@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::{fs, net::SocketAddr, path::Path};
 
 mod commit;
+mod global_paths;
 mod hook;
 mod mcp;
 mod outbox;
@@ -9,6 +10,7 @@ mod runtime;
 mod validation;
 
 pub use commit::{CommitRequest, CommitResult, run_structured_commit};
+pub use global_paths::GlobalPaths;
 pub use hook::{
     HookOutcome, handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
     handle_session_start_in_repo, handle_stop_in_repo, handle_user_prompt_submit_in_repo,
