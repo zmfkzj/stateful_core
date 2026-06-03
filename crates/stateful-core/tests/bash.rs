@@ -169,6 +169,31 @@ fn stateful_commit_with_shell_control_syntax_is_denied() {
 }
 
 #[test]
+fn stateful_commit_with_broad_pathspecs_is_not_allowed() {
+    let rejected = [
+        "",
+        ".",
+        "*",
+        ":/",
+        "-n",
+        "docs/../plan.md",
+        "docs/*.md",
+        ":(glob)docs/*.md",
+    ];
+
+    for pathspec in rejected {
+        let classification =
+            classify_bash(&format!("stateful commit -m 'docs: add plan' -- {pathspec}"));
+
+        assert_ne!(
+            classification.kind,
+            BashKind::ReadOnly,
+            "pathspec `{pathspec}` should not be allowed"
+        );
+    }
+}
+
+#[test]
 fn other_stateful_control_commands_are_not_bash_allowed() {
     let classification = classify_bash("stateful sync-outbox");
 

@@ -56,19 +56,13 @@ pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitRes
 
 fn normalize_explicit_paths(paths: &[String]) -> anyhow::Result<Vec<String>> {
     if paths.is_empty() {
-        anyhow::bail!("at least one explicit file path is required");
+        anyhow::bail!("explicit file paths are required");
     }
 
     let mut normalized = Vec::new();
     for path in paths {
         let path = path.trim();
-        if path.is_empty()
-            || path == "."
-            || path == "*"
-            || path == ":/"
-            || path.starts_with('-')
-            || path.contains("..")
-        {
+        if is_broad_pathspec(path) {
             anyhow::bail!("explicit file paths are required; rejected pathspec `{path}`");
         }
         normalized.push(path.replace('\\', "/"));
@@ -77,6 +71,20 @@ fn normalize_explicit_paths(paths: &[String]) -> anyhow::Result<Vec<String>> {
     normalized.sort();
     normalized.dedup();
     Ok(normalized)
+}
+
+fn is_broad_pathspec(path: &str) -> bool {
+    path.is_empty()
+        || path == "."
+        || path == "*"
+        || path == ":/"
+        || path.starts_with('-')
+        || path.starts_with(':')
+        || path.contains("..")
+        || path.contains('*')
+        || path.contains('?')
+        || path.contains('[')
+        || path.contains(']')
 }
 
 fn deny_unrelated_staged_changes(

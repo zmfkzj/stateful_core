@@ -198,14 +198,21 @@ fn is_stateful_commit_command(command: &str) -> bool {
         && words[1] == "commit"
         && words.iter().any(|word| word == "-m" || word == "--message")
         && !paths.is_empty()
-        && paths.iter().all(|path| {
-            !path.is_empty()
-                && path != "."
-                && path != "*"
-                && path != ":/"
-                && !path.starts_with('-')
-                && !path.contains("..")
-        })
+        && paths.iter().all(|path| !is_broad_commit_pathspec(path))
+}
+
+fn is_broad_commit_pathspec(path: &str) -> bool {
+    path.is_empty()
+        || path == "."
+        || path == "*"
+        || path == ":/"
+        || path.starts_with('-')
+        || path.starts_with(':')
+        || path.contains("..")
+        || path.contains('*')
+        || path.contains('?')
+        || path.contains('[')
+        || path.contains(']')
 }
 
 fn contains_shell_control_syntax(command: &str) -> bool {
