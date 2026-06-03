@@ -60,16 +60,34 @@ where
 }
 
 pub fn ensure_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
-    ensure_server_with_options(paths, ServerStartOptions::default())
+    let options = ServerStartOptions::default();
+    ensure_server_with(paths, runtime_is_healthy, || {
+        start_detached_server(paths, &options)
+    })
 }
 
 pub fn ensure_server_with_options(
     paths: &GlobalPaths,
     options: ServerStartOptions,
 ) -> anyhow::Result<ServerRuntime> {
-    ensure_server_with(paths, runtime_is_healthy, || {
-        start_detached_server(paths, &options)
-    })
+    if let Some(runtime) = read_runtime_file(paths)? {
+        if runtime_is_healthy(&runtime) {
+            ensure_runtime_matches_options(&runtime, &options)?;
+            return Ok(runtime);
+        }
+    }
+
+    let _lock = acquire_start_lock(paths)?;
+    if let Some(runtime) = read_runtime_file(paths)? {
+        if runtime_is_healthy(&runtime) {
+            ensure_runtime_matches_options(&runtime, &options)?;
+            return Ok(runtime);
+        }
+    }
+
+    let runtime = start_detached_server(paths, &options)?;
+    write_global_runtime_file(paths, &runtime)?;
+    Ok(runtime)
 }
 
 pub fn runtime_is_healthy(runtime: &ServerRuntime) -> bool {
@@ -102,6 +120,7 @@ pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
     let runtime: ServerRuntime = serde_json::from_str(&contents)?;
     if runtime.pid == 0
         || !runtime_is_healthy(&runtime)
+        || !runtime_identity_matches_pid(&runtime)?
         || !pid_matches_current_exe(runtime.pid)?
     {
         anyhow::bail!(
@@ -171,6 +190,44 @@ pub fn detached_server_args(options: &ServerStartOptions) -> Vec<String> {
         options.workspace_id.clone(),
     ]);
     args
+}
+
+fn ensure_runtime_matches_options(
+    runtime: &ServerRuntime,
+    options: &ServerStartOptions,
+) -> anyhow::Result<()> {
+    let expected_base_url = format!("http://{}:{}", options.host, options.port);
+    let token_matches = options
+        .token
+        .as_ref()
+        .is_none_or(|token| token == &runtime.token);
+    if runtime.base_url == expected_base_url
+        && token_matches
+        && runtime.workspace_id == options.workspace_id
+    {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "existing stateful server runtime does not match requested server options: existing {} workspace {} pid {}, requested {} workspace {}",
+        runtime.base_url,
+        runtime.workspace_id,
+        runtime.pid,
+        expected_base_url,
+        options.workspace_id
+    )
+}
+
+fn runtime_identity_matches_pid(runtime: &ServerRuntime) -> anyhow::Result<bool> {
+    let response = get_json(runtime, "/v1/runtime/identity")?;
+    if response.status_code != 200 {
+        return Ok(false);
+    }
+
+    let identity: RuntimeIdentity = serde_json::from_str(&response.body)?;
+    Ok(identity.status == "ok"
+        && identity.protocol_version == runtime.protocol_version
+        && identity.pid == runtime.pid)
 }
 
 fn acquire_start_lock(paths: &GlobalPaths) -> anyhow::Result<StartLock> {
@@ -256,6 +313,13 @@ fn pid_matches_current_exe(pid: u32) -> anyhow::Result<bool> {
                 .and_then(|name| name.to_str())
                 == Some(current_exe_name)
         }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RuntimeIdentity {
+    status: String,
+    pid: u32,
+    protocol_version: String,
 }
 
 struct StartLock {

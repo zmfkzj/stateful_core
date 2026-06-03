@@ -12,7 +12,7 @@ use std::{
 
 use stateful_cli::{
     GlobalPaths, ServerRuntime, ServerStartOptions, detached_server_args, ensure_server_with,
-    runtime_is_healthy, stop_server,
+    ensure_server_with_options, runtime_is_healthy, stop_server,
 };
 
 #[test]
@@ -220,6 +220,10 @@ fn stop_server_refuses_to_kill_unverified_pid() {
     let fake = FakeHttpServer::start(vec![
         fake_response(200, "ok"),
         fake_response(200, r#"{"status":"ok","current":{}}"#),
+        fake_response(
+            200,
+            r#"{"status":"ok","pid":999999,"protocol_version":"stateful.v1"}"#,
+        ),
     ]);
     let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 1);
     stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
@@ -231,6 +235,58 @@ fn stop_server_refuses_to_kill_unverified_pid() {
         "unexpected error: {error}"
     );
     assert!(paths.server_json.is_file());
+}
+
+#[test]
+fn stop_server_refuses_identity_pid_mismatch() {
+    let home = temp_home("stateful-server-stop-identity-mismatch");
+    let paths = GlobalPaths::new(&home);
+    let fake = FakeHttpServer::start(vec![
+        fake_response(200, "ok"),
+        fake_response(200, r#"{"status":"ok","current":{}}"#),
+        fake_response(
+            200,
+            r#"{"status":"ok","pid":999999,"protocol_version":"stateful.v1"}"#,
+        ),
+    ]);
+    let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", std::process::id());
+    stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
+
+    let error = stop_server(&paths).expect_err("identity pid mismatch must not be killed");
+
+    assert!(
+        error.to_string().contains("refusing to stop"),
+        "unexpected error: {error}"
+    );
+    assert!(paths.server_json.is_file());
+}
+
+#[test]
+fn ensure_server_with_options_rejects_healthy_runtime_on_different_port() {
+    let home = temp_home("stateful-server-option-mismatch");
+    let paths = GlobalPaths::new(&home);
+    let fake = FakeHttpServer::start(vec![
+        fake_response(200, "ok"),
+        fake_response(200, r#"{"status":"ok","current":{}}"#),
+    ]);
+    let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 123);
+    stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
+
+    let error = ensure_server_with_options(
+        &paths,
+        ServerStartOptions {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            token: None,
+            workspace_id: "w1".to_string(),
+        },
+    )
+    .expect_err("healthy runtime with different port should be rejected");
+
+    assert!(
+        error.to_string().contains("does not match requested server options"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
