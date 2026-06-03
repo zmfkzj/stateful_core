@@ -522,6 +522,108 @@ fn cancelling_request_cancels_owned_waiters_only() {
 }
 
 #[test]
+fn cancel_intent_request_rejects_non_cancellable_status() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .create_intent_request(
+            "req-1",
+            "s1",
+            "w1",
+            &["src/auth.ts".to_string()],
+            "write_file",
+        )
+        .expect("request should create");
+    store
+        .mark_intent_request_status("req-1", "claimed")
+        .expect("request status should update");
+
+    store
+        .cancel_intent_request("req-1", "s1")
+        .expect_err("claimed request should not cancel");
+
+    let request = store
+        .intent_request("req-1")
+        .expect("request should load")
+        .expect("request should exist");
+    assert_eq!(request.status, "claimed");
+}
+
+#[test]
+fn request_aware_enqueue_dedupes_same_resource_only() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .create_intent_request(
+            "req-1",
+            "s1",
+            "w1",
+            &["src/auth.ts".to_string(), "src/billing.ts".to_string()],
+            "write_file",
+        )
+        .expect("request should create");
+
+    let first = store
+        .enqueue_waiter_for_request("req-1", "s1", "w1", "src/auth.ts", "write_file", Some("s0"))
+        .expect("first waiter should enqueue");
+    let duplicate = store
+        .enqueue_waiter_for_request("req-1", "s1", "w1", "src/auth.ts", "write_file", Some("s0"))
+        .expect("duplicate waiter should dedupe");
+    let different_resource = store
+        .enqueue_waiter_for_request(
+            "req-1",
+            "s1",
+            "w1",
+            "src/billing.ts",
+            "write_file",
+            Some("s0"),
+        )
+        .expect("different resource should enqueue");
+
+    assert_eq!(first.wait_id, duplicate.wait_id);
+    assert_eq!(first.request_id.as_deref(), Some("req-1"));
+    assert_eq!(duplicate.request_id.as_deref(), Some("req-1"));
+    assert_ne!(first.wait_id, different_resource.wait_id);
+    assert_eq!(different_resource.request_id.as_deref(), Some("req-1"));
+}
+
+#[test]
+fn request_id_survives_reservation_lookups() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .create_intent_request(
+            "req-1",
+            "s1",
+            "w1",
+            &["src/auth.ts".to_string()],
+            "write_file",
+        )
+        .expect("request should create");
+    let waiter = store
+        .enqueue_waiter_for_request("req-1", "s1", "w1", "src/auth.ts", "write_file", Some("s0"))
+        .expect("waiter should enqueue");
+
+    let promoted = store
+        .promote_next_waiter("w1", "src/auth.ts")
+        .expect("waiter should promote")
+        .expect("promoted waiter should load");
+    assert_eq!(promoted.wait_id, waiter.wait_id);
+    assert_eq!(promoted.request_id.as_deref(), Some("req-1"));
+
+    let active = store
+        .active_reservation("w1", "src/auth.ts")
+        .expect("reservation should load")
+        .expect("active reservation should exist");
+    assert_eq!(active.wait_id, waiter.wait_id);
+    assert_eq!(active.request_id.as_deref(), Some("req-1"));
+
+    let next = store
+        .next_reservation_for_session("s1", "w1")
+        .expect("session reservation should load")
+        .expect("session reservation should exist");
+    assert_eq!(next.wait_id, waiter.wait_id);
+    assert_eq!(next.request_id.as_deref(), Some("req-1"));
+}
+
+#[test]
 fn migrations_create_contract_tables_and_indexes() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 

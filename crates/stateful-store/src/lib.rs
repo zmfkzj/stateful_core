@@ -424,6 +424,24 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    pub fn mark_intent_request_status(
+        &self,
+        request_id: impl AsRef<str>,
+        status: impl AsRef<str>,
+    ) -> StoreResult<()> {
+        let updated = self.conn.execute(
+            "UPDATE intent_requests
+             SET status = ?1, updated_at = ?2
+             WHERE request_id = ?3",
+            params![status.as_ref(), "2026-05-31T00:00:00Z", request_id.as_ref(),],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::ReservationOwnerMismatch);
+        }
+
+        Ok(())
+    }
+
     pub fn enqueue_waiter(
         &self,
         session_id: impl AsRef<str>,
@@ -624,7 +642,8 @@ impl Store {
                     status,
                     requested_at,
                     reservation_expires_at,
-                    blocking_session_id
+                    blocking_session_id,
+                    request_id
                  FROM wait_queue
                  WHERE workspace_id = ?1 AND relative_path = ?2 AND status = 'reserved'
                  ORDER BY rowid ASC
@@ -662,7 +681,8 @@ impl Store {
                     status,
                     requested_at,
                     reservation_expires_at,
-                    blocking_session_id
+                    blocking_session_id,
+                    request_id
                  FROM wait_queue
                  WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'reserved'
                  ORDER BY rowid ASC
@@ -711,12 +731,18 @@ impl Store {
             return Err(StoreError::ReservationOwnerMismatch);
         }
 
-        self.conn.execute(
+        let updated = self.conn.execute(
             "UPDATE intent_requests
              SET status = 'cancelled', updated_at = ?1
-             WHERE request_id = ?2 AND session_id = ?3",
+             WHERE request_id = ?2
+                AND session_id = ?3
+                AND status IN ('requested', 'queued', 'reserved')",
             params!["2026-05-31T00:00:00Z", request_id, session_id],
         )?;
+        if updated == 0 {
+            return Err(StoreError::ReservationOwnerMismatch);
+        }
+
         self.conn.execute(
             "UPDATE wait_queue
              SET status = 'cancelled'
@@ -1173,7 +1199,8 @@ impl Store {
                     status,
                     requested_at,
                     reservation_expires_at,
-                    blocking_session_id
+                    blocking_session_id,
+                    request_id
                  FROM wait_queue
                  WHERE wait_id = ?1",
                 params![wait_id],
@@ -1210,6 +1237,7 @@ fn wait_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WaitRecord>
         requested_at: row.get(6)?,
         reservation_expires_at: row.get(7)?,
         blocking_session_id: row.get(8)?,
+        request_id: row.get(9)?,
     })
 }
 
@@ -1426,6 +1454,7 @@ pub struct WaitRecord {
     pub requested_at: String,
     pub reservation_expires_at: Option<String>,
     pub blocking_session_id: Option<String>,
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
