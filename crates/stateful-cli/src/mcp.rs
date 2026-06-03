@@ -94,7 +94,16 @@ fn call_mcp_tool(
 fn protocol_required_http_path(path: &str) -> bool {
     matches!(
         path,
-        "/v1/intent/declare" | "/v1/lease/acquire" | "/v1/lease/release" | "/v1/conflicts/check"
+        "/v1/session/register"
+            | "/v1/session/heartbeat"
+            | "/v1/intent/declare"
+            | "/v1/lease/acquire"
+            | "/v1/lease/release"
+            | "/v1/activity/observe"
+            | "/v1/activity/finalize"
+            | "/v1/conflicts/check"
+            | "/v1/reconcile/ack"
+            | "/v1/validation/run"
     )
 }
 

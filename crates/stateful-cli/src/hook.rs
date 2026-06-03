@@ -270,18 +270,20 @@ fn post_session_event(
     session_id: &str,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
-    let mut body = json!({
-        "session_id": session_id,
-        "workspace_id": runtime.workspace_id,
-    });
-    if let Some(identity) = identity {
-        body["repo_id"] = json!(&identity.repo_id);
-        body["worktree_id"] = json!(&identity.worktree_id);
-        body["root"] = json!(&identity.root);
-        body["branch"] = json!(&identity.branch);
-    }
-
-    let response = post_json(runtime, path, &body)?;
+    let response = post_protocol_json(
+        runtime,
+        path,
+        ProtocolPostContext {
+            session_id,
+            workspace_id: &runtime.workspace_id,
+            source_kind: "hook",
+            source_event: session_event_source(path),
+            source_ref: "stateful hook session event",
+            tool_name: None,
+            identity,
+        },
+        &json!({}),
+    )?;
 
     if !(200..300).contains(&response.status_code) {
         anyhow::bail!(
@@ -292,6 +294,15 @@ fn post_session_event(
     }
 
     Ok(())
+}
+
+fn session_event_source(path: &str) -> &'static str {
+    match path {
+        "/v1/session/register" => "session_start",
+        "/v1/session/heartbeat" => "post_tool_use",
+        "/v1/activity/finalize" => "stop",
+        _ => "session_event",
+    }
 }
 
 fn handle_pre_tool_use_with_runtime(

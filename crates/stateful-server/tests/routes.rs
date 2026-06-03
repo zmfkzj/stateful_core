@@ -363,17 +363,89 @@ async fn side_effecting_routes_fail_closed_on_invalid_v1_protocol_metadata() {
 }
 
 #[tokio::test]
-async fn session_register_and_heartbeat_update_current_summary() {
+async fn remaining_side_effecting_routes_require_protocol_metadata() {
     let app = build_router(ServerConfig::new("secret-token"));
 
-    let register = app
-        .clone()
-        .oneshot(json_request(
+    for (path, body) in [
+        (
             "/v1/session/register",
             serde_json::json!({
                 "session_id": "s1",
                 "workspace_id": "w1"
             }),
+        ),
+        (
+            "/v1/session/heartbeat",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1"
+            }),
+        ),
+        (
+            "/v1/activity/observe",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1"
+            }),
+        ),
+        (
+            "/v1/activity/finalize",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1"
+            }),
+        ),
+        (
+            "/v1/reconcile/ack",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "decision": "adopt",
+                "files_reread": ["src/auth.ts"],
+                "human_change_summary": "reviewed"
+            }),
+        ),
+        (
+            "/v1/outbox/sync",
+            serde_json::json!({
+                "outbox_id": "outbox-1",
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "sequence": 1,
+                "event_type": "SessionHeartbeatQueued",
+                "payload": {}
+            }),
+        ),
+        (
+            "/v1/validation/run",
+            serde_json::json!({
+                "workspace_id": "w1",
+                "repo_root": "/repo",
+                "profile": "cargo-test"
+            }),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(json_request(path, body))
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn session_register_and_heartbeat_update_current_summary() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let register = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/session/register",
+            "req-session-register-current",
+            "s1",
+            "w1",
+            serde_json::json!({}),
         ))
         .await
         .expect("session register should complete");
@@ -381,12 +453,12 @@ async fn session_register_and_heartbeat_update_current_summary() {
 
     let heartbeat = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/session/heartbeat",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1"
-            }),
+            "req-session-heartbeat-current",
+            "s1",
+            "w1",
+            serde_json::json!({}),
         ))
         .await
         .expect("session heartbeat should complete");
@@ -421,16 +493,12 @@ async fn session_events_preserve_repo_identity_when_provided() {
 
     let response = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/session/register",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "repo_id": "repo-1",
-                "worktree_id": "worktree-1",
-                "root": "/repo",
-                "branch": "main"
-            }),
+            "req-session-register-identity",
+            "s1",
+            "w1",
+            serde_json::json!({}),
         ))
         .await
         .expect("session register should complete");
@@ -481,12 +549,12 @@ async fn lease_activity_and_conflict_routes_are_available() {
 
     let activity = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/activity/observe",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1"
-            }),
+            "req-activity-observe",
+            "s1",
+            "w1",
+            serde_json::json!({}),
         ))
         .await
         .expect("activity observe should complete");
@@ -494,12 +562,12 @@ async fn lease_activity_and_conflict_routes_are_available() {
 
     let finalized = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/activity/finalize",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1"
-            }),
+            "req-activity-finalize",
+            "s1",
+            "w1",
+            serde_json::json!({}),
         ))
         .await
         .expect("activity finalize should complete");
@@ -1388,12 +1456,12 @@ async fn activity_finalize_releases_leases_and_notifications_poll_returns_resume
 
     let finalize = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/activity/finalize",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1"
-            }),
+            "req-activity-finalize-notify-owner",
+            "s1",
+            "w1",
+            serde_json::json!({}),
         ))
         .await
         .expect("finalize should complete");
@@ -1770,11 +1838,12 @@ async fn reconcile_ack_records_acknowledgement() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     let response = app
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/reconcile/ack",
+            "req-reconcile-ack",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
                 "decision": "adopt",
                 "files_reread": ["src/auth.ts"],
                 "human_change_summary": "User adjusted auth guard."
@@ -1804,11 +1873,12 @@ async fn reconcile_ack_persists_acknowledgement() {
     let app = build_router(ServerConfig::with_store("secret-token", store));
 
     let response = app
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/reconcile/ack",
+            "req-reconcile-ack-persist",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
                 "decision": "reapply",
                 "files_reread": ["src/auth.ts"],
                 "human_change_summary": "User edited guard."
@@ -1836,12 +1906,13 @@ async fn outbox_sync_accepts_idempotent_events() {
     for _ in 0..2 {
         let response = app
             .clone()
-            .oneshot(json_request(
+            .oneshot(protocol_request(
                 "/v1/outbox/sync",
+                "req-outbox-sync",
+                "s1",
+                "w1",
                 serde_json::json!({
                     "outbox_id": "outbox-1",
-                    "session_id": "s1",
-                    "workspace_id": "w1",
                     "sequence": 1,
                     "event_type": "HeartbeatObserved",
                     "payload": {"ok": true}
@@ -1871,10 +1942,12 @@ profiles:
     let app = build_router(ServerConfig::new("secret-token"));
 
     let response = app
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/validation/run",
+            "req-validation-run-pass",
+            "s1",
+            "w1",
             serde_json::json!({
-                "workspace_id": "w1",
                 "repo_root": repo.path(),
                 "profile": "pass"
             }),
@@ -1916,10 +1989,12 @@ profiles:
     let app = build_router(ServerConfig::with_store("secret-token", store));
 
     let response = app
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/validation/run",
+            "req-validation-run-store",
+            "s1",
+            "w1",
             serde_json::json!({
-                "workspace_id": "w1",
                 "repo_root": repo.path(),
                 "profile": "pass"
             }),

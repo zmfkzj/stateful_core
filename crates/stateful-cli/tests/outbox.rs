@@ -52,6 +52,10 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
     let first = rx.recv().expect("first request should arrive");
     let second = rx.recv().expect("second request should arrive");
     assert!(first.contains("POST /v1/outbox/sync HTTP/1.1"));
+    assert!(first.contains("\"protocol_version\":\"stateful.v1\""));
+    assert!(first.contains("\"request_id\":\""));
+    assert!(first.contains("\"session_id\":\"s1\""));
+    assert!(first.contains("\"workspace_id\":\"w1\""));
     assert!(first.contains("\"outbox_id\":\"outbox-1\""));
     assert!(first.contains("\"sequence\":1"));
     assert!(second.contains("\"outbox_id\":\"outbox-2\""));
@@ -112,6 +116,8 @@ fn sync_outbox_command_discovers_global_runtime_file() {
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/outbox/sync HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
+    assert!(request.contains("\"protocol_version\":\"stateful.v1\""));
+    assert!(request.contains("\"request_id\":\""));
     assert!(request.contains("\"outbox_id\":\"outbox-global\""));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");

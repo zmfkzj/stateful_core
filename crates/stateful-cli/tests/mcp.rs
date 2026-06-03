@@ -97,6 +97,8 @@ fn mcp_validation_run_adds_repo_root_and_workspace_id() {
     );
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/validation/run HTTP/1.1"));
+    assert!(request.contains("\"protocol_version\":\"stateful.v1\""));
+    assert!(request.contains("\"request_id\":\""));
     assert!(request.contains("\"workspace_id\":\"w1\""));
     assert!(request.contains("\"repo_root\":"));
     assert!(request.contains("\"profile\":\"cargo-test\""));
@@ -137,6 +139,8 @@ fn mcp_validation_run_from_enabled_subdir_sends_repo_root() {
         .expect("repo root should canonicalize");
     let canonical_subdir = subdir.canonicalize().expect("subdir should canonicalize");
     assert!(request.contains("POST /v1/validation/run HTTP/1.1"));
+    assert!(request.contains("\"protocol_version\":\"stateful.v1\""));
+    assert!(request.contains("\"request_id\":\""));
     assert!(request.contains(&format!(
         "\"repo_root\":\"{}\"",
         canonical_repo_root.to_string_lossy()
@@ -364,6 +368,48 @@ fn mcp_tools_call_for_lease_acquire_posts_protocol_envelope() {
     let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
     assert_eq!(json["jsonrpc"], "2.0");
     assert_eq!(json["id"], 4);
+    assert_eq!(json["result"]["isError"], false);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_tools_call_for_session_register_posts_protocol_envelope() {
+    let temp_root = temp_root("stateful-mcp-session-register");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let response = run_mcp_jsonrpc_in_repo(
+        &repo_root,
+        &paths,
+        r#"{
+          "jsonrpc":"2.0",
+          "id":5,
+          "method":"tools/call",
+          "params":{
+            "name":"state_session_register",
+            "arguments":{
+              "session_id":"s1",
+              "workspace_id":"w1"
+            }
+          }
+        }"#,
+    );
+
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("POST /v1/session/register HTTP/1.1"));
+    assert!(request.contains("\"protocol_version\":\"stateful.v1\""));
+    assert!(request.contains("\"request_id\":\""));
+    assert!(request.contains("\"session_id\":\"s1\""));
+    assert!(request.contains("\"workspace_id\":\"w1\""));
+
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 5);
     assert_eq!(json["result"]["isError"], false);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");

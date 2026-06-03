@@ -678,6 +678,8 @@ fn session_start_posts_session_register() {
 
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/session/register HTTP/1.1"));
+    assert!(request.contains("\"protocol_version\":\"stateful.v1\""));
+    assert!(request.contains("\"request_id\":\""));
     assert!(request.contains("\"session_id\":\"s1\""));
     assert!(request.contains("\"workspace_id\":\"w1\""));
 
@@ -714,6 +716,8 @@ fn post_tool_use_posts_session_heartbeat() {
 
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/session/heartbeat HTTP/1.1"));
+    assert!(request.contains("\"protocol_version\":\"stateful.v1\""));
+    assert!(request.contains("\"request_id\":\""));
     assert!(request.contains("\"session_id\":\"s1\""));
     assert!(request.contains("\"workspace_id\":\"w1\""));
 
@@ -808,6 +812,8 @@ fn stop_posts_activity_finalize() {
 
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/activity/finalize HTTP/1.1"));
+    assert!(request.contains("\"protocol_version\":\"stateful.v1\""));
+    assert!(request.contains("\"request_id\":\""));
     assert!(request.contains("\"session_id\":\"s1\""));
     assert!(request.contains("\"workspace_id\":\"w1\""));
 

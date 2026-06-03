@@ -7,7 +7,7 @@ use std::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{discover_runtime_with_optional_global, post_json};
+use crate::{ProtocolPostContext, discover_runtime_with_optional_global, post_protocol_json};
 
 #[derive(Debug, Clone, Deserialize)]
 struct LocalOutboxRecord {
@@ -38,13 +38,20 @@ pub fn sync_outbox_in_repo(repo_root: impl AsRef<Path>) -> anyhow::Result<usize>
         });
 
         for record in records {
-            let response = post_json(
+            let response = post_protocol_json(
                 &runtime,
                 "/v1/outbox/sync",
+                ProtocolPostContext {
+                    session_id: &record.session_id,
+                    workspace_id: &record.workspace_id,
+                    source_kind: "cli",
+                    source_event: "outbox.sync",
+                    source_ref: "stateful outbox sync",
+                    tool_name: None,
+                    identity: None,
+                },
                 &json!({
                     "outbox_id": record.outbox_id,
-                    "session_id": record.session_id,
-                    "workspace_id": record.workspace_id,
                     "sequence": record.sequence,
                     "event_type": record.event_type,
                     "payload": record.payload,

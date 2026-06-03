@@ -431,3 +431,50 @@ fn read_http_response(stream: &mut TcpStream) -> anyhow::Result<String> {
 
     Ok(String::from_utf8(buffer)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_body_wraps_payload_with_session_workspace_and_source() {
+        let runtime = ServerRuntime::new("http://127.0.0.1:1", "secret", "runtime-w", 42);
+        let identity = RepoIdentity {
+            repo_id: "repo-1".to_string(),
+            worktree_id: "worktree-1".to_string(),
+            root: "/repo".to_string(),
+            branch: "main".to_string(),
+        };
+
+        let body = protocol_body(
+            &runtime,
+            ProtocolPostContext {
+                session_id: "s1",
+                workspace_id: "w1",
+                source_kind: "cli",
+                source_event: "lease.acquire",
+                source_ref: "stateful test",
+                tool_name: Some("state.lease.acquire"),
+                identity: Some(&identity),
+            },
+            &serde_json::json!({
+                "path": "src/auth.ts",
+                "protocol_version": "stateful.v0"
+            }),
+        );
+
+        assert_eq!(body["protocol_version"], "stateful.v1");
+        assert!(body["request_id"].as_str().unwrap_or_default().len() > 10);
+        assert_eq!(body["session"]["session_id"], "s1");
+        assert_eq!(body["session"]["actor_id"], "s1");
+        assert_eq!(body["workspace"]["workspace_id"], "w1");
+        assert_eq!(body["workspace"]["repo_id"], "repo-1");
+        assert_eq!(body["workspace"]["worktree_id"], "worktree-1");
+        assert_eq!(body["workspace"]["root"], "/repo");
+        assert_eq!(body["workspace"]["branch"], "main");
+        assert_eq!(body["source"]["kind"], "cli");
+        assert_eq!(body["source"]["event"], "lease.acquire");
+        assert_eq!(body["source"]["tool_name"], "state.lease.acquire");
+        assert_eq!(body["path"], "src/auth.ts");
+    }
+}

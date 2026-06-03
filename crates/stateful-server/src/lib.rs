@@ -171,17 +171,28 @@ async fn runtime_identity(
 async fn session_register(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<SessionRequest>,
+    body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
 
+    let input = match validate_protocol_body::<EmptyPayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+    let identity = WorkspaceIdentityRequest {
+        repo_id: Some(input.workspace.repo_id),
+        worktree_id: Some(input.workspace.worktree_id),
+        root: Some(input.workspace.root),
+        branch: Some(input.workspace.branch),
+    };
+
     append_event_response(
         &config.store,
         with_request_identity(
-            Event::session_registered(input.session_id, input.workspace_id),
-            input.identity,
+            Event::session_registered(input.session.session_id, input.workspace.workspace_id),
+            identity,
         ),
     )
 }
@@ -189,17 +200,28 @@ async fn session_register(
 async fn session_heartbeat(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<SessionRequest>,
+    body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
 
+    let input = match validate_protocol_body::<EmptyPayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+    let identity = WorkspaceIdentityRequest {
+        repo_id: Some(input.workspace.repo_id),
+        worktree_id: Some(input.workspace.worktree_id),
+        root: Some(input.workspace.root),
+        branch: Some(input.workspace.branch),
+    };
+
     append_event_response(
         &config.store,
         with_request_identity(
-            Event::session_heartbeat(input.session_id, input.workspace_id),
-            input.identity,
+            Event::session_heartbeat(input.session.session_id, input.workspace.workspace_id),
+            identity,
         ),
     )
 }
@@ -438,23 +460,37 @@ async fn lease_release(
 async fn activity_observe(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<ActivityRequest>,
+    body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
 
-    append_activity_response(&config.store, input)
+    let input = match validate_protocol_body::<EmptyPayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+
+    append_activity_response(
+        &config.store,
+        input.session.session_id,
+        input.workspace.workspace_id,
+    )
 }
 
 async fn activity_finalize(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<ActivityRequest>,
+    body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+
+    let input = match validate_protocol_body::<EmptyPayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
 
     let result = config
         .store
@@ -462,10 +498,10 @@ async fn activity_finalize(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .append_activity(&input.session_id, &input.workspace_id)
+                .append_activity(&input.session.session_id, &input.workspace.workspace_id)
                 .map_err(|error| error.to_string())?;
             let released = store
-                .release_session_leases(&input.session_id, &input.workspace_id)
+                .release_session_leases(&input.session.session_id, &input.workspace.workspace_id)
                 .map_err(|error| error.to_string())?;
             Ok(released)
         });
@@ -564,13 +600,18 @@ async fn conflicts_check(
 async fn reconcile_ack(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<ReconcileAckRequest>,
+    body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
 
-    let decision = match input.decision.parse::<ReconciliationDecision>() {
+    let input = match validate_protocol_body::<ReconcileAckPayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+
+    let decision = match input.payload.decision.parse::<ReconciliationDecision>() {
         Ok(decision) => decision,
         Err(message) => {
             return (
@@ -588,7 +629,7 @@ async fn reconcile_ack(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .append_reconciliation_ack(&input.session_id)
+                .append_reconciliation_ack(&input.session.session_id)
                 .map_err(|error| error.to_string())
         });
     if let Err(message) = result {
@@ -604,10 +645,10 @@ async fn reconcile_ack(
         StatusCode::OK,
         Json(json!({
             "status": "ok",
-            "session_id": input.session_id,
-            "workspace_id": input.workspace_id,
-            "files_reread": input.files_reread,
-            "human_change_summary": input.human_change_summary,
+            "session_id": input.session.session_id,
+            "workspace_id": input.workspace.workspace_id,
+            "files_reread": input.payload.files_reread,
+            "human_change_summary": input.payload.human_change_summary,
             "clears_human_write_block": decision.clears_human_write_block()
         })),
     )
@@ -616,11 +657,16 @@ async fn reconcile_ack(
 async fn outbox_sync(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<OutboxSyncRequest>,
+    body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+
+    let input = match validate_protocol_body::<OutboxSyncPayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
 
     let result = config
         .store
@@ -629,9 +675,9 @@ async fn outbox_sync(
         .and_then(|store| {
             store
                 .append_outbox(OutboxEntry::new(
-                    input.outbox_id,
-                    input.session_id,
-                    input.sequence,
+                    input.payload.outbox_id,
+                    input.session.session_id,
+                    input.payload.sequence,
                 ))
                 .map_err(|error| error.to_string())
         });
@@ -642,9 +688,9 @@ async fn outbox_sync(
             Json(json!({
                 "status": "ok",
                 "sync_status": "synced",
-                "event_type": input.event_type,
-                "workspace_id": input.workspace_id,
-                "payload": input.payload
+                "event_type": input.payload.event_type,
+                "workspace_id": input.workspace.workspace_id,
+                "payload": input.payload.payload
             })),
         ),
         Err(message) => (
@@ -743,21 +789,26 @@ async fn resume_next(
 async fn validation_run(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<ValidationRunRequest>,
+    body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
 
-    match run_validation_profile(&input.repo_root, &input.profile) {
+    let input = match validate_protocol_body::<ValidationRunPayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+
+    match run_validation_profile(&input.payload.repo_root, &input.payload.profile) {
         Ok(result) => {
             let record_result =
-                record_validation_result(&config.store, &input.workspace_id, &result);
+                record_validation_result(&config.store, &input.workspace.workspace_id, &result);
             if let Err(message) = record_result {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({
-                        "workspace_id": input.workspace_id,
+                        "workspace_id": input.workspace.workspace_id,
                         "profile_id": result.profile_id,
                         "status": "error",
                         "exit_code": result.exit_code,
@@ -768,14 +819,14 @@ async fn validation_run(
 
             (
                 StatusCode::OK,
-                Json(validation_result_json(result, input.workspace_id)),
+                Json(validation_result_json(result, input.workspace.workspace_id)),
             )
         }
         Err(message) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "workspace_id": input.workspace_id,
-                "profile_id": input.profile,
+                "workspace_id": input.workspace.workspace_id,
+                "profile_id": input.payload.profile,
                 "status": "error",
                 "exit_code": null,
                 "message": message.to_string()
@@ -808,14 +859,15 @@ fn append_event_response(store: &SharedStore, event: Event) -> (StatusCode, Json
 
 fn append_activity_response(
     store: &SharedStore,
-    input: ActivityRequest,
+    session_id: String,
+    workspace_id: String,
 ) -> (StatusCode, Json<Value>) {
     let result = store
         .lock()
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .append_activity(input.session_id, input.workspace_id)
+                .append_activity(session_id, workspace_id)
                 .map_err(|error| error.to_string())
         });
 
@@ -923,13 +975,8 @@ struct IntentDeclareRequest {
     files_planned: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct SessionRequest {
-    session_id: String,
-    workspace_id: String,
-    #[serde(flatten)]
-    identity: WorkspaceIdentityRequest,
-}
+#[derive(Debug, Default, Deserialize)]
+struct EmptyPayload {}
 
 #[derive(Debug, Deserialize)]
 struct IntentRequestPayload {
@@ -951,12 +998,6 @@ struct IntentCancelPayload {
 #[derive(Debug, Deserialize)]
 struct LeasePayload {
     path: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ActivityRequest {
-    session_id: String,
-    workspace_id: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1002,27 +1043,22 @@ struct ContextRenderRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct ReconcileAckRequest {
-    session_id: String,
-    workspace_id: String,
+struct ReconcileAckPayload {
     decision: String,
     files_reread: Vec<String>,
     human_change_summary: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct OutboxSyncRequest {
+struct OutboxSyncPayload {
     outbox_id: String,
-    session_id: String,
-    workspace_id: String,
     sequence: u64,
     event_type: String,
     payload: Value,
 }
 
 #[derive(Debug, Deserialize)]
-struct ValidationRunRequest {
-    workspace_id: String,
+struct ValidationRunPayload {
     repo_root: PathBuf,
     profile: String,
 }
