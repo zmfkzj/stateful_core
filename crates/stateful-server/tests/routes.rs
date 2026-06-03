@@ -176,6 +176,47 @@ async fn side_effecting_routes_fail_closed_on_major_protocol_mismatch() {
 }
 
 #[tokio::test]
+async fn side_effecting_routes_fail_closed_on_malformed_protocol_metadata() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let mut numeric_protocol_version = protocol_body(
+        "req-declare-3",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    numeric_protocol_version["protocol_version"] = serde_json::json!(1);
+
+    let mut non_object_session = protocol_body(
+        "req-declare-4",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    non_object_session["session"] = serde_json::json!("s1");
+
+    for body in [numeric_protocol_version, non_object_session] {
+        let response = app
+            .clone()
+            .oneshot(json_request("/v1/intent/declare", body))
+            .await
+            .expect("intent declaration should complete");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 2048)
+            .await
+            .expect("body should read");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(json["decision"], "error");
+        assert_eq!(json["reason_code"], "protocol_mismatch");
+    }
+}
+
+#[tokio::test]
 async fn session_register_and_heartbeat_update_current_summary() {
     let app = build_router(ServerConfig::new("secret-token"));
 
@@ -962,6 +1003,49 @@ async fn events_returns_recent_audit_events() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["status"], "ok");
     assert_eq!(json["events"][0]["event_type"], "IntentDeclared");
+}
+
+#[tokio::test]
+async fn intent_declare_persists_envelope_workspace_identity() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let mut body = protocol_body(
+        "req-declare-s1-envelope-identity",
+        "s1",
+        "w-envelope",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    body["workspace"]["repo_id"] = serde_json::json!("repo-envelope");
+    body["workspace"]["worktree_id"] = serde_json::json!("worktree-envelope");
+    body["workspace"]["root"] = serde_json::json!("/repo-envelope");
+    body["workspace"]["branch"] = serde_json::json!("feature/envelope");
+
+    let declare = app
+        .clone()
+        .oneshot(json_request("/v1/intent/declare", body))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(authorized_get("/v1/events"))
+        .await
+        .expect("events request should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    let event = &json["events"][0];
+    assert_eq!(event["event_type"], "IntentDeclared");
+    assert_eq!(event["workspace_id"], "w-envelope");
+    assert_eq!(event["repo_id"], "repo-envelope");
+    assert_eq!(event["worktree_id"], "worktree-envelope");
+    assert_eq!(event["root"], "/repo-envelope");
+    assert_eq!(event["branch"], "feature/envelope");
 }
 
 #[tokio::test]

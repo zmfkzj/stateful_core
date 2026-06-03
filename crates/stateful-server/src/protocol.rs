@@ -1,5 +1,5 @@
 use axum::{Json, http::StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 const SUPPORTED_PROTOCOL_VERSION: &str = "stateful.v1";
@@ -7,15 +7,15 @@ const SUPPORTED_PROTOCOL_VERSION: &str = "stateful.v1";
 #[derive(Debug, Deserialize)]
 pub struct ProtocolRequest<T> {
     #[serde(default)]
-    protocol_version: Option<String>,
+    protocol_version: Option<Value>,
     #[serde(default)]
-    request_id: Option<String>,
+    request_id: Option<Value>,
     #[serde(default)]
-    session: Option<RawSessionMetadata>,
+    session: Option<Value>,
     #[serde(default)]
-    workspace: Option<RawWorkspaceMetadata>,
+    workspace: Option<Value>,
     #[serde(default)]
-    source: Option<RawSourceMetadata>,
+    source: Option<Value>,
     #[serde(flatten)]
     payload: T,
 }
@@ -61,7 +61,7 @@ pub struct ValidatedRequest<T> {
 pub fn validate_protocol<T>(
     request: ProtocolRequest<T>,
 ) -> Result<ValidatedRequest<T>, (StatusCode, Json<Value>)> {
-    let protocol_version = match required(request.protocol_version, "protocol_version") {
+    let protocol_version = match required_string(request.protocol_version, "protocol_version") {
         Ok(protocol_version) => protocol_version,
         Err(message) => return Err(protocol_error(message)),
     };
@@ -71,28 +71,22 @@ pub fn validate_protocol<T>(
         )));
     }
 
-    let request_id = match required(request.request_id, "request_id") {
+    let request_id = match required_string(request.request_id, "request_id") {
         Ok(request_id) => request_id,
         Err(message) => return Err(protocol_error(message)),
     };
 
-    let session = match request.session {
-        Some(session) => validate_session(session),
-        None => Err("Missing protocol field: session".to_string()),
-    }
-    .map_err(protocol_error)?;
+    let session = decode_metadata(request.session, "session")
+        .and_then(validate_session)
+        .map_err(protocol_error)?;
 
-    let workspace = match request.workspace {
-        Some(workspace) => validate_workspace(workspace),
-        None => Err("Missing protocol field: workspace".to_string()),
-    }
-    .map_err(protocol_error)?;
+    let workspace = decode_metadata(request.workspace, "workspace")
+        .and_then(validate_workspace)
+        .map_err(protocol_error)?;
 
-    let source = match request.source {
-        Some(source) => validate_source(source),
-        None => Err("Missing protocol field: source".to_string()),
-    }
-    .map_err(protocol_error)?;
+    let source = decode_metadata(request.source, "source")
+        .and_then(validate_source)
+        .map_err(protocol_error)?;
 
     Ok(ValidatedRequest {
         protocol_version,
@@ -102,6 +96,14 @@ pub fn validate_protocol<T>(
         source,
         payload: request.payload,
     })
+}
+
+fn decode_metadata<T>(value: Option<Value>, field: &str) -> Result<T, String>
+where
+    T: DeserializeOwned,
+{
+    let value = value.ok_or_else(|| format!("Missing protocol field: {field}"))?;
+    serde_json::from_value(value).map_err(|_| format!("Invalid protocol field: {field}"))
 }
 
 pub fn protocol_error(message: impl Into<String>) -> (StatusCode, Json<Value>) {
@@ -194,5 +196,13 @@ fn required(value: Option<String>, field: &str) -> Result<String, String> {
     match value {
         Some(value) if !value.trim().is_empty() => Ok(value),
         _ => Err(format!("Missing protocol field: {field}")),
+    }
+}
+
+fn required_string(value: Option<Value>, field: &str) -> Result<String, String> {
+    match value {
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(value),
+        Some(Value::String(_)) | None => Err(format!("Missing protocol field: {field}")),
+        Some(_) => Err(format!("Invalid protocol field: {field}")),
     }
 }
