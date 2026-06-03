@@ -78,6 +78,16 @@ fn from_env_rejects_empty_stateful_home() {
     });
 }
 
+#[test]
+fn from_env_rejects_empty_home() {
+    run_from_env_child(|command| {
+        command
+            .env("HOME", "")
+            .env(CHILD_CASE, "expect_error")
+            .env(EXPECTED_ERROR, "HOME is set but empty; set STATEFUL_HOME");
+    });
+}
+
 fn run_from_env_child(configure: impl FnOnce(&mut Command)) {
     let mut command = Command::new(std::env::current_exe().expect("current test binary path"));
     command
@@ -100,10 +110,11 @@ fn run_from_env_child(configure: impl FnOnce(&mut Command)) {
 #[test]
 #[ignore]
 fn from_env_child_probe() {
-    match std::env::var(CHILD_CASE)
-        .expect("child case must be configured")
-        .as_str()
-    {
+    let Ok(child_case) = std::env::var(CHILD_CASE) else {
+        return;
+    };
+
+    match child_case.as_str() {
         "expect_home" => {
             let expected_home = PathBuf::from(
                 std::env::var_os(EXPECTED_HOME).expect("expected home must be configured"),

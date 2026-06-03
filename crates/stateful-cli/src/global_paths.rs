@@ -37,6 +37,9 @@ impl GlobalPaths {
         }
         let home = std::env::var_os("HOME")
             .ok_or_else(|| anyhow::anyhow!("HOME is not set; set STATEFUL_HOME"))?;
+        if home.as_os_str().is_empty() {
+            anyhow::bail!("HOME is set but empty; set STATEFUL_HOME");
+        }
         Ok(Self::new(PathBuf::from(home).join(".stateful_core")))
     }
 }
