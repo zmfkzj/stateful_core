@@ -350,9 +350,12 @@ fn toml_table_header(line: &str) -> anyhow::Result<Option<TomlTableHeader<'_>>> 
 
     let body = &line[body_start..body_end];
     if body.contains('"') || body.contains('\'') {
-        anyhow::bail!(
-            "unsupported Codex config quoted table header; stateful install supports only bare dotted table headers: {line}"
-        );
+        if quoted_header_may_affect_stateful(body) {
+            anyhow::bail!(
+                "unsupported Codex config quoted table header; stateful install supports only bare dotted table headers: {line}"
+            );
+        }
+        return Ok(Some(TomlTableHeader::Other));
     }
 
     let tail = line[tail_start..].trim();
@@ -448,6 +451,101 @@ fn unsupported_header_may_affect_stateful(header: &str) -> bool {
         .collect();
 
     normalized == "features" || normalized == "mcp_servers.stateful"
+}
+
+fn quoted_header_may_affect_stateful(header: &str) -> bool {
+    toml_table_key_segments(header)
+        .map(|segments| segments == ["features"] || segments == ["mcp_servers", "stateful"])
+        .unwrap_or_else(|| unsupported_header_may_affect_stateful(header))
+}
+
+fn toml_table_key_segments(header: &str) -> Option<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = header.chars().peekable();
+
+    while let Some(character) = chars.next() {
+        match character {
+            '"' => {
+                current.push_str(&parse_basic_toml_string(&mut chars)?);
+            }
+            '\'' => {
+                current.push_str(&parse_literal_toml_string(&mut chars)?);
+            }
+            '.' => {
+                if current.is_empty() {
+                    return None;
+                }
+                segments.push(std::mem::take(&mut current));
+            }
+            character if character.is_whitespace() => {}
+            character => current.push(character),
+        }
+    }
+
+    if current.is_empty() {
+        return None;
+    }
+    segments.push(current);
+    Some(segments)
+}
+
+fn parse_basic_toml_string<I>(chars: &mut std::iter::Peekable<I>) -> Option<String>
+where
+    I: Iterator<Item = char>,
+{
+    let mut output = String::new();
+    while let Some(character) = chars.next() {
+        match character {
+            '"' => return Some(output),
+            '\\' => output.push(parse_basic_toml_escape(chars)?),
+            character => output.push(character),
+        }
+    }
+    None
+}
+
+fn parse_basic_toml_escape<I>(chars: &mut std::iter::Peekable<I>) -> Option<char>
+where
+    I: Iterator<Item = char>,
+{
+    match chars.next()? {
+        'b' => Some('\u{0008}'),
+        't' => Some('\t'),
+        'n' => Some('\n'),
+        'f' => Some('\u{000c}'),
+        'r' => Some('\r'),
+        '"' => Some('"'),
+        '\\' => Some('\\'),
+        'u' => parse_toml_unicode_escape(chars, 4),
+        'U' => parse_toml_unicode_escape(chars, 8),
+        _ => None,
+    }
+}
+
+fn parse_toml_unicode_escape<I>(chars: &mut std::iter::Peekable<I>, digits: usize) -> Option<char>
+where
+    I: Iterator<Item = char>,
+{
+    let mut value = 0_u32;
+    for _ in 0..digits {
+        value = (value << 4) + chars.next()?.to_digit(16)?;
+    }
+    char::from_u32(value)
+}
+
+fn parse_literal_toml_string<I>(chars: &mut std::iter::Peekable<I>) -> Option<String>
+where
+    I: Iterator<Item = char>,
+{
+    let mut output = String::new();
+    for character in chars.by_ref() {
+        if character == '\'' {
+            return Some(output);
+        }
+        output.push(character);
+    }
+    None
 }
 
 fn join_lines(lines: Vec<String>, had_trailing_newline: bool) -> String {
