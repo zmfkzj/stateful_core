@@ -1,6 +1,8 @@
 use std::fs;
 
-use stateful_cli::{GlobalPaths, doctor_report, enable_repo, install_repo_local};
+use stateful_cli::{
+    GlobalPaths, doctor_report, doctor_report_with_global, enable_repo, install_repo_local,
+};
 
 #[test]
 fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
@@ -28,10 +30,9 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(codex_config.contains("$(git rev-parse --show-toplevel)/target/debug/stateful"));
     assert!(codex_config.contains("hook pre-tool-use"));
 
-    let command_policy_skill = fs::read_to_string(
-        temp_root.join(".codex/skills/stateful-command-policy/SKILL.md"),
-    )
-    .expect("stateful command policy skill should exist");
+    let command_policy_skill =
+        fs::read_to_string(temp_root.join(".codex/skills/stateful-command-policy/SKILL.md"))
+            .expect("stateful command policy skill should exist");
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
     assert!(command_policy_skill.contains("Use when running shell commands"));
     assert!(command_policy_skill.contains("stateful intent declare"));
@@ -61,7 +62,11 @@ fn install_repo_local_refuses_existing_non_stateful_codex_config() {
     let error = install_repo_local(&temp_root, "target/debug/stateful")
         .expect_err("repo install should refuse existing non-stateful config");
 
-    assert!(error.to_string().contains("would overwrite existing Codex config"));
+    assert!(
+        error
+            .to_string()
+            .contains("would overwrite existing Codex config")
+    );
     let config = fs::read_to_string(config_path).expect("existing config should remain readable");
     assert_eq!(config, "[mcp_servers.other]\ncommand = \"other\"\n");
     assert!(!temp_root.join(".stateful/config.yml").exists());
@@ -97,8 +102,13 @@ fn install_repo_local_refuses_existing_non_stateful_hooks_json() {
     let error = install_repo_local(&temp_root, "target/debug/stateful")
         .expect_err("repo install should refuse existing non-stateful hooks");
 
-    assert!(error.to_string().contains("would overwrite existing Codex config"));
-    let saved_hooks = fs::read_to_string(hooks_path).expect("existing hooks should remain readable");
+    assert!(
+        error
+            .to_string()
+            .contains("would overwrite existing Codex config")
+    );
+    let saved_hooks =
+        fs::read_to_string(hooks_path).expect("existing hooks should remain readable");
     assert_eq!(saved_hooks, hooks);
     assert!(!temp_root.join(".codex/config.toml").exists());
     assert!(!temp_root.join(".stateful/config.yml").exists());
@@ -215,4 +225,34 @@ fn doctor_report_marks_repo_local_installation() {
     assert!(!report.state_db);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn doctor_report_includes_global_install_and_repo_enabled_status() {
+    let repo = std::env::temp_dir().join(format!(
+        "stateful-doctor-global-repo-{}",
+        std::process::id()
+    ));
+    let home = std::env::temp_dir().join(format!(
+        "stateful-doctor-global-home-{}",
+        std::process::id()
+    ));
+    if repo.exists() {
+        fs::remove_dir_all(&repo).expect("old repo should be removable");
+    }
+    if home.exists() {
+        fs::remove_dir_all(&home).expect("old home should be removable");
+    }
+    fs::create_dir_all(repo.join(".git")).expect("git marker should write");
+    let paths = stateful_cli::GlobalPaths::new(&home);
+    stateful_cli::enable_repo(&paths, &repo, false).expect("repo should enable");
+
+    let report = doctor_report_with_global(&repo, &paths);
+
+    assert!(report.global_config_yml);
+    assert!(report.repo_enabled);
+    assert!(report.config_yml);
+    assert!(report.validation_yml);
+    fs::remove_dir_all(repo).expect("repo should remove");
+    fs::remove_dir_all(home).expect("home should remove");
 }

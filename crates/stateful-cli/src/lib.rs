@@ -518,9 +518,23 @@ pub struct DoctorReport {
     pub validation_yml: bool,
     pub runtime_server_json: bool,
     pub state_db: bool,
+    pub global_config_yml: bool,
+    pub global_runtime_server_json: bool,
+    pub global_state_db: bool,
+    pub repo_enabled: bool,
 }
 
 pub fn doctor_report(repo_root: impl AsRef<Path>) -> DoctorReport {
+    match GlobalPaths::from_env() {
+        Ok(paths) => doctor_report_with_global(repo_root, &paths),
+        Err(_) => {
+            let paths = GlobalPaths::new(PathBuf::from(".stateful_core"));
+            doctor_report_with_global(repo_root, &paths)
+        }
+    }
+}
+
+pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPaths) -> DoctorReport {
     let repo_root = repo_root.as_ref();
     let hooks_json = repo_root.join(".codex").join("hooks.json").is_file();
     let codex_config_toml = repo_root.join(".codex").join("config.toml").is_file();
@@ -532,14 +546,23 @@ pub fn doctor_report(repo_root: impl AsRef<Path>) -> DoctorReport {
         .join("server.json")
         .is_file();
     let state_db = state_db_path(repo_root).is_file();
+    let repo_enabled = RepoRegistry::load(paths)
+        .map(|registry| registry.is_enabled(repo_root))
+        .unwrap_or(false);
 
     DoctorReport {
-        installed: codex_config_toml && config_yml && validation_yml,
+        installed: (hooks_json || codex_config_toml || paths.config_yml.is_file())
+            && config_yml
+            && validation_yml,
         hooks_json,
         config_yml,
         validation_yml,
         runtime_server_json,
         state_db,
+        global_config_yml: paths.config_yml.is_file(),
+        global_runtime_server_json: paths.server_json.is_file(),
+        global_state_db: paths.state_db.is_file(),
+        repo_enabled,
     }
 }
 
