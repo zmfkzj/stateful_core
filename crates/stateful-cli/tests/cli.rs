@@ -1,6 +1,9 @@
 use clap::Parser;
+use stateful_cli::{
+    Cli, Command, HookCommand, McpCommand, NotificationsCommand, ReposCommand, ResumeCommand,
+    ServerCommand,
+};
 use std::path::PathBuf;
-use stateful_cli::{Cli, Command, HookCommand, McpCommand, ReposCommand};
 
 #[test]
 fn parses_structured_commit_command() {
@@ -25,14 +28,8 @@ fn parses_structured_commit_command() {
 
 #[test]
 fn structured_commit_command_requires_path_separator() {
-    let error = Cli::try_parse_from([
-        "stateful",
-        "commit",
-        "-m",
-        "docs: add plan",
-        "docs/plan.md",
-    ])
-    .expect_err("commit paths should require -- separator");
+    let error = Cli::try_parse_from(["stateful", "commit", "-m", "docs: add plan", "docs/plan.md"])
+        .expect_err("commit paths should require -- separator");
 
     assert!(error.to_string().contains("--"));
 }
@@ -97,9 +94,52 @@ fn parses_repos_list_command() {
     let cli = Cli::try_parse_from(["stateful", "repos", "list"])
         .expect("repos list command should parse");
 
+    assert!(matches!(cli.command, Command::Repos(ReposCommand::List)));
+}
+
+#[test]
+fn parses_notifications_poll_command() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "notifications",
+        "poll",
+        "--session-id",
+        "s1",
+        "--workspace-id",
+        "w1",
+    ])
+    .expect("notifications poll command should parse");
+
     assert!(matches!(
         cli.command,
-        Command::Repos(ReposCommand::List)
+        Command::Notifications(NotificationsCommand::Poll {
+            ref session_id,
+            ref workspace_id,
+        }) if session_id.as_deref() == Some("s1")
+            && workspace_id.as_deref() == Some("w1")
+    ));
+}
+
+#[test]
+fn parses_resume_next_command() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "resume",
+        "next",
+        "--session-id",
+        "s1",
+        "--workspace-id",
+        "w1",
+    ])
+    .expect("resume next command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Resume(ResumeCommand::Next {
+            ref session_id,
+            ref workspace_id,
+        }) if session_id.as_deref() == Some("s1")
+            && workspace_id.as_deref() == Some("w1")
     ));
 }
 
@@ -169,6 +209,7 @@ fn server_command_parses_runtime_options() {
     let cli = Cli::try_parse_from([
         "stateful",
         "server",
+        "start",
         "--host",
         "127.0.0.1",
         "--port",
@@ -183,15 +224,31 @@ fn server_command_parses_runtime_options() {
     assert!(matches!(
         cli.command,
         Command::Server {
-            ref host,
-            port,
-            ref token,
-            ref workspace_id
+            command: Some(ServerCommand::Start {
+                ref host,
+                port,
+                ref token,
+                ref workspace_id,
+                ..
+            })
         } if host == "127.0.0.1"
             && port == 43873
             && token.as_deref() == Some("secret-token")
             && workspace_id == "w1"
     ));
+}
+
+#[test]
+fn parses_server_start_subcommand() {
+    let cli = Cli::try_parse_from(["stateful", "server", "start", "--foreground"])
+        .expect("server start should parse");
+
+    match cli.command {
+        Command::Server {
+            command: Some(ServerCommand::Start { foreground, .. }),
+        } => assert!(foreground),
+        other => panic!("expected server start command, got {other:?}"),
+    }
 }
 
 #[test]

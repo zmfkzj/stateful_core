@@ -13,6 +13,7 @@ mod mcp;
 mod outbox;
 mod repo_registry;
 mod runtime;
+mod server_lifecycle;
 mod validation;
 
 pub use commit::{CommitRequest, CommitResult, run_structured_commit};
@@ -36,6 +37,7 @@ pub use runtime::{
     global_state_db_path, post_json, read_current_session_file, write_current_session_file,
     write_global_runtime_file, write_runtime_file,
 };
+pub use server_lifecycle::{ensure_server, ensure_server_with, stop_server};
 pub use validation::{
     ResultParser, ValidationConfig, ValidationProfile, ValidationResult, ValidationStatus,
     run_validation_profile,
@@ -64,14 +66,8 @@ pub enum Command {
         binary: Option<String>,
     },
     Server {
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        #[arg(long, default_value_t = 43873)]
-        port: u16,
-        #[arg(long)]
-        token: Option<String>,
-        #[arg(long, default_value = "local")]
-        workspace_id: String,
+        #[command(subcommand)]
+        command: Option<ServerCommand>,
     },
     Status,
     Current,
@@ -109,6 +105,24 @@ pub enum Command {
     SyncOutbox,
     #[command(subcommand)]
     Hook(HookCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServerCommand {
+    Start {
+        #[arg(long)]
+        foreground: bool,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 43873)]
+        port: u16,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "local")]
+        workspace_id: String,
+    },
+    Stop,
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -200,12 +214,31 @@ pub fn run() -> anyhow::Result<()> {
                 }))?
             );
         }
-        Command::Server {
-            host,
-            port,
-            token,
-            workspace_id,
-        } => run_server(host, port, token, workspace_id)?,
+        Command::Server { command } => match command.unwrap_or(ServerCommand::Start {
+            foreground: true,
+            host: "127.0.0.1".to_string(),
+            port: 43873,
+            token: None,
+            workspace_id: "local".to_string(),
+        }) {
+            ServerCommand::Start {
+                host,
+                port,
+                token,
+                workspace_id,
+                ..
+            } => run_server(host, port, token, workspace_id)?,
+            ServerCommand::Status => {
+                let paths = GlobalPaths::from_env()?;
+                let runtime = discover_runtime_with_global(std::env::current_dir()?, &paths).ok();
+                println!("{}", serde_json::to_string_pretty(&runtime)?);
+            }
+            ServerCommand::Stop => {
+                let paths = GlobalPaths::from_env()?;
+                stop_server(&paths)?;
+                println!("{}", serde_json::json!({ "status": "ok" }));
+            }
+        },
         Command::Status => {
             let report = doctor_report(std::env::current_dir()?);
             println!("{}", serde_json::to_string_pretty(&report)?);
