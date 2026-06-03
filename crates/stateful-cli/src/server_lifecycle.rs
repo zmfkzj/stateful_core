@@ -90,22 +90,37 @@ fn start_detached_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
 
 fn acquire_start_lock(paths: &GlobalPaths) -> anyhow::Result<StartLock> {
     fs::create_dir_all(&paths.runtime_dir)?;
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&paths.server_lock)
-    {
-        Ok(_) => Ok(StartLock {
-            path: paths.server_lock.clone(),
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            thread::sleep(Duration::from_millis(250));
-            Ok(StartLock {
-                path: paths.server_lock.clone(),
-            })
+    let attempts = 20;
+    let retry_delay = Duration::from_millis(10);
+
+    for attempt in 0..attempts {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&paths.server_lock)
+        {
+            Ok(_) => {
+                return Ok(StartLock {
+                    path: paths.server_lock.clone(),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if attempt + 1 == attempts {
+                    anyhow::bail!(
+                        "timed out acquiring stateful server start lock at {}",
+                        paths.server_lock.display()
+                    );
+                }
+                thread::sleep(retry_delay);
+            }
+            Err(error) => return Err(error.into()),
         }
-        Err(error) => Err(error.into()),
     }
+
+    anyhow::bail!(
+        "timed out acquiring stateful server start lock at {}",
+        paths.server_lock.display()
+    )
 }
 
 struct StartLock {
