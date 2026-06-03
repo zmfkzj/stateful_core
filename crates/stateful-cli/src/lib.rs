@@ -8,6 +8,7 @@ use std::{
 mod commit;
 mod global_paths;
 mod hook;
+mod install;
 mod mcp;
 mod outbox;
 mod repo_registry;
@@ -19,6 +20,10 @@ pub use global_paths::GlobalPaths;
 pub use hook::{
     HookOutcome, handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
     handle_session_start_in_repo, handle_stop_in_repo, handle_user_prompt_submit_in_repo,
+};
+pub use install::{
+    InstallOptions, InstallPlan, apply_global_install, current_stateful_binary_path,
+    default_codex_config_path, plan_global_install,
 };
 pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio_in_repo};
 pub use outbox::sync_outbox_in_repo;
@@ -48,6 +53,14 @@ pub enum Command {
     Init {
         #[arg(long, default_value = "target/debug/stateful")]
         binary: String,
+    },
+    Install {
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        codex_config: Option<PathBuf>,
+        #[arg(long)]
+        binary: Option<String>,
     },
     Server {
         #[arg(long, default_value = "127.0.0.1")]
@@ -133,6 +146,34 @@ pub fn run() -> anyhow::Result<()> {
         Command::Init { binary } => {
             install_repo_local(std::env::current_dir()?, binary)?;
             println!("installed stateful repo-local configuration");
+        }
+        Command::Install {
+            yes,
+            codex_config,
+            binary,
+        } => {
+            let paths = GlobalPaths::from_env()?;
+            let codex_config_path = match codex_config {
+                Some(path) => path,
+                None => default_codex_config_path()?,
+            };
+            let binary_path = match binary {
+                Some(path) => path,
+                None => current_stateful_binary_path()?,
+            };
+            let plan = apply_global_install(InstallOptions {
+                yes,
+                paths,
+                codex_config_path,
+                binary_path,
+            })?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "summary": plan.summary,
+                    "files": plan.files,
+                }))?
+            );
         }
         Command::Server {
             host,

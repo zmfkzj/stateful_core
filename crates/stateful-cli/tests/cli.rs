@@ -69,6 +69,30 @@ fn parses_disable_command() {
 }
 
 #[test]
+fn parses_install_yes_command() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "install",
+        "--yes",
+        "--codex-config",
+        "/home/me/.codex/config.toml",
+        "--binary",
+        "/opt/stateful/bin/stateful",
+    ])
+    .expect("install command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Install {
+            yes: true,
+            ref codex_config,
+            ref binary
+        } if codex_config == &Some(PathBuf::from("/home/me/.codex/config.toml"))
+            && binary.as_deref() == Some("/opt/stateful/bin/stateful")
+    ));
+}
+
+#[test]
 fn parses_repos_list_command() {
     let cli = Cli::try_parse_from(["stateful", "repos", "list"])
         .expect("repos list command should parse");
