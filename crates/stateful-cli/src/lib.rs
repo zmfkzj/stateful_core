@@ -59,7 +59,7 @@ pub enum Command {
     Commit {
         #[arg(short = 'm', long)]
         message: String,
-        #[arg(required = true, trailing_var_arg = true)]
+        #[arg(required = true, num_args = 1.., last = true)]
         paths: Vec<String>,
     },
     #[command(subcommand)]

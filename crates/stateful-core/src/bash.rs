@@ -94,7 +94,8 @@ pub fn classify_bash(command: &str) -> BashClassification {
 }
 
 fn contains_write_syntax(command: &str) -> bool {
-    command.contains(" >")
+    command.contains('>')
+        || command.contains(" >")
         || command.contains(">>")
         || command.contains(" 2>")
         || command.contains("| tee")
@@ -206,9 +207,14 @@ fn is_broad_commit_pathspec(path: &str) -> bool {
         || path == "."
         || path == "*"
         || path == ":/"
+        || path.starts_with('/')
         || path.starts_with('-')
         || path.starts_with(':')
+        || path.starts_with("./")
         || path.contains("..")
+        || path.contains("//")
+        || path.contains("/./")
+        || path.ends_with('/')
         || path.contains('*')
         || path.contains('?')
         || path.contains('[')
@@ -216,7 +222,7 @@ fn is_broad_commit_pathspec(path: &str) -> bool {
 }
 
 fn contains_shell_control_syntax(command: &str) -> bool {
-    [";", "&&", "||", "|", "`", "$("]
+    ["\n", "\r", ";", "&", "&&", "||", "|", "`", "$(", "<(", ">("]
         .iter()
         .any(|token| command.contains(token))
 }

@@ -23,6 +23,20 @@ fn parses_structured_commit_command() {
 }
 
 #[test]
+fn structured_commit_command_requires_path_separator() {
+    let error = Cli::try_parse_from([
+        "stateful",
+        "commit",
+        "-m",
+        "docs: add plan",
+        "docs/plan.md",
+    ])
+    .expect_err("commit paths should require -- separator");
+
+    assert!(error.to_string().contains("--"));
+}
+
+#[test]
 fn hook_pre_tool_use_command_parses() {
     let cli = Cli::try_parse_from(["stateful", "hook", "pre-tool-use"])
         .expect("hook pre-tool-use command should parse");

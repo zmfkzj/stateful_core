@@ -169,6 +169,29 @@ fn stateful_commit_with_shell_control_syntax_is_denied() {
 }
 
 #[test]
+fn stateful_commit_with_shell_control_or_redirection_syntax_is_denied() {
+    let rejected = [
+        "stateful commit -m x -- docs/a.md\nrm docs/b.md",
+        "stateful commit -m x -- docs/a.md & rm docs/b.md",
+        "stateful commit -m x -- docs/a.md>file",
+        "stateful commit -m x -- docs/a.md $(git status)",
+        "stateful commit -m x -- docs/a.md `git status`",
+        "stateful commit -m x -- docs/a.md <(git status)",
+        "stateful commit -m x -- docs/a.md >(cat)",
+    ];
+
+    for command in rejected {
+        let classification = classify_bash(command);
+
+        assert_ne!(
+            classification.kind,
+            BashKind::ReadOnly,
+            "command `{command}` should not be allowed"
+        );
+    }
+}
+
+#[test]
 fn stateful_commit_with_broad_pathspecs_is_not_allowed() {
     let rejected = [
         "",
@@ -179,6 +202,10 @@ fn stateful_commit_with_broad_pathspecs_is_not_allowed() {
         "docs/../plan.md",
         "docs/*.md",
         ":(glob)docs/*.md",
+        "./docs/plan.md",
+        "docs//plan.md",
+        "/tmp/stateful/plan.md",
+        "docs/",
     ];
 
     for pathspec in rejected {

@@ -29,7 +29,7 @@ pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitRes
         anyhow::bail!("commit message is required");
     }
 
-    let paths = normalize_explicit_paths(&request.paths)?;
+    let paths = normalize_explicit_paths(&request.repo_root, &request.paths)?;
     let explicit = paths.iter().cloned().collect::<BTreeSet<_>>();
 
     deny_unrelated_staged_changes(&request.repo_root, &explicit)?;
@@ -54,7 +54,7 @@ pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitRes
     })
 }
 
-fn normalize_explicit_paths(paths: &[String]) -> anyhow::Result<Vec<String>> {
+fn normalize_explicit_paths(repo_root: &Path, paths: &[String]) -> anyhow::Result<Vec<String>> {
     if paths.is_empty() {
         anyhow::bail!("explicit file paths are required");
     }
@@ -62,7 +62,7 @@ fn normalize_explicit_paths(paths: &[String]) -> anyhow::Result<Vec<String>> {
     let mut normalized = Vec::new();
     for path in paths {
         let path = path.trim();
-        if is_broad_pathspec(path) {
+        if is_broad_pathspec(repo_root, path) {
             anyhow::bail!("explicit file paths are required; rejected pathspec `{path}`");
         }
         normalized.push(path.replace('\\', "/"));
@@ -73,18 +73,25 @@ fn normalize_explicit_paths(paths: &[String]) -> anyhow::Result<Vec<String>> {
     Ok(normalized)
 }
 
-fn is_broad_pathspec(path: &str) -> bool {
+fn is_broad_pathspec(repo_root: &Path, path: &str) -> bool {
     path.is_empty()
         || path == "."
         || path == "*"
         || path == ":/"
+        || Path::new(path).is_absolute()
         || path.starts_with('-')
         || path.starts_with(':')
+        || path.starts_with("./")
         || path.contains("..")
+        || path.contains("//")
+        || path.contains("/./")
+        || path.ends_with('/')
+        || path.contains('\\')
         || path.contains('*')
         || path.contains('?')
         || path.contains('[')
         || path.contains(']')
+        || repo_root.join(path).is_dir()
 }
 
 fn deny_unrelated_staged_changes(

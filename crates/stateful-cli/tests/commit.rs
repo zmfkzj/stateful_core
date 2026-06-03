@@ -29,7 +29,12 @@ fn structured_commit_rejects_broad_pathspecs() {
     fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
     fs::write(root.path().join("docs/other.md"), "other\n").expect("other should write");
 
-    let rejected_path_lists = [
+    let absolute_plan = root
+        .path()
+        .join("docs/plan.md")
+        .to_string_lossy()
+        .to_string();
+    let rejected_path_lists = vec![
         Vec::<String>::new(),
         vec![".".to_string()],
         vec!["*".to_string()],
@@ -38,6 +43,11 @@ fn structured_commit_rejects_broad_pathspecs() {
         vec!["docs/../plan.md".to_string()],
         vec!["docs/*.md".to_string()],
         vec![":(glob)docs/*.md".to_string()],
+        vec!["./docs/plan.md".to_string()],
+        vec!["docs//plan.md".to_string()],
+        vec![absolute_plan],
+        vec!["docs".to_string()],
+        vec!["docs/".to_string()],
     ];
 
     for paths in rejected_path_lists {
@@ -109,6 +119,8 @@ fn structured_commit_stages_only_explicit_paths_and_commits() {
     .expect("commit should succeed");
 
     assert_eq!(result.committed_paths, vec!["docs/plan.md"]);
+    let head = git_output(root.path(), &["rev-parse", "HEAD"]);
+    assert_eq!(result.commit_sha, head.trim());
     let show = git_output(root.path(), &["show", "--name-only", "--format=", "HEAD"]);
     assert!(show.lines().any(|line| line == "docs/plan.md"));
     assert!(!show.lines().any(|line| line == "docs/untracked.md"));
