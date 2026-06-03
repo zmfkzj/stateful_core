@@ -352,6 +352,78 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    pub fn create_intent_request(
+        &self,
+        request_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        resources: &[String],
+        action: impl AsRef<str>,
+    ) -> StoreResult<IntentRequestRecord> {
+        let request_id = request_id.as_ref();
+        let session_id = session_id.as_ref();
+        let workspace_id = workspace_id.as_ref();
+        let action = action.as_ref();
+        let resources_json = serde_json::to_string(resources)
+            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+
+        self.conn.execute(
+            "INSERT OR IGNORE INTO intent_requests (
+                request_id,
+                session_id,
+                workspace_id,
+                resources_json,
+                action,
+                status,
+                created_at,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'requested', ?6, ?6)",
+            params![
+                request_id,
+                session_id,
+                workspace_id,
+                resources_json,
+                action,
+                "2026-05-31T00:00:00Z",
+            ],
+        )?;
+
+        self.intent_request(request_id)?
+            .ok_or_else(|| StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    pub fn intent_request(
+        &self,
+        request_id: impl AsRef<str>,
+    ) -> StoreResult<Option<IntentRequestRecord>> {
+        self.conn
+            .query_row(
+                "SELECT
+                    request_id,
+                    session_id,
+                    workspace_id,
+                    resources_json,
+                    action,
+                    status,
+                    created_at,
+                    updated_at
+                 FROM intent_requests
+                 WHERE request_id = ?1",
+                params![request_id.as_ref()],
+                intent_request_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn intent_request_count(&self) -> StoreResult<u64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM intent_requests", [], |row| {
+                row.get::<_, u64>(0)
+            })
+            .map_err(StoreError::from)
+    }
+
     pub fn enqueue_waiter(
         &self,
         session_id: impl AsRef<str>,
@@ -360,11 +432,65 @@ impl Store {
         action: impl AsRef<str>,
         blocking_session_id: Option<&str>,
     ) -> StoreResult<WaitRecord> {
-        let relative_path = normalize_relative_path(relative_path.as_ref());
-        let existing = self
-            .conn
-            .query_row(
-                "SELECT wait_id FROM wait_queue
+        self.enqueue_waiter_inner(
+            None,
+            session_id.as_ref(),
+            workspace_id.as_ref(),
+            relative_path.as_ref(),
+            action.as_ref(),
+            blocking_session_id,
+        )
+    }
+
+    pub fn enqueue_waiter_for_request(
+        &self,
+        request_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        action: impl AsRef<str>,
+        blocking_session_id: Option<&str>,
+    ) -> StoreResult<WaitRecord> {
+        self.enqueue_waiter_inner(
+            Some(request_id.as_ref()),
+            session_id.as_ref(),
+            workspace_id.as_ref(),
+            relative_path.as_ref(),
+            action.as_ref(),
+            blocking_session_id,
+        )
+    }
+
+    fn enqueue_waiter_inner(
+        &self,
+        request_id: Option<&str>,
+        session_id: &str,
+        workspace_id: &str,
+        relative_path: &str,
+        action: &str,
+        blocking_session_id: Option<&str>,
+    ) -> StoreResult<WaitRecord> {
+        let relative_path = normalize_relative_path(relative_path);
+        let existing = if let Some(request_id) = request_id {
+            self.conn
+                .query_row(
+                    "SELECT wait_id FROM wait_queue
+                     WHERE request_id = ?1
+                        AND session_id = ?2
+                        AND workspace_id = ?3
+                        AND relative_path = ?4
+                        AND action = ?5
+                        AND status IN ('queued', 'reserved')
+                     ORDER BY rowid DESC
+                     LIMIT 1",
+                    params![request_id, session_id, workspace_id, relative_path, action],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+        } else {
+            self.conn
+                .query_row(
+                    "SELECT wait_id FROM wait_queue
                  WHERE session_id = ?1
                     AND workspace_id = ?2
                     AND relative_path = ?3
@@ -372,15 +498,11 @@ impl Store {
                     AND status IN ('queued', 'reserved')
                  ORDER BY rowid DESC
                  LIMIT 1",
-                params![
-                    session_id.as_ref(),
-                    workspace_id.as_ref(),
-                    relative_path,
-                    action.as_ref(),
-                ],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
+                    params![session_id, workspace_id, relative_path, action],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+        };
         if let Some(wait_id) = existing {
             return self
                 .waiter(&wait_id)
@@ -398,16 +520,18 @@ impl Store {
                 status,
                 requested_at,
                 reservation_expires_at,
-                blocking_session_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, NULL, ?7)",
+                blocking_session_id,
+                request_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, NULL, ?7, ?8)",
             params![
                 wait_id,
-                session_id.as_ref(),
-                workspace_id.as_ref(),
+                session_id,
+                workspace_id,
                 relative_path,
-                action.as_ref(),
+                action,
                 "2026-05-31T00:00:00Z",
                 blocking_session_id,
+                request_id,
             ],
         )?;
 
@@ -573,6 +697,38 @@ impl Store {
         Ok(())
     }
 
+    pub fn cancel_intent_request(
+        &self,
+        request_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<()> {
+        let request_id = request_id.as_ref();
+        let session_id = session_id.as_ref();
+        let Some(request) = self.intent_request(request_id)? else {
+            return Err(StoreError::ReservationOwnerMismatch);
+        };
+        if request.session_id != session_id {
+            return Err(StoreError::ReservationOwnerMismatch);
+        }
+
+        self.conn.execute(
+            "UPDATE intent_requests
+             SET status = 'cancelled', updated_at = ?1
+             WHERE request_id = ?2 AND session_id = ?3",
+            params!["2026-05-31T00:00:00Z", request_id, session_id],
+        )?;
+        self.conn.execute(
+            "UPDATE wait_queue
+             SET status = 'cancelled'
+             WHERE request_id = ?1
+                AND session_id = ?2
+                AND status IN ('queued', 'reserved')",
+            params![request_id, session_id],
+        )?;
+
+        Ok(())
+    }
+
     pub fn expire_reservation(&self, wait_id: impl AsRef<str>) -> StoreResult<()> {
         self.conn.execute(
             "UPDATE wait_queue
@@ -688,6 +844,18 @@ impl Store {
 
     pub fn has_index(&self, index_name: &str) -> StoreResult<bool> {
         self.schema_object_exists("index", index_name)
+    }
+
+    pub fn has_column(&self, table_name: &str, column_name: &str) -> StoreResult<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2
+                 )",
+                params![table_name, column_name],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StoreError::from)
     }
 
     fn schema_object_exists(&self, object_type: &str, name: &str) -> StoreResult<bool> {
@@ -812,6 +980,20 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_leases_repo_relative_status_expires_at
                 ON leases(repo_id, relative_path, status, expires_at);
 
+            CREATE TABLE IF NOT EXISTS intent_requests (
+                request_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                resources_json TEXT NOT NULL,
+                action TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_intent_requests_session_status
+                ON intent_requests(session_id, status);
+
             CREATE TABLE IF NOT EXISTS wait_queue (
                 wait_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -897,28 +1079,29 @@ impl Store {
             ",
         )?;
 
-        self.add_column_if_missing(
-            "events",
-            "repo_id",
-            "ALTER TABLE events ADD COLUMN repo_id TEXT;",
-        )?;
-        self.add_column_if_missing(
-            "events",
-            "worktree_id",
-            "ALTER TABLE events ADD COLUMN worktree_id TEXT;",
-        )?;
-        self.add_column_if_missing("events", "root", "ALTER TABLE events ADD COLUMN root TEXT;")?;
-        self.add_column_if_missing(
-            "events",
-            "branch",
-            "ALTER TABLE events ADD COLUMN branch TEXT;",
-        )?;
+        self.add_column_if_missing("events", "repo_id", "TEXT")?;
+        self.add_column_if_missing("events", "worktree_id", "TEXT")?;
+        self.add_column_if_missing("events", "root", "TEXT")?;
+        self.add_column_if_missing("events", "branch", "TEXT")?;
+        self.add_column_if_missing("wait_queue", "request_id", "TEXT")?;
 
         Ok(())
     }
 
-    fn add_column_if_missing(&self, table: &str, column: &str, ddl: &str) -> StoreResult<()> {
-        if table != "events" || !matches!(column, "repo_id" | "worktree_id" | "root" | "branch") {
+    fn add_column_if_missing(
+        &self,
+        table: &str,
+        column: &str,
+        column_type: &str,
+    ) -> StoreResult<()> {
+        if !matches!(
+            (table, column, column_type),
+            ("events", "repo_id", "TEXT")
+                | ("events", "worktree_id", "TEXT")
+                | ("events", "root", "TEXT")
+                | ("events", "branch", "TEXT")
+                | ("wait_queue", "request_id", "TEXT")
+        ) {
             return Ok(());
         }
 
@@ -927,7 +1110,9 @@ impl Store {
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<Result<Vec<_>, _>>()?;
         if !columns.iter().any(|name| name == column) {
-            self.conn.execute_batch(ddl)?;
+            self.conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {column_type};"
+            ))?;
         }
         Ok(())
     }
@@ -1025,6 +1210,24 @@ fn wait_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WaitRecord>
         requested_at: row.get(6)?,
         reservation_expires_at: row.get(7)?,
         blocking_session_id: row.get(8)?,
+    })
+}
+
+fn intent_request_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IntentRequestRecord> {
+    let resources_json: String = row.get(3)?;
+    let resources = serde_json::from_str(&resources_json).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+
+    Ok(IntentRequestRecord {
+        request_id: row.get(0)?,
+        session_id: row.get(1)?,
+        workspace_id: row.get(2)?,
+        resources,
+        action: row.get(4)?,
+        status: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
     })
 }
 
@@ -1223,6 +1426,18 @@ pub struct WaitRecord {
     pub requested_at: String,
     pub reservation_expires_at: Option<String>,
     pub blocking_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntentRequestRecord {
+    pub request_id: String,
+    pub session_id: String,
+    pub workspace_id: String,
+    pub resources: Vec<String>,
+    pub action: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

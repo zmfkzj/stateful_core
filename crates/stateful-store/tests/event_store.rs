@@ -427,14 +427,118 @@ fn expired_reservation_promotes_next_waiter() {
 }
 
 #[test]
+fn intent_requests_are_idempotent_by_request_id() {
+    let store = Store::open_in_memory().expect("store should open");
+
+    let first = store
+        .create_intent_request(
+            "req-1",
+            "s1",
+            "w1",
+            &["src/auth.ts".to_string()],
+            "write_file",
+        )
+        .expect("first request should create");
+    let second = store
+        .create_intent_request(
+            "req-1",
+            "s1",
+            "w1",
+            &["src/auth.ts".to_string()],
+            "write_file",
+        )
+        .expect("duplicate request should return existing");
+
+    assert_eq!(first.request_id, "req-1");
+    assert_eq!(second.request_id, "req-1");
+    assert_eq!(
+        store
+            .intent_request_count()
+            .expect("request count should load"),
+        1
+    );
+}
+
+#[test]
+fn cancelling_request_cancels_owned_waiters_only() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .create_intent_request(
+            "req-1",
+            "s1",
+            "w1",
+            &["src/auth.ts".to_string(), "src/billing.ts".to_string()],
+            "write_file",
+        )
+        .expect("request should create");
+    let queued_waiter = store
+        .enqueue_waiter_for_request("req-1", "s1", "w1", "src/auth.ts", "write_file", Some("s0"))
+        .expect("queued waiter should enqueue");
+    let reserved_waiter = store
+        .enqueue_waiter_for_request(
+            "req-1",
+            "s1",
+            "w1",
+            "src/billing.ts",
+            "write_file",
+            Some("s0"),
+        )
+        .expect("reserved waiter should enqueue");
+    store
+        .promote_next_waiter("w1", "src/billing.ts")
+        .expect("waiter should reserve");
+
+    store
+        .cancel_intent_request("req-1", "s2")
+        .expect_err("different session cannot cancel");
+    assert_eq!(
+        store
+            .waiter_status(&queued_waiter.wait_id)
+            .expect("queued waiter status should load"),
+        Some("queued".to_string())
+    );
+    assert_eq!(
+        store
+            .waiter_status(&reserved_waiter.wait_id)
+            .expect("reserved waiter status should load"),
+        Some("reserved".to_string())
+    );
+
+    store
+        .cancel_intent_request("req-1", "s1")
+        .expect("owner should cancel");
+    assert_eq!(
+        store
+            .waiter_status(&queued_waiter.wait_id)
+            .expect("queued waiter status should load"),
+        Some("cancelled".to_string())
+    );
+    assert_eq!(
+        store
+            .waiter_status(&reserved_waiter.wait_id)
+            .expect("reserved waiter status should load"),
+        Some("cancelled".to_string())
+    );
+}
+
+#[test]
 fn migrations_create_contract_tables_and_indexes() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
+    for table in ["schema_migrations", "intent_requests"] {
+        assert!(
+            store.has_table(table).expect("table check should run"),
+            "missing table {table}"
+        );
+    }
+
     assert!(
         store
-            .has_table("schema_migrations")
-            .expect("table check should run")
+            .has_column("wait_queue", "request_id")
+            .expect("column check should run"),
+        "missing wait_queue.request_id column"
     );
+
     for index in [
         "idx_events_workspace_created_at",
         "idx_events_session_sequence",
@@ -443,6 +547,7 @@ fn migrations_create_contract_tables_and_indexes() {
         "idx_intents_session_status_expires_at",
         "idx_leases_workspace_absolute_status_expires_at",
         "idx_leases_repo_relative_status_expires_at",
+        "idx_intent_requests_session_status",
         "idx_conflicts_session_checked_at",
         "idx_validations_workspace_profile_status",
         "idx_reconciliations_session_created_at",
