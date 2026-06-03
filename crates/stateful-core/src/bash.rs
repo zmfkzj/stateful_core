@@ -249,7 +249,38 @@ fn contains_shell_control_syntax(command: &str) -> bool {
 }
 
 fn contains_unsupported_shell_expansion(command: &str) -> bool {
-    command.contains('$')
+    let mut in_single_quote = false;
+    let mut escaped = false;
+
+    for ch in command.chars() {
+        if escaped {
+            escaped = false;
+            if ch == '$' || (!in_single_quote && is_shell_expansion_metachar(ch)) {
+                return true;
+            }
+            continue;
+        }
+
+        if ch == '\\' && !in_single_quote {
+            escaped = true;
+            continue;
+        }
+
+        if ch == '\'' {
+            in_single_quote = !in_single_quote;
+            continue;
+        }
+
+        if ch == '$' || (!in_single_quote && is_shell_expansion_metachar(ch)) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_shell_expansion_metachar(ch: char) -> bool {
+    matches!(ch, '{' | '}' | '*' | '?' | '[' | ']')
 }
 
 fn is_stateful_binary(word: &str) -> bool {

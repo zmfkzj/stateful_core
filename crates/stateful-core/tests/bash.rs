@@ -17,6 +17,7 @@ fn find_is_read_only_only_without_mutating_actions() {
         "find docs \\-delete",
         "find docs -'delete'",
         "find docs -$'delete'",
+        "find docs -{delete,print}",
         "find docs -exec rm {} +",
         "find docs -execdir rm {} +",
         "find docs -ok rm {} +",
@@ -82,12 +83,13 @@ fn git_branch_and_diff_read_only_allowlists_reject_mutating_options() {
         "git diff --out'put'=file",
         "git diff --out$'put'=file",
         "git diff --out$SUFFIX=file",
+        "git diff --out{put,put}=file",
     ];
 
     for command in rejected {
-        assert_ne!(
+        assert_eq!(
             classify_bash(command).kind,
-            BashKind::ReadOnly,
+            BashKind::Mutating,
             "command `{command}` should not be allowed as read-only"
         );
     }
@@ -130,6 +132,7 @@ fn shell_expansion_syntax_is_denied_before_read_only_allowlists() {
         "rg $PATTERN docs",
         "rg $1 docs",
         "rg $? docs",
+        "rg *.rs src",
     ];
 
     for command in rejected {
