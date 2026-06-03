@@ -49,6 +49,7 @@ fn install_yes_creates_global_files_and_database() {
     assert!(first_config.contains("[mcp_servers.stateful]"));
     assert!(first_config.contains("command = \"/opt/stateful/bin/stateful\""));
     assert!(first_config.contains("hook pre-tool-use"));
+    assert_eq!(count(&first_config, "[features]"), 1);
 
     apply_global_install(fixture.options(true)).expect("install should be idempotent");
 
@@ -56,6 +57,7 @@ fn install_yes_creates_global_files_and_database() {
         fs::read_to_string(&fixture.codex_config).expect("codex config should reread");
     assert_eq!(count(&second_config, "# stateful-core-global-install"), 1);
     assert_eq!(count(&second_config, "[mcp_servers.stateful]"), 1);
+    assert_eq!(count(&second_config, "[features]"), 1);
     assert_eq!(count(&second_config, "[[hooks.PreToolUse]]"), 1);
 }
 
@@ -77,18 +79,131 @@ fn install_yes_backs_up_existing_codex_config_before_merge() {
     assert_eq!(backup_contents, existing);
 }
 
+#[test]
+fn install_yes_preserves_existing_features_and_enables_hooks() {
+    let fixture = TestFixture::new("features");
+    let existing = "[features]\nexperimental = true\nhooks = false\n\n[tools]\ncustom = true\n";
+    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::write(&fixture.codex_config, existing).expect("existing config should write");
+
+    apply_global_install(fixture.options(true)).expect("install should apply");
+
+    let merged = fs::read_to_string(&fixture.codex_config).expect("merged config should read");
+    assert_eq!(count(&merged, "[features]"), 1);
+    assert_eq!(count(&merged, "hooks = true"), 1);
+    assert!(!merged.contains("hooks = false"));
+    assert!(merged.contains("experimental = true"));
+    assert!(merged.contains("[tools]\ncustom = true"));
+}
+
+#[test]
+fn install_yes_rejects_existing_unmarked_stateful_mcp_server() {
+    let fixture = TestFixture::new("mcp-conflict");
+    let existing = "[mcp_servers.stateful]\ncommand = \"other\"\n";
+    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::write(&fixture.codex_config, existing).expect("existing config should write");
+
+    let error = apply_global_install(fixture.options(true))
+        .expect_err("unmarked stateful mcp config should conflict");
+
+    assert!(error.to_string().contains("mcp_servers.stateful"));
+    assert_eq!(
+        fs::read_to_string(&fixture.codex_config).expect("config should remain readable"),
+        existing
+    );
+    assert!(backup_paths_for(&fixture.codex_config).is_empty());
+}
+
+#[test]
+fn install_yes_rejects_malformed_marker_block_without_writing() {
+    let fixture = TestFixture::new("malformed-marker");
+    let existing = "# stateful-core-global-install\n[mcp_servers.stateful]\ncommand = \"old\"\n";
+    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::write(&fixture.codex_config, existing).expect("existing config should write");
+
+    let error = apply_global_install(fixture.options(true))
+        .expect_err("unterminated stateful block should fail");
+
+    assert!(error.to_string().contains("missing end marker"));
+    assert_eq!(
+        fs::read_to_string(&fixture.codex_config).expect("config should remain readable"),
+        existing
+    );
+    assert!(backup_paths_for(&fixture.codex_config).is_empty());
+}
+
+#[test]
+fn install_yes_idempotent_rerun_does_not_create_extra_backup() {
+    let fixture = TestFixture::new("backup-idempotent");
+    let existing = "[tools]\ncustom = true\n";
+    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::write(&fixture.codex_config, existing).expect("existing config should write");
+
+    apply_global_install(fixture.options(true)).expect("first install should apply");
+    let first_merged = fs::read_to_string(&fixture.codex_config).expect("config should read");
+    assert_eq!(backup_paths_for(&fixture.codex_config).len(), 1);
+
+    apply_global_install(fixture.options(true)).expect("second install should be idempotent");
+
+    let second_merged = fs::read_to_string(&fixture.codex_config).expect("config should reread");
+    assert_eq!(second_merged, first_merged);
+    assert_eq!(backup_paths_for(&fixture.codex_config).len(), 1);
+}
+
+#[test]
+fn install_yes_shell_quotes_dangerous_binary_path() {
+    let fixture = TestFixture::new("dangerous-binary");
+    let mut options = fixture.options(true);
+    options.binary_path = "/opt/stateful dir/$(touch x)`cmd`/foo'bar/stateful".to_string();
+
+    apply_global_install(options).expect("install should quote dangerous shell chars");
+
+    let config = fs::read_to_string(&fixture.codex_config).expect("codex config should read");
+    assert!(config.contains(
+        r##"command = "/opt/stateful dir/$(touch x)`cmd`/foo'bar/stateful""##
+    ));
+    assert!(config.contains(
+        r##"command = "'/opt/stateful dir/$(touch x)`cmd`/foo'\\''bar/stateful' hook pre-tool-use""##
+    ));
+    assert_eq!(count(&config, "[mcp_servers.stateful]"), 1);
+}
+
+#[test]
+fn install_yes_rejects_binary_path_with_control_character() {
+    let fixture = TestFixture::new("control-binary");
+    let mut options = fixture.options(true);
+    options.binary_path = "/opt/stateful\nbin/stateful".to_string();
+
+    let error = apply_global_install(options).expect_err("control chars should be rejected");
+
+    assert!(error.to_string().contains("control character"));
+    assert!(!fixture.paths.home.exists());
+    assert!(!fixture.codex_config.exists());
+}
+
 fn count(haystack: &str, needle: &str) -> usize {
     haystack.matches(needle).count()
 }
 
 fn single_backup_for(config_path: &Path) -> PathBuf {
+    let backups = backup_paths_for(config_path);
+
+    assert_eq!(backups.len(), 1, "expected one backup, got {backups:?}");
+    backups.into_iter().next().expect("backup should exist")
+}
+
+fn backup_paths_for(config_path: &Path) -> Vec<PathBuf> {
     let parent = config_path.parent().expect("config path should have parent");
+    if !parent.exists() {
+        return Vec::new();
+    }
+
     let file_name = config_path
         .file_name()
         .and_then(|name| name.to_str())
         .expect("config file name should be utf-8");
     let prefix = format!("{file_name}.stateful-backup-");
-    let backups: Vec<PathBuf> = fs::read_dir(parent)
+    fs::read_dir(parent)
         .expect("codex config dir should read")
         .map(|entry| entry.expect("dir entry should read").path())
         .filter(|path| {
@@ -96,10 +211,7 @@ fn single_backup_for(config_path: &Path) -> PathBuf {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with(&prefix))
         })
-        .collect();
-
-    assert_eq!(backups.len(), 1, "expected one backup, got {backups:?}");
-    backups.into_iter().next().expect("backup should exist")
+        .collect()
 }
 
 struct TestFixture {
