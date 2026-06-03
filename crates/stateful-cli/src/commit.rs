@@ -6,7 +6,7 @@ use std::{
 
 use crate::{discover_runtime_with_optional_global, post_json};
 
-pub type AuthorizePath = Box<dyn Fn(&str) -> anyhow::Result<()> + Send + Sync>;
+pub type AuthorizePath = Box<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 
 pub struct CommitRequest {
     pub repo_root: PathBuf,
@@ -33,8 +33,13 @@ pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitRes
     let explicit = paths.iter().cloned().collect::<BTreeSet<_>>();
 
     deny_unrelated_staged_changes(&request.repo_root, &explicit)?;
-    for path in &paths {
-        authorize_path(&request, path)?;
+    let targets = paths
+        .iter()
+        .map(|path| commit_target(&request.repo_root, path))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    for target in &targets {
+        authorize_path(&request, target)?;
     }
 
     let mut add_args = vec!["add", "--"];
@@ -128,9 +133,9 @@ fn deny_unrelated_staged_changes(
     Ok(())
 }
 
-fn authorize_path(request: &CommitRequest, path: &str) -> anyhow::Result<()> {
+fn authorize_path(request: &CommitRequest, target: &CommitTarget) -> anyhow::Result<()> {
     if let Some(authorize) = &request.authorize {
-        return authorize(path);
+        return authorize(target.action, &target.path);
     }
 
     let session_id = request
@@ -148,8 +153,8 @@ fn authorize_path(request: &CommitRequest, path: &str) -> anyhow::Result<()> {
         &serde_json::json!({
             "session_id": session_id,
             "workspace_id": workspace_id,
-            "action": "write_file",
-            "path": path,
+            "action": target.action,
+            "path": target.path,
         }),
     )?;
 
@@ -167,6 +172,56 @@ fn authorize_path(request: &CommitRequest, path: &str) -> anyhow::Result<()> {
             "{}",
             decision.required_next_action.unwrap_or(decision.message)
         );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommitTarget {
+    path: String,
+    action: &'static str,
+}
+
+fn commit_target(repo_root: &Path, path: &str) -> anyhow::Result<CommitTarget> {
+    reject_rename_or_copy_status(repo_root, path)?;
+    let action = if is_missing_tracked_file(repo_root, path)? {
+        "delete_file"
+    } else {
+        "write_file"
+    };
+
+    Ok(CommitTarget {
+        path: path.to_string(),
+        action,
+    })
+}
+
+fn is_missing_tracked_file(repo_root: &Path, path: &str) -> anyhow::Result<bool> {
+    if repo_root.join(path).exists() {
+        return Ok(false);
+    }
+
+    Ok(Command::new("git")
+        .args(["ls-files", "--error-unmatch", "--", path])
+        .current_dir(repo_root)
+        .output()?
+        .status
+        .success())
+}
+
+fn reject_rename_or_copy_status(repo_root: &Path, path: &str) -> anyhow::Result<()> {
+    let status = git_stdout(
+        repo_root,
+        &["status", "--porcelain=v1", "--find-renames", "--", path],
+    )?;
+    for line in status.lines() {
+        let code = line.get(0..2).unwrap_or_default();
+        if code.contains('R') || code.contains('C') || line.contains(" -> ") {
+            anyhow::bail!(
+                "stateful commit does not yet support rename/copy path status for `{path}`"
+            );
+        }
     }
 
     Ok(())

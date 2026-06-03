@@ -64,13 +64,17 @@ impl RepoRegistry {
     }
 
     pub fn is_enabled(&self, repo_root: impl AsRef<Path>) -> bool {
+        self.enabled_entry(repo_root).is_some()
+    }
+
+    pub fn enabled_entry(&self, repo_root: impl AsRef<Path>) -> Option<&RepoEntry> {
         let Ok(repo_root) = repo_root.as_ref().canonicalize() else {
-            return false;
+            return None;
         };
 
         self.repos
             .iter()
-            .any(|entry| entry.enabled && entry.root == repo_root)
+            .find(|entry| entry.enabled && entry.root == repo_root)
     }
 }
 

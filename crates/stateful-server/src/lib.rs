@@ -171,7 +171,10 @@ async fn session_register(
 
     append_event_response(
         &config.store,
-        Event::session_registered(input.session_id, input.workspace_id),
+        with_request_identity(
+            Event::session_registered(input.session_id, input.workspace_id),
+            input.identity,
+        ),
     )
 }
 
@@ -186,7 +189,10 @@ async fn session_heartbeat(
 
     append_event_response(
         &config.store,
-        Event::session_heartbeat(input.session_id, input.workspace_id),
+        with_request_identity(
+            Event::session_heartbeat(input.session_id, input.workspace_id),
+            input.identity,
+        ),
     )
 }
 
@@ -237,7 +243,10 @@ async fn intent_declare(
 
     append_event_response(
         &config.store,
-        Event::intent_declared(input.session_id, input.workspace_id, input.files_planned),
+        with_request_identity(
+            Event::intent_declared(input.session_id, input.workspace_id, input.files_planned),
+            input.identity,
+        ),
     )
 }
 
@@ -783,6 +792,14 @@ fn append_activity_response(
     status_response(result)
 }
 
+fn with_request_identity(mut event: Event, identity: WorkspaceIdentityRequest) -> Event {
+    event.repo_id = identity.repo_id;
+    event.worktree_id = identity.worktree_id;
+    event.root = identity.root;
+    event.branch = identity.branch;
+    event
+}
+
 fn status_response(result: Result<(), String>) -> (StatusCode, Json<Value>) {
     match result {
         Ok(()) => (
@@ -904,12 +921,16 @@ struct IntentDeclareRequest {
     session_id: String,
     workspace_id: String,
     files_planned: Vec<String>,
+    #[serde(flatten)]
+    identity: WorkspaceIdentityRequest,
 }
 
 #[derive(Debug, Deserialize)]
 struct SessionRequest {
     session_id: String,
     workspace_id: String,
+    #[serde(flatten)]
+    identity: WorkspaceIdentityRequest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -923,6 +944,18 @@ struct LeaseRequest {
 struct ActivityRequest {
     session_id: String,
     workspace_id: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WorkspaceIdentityRequest {
+    #[serde(default)]
+    repo_id: Option<String>,
+    #[serde(default)]
+    worktree_id: Option<String>,
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

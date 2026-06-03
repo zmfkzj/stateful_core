@@ -148,6 +148,53 @@ async fn session_register_and_heartbeat_update_current_summary() {
 }
 
 #[tokio::test]
+async fn session_events_preserve_repo_identity_when_provided() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-session-identity-store-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/session/register",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "repo_id": "repo-1",
+                "worktree_id": "worktree-1",
+                "root": "/repo",
+                "branch": "main"
+            }),
+        ))
+        .await
+        .expect("session register should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let events = app
+        .oneshot(authorized_get("/v1/events"))
+        .await
+        .expect("events request should complete");
+    assert_eq!(events.status(), StatusCode::OK);
+    let body = to_bytes(events.into_body(), 4096)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["events"][0]["repo_id"], "repo-1");
+    assert_eq!(json["events"][0]["worktree_id"], "worktree-1");
+    assert_eq!(json["events"][0]["root"], "/repo");
+    assert_eq!(json["events"][0]["branch"], "main");
+
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[tokio::test]
 async fn lease_activity_and_conflict_routes_are_available() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-coordination-store-{}",

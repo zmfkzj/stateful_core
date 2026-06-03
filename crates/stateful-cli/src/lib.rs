@@ -264,7 +264,8 @@ pub fn run() -> anyhow::Result<()> {
             }
             ServerCommand::Status => {
                 let paths = GlobalPaths::from_env()?;
-                let runtime = discover_runtime_with_global(std::env::current_dir()?, &paths).ok();
+                let runtime =
+                    discover_runtime_with_global(current_repo_root_or_current_dir()?, &paths).ok();
                 println!("{}", serde_json::to_string_pretty(&runtime)?);
             }
             ServerCommand::Stop => {
@@ -274,7 +275,7 @@ pub fn run() -> anyhow::Result<()> {
             }
         },
         Command::Status => {
-            let report = doctor_report(std::env::current_dir()?);
+            let report = doctor_report(current_repo_root_or_current_dir()?);
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Current => {
@@ -288,22 +289,24 @@ pub fn run() -> anyhow::Result<()> {
             print_http_response(response)?;
         }
         Command::SyncOutbox => {
-            let synced = sync_outbox_in_repo(std::env::current_dir()?)?;
+            let synced = sync_outbox_in_repo(current_repo_root_or_current_dir()?)?;
             println!("{}", serde_json::json!({ "synced": synced }));
         }
         Command::Doctor => {
-            let report = doctor_report(std::env::current_dir()?);
+            let report = doctor_report(current_repo_root_or_current_dir()?);
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Validate { profile } => {
-            let result = run_validation_profile(std::env::current_dir()?, &profile)?;
+            let result = run_validation_profile(current_repo_root_or_current_dir()?, &profile)?;
             println!("{}", serde_json::to_string(&result)?);
             if !matches!(result.status, ValidationStatus::Passed) {
                 std::process::exit(1);
             }
         }
         Command::Commit { message, paths } => {
-            let repo_root = std::env::current_dir()?;
+            let cwd = std::env::current_dir()?;
+            let repo_root = detect_git_root(&cwd)?;
+            let paths = root_relative_paths(&repo_root, &cwd, paths)?;
             let current_session = read_current_session_file(&repo_root).ok();
             let result = run_structured_commit(CommitRequest {
                 repo_root,
@@ -434,10 +437,43 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 fn discover_runtime_for_current_dir() -> anyhow::Result<(PathBuf, ServerRuntime)> {
-    let repo_root = std::env::current_dir()?;
+    let repo_root = current_repo_root_or_current_dir()?;
     let runtime = discover_runtime_with_optional_global(&repo_root)?;
 
     Ok((repo_root, runtime))
+}
+
+fn current_repo_root_or_current_dir() -> anyhow::Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    Ok(detect_git_root(&cwd).unwrap_or(cwd))
+}
+
+fn root_relative_paths(
+    repo_root: &Path,
+    cwd: &Path,
+    paths: Vec<String>,
+) -> anyhow::Result<Vec<String>> {
+    let canonical_repo = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let cwd_relative = canonical_cwd.strip_prefix(&canonical_repo).ok();
+
+    Ok(paths
+        .into_iter()
+        .map(|path| {
+            let path = path.trim();
+            if Path::new(path).is_absolute() {
+                path.to_string()
+            } else if let Some(prefix) =
+                cwd_relative.filter(|prefix| !prefix.as_os_str().is_empty())
+            {
+                prefix.join(path).to_string_lossy().replace('\\', "/")
+            } else {
+                path.to_string()
+            }
+        })
+        .collect())
 }
 
 fn resolve_session_workspace(
@@ -539,7 +575,8 @@ pub fn doctor_report(repo_root: impl AsRef<Path>) -> DoctorReport {
 }
 
 pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPaths) -> DoctorReport {
-    let repo_root = repo_root.as_ref();
+    let detected_root = detect_git_root(repo_root.as_ref()).ok();
+    let repo_root = detected_root.as_deref().unwrap_or(repo_root.as_ref());
     let hooks_json = repo_root.join(".codex").join("hooks.json").is_file();
     let codex_config_toml = repo_root.join(".codex").join("config.toml").is_file();
     let config_yml = repo_root.join(".stateful").join("config.yml").is_file();

@@ -3,7 +3,7 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     process::Command,
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     thread,
 };
 
@@ -67,7 +67,7 @@ fn structured_commit_rejects_broad_pathspecs() {
             paths,
             session_id: Some("s1".to_string()),
             workspace_id: Some("w1".to_string()),
-            authorize: Some(Box::new(|path| {
+            authorize: Some(Box::new(|_action, path| {
                 panic!("broad pathspec `{path}` should be rejected before authorization")
             })),
         });
@@ -99,7 +99,7 @@ fn structured_commit_rejects_deleted_tracked_directory_before_staging() {
         paths: vec!["docs".to_string()],
         session_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|path| {
+        authorize: Some(Box::new(|_action, path| {
             panic!("directory pathspec `{path}` should be rejected before authorization")
         })),
     });
@@ -143,6 +143,109 @@ fn structured_commit_rejects_unrelated_staged_changes() {
 }
 
 #[test]
+fn structured_commit_authorizes_deleted_files_as_delete_file() {
+    let root = git_repo("stateful-commit-delete-action");
+    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
+    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
+    git(root.path(), &["add", "docs/plan.md"]);
+    git(root.path(), &["commit", "-m", "docs: seed"]);
+    fs::remove_file(root.path().join("docs/plan.md")).expect("plan should remove");
+    let authorized = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let authorized_for_closure = Arc::clone(&authorized);
+
+    let result = run_structured_commit(CommitRequest {
+        repo_root: root.path().to_path_buf(),
+        message: "docs: remove plan".to_string(),
+        paths: vec!["docs/plan.md".to_string()],
+        session_id: Some("s1".to_string()),
+        workspace_id: Some("w1".to_string()),
+        authorize: Some(Box::new(move |action, path| {
+            authorized_for_closure
+                .lock()
+                .expect("authorization log should lock")
+                .push((action.to_string(), path.to_string()));
+            Ok(())
+        })),
+    })
+    .expect("commit should succeed");
+
+    assert_eq!(result.committed_paths, vec!["docs/plan.md"]);
+    assert_eq!(
+        *authorized.lock().expect("authorization log should lock"),
+        vec![("delete_file".to_string(), "docs/plan.md".to_string())]
+    );
+    let show = git_output(root.path(), &["show", "--name-status", "--format=", "HEAD"]);
+    assert!(show.lines().any(|line| line == "D\tdocs/plan.md"));
+}
+
+#[test]
+fn structured_commit_does_not_allow_deleted_file_under_write_authorization() {
+    let root = git_repo("stateful-commit-delete-policy");
+    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
+    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
+    git(root.path(), &["add", "docs/plan.md"]);
+    git(root.path(), &["commit", "-m", "docs: seed"]);
+    fs::remove_file(root.path().join("docs/plan.md")).expect("plan should remove");
+
+    let result = run_structured_commit(CommitRequest {
+        repo_root: root.path().to_path_buf(),
+        message: "docs: remove plan".to_string(),
+        paths: vec!["docs/plan.md".to_string()],
+        session_id: Some("s1".to_string()),
+        workspace_id: Some("w1".to_string()),
+        authorize: Some(Box::new(|action, path| {
+            assert_eq!(path, "docs/plan.md");
+            if action == "delete_file" {
+                anyhow::bail!("delete requires exact file intent");
+            }
+            Ok(())
+        })),
+    });
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("delete requires exact file intent")
+    );
+    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
+    assert!(staged.is_empty(), "denied delete should not mutate index");
+}
+
+#[test]
+fn structured_commit_command_from_subdir_uses_git_root_session_and_paths() {
+    let root = git_repo("stateful-commit-subdir");
+    let paths = GlobalPaths::new(root.path().join("home"));
+    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
+    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
+    write_current_session_file(root.path(), &CurrentSession::new("s-subdir", "w-session"))
+        .expect("current session should write");
+    let (runtime, rx) = spawn_fake_authorize_server();
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+        .args(["commit", "-m", "docs: add plan", "--", "plan.md"])
+        .current_dir(root.path().join("docs"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("STATEFUL_HOME", &paths.home)
+        .output()
+        .expect("stateful commit should run");
+
+    assert!(
+        output.status.success(),
+        "stateful commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("\"session_id\":\"s-subdir\""));
+    assert!(request.contains("\"workspace_id\":\"w-session\""));
+    assert!(request.contains("\"path\":\"docs/plan.md\""));
+    let show = git_output(root.path(), &["show", "--name-only", "--format=", "HEAD"]);
+    assert!(show.lines().any(|line| line == "docs/plan.md"));
+}
+
+#[test]
 fn structured_commit_stages_only_explicit_paths_and_commits() {
     let root = git_repo("stateful-commit-success");
     fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
@@ -156,7 +259,8 @@ fn structured_commit_stages_only_explicit_paths_and_commits() {
         paths: vec!["docs/plan.md".to_string()],
         session_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|path| {
+        authorize: Some(Box::new(|action, path| {
+            assert_eq!(action, "write_file");
             assert_eq!(path, "docs/plan.md");
             Ok(())
         })),
@@ -215,6 +319,23 @@ fn structured_commit_command_discovers_global_runtime_for_authorization() {
     assert!(request.contains("\"session_id\":\"s-global\""));
     assert!(request.contains("\"workspace_id\":\"w-session\""));
     assert!(request.contains("\"path\":\"docs/plan.md\""));
+}
+
+fn spawn_fake_authorize_server() -> (ServerRuntime, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request(&mut stream);
+        tx.send(request).expect("request should send to test");
+        write_json_response(
+            &mut stream,
+            r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        );
+    });
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "global-w", 42);
+    (runtime, rx)
 }
 
 fn git_repo(name: &str) -> tempfile_root::TempRoot {

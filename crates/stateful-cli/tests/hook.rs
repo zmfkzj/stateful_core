@@ -2,6 +2,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
+    path::Path,
     process::{Command, Stdio},
     sync::mpsc,
     thread,
@@ -276,6 +277,139 @@ fn pre_tool_use_denies_apply_patch_until_intent_protocol_exists() {
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
     assert!(matches!(outcome, HookOutcome::Deny { .. }));
+}
+
+#[test]
+fn pre_tool_use_denies_edit_and_write_without_runtime() {
+    for (tool_name, tool_input) in [
+        (
+            "Edit",
+            serde_json::json!({
+                "file_path": "src/auth.ts",
+                "old_string": "old",
+                "new_string": "new"
+            }),
+        ),
+        (
+            "Write",
+            serde_json::json!({
+                "file_path": "src/auth.ts",
+                "content": "new"
+            }),
+        ),
+    ] {
+        let input = serde_json::json!({
+            "session_id": "s1",
+            "cwd": "/repo",
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool_name,
+            "tool_input": tool_input
+        })
+        .to_string();
+
+        let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+        assert!(
+            matches!(outcome, HookOutcome::Deny { .. }),
+            "{tool_name} should require stateful authorization"
+        );
+    }
+}
+
+#[test]
+fn pre_tool_use_edit_posts_authorize_and_denies_when_server_denies() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-edit-deny-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Write target is outside active intent scope.","required_next_action":"Declare matching intent."}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": "src/auth.ts",
+            "old_string": "old",
+            "new_string": "new"
+        }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("POST /v1/authorize HTTP/1.1"));
+    assert!(request.contains("\"action\":\"write_file\""));
+    assert!(request.contains("\"path\":\"src/auth.ts\""));
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
+    assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn run_hook_uses_payload_cwd_for_repo_gate() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-payload-cwd-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    let outside = temp_root.join("outside");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    fs::create_dir_all(&outside).expect("outside dir should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "session_id": "s-cwd",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "apply_patch",
+        "tool_input": {
+            "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
+        }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess_from(&outside, &paths, &["hook", "pre-tool-use"], &input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("POST /v1/authorize HTTP/1.1"));
+    let session = read_current_session_file(&repo_root).expect("root current session should read");
+    assert_eq!(session.session_id, "s-cwd");
+    assert!(!outside.join(".stateful_core/runtime/session.json").exists());
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -698,9 +832,18 @@ fn run_hook_subprocess(
     args: &[&str],
     input: &str,
 ) -> std::process::Output {
+    run_hook_subprocess_from(repo_root, paths, args, input)
+}
+
+fn run_hook_subprocess_from(
+    cwd: &Path,
+    paths: &GlobalPaths,
+    args: &[&str],
+    input: &str,
+) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_stateful"))
         .args(args)
-        .current_dir(repo_root)
+        .current_dir(cwd)
         .env_clear()
         .env("STATEFUL_HOME", &paths.home)
         .stdin(Stdio::piped())
