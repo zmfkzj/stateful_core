@@ -122,6 +122,16 @@ pub fn discover_runtime_with_global(
     discover_runtime(repo_root)
 }
 
+pub fn discover_runtime_with_optional_global(
+    repo_root: impl AsRef<Path>,
+) -> anyhow::Result<ServerRuntime> {
+    let repo_root = repo_root.as_ref();
+    match GlobalPaths::from_env() {
+        Ok(paths) => discover_runtime_with_global(repo_root, &paths),
+        Err(_) => discover_runtime(repo_root),
+    }
+}
+
 pub fn write_current_session_file(
     repo_root: impl AsRef<Path>,
     session: &CurrentSession,

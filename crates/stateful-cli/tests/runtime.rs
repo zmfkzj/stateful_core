@@ -2,6 +2,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
+    process::Command,
     sync::mpsc,
     thread,
 };
@@ -82,6 +83,47 @@ fn runtime_discovery_keeps_repo_local_compatibility_fallback() {
     assert_eq!(discovered.base_url, "http://127.0.0.1:43875");
     assert_eq!(discovered.token, "repo-token");
     assert_eq!(discovered.workspace_id, "repo-w");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn cli_current_uses_repo_local_runtime_when_global_paths_are_unavailable() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-runtime-no-home-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let _request = read_http_request_without_body(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}")
+            .expect("response should write");
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
+    write_runtime_file(&temp_root, &runtime).expect("runtime file should write");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+        .arg("current")
+        .current_dir(&temp_root)
+        .env_clear()
+        .output()
+        .expect("stateful current should run");
+
+    assert!(
+        output.status.success(),
+        "stateful current failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"ok\""));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

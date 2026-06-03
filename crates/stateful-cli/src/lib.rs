@@ -32,9 +32,9 @@ pub use repo_registry::{
 };
 pub use runtime::{
     CurrentSession, HttpResponse, IntentDeclareArgs, ServerRuntime, declare_intent_via_http,
-    discover_runtime, discover_runtime_with_global, get_json, global_state_db_path, post_json,
-    read_current_session_file, write_current_session_file, write_global_runtime_file,
-    write_runtime_file,
+    discover_runtime, discover_runtime_with_global, discover_runtime_with_optional_global, get_json,
+    global_state_db_path, post_json, read_current_session_file, write_current_session_file,
+    write_global_runtime_file, write_runtime_file,
 };
 pub use validation::{
     ResultParser, ValidationConfig, ValidationProfile, ValidationResult, ValidationStatus,
@@ -368,8 +368,7 @@ pub fn run() -> anyhow::Result<()> {
 
 fn discover_runtime_for_current_dir() -> anyhow::Result<(PathBuf, ServerRuntime)> {
     let repo_root = std::env::current_dir()?;
-    let paths = GlobalPaths::from_env()?;
-    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
+    let runtime = discover_runtime_with_optional_global(&repo_root)?;
 
     Ok((repo_root, runtime))
 }
