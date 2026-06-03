@@ -7,6 +7,9 @@ use stateful_cli::{
     GlobalPaths, InstallOptions, RepoRegistry, apply_global_install, plan_global_install,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 #[test]
 fn install_dry_run_does_not_write_files() {
     let fixture = TestFixture::new("dry-run");
@@ -82,7 +85,8 @@ fn install_yes_backs_up_existing_codex_config_before_merge() {
 #[test]
 fn install_yes_preserves_existing_features_and_enables_hooks() {
     let fixture = TestFixture::new("features");
-    let existing = "[features]\nexperimental = true\nhooks = false\n\n[tools]\ncustom = true\n";
+    let existing =
+        "[features] # codex feature flags\nexperimental = true\nhooks = false\n\n[tools]\ncustom = true\n";
     fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
@@ -92,6 +96,7 @@ fn install_yes_preserves_existing_features_and_enables_hooks() {
     assert_eq!(count(&merged, "[features]"), 1);
     assert_eq!(count(&merged, "hooks = true"), 1);
     assert!(!merged.contains("hooks = false"));
+    assert!(merged.contains("[features] # codex feature flags"));
     assert!(merged.contains("experimental = true"));
     assert!(merged.contains("[tools]\ncustom = true"));
 }
@@ -99,7 +104,7 @@ fn install_yes_preserves_existing_features_and_enables_hooks() {
 #[test]
 fn install_yes_rejects_existing_unmarked_stateful_mcp_server() {
     let fixture = TestFixture::new("mcp-conflict");
-    let existing = "[mcp_servers.stateful]\ncommand = \"other\"\n";
+    let existing = "[mcp_servers.stateful] # existing server\ncommand = \"other\"\n";
     fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
@@ -107,6 +112,24 @@ fn install_yes_rejects_existing_unmarked_stateful_mcp_server() {
         .expect_err("unmarked stateful mcp config should conflict");
 
     assert!(error.to_string().contains("mcp_servers.stateful"));
+    assert_eq!(
+        fs::read_to_string(&fixture.codex_config).expect("config should remain readable"),
+        existing
+    );
+    assert!(backup_paths_for(&fixture.codex_config).is_empty());
+}
+
+#[test]
+fn install_yes_rejects_quoted_stateful_mcp_table_header() {
+    let fixture = TestFixture::new("quoted-mcp-conflict");
+    let existing = "[\"mcp_servers\".\"stateful\"]\ncommand = \"other\"\n";
+    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::write(&fixture.codex_config, existing).expect("existing config should write");
+
+    let error = apply_global_install(fixture.options(true))
+        .expect_err("quoted stateful mcp config should conflict");
+
+    assert!(error.to_string().contains("unsupported"));
     assert_eq!(
         fs::read_to_string(&fixture.codex_config).expect("config should remain readable"),
         existing
@@ -179,6 +202,37 @@ fn install_yes_rejects_binary_path_with_control_character() {
     assert!(error.to_string().contains("control character"));
     assert!(!fixture.paths.home.exists());
     assert!(!fixture.codex_config.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn install_yes_preserves_existing_codex_config_file_mode() {
+    let fixture = TestFixture::new("file-mode");
+    let existing = "[tools]\ncustom = true\n";
+    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::write(&fixture.codex_config, existing).expect("existing config should write");
+    let mut permissions = fs::metadata(&fixture.codex_config)
+        .expect("config metadata should read")
+        .permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(&fixture.codex_config, permissions).expect("config mode should set");
+
+    apply_global_install(fixture.options(true)).expect("install should apply");
+
+    let config_mode = fs::metadata(&fixture.codex_config)
+        .expect("config metadata should reread")
+        .permissions()
+        .mode()
+        & 0o777;
+    let backup = single_backup_for(&fixture.codex_config);
+    let backup_mode = fs::metadata(backup)
+        .expect("backup metadata should read")
+        .permissions()
+        .mode()
+        & 0o777;
+
+    assert_eq!(config_mode, 0o600);
+    assert_eq!(backup_mode, 0o600);
 }
 
 fn count(haystack: &str, needle: &str) -> usize {

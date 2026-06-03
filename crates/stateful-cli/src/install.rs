@@ -4,6 +4,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use anyhow::Context;
 
 use crate::{GlobalPaths, RepoRegistry};
@@ -150,6 +153,7 @@ fn write_codex_config_update(
     let CodexConfigUpdate::Write { existing, merged } = update else {
         return Ok(());
     };
+    let existing_mode = file_mode(config_path)?;
 
     let parent = containing_dir(config_path);
     fs::create_dir_all(parent).with_context(|| {
@@ -167,6 +171,7 @@ fn write_codex_config_update(
                 backup_path.display()
             )
         })?;
+        set_file_mode(&backup_path, existing_mode)?;
     }
 
     let temp_path = codex_temp_path(config_path)?;
@@ -176,6 +181,7 @@ fn write_codex_config_update(
             temp_path.display()
         )
     })?;
+    set_file_mode(&temp_path, existing_mode)?;
     fs::rename(&temp_path, config_path).with_context(|| {
         format!(
             "failed to write merged Codex config {}",
@@ -225,11 +231,11 @@ fn ensure_hooks_feature_enabled(contents: &str) -> anyhow::Result<FeatureUpdate>
 
     for index in 0..lines.len() {
         let trimmed = lines[index].trim();
-        if is_toml_table_header(trimmed) {
+        if let Some(header) = toml_table_header(trimmed)? {
             if matches!(section, TomlSection::Features) {
                 features_table_end = Some(index);
             }
-            if toml_single_table_name(trimmed) == Some("features") {
+            if header.simple_name() == Some("features") {
                 features_table_count += 1;
                 section = TomlSection::Features;
                 features_table_end = Some(lines.len());
@@ -304,15 +310,130 @@ fn toml_key_equals(line: &str, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn is_toml_table_header(line: &str) -> bool {
-    line.starts_with('[') && line.ends_with(']')
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TomlTableHeader<'a> {
+    Simple { name: &'a str },
+    Other,
 }
 
-fn toml_single_table_name(line: &str) -> Option<&str> {
-    if line.starts_with("[[") || !line.starts_with('[') || !line.ends_with(']') {
-        return None;
+impl<'a> TomlTableHeader<'a> {
+    fn simple_name(self) -> Option<&'a str> {
+        match self {
+            Self::Simple { name } => Some(name),
+            Self::Other => None,
+        }
     }
-    line.strip_prefix('[')?.strip_suffix(']').map(str::trim)
+}
+
+fn toml_table_header(line: &str) -> anyhow::Result<Option<TomlTableHeader<'_>>> {
+    let line = line.trim();
+    if !line.starts_with('[') {
+        return Ok(None);
+    }
+
+    let is_array = line.starts_with("[[");
+    let body_start = if is_array { 2 } else { 1 };
+    let Some((body_end, tail_start)) = find_toml_table_header_end(line, is_array) else {
+        if unsupported_header_may_affect_stateful(line) {
+            anyhow::bail!("unsupported Codex config table header could conflict with stateful install: {line}");
+        }
+        return Ok(Some(TomlTableHeader::Other));
+    };
+
+    let body = &line[body_start..body_end];
+    let tail = line[tail_start..].trim();
+    let supported_tail = tail.is_empty() || tail.starts_with('#');
+    if is_array || !supported_tail || !is_supported_simple_table_name(body) {
+        if unsupported_header_may_affect_stateful(body) {
+            anyhow::bail!("unsupported Codex config table header could conflict with stateful install: {line}");
+        }
+        return Ok(Some(TomlTableHeader::Other));
+    }
+
+    Ok(Some(TomlTableHeader::Simple { name: body }))
+}
+
+fn find_toml_table_header_end(line: &str, is_array: bool) -> Option<(usize, usize)> {
+    let mut in_basic_string = false;
+    let mut in_literal_string = false;
+    let mut escaped = false;
+    let body_start = if is_array { 2 } else { 1 };
+    let mut chars = line.char_indices().peekable();
+
+    while let Some((index, character)) = chars.next() {
+        if index < body_start {
+            continue;
+        }
+
+        if in_basic_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_basic_string = false;
+            }
+            continue;
+        }
+        if in_literal_string {
+            if character == '\'' {
+                in_literal_string = false;
+            }
+            continue;
+        }
+
+        match character {
+            '"' => in_basic_string = true,
+            '\'' => in_literal_string = true,
+            ']' if is_array => {
+                if chars
+                    .peek()
+                    .map(|(_next_index, next)| *next == ']')
+                    .unwrap_or(false)
+                {
+                    let tail_start = index + 2;
+                    return Some((index, tail_start));
+                }
+            }
+            ']' => {
+                let tail_start = index + 1;
+                return Some((index, tail_start));
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn is_supported_simple_table_name(name: &str) -> bool {
+    if name.is_empty() || name.starts_with('.') || name.ends_with('.') || name.contains("..") {
+        return false;
+    }
+
+    name.split('.').all(|segment| {
+        !segment.is_empty()
+            && segment
+                .chars()
+                .all(|character| {
+                    character.is_ascii_alphanumeric() || character == '_' || character == '-'
+                })
+    })
+}
+
+fn unsupported_header_may_affect_stateful(header: &str) -> bool {
+    let normalized: String = header
+        .chars()
+        .filter(|character| {
+            !character.is_whitespace()
+                && *character != '"'
+                && *character != '\''
+                && *character != '['
+                && *character != ']'
+        })
+        .collect();
+
+    normalized == "features" || normalized == "mcp_servers.stateful"
 }
 
 fn join_lines(lines: Vec<String>, had_trailing_newline: bool) -> String {
@@ -361,7 +482,9 @@ fn strip_stateful_block(contents: &str) -> anyhow::Result<String> {
 
 fn ensure_no_unmarked_stateful_mcp(contents: &str) -> anyhow::Result<()> {
     for line in contents.lines() {
-        if toml_single_table_name(line.trim()) == Some("mcp_servers.stateful") {
+        if toml_table_header(line.trim())?.and_then(TomlTableHeader::simple_name)
+            == Some("mcp_servers.stateful")
+        {
             anyhow::bail!(
                 "Codex config already contains unmarked [mcp_servers.stateful]; remove it or install into a config without that conflict"
             );
@@ -408,6 +531,44 @@ fn containing_dir(path: &Path) -> &Path {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     }
+}
+
+#[cfg(unix)]
+fn file_mode(path: &Path) -> anyhow::Result<Option<u32>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let mode = fs::metadata(path)
+        .with_context(|| format!("failed to read file mode for {}", path.display()))?
+        .permissions()
+        .mode()
+        & 0o7777;
+    Ok(Some(mode))
+}
+
+#[cfg(not(unix))]
+fn file_mode(_path: &Path) -> anyhow::Result<Option<()>> {
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn set_file_mode(path: &Path, mode: Option<u32>) -> anyhow::Result<()> {
+    let Some(mode) = mode else {
+        return Ok(());
+    };
+
+    let mut permissions = fs::metadata(path)
+        .with_context(|| format!("failed to read file mode for {}", path.display()))?
+        .permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(path, permissions)
+        .with_context(|| format!("failed to preserve file mode for {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_file_mode(_path: &Path, _mode: Option<()>) -> anyhow::Result<()> {
+    Ok(())
 }
 
 fn global_codex_config_block(
