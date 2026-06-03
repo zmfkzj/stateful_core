@@ -13,6 +13,25 @@ const START_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const START_LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
 const START_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerStartOptions {
+    pub host: String,
+    pub port: u16,
+    pub token: Option<String>,
+    pub workspace_id: String,
+}
+
+impl Default for ServerStartOptions {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 43873,
+            token: None,
+            workspace_id: "local".to_string(),
+        }
+    }
+}
+
 pub fn ensure_server_with<H, S>(
     paths: &GlobalPaths,
     health: H,
@@ -41,7 +60,16 @@ where
 }
 
 pub fn ensure_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
-    ensure_server_with(paths, runtime_is_healthy, || start_detached_server(paths))
+    ensure_server_with_options(paths, ServerStartOptions::default())
+}
+
+pub fn ensure_server_with_options(
+    paths: &GlobalPaths,
+    options: ServerStartOptions,
+) -> anyhow::Result<ServerRuntime> {
+    ensure_server_with(paths, runtime_is_healthy, || {
+        start_detached_server(paths, &options)
+    })
 }
 
 pub fn runtime_is_healthy(runtime: &ServerRuntime) -> bool {
@@ -90,7 +118,10 @@ pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn start_detached_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
+fn start_detached_server(
+    paths: &GlobalPaths,
+    options: &ServerStartOptions,
+) -> anyhow::Result<ServerRuntime> {
     fs::create_dir_all(&paths.runtime_dir)?;
     let log = OpenOptions::new()
         .create(true)
@@ -98,7 +129,7 @@ fn start_detached_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
         .open(&paths.server_log)?;
     let log_err = log.try_clone()?;
     let child = Command::new(std::env::current_exe()?)
-        .args(["server", "start", "--foreground"])
+        .args(detached_server_args(options))
         .env("STATEFUL_HOME", &paths.home)
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
@@ -117,6 +148,29 @@ fn start_detached_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
         "stateful server did not become healthy after starting pid {}",
         child.id()
     )
+}
+
+pub fn detached_server_args(options: &ServerStartOptions) -> Vec<String> {
+    let mut args = vec![
+        "server".to_string(),
+        "start".to_string(),
+        "--foreground".to_string(),
+        "--host".to_string(),
+        options.host.clone(),
+        "--port".to_string(),
+        options.port.to_string(),
+    ];
+
+    if let Some(token) = &options.token {
+        args.push("--token".to_string());
+        args.push(token.clone());
+    }
+
+    args.extend([
+        "--workspace-id".to_string(),
+        options.workspace_id.clone(),
+    ]);
+    args
 }
 
 fn acquire_start_lock(paths: &GlobalPaths) -> anyhow::Result<StartLock> {

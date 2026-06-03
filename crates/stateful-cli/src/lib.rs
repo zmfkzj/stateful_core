@@ -37,7 +37,10 @@ pub use runtime::{
     global_state_db_path, post_json, read_current_session_file, write_current_session_file,
     write_global_runtime_file, write_runtime_file,
 };
-pub use server_lifecycle::{ensure_server, ensure_server_with, runtime_is_healthy, stop_server};
+pub use server_lifecycle::{
+    ServerStartOptions, detached_server_args, ensure_server, ensure_server_with,
+    ensure_server_with_options, runtime_is_healthy, stop_server,
+};
 pub use validation::{
     ResultParser, ValidationConfig, ValidationProfile, ValidationResult, ValidationStatus,
     run_validation_profile,
@@ -236,12 +239,28 @@ pub fn run() -> anyhow::Result<()> {
             workspace_id: legacy_workspace_id,
         }) {
             ServerCommand::Start {
+                foreground,
                 host,
                 port,
                 token,
                 workspace_id,
-                ..
-            } => run_server(host, port, token, workspace_id)?,
+            } => {
+                if foreground {
+                    run_server(host, port, token, workspace_id)?;
+                } else {
+                    let paths = GlobalPaths::from_env()?;
+                    let runtime = ensure_server_with_options(
+                        &paths,
+                        ServerStartOptions {
+                            host,
+                            port,
+                            token,
+                            workspace_id,
+                        },
+                    )?;
+                    println!("{}", serde_json::to_string_pretty(&runtime)?);
+                }
+            }
             ServerCommand::Status => {
                 let paths = GlobalPaths::from_env()?;
                 let runtime = discover_runtime_with_global(std::env::current_dir()?, &paths).ok();

@@ -11,7 +11,8 @@ use std::{
 };
 
 use stateful_cli::{
-    GlobalPaths, ServerRuntime, ensure_server_with, runtime_is_healthy, stop_server,
+    GlobalPaths, ServerRuntime, ServerStartOptions, detached_server_args, ensure_server_with,
+    runtime_is_healthy, stop_server,
 };
 
 #[test]
@@ -230,6 +231,33 @@ fn stop_server_refuses_to_kill_unverified_pid() {
         "unexpected error: {error}"
     );
     assert!(paths.server_json.is_file());
+}
+
+#[test]
+fn detached_server_args_include_start_options() {
+    let args = detached_server_args(&ServerStartOptions {
+        host: "127.0.0.2".to_string(),
+        port: 43874,
+        token: Some("secret-token".to_string()),
+        workspace_id: "w2".to_string(),
+    });
+
+    assert_eq!(
+        args,
+        vec![
+            "server",
+            "start",
+            "--foreground",
+            "--host",
+            "127.0.0.2",
+            "--port",
+            "43874",
+            "--token",
+            "secret-token",
+            "--workspace-id",
+            "w2"
+        ]
+    );
 }
 
 fn temp_home(name: &str) -> std::path::PathBuf {

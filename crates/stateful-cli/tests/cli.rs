@@ -254,6 +254,20 @@ fn parses_server_start_subcommand() {
 }
 
 #[test]
+fn parses_server_start_subcommand_as_detached_by_default() {
+    let cli =
+        Cli::try_parse_from(["stateful", "server", "start"]).expect("server start should parse");
+
+    match cli.command {
+        Command::Server {
+            command: Some(ServerCommand::Start { foreground, .. }),
+            ..
+        } => assert!(!foreground),
+        other => panic!("expected server start command, got {other:?}"),
+    }
+}
+
+#[test]
 fn parses_legacy_server_runtime_options() {
     let cli = Cli::try_parse_from([
         "stateful",
