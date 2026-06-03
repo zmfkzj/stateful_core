@@ -103,6 +103,11 @@ fn repo_local_codex_uses_absolute_binary_path() {
         command.starts_with("\"/"),
         "repo-local codex command should use an absolute binary path, got {command:?}"
     );
+    assert_eq!(hooks["stateful_core_owned"], true);
+
+    let config =
+        fs::read_to_string(repo.join(".codex/config.toml")).expect("config should exist");
+    assert!(config.contains("# stateful-core-owned"));
 }
 
 #[test]
@@ -121,6 +126,38 @@ fn repo_local_codex_refuses_to_overwrite_existing_non_stateful_config() {
     assert!(error.to_string().contains("would overwrite existing Codex config"));
     let config = fs::read_to_string(config_path).expect("existing config should remain readable");
     assert_eq!(config, "[mcp_servers.other]\ncommand = \"other\"\n");
+    assert!(!repo.join(".stateful/config.yml").exists());
+    assert!(!repo.join(".stateful/validation.yml").exists());
+}
+
+#[test]
+fn repo_local_codex_refuses_similar_non_stateful_hooks_without_side_effects() {
+    let fixture = TestFixture::new("repo-local-similar-hooks");
+    let repo = fixture.create_repo("repo");
+    let codex_dir = repo.join(".codex");
+    fs::create_dir_all(&codex_dir).expect("codex dir should be creatable");
+    let hooks_path = codex_dir.join("hooks.json");
+    let hooks = r#"{
+  "hooks": {
+    "PreToolUse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "custom-tool hook pre-tool-use"
+      }]
+    }]
+  }
+}
+"#;
+    fs::write(&hooks_path, hooks).expect("existing hooks should be writable");
+
+    let error = enable_repo(&fixture.paths, &repo, true)
+        .expect_err("repo-local codex should refuse similar non-stateful hooks");
+
+    assert!(error.to_string().contains("would overwrite existing Codex config"));
+    let saved_hooks = fs::read_to_string(hooks_path).expect("existing hooks should remain readable");
+    assert_eq!(saved_hooks, hooks);
+    assert!(!repo.join(".stateful/config.yml").exists());
+    assert!(!repo.join(".stateful/validation.yml").exists());
 }
 
 #[test]

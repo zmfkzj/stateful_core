@@ -8,6 +8,9 @@ use anyhow::Context;
 
 use crate::{GlobalPaths, default_config_yml, default_validation_yml, install_repo_local};
 
+const STATEFUL_CODEX_JSON_MARKER: &str = "stateful_core_owned";
+const STATEFUL_CODEX_TOML_MARKER: &str = "# stateful-core-owned";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RepoRegistry {
     #[serde(default)]
@@ -96,10 +99,12 @@ pub fn enable_repo(
     repo_local_codex: bool,
 ) -> anyhow::Result<RepoEntry> {
     let root = detect_git_root(repo)?;
-    ensure_repo_configs(&root)?;
     if repo_local_codex {
         ensure_repo_local_codex_can_install(&root)?;
+    }
 
+    ensure_repo_configs(&root)?;
+    if repo_local_codex {
         let policy_config = root.join(".stateful/config.yml");
         let validation_config = root.join(".stateful/validation.yml");
         let policy_contents = fs::read(&policy_config)
@@ -109,6 +114,7 @@ pub fn enable_repo(
         let binary_path = current_stateful_binary_path()?;
 
         install_repo_local(&root, &binary_path)?;
+        mark_repo_local_codex_files(&root)?;
         fs::write(&policy_config, policy_contents)
             .with_context(|| format!("failed to restore {}", policy_config.display()))?;
         fs::write(&validation_config, validation_contents)
@@ -226,8 +232,53 @@ fn is_stateful_owned_codex_file(path: &Path) -> anyhow::Result<bool> {
     let contents = fs::read_to_string(path)
         .with_context(|| format!("failed to read existing Codex config {}", path.display()))?;
 
-    Ok(contents.contains("hook pre-tool-use")
-        && (contents.contains("mcp_servers.stateful") || contents.contains("\"PreToolUse\"")))
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("hooks.json") => {
+            let value: serde_json::Value = serde_json::from_str(&contents)
+                .with_context(|| format!("failed to parse existing hooks {}", path.display()))?;
+            Ok(value
+                .get(STATEFUL_CODEX_JSON_MARKER)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false))
+        }
+        Some("config.toml") => Ok(contents
+            .lines()
+            .any(|line| line.trim() == STATEFUL_CODEX_TOML_MARKER)),
+        _ => Ok(false),
+    }
+}
+
+fn mark_repo_local_codex_files(root: &Path) -> anyhow::Result<()> {
+    let hooks_path = root.join(".codex/hooks.json");
+    let hooks = fs::read_to_string(&hooks_path)
+        .with_context(|| format!("failed to read {}", hooks_path.display()))?;
+    let mut hooks: serde_json::Value = serde_json::from_str(&hooks)
+        .with_context(|| format!("failed to parse {}", hooks_path.display()))?;
+    let hooks_object = hooks
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} must contain a JSON object", hooks_path.display()))?;
+    hooks_object.insert(STATEFUL_CODEX_JSON_MARKER.to_string(), true.into());
+    fs::write(
+        &hooks_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&hooks).context("failed to serialize marked hooks")?
+        ),
+    )
+    .with_context(|| format!("failed to write {}", hooks_path.display()))?;
+
+    let config_path = root.join(".codex/config.toml");
+    let config = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    if !config
+        .lines()
+        .any(|line| line.trim() == STATEFUL_CODEX_TOML_MARKER)
+    {
+        fs::write(&config_path, format!("{STATEFUL_CODEX_TOML_MARKER}\n{config}"))
+            .with_context(|| format!("failed to write {}", config_path.display()))?;
+    }
+
+    Ok(())
 }
 
 fn write_repo_metadata(paths: &GlobalPaths, entry: &RepoEntry) -> anyhow::Result<()> {
