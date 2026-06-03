@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use stateful_cli::{Cli, Command, HookCommand, McpCommand};
+use stateful_cli::{Cli, Command, HookCommand, McpCommand, ReposCommand};
 
 #[test]
 fn parses_structured_commit_command() {
@@ -65,6 +65,17 @@ fn parses_disable_command() {
     assert!(matches!(
         cli.command,
         Command::Disable { ref repo } if repo == &Some(PathBuf::from("/work/repo"))
+    ));
+}
+
+#[test]
+fn parses_repos_list_command() {
+    let cli = Cli::try_parse_from(["stateful", "repos", "list"])
+        .expect("repos list command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Repos(ReposCommand::List)
     ));
 }
 

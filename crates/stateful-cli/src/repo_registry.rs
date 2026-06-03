@@ -46,9 +46,13 @@ impl RepoRegistry {
         }
 
         let config = serde_yaml::to_string(self).context("failed to serialize repo registry")?;
-        fs::write(&paths.config_yml, config).with_context(|| {
+        let temp_path = registry_temp_path(paths)?;
+        fs::write(&temp_path, config).with_context(|| {
+            format!("failed to write temporary registry {}", temp_path.display())
+        })?;
+        fs::rename(&temp_path, &paths.config_yml).with_context(|| {
             format!(
-                "failed to write repo registry config {}",
+                "failed to replace repo registry config {}",
                 paths.config_yml.display()
             )
         })?;
@@ -94,14 +98,17 @@ pub fn enable_repo(
     let root = detect_git_root(repo)?;
     ensure_repo_configs(&root)?;
     if repo_local_codex {
+        ensure_repo_local_codex_can_install(&root)?;
+
         let policy_config = root.join(".stateful/config.yml");
         let validation_config = root.join(".stateful/validation.yml");
         let policy_contents = fs::read(&policy_config)
             .with_context(|| format!("failed to read {}", policy_config.display()))?;
         let validation_contents = fs::read(&validation_config)
             .with_context(|| format!("failed to read {}", validation_config.display()))?;
+        let binary_path = current_stateful_binary_path()?;
 
-        install_repo_local(&root, "stateful")?;
+        install_repo_local(&root, &binary_path)?;
         fs::write(&policy_config, policy_contents)
             .with_context(|| format!("failed to restore {}", policy_config.display()))?;
         fs::write(&validation_config, validation_contents)
@@ -150,6 +157,7 @@ pub fn disable_repo(paths: &GlobalPaths, repo: impl AsRef<Path>) -> anyhow::Resu
     entry.enabled = false;
     let disabled = entry.clone();
     registry.save(paths)?;
+    write_repo_metadata(paths, &disabled)?;
 
     Ok(disabled)
 }
@@ -198,6 +206,30 @@ fn ensure_repo_configs(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn ensure_repo_local_codex_can_install(root: &Path) -> anyhow::Result<()> {
+    for path in [
+        root.join(".codex/hooks.json"),
+        root.join(".codex/config.toml"),
+    ] {
+        if path.exists() && !is_stateful_owned_codex_file(&path)? {
+            anyhow::bail!(
+                "repo-local Codex install would overwrite existing Codex config {}",
+                path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn is_stateful_owned_codex_file(path: &Path) -> anyhow::Result<bool> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read existing Codex config {}", path.display()))?;
+
+    Ok(contents.contains("hook pre-tool-use")
+        && (contents.contains("mcp_servers.stateful") || contents.contains("\"PreToolUse\"")))
+}
+
 fn write_repo_metadata(paths: &GlobalPaths, entry: &RepoEntry) -> anyhow::Result<()> {
     fs::create_dir_all(&paths.repos_dir).with_context(|| {
         format!(
@@ -213,12 +245,52 @@ fn write_repo_metadata(paths: &GlobalPaths, entry: &RepoEntry) -> anyhow::Result
     Ok(())
 }
 
+fn current_stateful_binary_path() -> anyhow::Result<String> {
+    let binary_path =
+        std::env::current_exe().context("failed to resolve current executable path")?;
+    let binary_path = binary_path.canonicalize().unwrap_or(binary_path);
+
+    if !binary_path.is_absolute() {
+        anyhow::bail!(
+            "current executable path is not absolute: {}",
+            binary_path.display()
+        );
+    }
+
+    binary_path
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("current executable path is not valid UTF-8"))
+}
+
 fn current_unix_timestamp() -> anyhow::Result<String> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock is before unix epoch")?
         .as_secs()
         .to_string())
+}
+
+fn registry_temp_path(paths: &GlobalPaths) -> anyhow::Result<PathBuf> {
+    let parent = paths
+        .config_yml
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("global config path has no parent"))?;
+    let file_name = paths
+        .config_yml
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("global config file name is not valid UTF-8"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before unix epoch")?
+        .as_nanos();
+
+    Ok(parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        nonce
+    )))
 }
 
 fn repo_id_for_root(root: &Path) -> String {

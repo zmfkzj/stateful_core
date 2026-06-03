@@ -66,6 +66,64 @@ fn disable_repo_marks_existing_entry_disabled() {
 }
 
 #[test]
+fn disable_repo_updates_repo_metadata_enabled_flag() {
+    let fixture = TestFixture::new("disable-metadata");
+    let repo = fixture.create_repo("repo");
+
+    let enabled = enable_repo(&fixture.paths, &repo, false).expect("repo should enable");
+    disable_repo(&fixture.paths, &repo).expect("repo should disable");
+
+    let metadata_path = fixture
+        .paths
+        .repos_dir
+        .join(format!("{}.json", enabled.repo_id));
+    let metadata = fs::read_to_string(metadata_path).expect("repo metadata should exist");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&metadata).expect("metadata should be valid json");
+
+    assert_eq!(metadata["enabled"], false);
+}
+
+#[test]
+fn repo_local_codex_uses_absolute_binary_path() {
+    let fixture = TestFixture::new("repo-local-codex");
+    let repo = fixture.create_repo("repo");
+
+    let entry = enable_repo(&fixture.paths, &repo, true).expect("repo should enable");
+
+    assert_eq!(entry.codex_mode, CodexMode::RepoLocal);
+    let hooks = fs::read_to_string(repo.join(".codex/hooks.json")).expect("hooks should exist");
+    let hooks: serde_json::Value = serde_json::from_str(&hooks).expect("hooks should be json");
+    let command = hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("hook command should be a string");
+
+    assert!(!command.contains("$(git rev-parse --show-toplevel)/stateful"));
+    assert!(
+        command.starts_with("\"/"),
+        "repo-local codex command should use an absolute binary path, got {command:?}"
+    );
+}
+
+#[test]
+fn repo_local_codex_refuses_to_overwrite_existing_non_stateful_config() {
+    let fixture = TestFixture::new("repo-local-existing-config");
+    let repo = fixture.create_repo("repo");
+    let codex_dir = repo.join(".codex");
+    fs::create_dir_all(&codex_dir).expect("codex dir should be creatable");
+    let config_path = codex_dir.join("config.toml");
+    fs::write(&config_path, "[mcp_servers.other]\ncommand = \"other\"\n")
+        .expect("existing codex config should be writable");
+
+    let error = enable_repo(&fixture.paths, &repo, true)
+        .expect_err("repo-local codex should refuse existing non-stateful config");
+
+    assert!(error.to_string().contains("would overwrite existing Codex config"));
+    let config = fs::read_to_string(config_path).expect("existing config should remain readable");
+    assert_eq!(config, "[mcp_servers.other]\ncommand = \"other\"\n");
+}
+
+#[test]
 fn enabled_lookup_returns_false_for_unknown_repo() {
     let fixture = TestFixture::new("unknown");
     let repo = fixture.create_repo("repo");
