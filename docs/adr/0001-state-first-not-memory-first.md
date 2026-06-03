@@ -46,10 +46,10 @@ a 60-minute maximum from declaration. Blocked or finalized work does not
 authorize writes.
 
 V1 denies Bash commands that appear to write or have ambiguous mutation targets.
-Write authorization starts with `apply_patch` and structured MCP filesystem
-write tools where target paths can be checked.
-Raw Bash test commands are not allowlisted; tests run through controlled
-validation actions such as `state.validation.run`.
+Write authorization starts with Codex `Edit`, Codex `Write`, `apply_patch`, and
+structured `stateful commit` where target paths can be checked. Common read-only
+test commands are allowlisted by the prototype Bash classifier; broader
+validation profile policy is future work.
 
 Overrides are never automatic. A blocked write can proceed only when the user
 explicitly instructs the current session to allow a specific resource override.

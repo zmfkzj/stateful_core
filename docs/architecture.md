@@ -226,16 +226,21 @@ the state server, not in duplicated hook scripts.
 V1 enforcement is strict about write target extraction:
 
 - `apply_patch`: enforce by parsing patch file headers.
-- MCP filesystem write/edit/delete/rename tools: enforce using structured tool
-  arguments.
+- Codex `Edit` and `Write`: enforce by parsing hook tool input.
+- `stateful commit`: enforce using structured CLI arguments.
 - Bash read and search commands: allow when they do not appear to write.
-- Test execution: run only through controlled validation actions such as
-  `state.validation.run`.
+- Test execution: allow common read-only test commands through the prototype
+  Bash classifier; profile-only policy is future work.
 - Bash commands that appear to write, mutate, generate files, or have ambiguous
   write targets: deny by default.
 
-Denied Bash writes should direct the agent to use `apply_patch` or a structured
-MCP filesystem write tool after declaring file or directory intent.
+The prototype enforces Codex `Edit`, `Write`, `apply_patch`, and the structured
+`stateful commit` CLI. Structured MCP filesystem and git write tools are future
+work because their argument shape is not part of the current stateful MCP
+surface.
+
+Denied Bash writes should direct the agent to use `apply_patch`, Codex `Edit` or
+`Write`, or `stateful commit` after declaring file or directory intent.
 
 The Bash classifier is allowlist-based. Initial read/search commands include:
 
@@ -262,50 +267,15 @@ start long-running processes, run unrecognized tests, install packages, redirect
 output, pipe into mutation commands, or have ambiguous side effects. Common
 read-only test commands such as `cargo test`, `npm test`, `pnpm test`,
 `yarn test`, `pytest`, and `go test` are allowlisted by the prototype Bash
-classifier. Arbitrary or project-specific test commands should run through
-validation profiles owned by the state server so source-tree writes can be
-denied while cache or artifact writes can be controlled.
+classifier.
 
 ## Validation Profiles
 
-Validation profiles live at `.stateful/validation.yml`.
-
-Agents cannot supply arbitrary test commands. They call:
-
-```text
-state.validation.run(profile)
-```
-
-The state server loads the named profile and executes its configured command.
-V1 profile fields:
-
-```text
-profile_id
-description
-command
-cwd
-timeout_seconds
-allowed_writes
-denied_writes
-exclusive
-env
-result_parser
-```
-
-V1 uses `result_parser: exit_code` by default. Validation results should be
-recorded as `passed`, `failed`, `failed_policy`, `timeout`, or `error`.
-Source-tree writes that match `denied_writes` fail validation as
-`failed_policy`, separate from command test failure.
-
-V1 detects source-tree writes with git status before/after comparison. Before a
-validation command starts, every path matching `denied_writes` must be clean in
-`git status --porcelain`; otherwise the validation returns `error`. After the
-command, any newly dirty path matching `denied_writes` returns `failed_policy`.
-Paths matching `allowed_writes` are ignored for policy failure.
-
-Validation profile concurrency is controlled by `exclusive`. Concurrent runs of
-the same exclusive profile are denied. Concurrent runs of non-exclusive profiles
-warn only.
+The current prototype keeps the existing validation runner and Bash classifier
+behavior. Validation profile policy expansion, including `exclusive`
+concurrency, `env`, `allowed_writes` semantics, and whether every test command
+must run through `state.validation.run`, is deferred until the validation
+profile product semantics are clarified.
 
 ## State Server
 
@@ -442,9 +412,9 @@ Initial policy:
   instruction
 - unrelated reads and searches: allow
 - reads, searches, diffs, and controlled validation after human writes: allow
-- tests: allow only through controlled validation actions
-- same non-exclusive validation profile active elsewhere: warn
-- same exclusive validation profile active elsewhere: deny
+- tests: allow common read-only test commands and controlled validation runner
+  actions in the current prototype
+- validation profile concurrency policy: future work
 - task, port, or migration resource conflict: warn or info only in v1
 
 Conflict decisions must be auditable. Overrides are never automatic. They are

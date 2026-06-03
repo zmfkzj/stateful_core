@@ -89,6 +89,9 @@ GET  /v1/events
 POST /v1/session/register
 POST /v1/session/heartbeat
 POST /v1/intent/declare
+POST /v1/intent/request
+POST /v1/intent/claim
+POST /v1/intent/cancel
 POST /v1/lease/acquire
 POST /v1/lease/release
 POST /v1/activity/observe
@@ -107,18 +110,19 @@ GET  /v1/runtime/identity
 `/v1/authorize` is the single policy entry point for supported tool actions.
 `/v1/conflicts/check` is a read-only dry-run wrapper around the same policy
 engine and must not create leases or write-authorizing state.
-`/v1/notifications/poll` returns pending coordination notifications for a
-session. `/v1/resume/next` returns the first active reservation that the session
-can claim after rereading the target. `/v1/runtime/identity` is an authenticated
-server identity endpoint used by `stateful server stop` to verify that the
-runtime file and process id describe the same stateful server. Full scheduling
-endpoints such as `intent/request`, `intent/claim`, and `intent/cancel` remain
-future contract work; the prototype implements `intent/declare` plus
-notifications and resume discovery.
+`/v1/intent/request`, `/v1/intent/claim`, and `/v1/intent/cancel` implement the
+explicit scheduling API. `/v1/notifications/poll` returns pending coordination
+notifications for a session. `/v1/resume/next` returns the first active
+reservation that the session can claim after rereading the target.
+`/v1/runtime/identity` is an authenticated server identity endpoint used by
+`stateful server stop` to verify that the runtime file and process id describe
+the same stateful server. MCP scheduling tools for request, claim, and cancel
+are future adapter work; the current MCP intent surface includes
+`state.intent.declare`.
 
-MCP tools map directly onto these endpoints. MCP handlers do not implement
-policy branches; they validate tool arguments, call the HTTP API, and return the
-server result.
+Implemented MCP tools map directly onto their server endpoints. MCP handlers do
+not implement policy branches; they validate tool arguments, call the HTTP API,
+and return the server result.
 
 ## Authorization Input
 
@@ -142,9 +146,12 @@ override_instruction
 ```
 
 For `apply_patch`, the hook adapter extracts targets from patch file headers
-before calling `/v1/authorize`. For structured MCP filesystem tools, targets
-come from tool arguments. For Bash, the adapter sends the command string and any
-extracted paths; ambiguous mutation targets are denied by default.
+before calling `/v1/authorize`. The prototype enforces Codex `Edit`, `Write`,
+`apply_patch`, and the structured `stateful commit` CLI. Structured MCP
+filesystem and git write tools are future work because their argument shape is
+not part of the current stateful MCP surface. For Bash, the adapter sends the
+command string and any extracted paths; ambiguous mutation targets are denied by
+default.
 
 ## Decision Output
 
@@ -178,21 +185,22 @@ request. Promotion is triggered by explicit lease release, session or activity
 finalization, or lease expiry. Promotion creates a short reservation and a
 pending notification for the waiting session.
 
-Promotion creates a reservation first. A reservation is not active write
-authority. The waiting session must claim the reservation before the server
-creates active intent and active leases. The default reservation TTL is 120
-seconds; the default lease TTL is 300 seconds and is refreshed by heartbeat.
+Reservations are not active write authority. The reserved session rereads the
+target and calls `state.intent.claim` or `/v1/intent/claim`. A successful claim
+creates active write-authorizing intent and active leases. Retrying a write
+before claiming is denied with a required next action that points to the claim
+API. The default reservation TTL is 120 seconds; the default lease TTL is 300
+seconds and is refreshed by heartbeat.
 
 For multi-resource requests, the request is grantable only when it is the head
 entry for every requested resource queue and none of those resources has an
 active lease. `request_id` is the idempotency key: repeating a request with the
 same id returns the existing state and must not enqueue a duplicate.
 
-Full scheduling APIs should return immediately with request state. Blocking
-waits can be implemented as a future client convenience by polling
-notifications or resume endpoints. Queued and reserved request cancellation is
-future contract work. Session or activity finalization should cancel that
-session's queued and reserved requests once those queues are implemented.
+Full scheduling APIs return immediately with request state. Blocking waits can
+be implemented as a future client convenience by polling notifications or resume
+endpoints. Queued and reserved requests can be canceled explicitly. Session or
+activity finalization cancels that session's queued and reserved requests.
 Explicit user overrides do not reorder the wait queue or transfer reservations.
 
 ## SQLite Storage
@@ -451,7 +459,8 @@ V1 must have tests for:
 - intent scope matching, including depth-2 directory behavior
 - exact file scope for delete, rename, and move
 - Bash allowlist and mutation-deny classification
-- hook input fixtures for `apply_patch`, Bash, and structured filesystem tools
+- hook input fixtures for Codex `Edit`, `Write`, `apply_patch`, Bash, and
+  structured `stateful commit`
 - prompt renderer golden output for brief and detailed modes
 - SQLite event append plus materialized-view transaction behavior
 - validation profile execution in a temporary git worktree

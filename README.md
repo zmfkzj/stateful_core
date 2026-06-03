@@ -55,9 +55,11 @@ the lease expire, the first waiter receives a short reservation and a pending
 notification. While that reservation is active, later sessions cannot take the
 same resource ahead of the reserved session.
 
-Reservations are not active write authority by themselves. The reserved session
-must claim the reservation before it becomes active intent and an active lease.
-The default reservation TTL is 120 seconds.
+Reservations are not active write authority. The reserved session rereads the
+target and calls `state.intent.claim` or `/v1/intent/claim`. A successful claim
+creates active write-authorizing intent and active leases. Retrying a write
+before claiming is denied with a required next action that points to the claim
+API. The default reservation TTL is 120 seconds.
 
 Resume signals are available through:
 
@@ -107,40 +109,48 @@ If you do not install it, use `target/debug/stateful` in the commands below.
 
 ## Quick Start
 
-Initialize repo-local Codex hook and `stateful` configuration:
+Install global Codex hooks and MCP configuration once:
 
 ```bash
-target/debug/stateful init --binary target/debug/stateful
+stateful install --yes
 ```
 
-Start the local state server in one terminal:
+Enable enforcement for the current repo:
 
 ```bash
-target/debug/stateful server
+stateful enable
 ```
 
-In another terminal, declare the files you intend to edit:
+The installed hooks lazily start the local state server when an enabled repo
+uses stateful coordination. Foreground server start remains available for
+debugging:
 
 ```bash
-target/debug/stateful intent declare --session-id demo --workspace-id local README.md
+stateful server start --foreground
+```
+
+Declare the files you intend to edit:
+
+```bash
+stateful intent declare --session-id demo --workspace-id local README.md
 ```
 
 Inspect the current coordination state:
 
 ```bash
-target/debug/stateful current
+stateful current
 ```
 
 Run a configured validation profile:
 
 ```bash
-target/debug/stateful validate cargo-test
+stateful validate cargo-test
 ```
 
 Check local installation health:
 
 ```bash
-target/debug/stateful doctor
+stateful doctor
 ```
 
 ## CLI Overview
@@ -152,8 +162,6 @@ target/debug/stateful doctor
 - `stateful current` renders active current state.
 - `stateful events` prints recent stored state events.
 - `stateful intent declare <paths...>` declares planned file scope.
-- `stateful intent wait --timeout <seconds>` waits for a queued or reserved
-  intent request as a CLI convenience over notification polling.
 - `stateful notifications poll` reads pending coordination notifications.
 - `stateful resume next` reads the next reservation available to the active
   session.

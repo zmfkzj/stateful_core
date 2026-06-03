@@ -156,11 +156,13 @@ triggers makes the requested resources available:
 - lease expiry
 
 The promoted waiter receives a short reservation. Reservations prevent a later
-session from taking the resource ahead of the first waiter, but they are not
-active write authority. The reserved session claims the reservation before it
-becomes active intent and active leases. The default reservation TTL is 120
-seconds. If the reservation expires without being claimed, the server may promote
-the next eligible FIFO waiter.
+session from taking the resource ahead of the first waiter. Reservations are not
+active write authority. The reserved session rereads the target and calls
+`state.intent.claim` or `/v1/intent/claim`. A successful claim creates active
+write-authorizing intent and active leases. Retrying a write before claiming is
+denied with a required next action that points to the claim API. The default
+reservation TTL is 120 seconds. If the reservation expires without being
+claimed, the server may promote the next eligible FIFO waiter.
 
 Resume is notification-driven rather than process-driven. The state server
 records a pending notification when it grants a reservation. Agents and
@@ -169,11 +171,11 @@ next resumable reservation, or receiving that context from a lifecycle hook.
 The state server does not wake a sleeping Codex process by itself; external
 orchestration can build on the notification and resume APIs.
 
-Full scheduling should work through immediate request/response plus polling.
-Future intent request APIs should return `granted`, `queued`, `reserved`,
-`canceled`, or `expired` state without blocking indefinitely. The prototype
-exposes notifications and `resume next`; a future CLI may provide
-`intent wait --timeout <seconds>` as a convenience wrapper around polling.
+Full scheduling works through immediate request/response plus polling. The
+intent request APIs return `granted`, `queued`, `reserved`, `canceled`, or
+`expired` state without blocking indefinitely. The prototype exposes
+notifications and `resume next`; a future CLI may provide a wait convenience
+wrapper around polling.
 
 `request_id` is required for idempotency. Repeating the same request id returns
 the existing request state and must not create duplicate queue entries. A queued
@@ -301,9 +303,9 @@ state.notifications.poll
 state.resume.next
 ```
 
-Future scheduling tools should add `state.intent.request`, `state.intent.claim`,
-and `state.intent.cancel` when the corresponding server endpoints are
-implemented.
+The HTTP scheduling API exposes `/v1/intent/request`, `/v1/intent/claim`, and
+`/v1/intent/cancel`. MCP scheduling tools for request, claim, and cancel remain
+future adapter work.
 
 Hooks should call the same state server API as MCP tools so policy remains
 centralized.
@@ -348,14 +350,17 @@ reliably:
 
 ```text
 apply_patch -> enforce from patch file headers
-MCP filesystem write/edit/delete/rename -> enforce from structured arguments
+Codex Edit/Write -> enforce from hook tool input
+stateful commit -> enforce from structured CLI arguments
 Bash read/search -> allow when no mutation is detected
-test execution -> run through controlled validation action
+test execution -> allow common read-only test commands through the prototype
+  Bash classifier; profile-only policy is future work
 Bash write or ambiguous mutation -> deny by default
 ```
 
-Bash write denial should tell the agent to use `apply_patch` or a structured
-MCP filesystem write tool after declaring file or directory intent.
+Bash write denial should tell the agent to use `apply_patch`, Codex `Edit` or
+`Write`, or the structured `stateful commit` CLI after declaring file or
+directory intent.
 
 The Bash classifier is allowlist-based. Initial read/search commands include:
 
@@ -382,42 +387,11 @@ processes, run unrecognized tests, install packages, redirect output, pipe into
 mutation commands, or produce ambiguous side effects is denied by default.
 Common read-only test commands such as `cargo test`, `npm test`, `pnpm test`,
 `yarn test`, `pytest`, and `go test` are allowlisted by the prototype Bash
-classifier. Arbitrary or project-specific test commands should run through
-`state.validation.run` or an equivalent controlled validation action backed by a
-profile. Validation profiles may allow cache or artifact writes, but source-tree
-writes must be denied unless a later policy explicitly permits them.
-
-Validation profiles are static repo-defined config at `.stateful/validation.yml`.
-Agents cannot provide arbitrary commands at runtime.
-
-Minimum v1 profile shape:
-
-```text
-profile_id
-description
-command
-cwd
-timeout_seconds
-allowed_writes
-denied_writes
-exclusive
-env
-result_parser
-```
-
-Default result parsing is `exit_code`. Validation status values are `passed`,
-`failed`, `failed_policy`, `timeout`, and `error`. Source-tree writes denied by
-the profile produce `failed_policy`, not ordinary test failure.
-
-V1 source-write detection uses `git status --porcelain` before and after the
-validation command. If a path matching `denied_writes` is already dirty before
-the run, validation does not start and returns `error`. If the run creates a new
-dirty path matching `denied_writes`, validation returns `failed_policy`.
-`allowed_writes` paths are ignored for policy failure.
-
-If a validation profile is marked `exclusive`, concurrent runs of the same
-profile in the workspace are denied. Non-exclusive concurrent runs produce
-warning context only.
+classifier. The current prototype keeps the existing validation runner and Bash
+classifier behavior. Validation profile policy expansion, including `exclusive`
+concurrency, `env`, `allowed_writes` semantics, and whether every test command
+must run through `state.validation.run`, is deferred until the validation
+profile product semantics are clarified.
 
 ## Conflict Policy
 
@@ -443,9 +417,9 @@ Initial policy should prefer advisory leases:
 - unknown repository identity: only same normalized absolute path can deny;
   repo-relative similarity is an unknown-confidence warning
 - expired lease: allow but surface stale-state context
-- test execution: allow only through controlled validation action
-- same non-exclusive validation profile active elsewhere: warn
-- same exclusive validation profile active elsewhere: deny
+- test execution: allow common read-only test commands and controlled validation
+  runner actions in the current prototype
+- validation profile concurrency policy: future work
 - task, port, or migration resource conflict: warn or info only in v1
 - human local changes detected: warn before edits and require extra care
 - human save observed after an agent lease or write: deny further agent writes

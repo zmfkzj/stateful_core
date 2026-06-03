@@ -103,10 +103,10 @@ provide the enforcement surface. This is a coordination guardrail, not a
 complete sandbox or security boundary.
 
 V1 only authorizes writes through tool paths with reliable target extraction:
-`apply_patch` and structured MCP filesystem write tools. Bash commands that
-appear to write or have ambiguous mutation targets are denied by default.
-Raw Bash test commands are not allowlisted; tests run through controlled
-validation actions.
+Codex `Edit`, Codex `Write`, `apply_patch`, and structured `stateful commit`.
+Bash commands that appear to write or have ambiguous mutation targets are denied
+by default. Common read-only test commands are allowlisted by the prototype Bash
+classifier; broader validation profile policy is future work.
 
 ## Product Shape
 

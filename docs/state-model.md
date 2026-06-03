@@ -144,9 +144,8 @@ Only `file` and `directory` resources can authorize filesystem writes. Other
 resource types can warn, coordinate, or constrain controlled actions, but cannot
 authorize filesystem mutation.
 
-`test` resources are tied to controlled validation profiles. They may constrain
-`state.validation.run`, including denying concurrent execution when a profile is
-marked `exclusive`, but they do not authorize source writes.
+`test` resources are tied to the controlled validation runner, but they do not
+authorize source writes.
 
 `task`, `port`, and `migration` resources are context and warning signals in v1.
 They can appear in prompt context and conflict records, but cannot block general
@@ -310,9 +309,11 @@ Grant triggers are limited to explicit lease release, session or activity
 finalization, or lease expiry. Soft repo-relative conflicts do not create wait
 queue records in v1.
 
-Promotion creates a reservation, not active write authority. The waiting session
-must claim the reservation before the server creates active intent and active
-leases. The default reservation TTL is 120 seconds. If the reservation is not
+Reservations are not active write authority. The reserved session rereads the
+target and calls `state.intent.claim` or `/v1/intent/claim`. A successful claim
+creates active write-authorizing intent and active leases. Retrying a write
+before claiming is denied with a required next action that points to the claim
+API. The default reservation TTL is 120 seconds. If the reservation is not
 claimed before `reservation_expires_at`, the reservation expires and the server
 may promote the next eligible FIFO waiter.
 
@@ -376,37 +377,11 @@ Same-owner sessions do not receive automatic override authority.
 
 ## Validation Profile
 
-Validation profiles are static repo-defined configuration loaded from
-`.stateful/validation.yml`. Agents run validation by profile name and cannot
-provide arbitrary commands at runtime.
-
-```text
-profile_id
-description
-command
-cwd
-timeout_seconds
-allowed_writes
-denied_writes
-exclusive
-env
-result_parser: exit_code
-```
-
-Validation results should distinguish command failure from policy failure:
-
-```text
-status: passed | failed | failed_policy | timeout | error
-```
-
-`failed_policy` means the validation command wrote to a denied source-tree path.
-V1 detects this by comparing `git status --porcelain` before and after
-validation. A denied path that is already dirty before validation produces
-`error`; a newly dirty denied path after validation produces `failed_policy`.
-
-If `exclusive` is true, only one run of that validation profile may be active in
-the workspace. A concurrent request for the same exclusive profile is denied. If
-`exclusive` is false or unset, concurrent runs produce warning context only.
+The current prototype keeps the existing validation runner and Bash classifier
+behavior. Validation profile policy expansion, including `exclusive`
+concurrency, `env`, `allowed_writes` semantics, and whether every test command
+must run through `state.validation.run`, is deferred until the validation
+profile product semantics are clarified.
 
 ## Finalization Record
 
