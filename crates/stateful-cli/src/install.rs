@@ -5,7 +5,11 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+};
 
 use anyhow::Context;
 
@@ -165,7 +169,7 @@ fn write_codex_config_update(
 
     if let Some(existing) = existing.as_ref() {
         let backup_path = codex_backup_path(config_path)?;
-        fs::write(&backup_path, existing).with_context(|| {
+        write_text_file_with_mode(&backup_path, existing, existing_mode).with_context(|| {
             format!(
                 "failed to write Codex config backup {}",
                 backup_path.display()
@@ -175,7 +179,7 @@ fn write_codex_config_update(
     }
 
     let temp_path = codex_temp_path(config_path)?;
-    fs::write(&temp_path, merged).with_context(|| {
+    write_text_file_with_mode(&temp_path, &merged, existing_mode).with_context(|| {
         format!(
             "failed to write temporary Codex config {}",
             temp_path.display()
@@ -334,6 +338,11 @@ fn toml_table_header(line: &str) -> anyhow::Result<Option<TomlTableHeader<'_>>> 
     let is_array = line.starts_with("[[");
     let body_start = if is_array { 2 } else { 1 };
     let Some((body_end, tail_start)) = find_toml_table_header_end(line, is_array) else {
+        if line.contains('"') || line.contains('\'') {
+            anyhow::bail!(
+                "unsupported Codex config quoted table header; stateful install supports only bare dotted table headers: {line}"
+            );
+        }
         if unsupported_header_may_affect_stateful(line) {
             anyhow::bail!("unsupported Codex config table header could conflict with stateful install: {line}");
         }
@@ -341,6 +350,12 @@ fn toml_table_header(line: &str) -> anyhow::Result<Option<TomlTableHeader<'_>>> 
     };
 
     let body = &line[body_start..body_end];
+    if body.contains('"') || body.contains('\'') {
+        anyhow::bail!(
+            "unsupported Codex config quoted table header; stateful install supports only bare dotted table headers: {line}"
+        );
+    }
+
     let tail = line[tail_start..].trim();
     let supported_tail = tail.is_empty() || tail.starts_with('#');
     if is_array || !supported_tail || !is_supported_simple_table_name(body) {
@@ -531,6 +546,34 @@ fn containing_dir(path: &Path) -> &Path {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     }
+}
+
+#[cfg(unix)]
+fn write_text_file_with_mode(
+    path: &Path,
+    contents: &str,
+    mode: Option<u32>,
+) -> anyhow::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    if let Some(mode) = mode {
+        options.mode(mode);
+    }
+
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn write_text_file_with_mode(
+    path: &Path,
+    contents: &str,
+    _mode: Option<()>,
+) -> anyhow::Result<()> {
+    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))
 }
 
 #[cfg(unix)]

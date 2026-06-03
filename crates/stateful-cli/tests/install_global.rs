@@ -138,6 +138,42 @@ fn install_yes_rejects_quoted_stateful_mcp_table_header() {
 }
 
 #[test]
+fn install_yes_rejects_quoted_stateful_mcp_table_header_with_escape() {
+    let fixture = TestFixture::new("quoted-mcp-escape-conflict");
+    let existing = "[\"mcp_servers\".\"state\\u0066ul\"]\ncommand = \"other\"\n";
+    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::write(&fixture.codex_config, existing).expect("existing config should write");
+
+    let error = apply_global_install(fixture.options(true))
+        .expect_err("quoted escaped stateful mcp config should conflict");
+
+    assert!(error.to_string().contains("unsupported"));
+    assert_eq!(
+        fs::read_to_string(&fixture.codex_config).expect("config should remain readable"),
+        existing
+    );
+    assert!(backup_paths_for(&fixture.codex_config).is_empty());
+}
+
+#[test]
+fn install_yes_rejects_quoted_features_table_header_with_escape() {
+    let fixture = TestFixture::new("quoted-features-escape-conflict");
+    let existing = "[\"feat\\u0075res\"]\nexperimental = true\n";
+    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::write(&fixture.codex_config, existing).expect("existing config should write");
+
+    let error = apply_global_install(fixture.options(true))
+        .expect_err("quoted escaped features config should conflict");
+
+    assert!(error.to_string().contains("unsupported"));
+    assert_eq!(
+        fs::read_to_string(&fixture.codex_config).expect("config should remain readable"),
+        existing
+    );
+    assert!(backup_paths_for(&fixture.codex_config).is_empty());
+}
+
+#[test]
 fn install_yes_rejects_malformed_marker_block_without_writing() {
     let fixture = TestFixture::new("malformed-marker");
     let existing = "# stateful-core-global-install\n[mcp_servers.stateful]\ncommand = \"old\"\n";
