@@ -680,6 +680,32 @@ async fn authorize_uses_policy_service_and_preserves_scope_decision() {
 }
 
 #[tokio::test]
+async fn authorize_valid_protocol_with_malformed_payload_returns_invalid_request() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "req-authorize-malformed-payload",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "error");
+    assert_eq!(json["reason_code"], "invalid_request");
+}
+
+#[tokio::test]
 async fn active_lease_by_other_session_denies_authorize_even_with_matching_intent() {
     let app = build_router(ServerConfig::new("secret-token"));
 
@@ -808,6 +834,74 @@ async fn conflicts_check_does_not_enqueue_waiters_on_queue_requested() {
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["resume_available"], false);
+}
+
+#[tokio::test]
+async fn authorize_queue_retries_with_new_request_ids_reuse_waiter() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let first = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "req-authorize-s2-queue-retry-1",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "queue_on_conflict": true
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(first.status(), StatusCode::OK);
+    let body = to_bytes(first.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let first_json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+
+    let second = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "req-authorize-s2-queue-retry-2",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "queue_on_conflict": true
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(second.status(), StatusCode::OK);
+    let body = to_bytes(second.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&body).expect("body should be json");
+
+    assert_eq!(
+        first_json["wait"]["wait_id"],
+        second_json["wait"]["wait_id"]
+    );
+    assert_eq!(first_json["wait"]["queue_position"], 1);
+    assert_eq!(second_json["wait"]["queue_position"], 1);
 }
 
 #[tokio::test]

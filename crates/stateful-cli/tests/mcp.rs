@@ -250,6 +250,9 @@ fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
+    assert!(request.contains("\"protocol_version\":\"stateful.v1\""));
+    assert!(request.contains("\"request_id\":\""));
+    assert!(request.contains("\"observed_at\":\"2026-05-31T00:00:00Z\""));
     assert!(request.contains("\"session_id\":\"s1\""));
     assert!(request.contains("\"files_planned\":[\"src/auth.ts\"]"));
     assert!(request.contains("\"repo_id\":\"repo-"));
@@ -268,6 +271,54 @@ fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
             .unwrap_or_default()
             .contains("\"status\":\"ok\"")
     );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_tools_call_for_conflicts_check_posts_protocol_envelope() {
+    let temp_root = temp_root("stateful-mcp-conflicts-check");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"deny","reason_code":"active_lease_conflict","message":"blocked","required_next_action":"wait"}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let response = run_mcp_jsonrpc_in_repo(
+        &repo_root,
+        &paths,
+        r#"{
+          "jsonrpc":"2.0",
+          "id":3,
+          "method":"tools/call",
+          "params":{
+            "name":"state_conflicts_check",
+            "arguments":{
+              "session_id":"s2",
+              "action":"write_file",
+              "path":"src/auth.ts"
+            }
+          }
+        }"#,
+    );
+
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("POST /v1/conflicts/check HTTP/1.1"));
+    assert!(request.contains("\"protocol_version\":\"stateful.v1\""));
+    assert!(request.contains("\"request_id\":\""));
+    assert!(request.contains("\"observed_at\":\"2026-05-31T00:00:00Z\""));
+    assert!(request.contains("\"session_id\":\"s2\""));
+    assert!(request.contains("\"workspace_id\":\"w1\""));
+    assert!(request.contains("\"action\":\"write_file\""));
+    assert!(request.contains("\"path\":\"src/auth.ts\""));
+
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 3);
+    assert_eq!(json["result"]["isError"], false);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

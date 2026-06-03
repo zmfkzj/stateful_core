@@ -9,9 +9,9 @@ use stateful_core::{BashKind, classify_bash};
 
 use crate::outbox::queue_session_heartbeat_outbox;
 use crate::{
-    CurrentSession, GlobalPaths, HookCommand, RepoGate, RepoIdentity, ServerRuntime,
-    discover_runtime_with_global, ensure_server, post_json, repo_gate,
-    repo_identity_for_enabled_repo, write_current_session_file,
+    CurrentSession, GlobalPaths, HookCommand, ProtocolPostContext, RepoGate, RepoIdentity,
+    ServerRuntime, discover_runtime_with_global, ensure_server, post_json, post_protocol_json,
+    repo_gate, repo_identity_for_enabled_repo, write_current_session_file,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,12 +387,19 @@ fn authorize_targets(
     }
 
     for target in targets {
-        let response = post_json(
+        let response = post_protocol_json(
             runtime,
             "/v1/authorize",
+            ProtocolPostContext {
+                session_id: &input.session_id,
+                workspace_id: &runtime.workspace_id,
+                source_kind: "hook",
+                source_event: "pre_tool_use",
+                source_ref: "stateful hook pre-tool-use",
+                tool_name: Some(&input.tool_name),
+                identity: None,
+            },
             &json!({
-                "session_id": input.session_id,
-                "workspace_id": runtime.workspace_id,
                 "action": target.action,
                 "path": target.path,
                 "queue_on_conflict": true,

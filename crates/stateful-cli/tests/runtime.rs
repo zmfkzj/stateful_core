@@ -262,6 +262,9 @@ fn declare_intent_via_http_posts_expected_payload() {
 
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
+    assert!(request.contains("\"protocol_version\":\"stateful.v1\""));
+    assert!(request.contains("\"request_id\":\""));
+    assert!(request.contains("\"observed_at\":\"2026-05-31T00:00:00Z\""));
     assert!(request.contains("\"session_id\":\"s1\""));
     assert!(request.contains("\"workspace_id\":\"w1\""));
     assert!(request.contains("\"files_planned\":[\"src/auth.ts\"]"));

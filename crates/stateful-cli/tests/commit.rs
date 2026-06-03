@@ -380,6 +380,9 @@ fn structured_commit_command_discovers_global_runtime_for_authorization() {
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/authorize HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
+    assert!(request.contains("\"protocol_version\":\"stateful.v1\""));
+    assert!(request.contains("\"request_id\":\""));
+    assert!(request.contains("\"observed_at\":\"2026-05-31T00:00:00Z\""));
     assert!(request.contains("\"session_id\":\"s-global\""));
     assert!(request.contains("\"workspace_id\":\"w-session\""));
     assert!(request.contains("\"path\":\"docs/plan.md\""));

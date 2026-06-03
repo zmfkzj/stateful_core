@@ -7,9 +7,9 @@ use serde_json::Value;
 use stateful_mcp::{ToolCall, map_tool_to_http, protocol_tool_name, tool_descriptors};
 
 use crate::{
-    GlobalPaths, HttpResponse, RepoGate, ServerRuntime, discover_runtime_with_global,
-    ensure_server, get_json, post_json, read_current_session_file, repo_gate,
-    repo_identity_for_enabled_repo,
+    GlobalPaths, HttpResponse, ProtocolPostContext, RepoGate, ServerRuntime,
+    discover_runtime_with_global, ensure_server, get_json, post_json, post_protocol_json,
+    read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
 };
 
 pub fn call_mcp_tool_in_repo(
@@ -56,9 +56,62 @@ fn call_mcp_tool(
 
     match request.method {
         "GET" => get_json(runtime, request.path),
+        "POST" if protocol_required_http_path(request.path) => {
+            let session_id = request
+                .body
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let workspace_id = request
+                .body
+                .get("workspace_id")
+                .and_then(Value::as_str)
+                .unwrap_or(runtime.workspace_id.as_str())
+                .to_string();
+            let identity = repo_identity_for_enabled_repo(paths, repo_root).ok();
+            let payload = protocol_payload(&request.body);
+            post_protocol_json(
+                runtime,
+                request.path,
+                ProtocolPostContext {
+                    session_id: &session_id,
+                    workspace_id: &workspace_id,
+                    source_kind: "mcp",
+                    source_event: protocol_name,
+                    source_ref: "stateful mcp",
+                    tool_name: Some(protocol_name),
+                    identity: identity.as_ref(),
+                },
+                &payload,
+            )
+        }
         "POST" => post_json(runtime, request.path, &request.body),
         method => anyhow::bail!("unsupported MCP HTTP method: {method}"),
     }
+}
+
+fn protocol_required_http_path(path: &str) -> bool {
+    matches!(path, "/v1/intent/declare" | "/v1/conflicts/check")
+}
+
+fn protocol_payload(body: &Value) -> Value {
+    let Value::Object(mut object) = body.clone() else {
+        return body.clone();
+    };
+
+    for key in [
+        "session_id",
+        "workspace_id",
+        "repo_id",
+        "worktree_id",
+        "root",
+        "branch",
+    ] {
+        object.remove(key);
+    }
+
+    Value::Object(object)
 }
 
 fn enrich_arguments(

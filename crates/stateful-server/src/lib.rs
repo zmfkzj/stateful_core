@@ -3,7 +3,7 @@ pub mod protocol;
 
 use crate::{
     policy_service::{PolicyService, WriteAuthorizationRequest, policy_outcome_json},
-    protocol::{ProtocolRequest, ValidatedRequest, validate_protocol},
+    protocol::{ProtocolRequest, validate_protocol, validate_protocol_body},
 };
 use axum::{
     Json, Router,
@@ -12,7 +12,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use stateful_core::{ContextPackage, ReconciliationDecision, RenderMode, render_prompt_text};
 use stateful_store::{Event, OutboxEntry, Store};
@@ -221,7 +221,6 @@ async fn authorize(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             PolicyService::new(&store).authorize_write(WriteAuthorizationRequest {
-                request_id: input.request_id,
                 session_id: input.session.session_id,
                 workspace_id: Some(input.workspace.workspace_id),
                 action: input.payload.action,
@@ -430,7 +429,6 @@ async fn conflicts_check(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             PolicyService::new(&store).authorize_write(WriteAuthorizationRequest {
-                request_id: input.request_id,
                 session_id: input.session.session_id,
                 workspace_id: Some(input.workspace.workspace_id),
                 action: input.payload.action,
@@ -758,15 +756,6 @@ fn validation_result_json(result: ValidationResult, workspace_id: String) -> Val
         "exit_code": result.exit_code,
         "message": result.message,
     })
-}
-
-fn validate_protocol_body<T>(body: &Bytes) -> Result<ValidatedRequest<T>, (StatusCode, Json<Value>)>
-where
-    T: DeserializeOwned,
-{
-    let request = serde_json::from_slice::<ProtocolRequest<T>>(body)
-        .map_err(|_| crate::protocol::protocol_error("Invalid protocol request body."))?;
-    validate_protocol(request)
 }
 
 fn record_validation_result(

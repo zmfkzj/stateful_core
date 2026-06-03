@@ -9,6 +9,8 @@ use std::{
 use crate::global_paths::GlobalPaths;
 use crate::repo_registry::RepoIdentity;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntentDeclareArgs {
@@ -65,6 +67,17 @@ impl ServerRuntime {
 pub struct HttpResponse {
     pub status_code: u16,
     pub body: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProtocolPostContext<'a> {
+    pub session_id: &'a str,
+    pub workspace_id: &'a str,
+    pub source_kind: &'a str,
+    pub source_event: &'a str,
+    pub source_ref: &'a str,
+    pub tool_name: Option<&'a str>,
+    pub identity: Option<&'a RepoIdentity>,
 }
 
 pub fn write_runtime_file(
@@ -176,6 +189,81 @@ pub fn post_json(
     parse_http_response(&response)
 }
 
+pub fn post_protocol_json(
+    runtime: &ServerRuntime,
+    path: &str,
+    context: ProtocolPostContext<'_>,
+    payload: &Value,
+) -> anyhow::Result<HttpResponse> {
+    let body = protocol_body(runtime, context, payload);
+    post_json(runtime, path, &body)
+}
+
+fn protocol_body(
+    runtime: &ServerRuntime,
+    context: ProtocolPostContext<'_>,
+    payload: &Value,
+) -> Value {
+    let workspace_id = non_empty_or(context.workspace_id, &runtime.workspace_id);
+    let root = context
+        .identity
+        .map(|identity| identity.root.as_str())
+        .unwrap_or("/unknown");
+    let repo_id = context
+        .identity
+        .map(|identity| identity.repo_id.as_str())
+        .unwrap_or(workspace_id);
+    let worktree_id = context
+        .identity
+        .map(|identity| identity.worktree_id.as_str())
+        .unwrap_or(workspace_id);
+    let branch = context
+        .identity
+        .map(|identity| identity.branch.as_str())
+        .unwrap_or("unknown");
+    let observed_at = non_empty_or(&runtime.started_at, "2026-05-31T00:00:00Z");
+
+    let mut body = serde_json::json!({
+        "protocol_version": runtime.protocol_version,
+        "request_id": Uuid::new_v4().to_string(),
+        "observed_at": observed_at,
+        "session": {
+            "session_id": non_empty_or(context.session_id, "unknown"),
+            "actor_id": non_empty_or(context.session_id, "unknown"),
+            "actor_type": "agent"
+        },
+        "workspace": {
+            "workspace_id": workspace_id,
+            "root": non_empty_or(root, "/unknown"),
+            "repo_id": non_empty_or(repo_id, workspace_id),
+            "worktree_id": non_empty_or(worktree_id, workspace_id),
+            "branch": non_empty_or(branch, "unknown")
+        },
+        "source": {
+            "kind": context.source_kind,
+            "event": non_empty_or(context.source_event, "request"),
+            "source_ref": non_empty_or(context.source_ref, "stateful-cli")
+        }
+    });
+
+    if let Some(tool_name) = context.tool_name {
+        body["source"]["tool_name"] = Value::String(tool_name.to_string());
+    }
+
+    let object = body
+        .as_object_mut()
+        .expect("protocol body should be object");
+    if let Some(payload) = payload.as_object() {
+        for (key, value) in payload {
+            if !is_protocol_reserved_key(key) {
+                object.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    body
+}
+
 pub fn get_json(runtime: &ServerRuntime, path: &str) -> anyhow::Result<HttpResponse> {
     let endpoint = parse_http_base_url(&runtime.base_url)?;
     let request = format!(
@@ -195,19 +283,28 @@ pub fn declare_intent_via_http(
     runtime: &ServerRuntime,
     args: IntentDeclareArgs,
 ) -> anyhow::Result<()> {
-    let mut body = serde_json::json!({
-        "session_id": args.session_id,
-        "workspace_id": args.workspace_id,
-        "files_planned": args.files_planned,
-    });
-    if let Some(identity) = args.identity {
-        body["repo_id"] = serde_json::json!(identity.repo_id);
-        body["worktree_id"] = serde_json::json!(identity.worktree_id);
-        body["root"] = serde_json::json!(identity.root);
-        body["branch"] = serde_json::json!(identity.branch);
-    }
-
-    let response = post_json(runtime, "/v1/intent/declare", &body)?;
+    let IntentDeclareArgs {
+        session_id,
+        workspace_id,
+        files_planned,
+        identity,
+    } = args;
+    let response = post_protocol_json(
+        runtime,
+        "/v1/intent/declare",
+        ProtocolPostContext {
+            session_id: &session_id,
+            workspace_id: &workspace_id,
+            source_kind: "cli",
+            source_event: "intent.declare",
+            source_ref: "stateful intent declare",
+            tool_name: None,
+            identity: identity.as_ref(),
+        },
+        &serde_json::json!({
+            "files_planned": files_planned,
+        }),
+    )?;
 
     if !(200..300).contains(&response.status_code) {
         anyhow::bail!(
@@ -244,6 +341,21 @@ fn runtime_from_env() -> Option<ServerRuntime> {
     }
 
     None
+}
+
+fn non_empty_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.trim().is_empty() {
+        fallback
+    } else {
+        value
+    }
+}
+
+fn is_protocol_reserved_key(key: &str) -> bool {
+    matches!(
+        key,
+        "protocol_version" | "request_id" | "observed_at" | "session" | "workspace" | "source"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

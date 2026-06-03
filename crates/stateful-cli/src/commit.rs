@@ -4,7 +4,7 @@ use std::{
     process::Command,
 };
 
-use crate::{discover_runtime_with_optional_global, post_json};
+use crate::{ProtocolPostContext, discover_runtime_with_optional_global, post_protocol_json};
 
 pub type AuthorizePath = Box<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 
@@ -148,12 +148,19 @@ fn authorize_path(request: &CommitRequest, target: &CommitTarget) -> anyhow::Res
         .workspace_id
         .as_deref()
         .unwrap_or(runtime.workspace_id.as_str());
-    let response = post_json(
+    let response = post_protocol_json(
         &runtime,
         "/v1/authorize",
+        ProtocolPostContext {
+            session_id,
+            workspace_id,
+            source_kind: "cli",
+            source_event: "commit",
+            source_ref: "stateful commit",
+            tool_name: None,
+            identity: None,
+        },
         &serde_json::json!({
-            "session_id": session_id,
-            "workspace_id": workspace_id,
             "action": target.action,
             "path": target.path,
         }),

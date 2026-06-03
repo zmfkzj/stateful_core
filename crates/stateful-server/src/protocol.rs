@@ -1,6 +1,6 @@
 use axum::{Json, http::StatusCode};
 use serde::{Deserialize, de::DeserializeOwned};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use stateful_core::{ActorType, SourceKind};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -112,6 +112,29 @@ pub fn validate_protocol<T>(
     })
 }
 
+pub fn validate_protocol_body<T>(
+    body: &[u8],
+) -> Result<ValidatedRequest<T>, (StatusCode, Json<Value>)>
+where
+    T: DeserializeOwned,
+{
+    let request = serde_json::from_slice::<ProtocolRequest<Map<String, Value>>>(body)
+        .map_err(|_| invalid_request_error("Invalid JSON request body."))?;
+    let input = validate_protocol(request)?;
+    let payload = serde_json::from_value::<T>(Value::Object(input.payload))
+        .map_err(|_| invalid_request_error("Invalid request payload."))?;
+
+    Ok(ValidatedRequest {
+        protocol_version: input.protocol_version,
+        request_id: input.request_id,
+        observed_at: input.observed_at,
+        session: input.session,
+        workspace: input.workspace,
+        source: input.source,
+        payload,
+    })
+}
+
 fn decode_metadata<T>(value: Option<Value>, field: &str) -> Result<T, String>
 where
     T: DeserializeOwned,
@@ -126,6 +149,17 @@ pub fn protocol_error(message: impl Into<String>) -> (StatusCode, Json<Value>) {
         Json(json!({
             "decision": "error",
             "reason_code": "protocol_mismatch",
+            "message": message.into()
+        })),
+    )
+}
+
+pub fn invalid_request_error(message: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "decision": "error",
+            "reason_code": "invalid_request",
             "message": message.into()
         })),
     )

@@ -33,10 +33,11 @@ pub use repo_registry::{
     enable_repo, repo_gate, repo_identity_for_enabled_repo,
 };
 pub use runtime::{
-    CurrentSession, HttpResponse, IntentDeclareArgs, ServerRuntime, declare_intent_via_http,
-    discover_runtime, discover_runtime_with_global, discover_runtime_with_optional_global,
-    get_json, global_state_db_path, post_json, read_current_session_file,
-    write_current_session_file, write_global_runtime_file, write_runtime_file,
+    CurrentSession, HttpResponse, IntentDeclareArgs, ProtocolPostContext, ServerRuntime,
+    declare_intent_via_http, discover_runtime, discover_runtime_with_global,
+    discover_runtime_with_optional_global, get_json, global_state_db_path, post_json,
+    post_protocol_json, read_current_session_file, write_current_session_file,
+    write_global_runtime_file, write_runtime_file,
 };
 pub use server_lifecycle::{
     ServerStartOptions, detached_server_args, ensure_server, ensure_server_with,

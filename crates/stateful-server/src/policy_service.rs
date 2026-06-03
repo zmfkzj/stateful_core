@@ -4,7 +4,6 @@ use stateful_store::{Store, WaitRecord};
 
 #[derive(Debug, Clone)]
 pub struct WriteAuthorizationRequest {
-    pub request_id: String,
     pub session_id: String,
     pub workspace_id: Option<String>,
     pub action: String,
@@ -90,8 +89,7 @@ impl<'a> PolicyService<'a> {
                 let wait = if input.allow_queue_side_effects && input.queue_on_conflict {
                     let waiter = self
                         .store
-                        .enqueue_waiter_for_request(
-                            &input.request_id,
+                        .enqueue_waiter(
                             &input.session_id,
                             workspace_id,
                             &input.path,
