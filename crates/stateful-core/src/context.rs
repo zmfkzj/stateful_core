@@ -45,6 +45,23 @@ impl ContextPackage {
         self
     }
 
+    pub fn with_blocking_item(
+        mut self,
+        resource: impl Into<String>,
+        summary: impl Into<String>,
+        next_action: impl Into<String>,
+    ) -> Self {
+        self.status = ContextStatus::Blocked;
+        self.items.push(ContextItem {
+            severity: ContextSeverity::Block,
+            resource: resource.into(),
+            summary: summary.into(),
+            next_action: Some(next_action.into()),
+            evidence: None,
+        });
+        self
+    }
+
     pub fn with_nearby_activity(
         mut self,
         resource: impl Into<String>,

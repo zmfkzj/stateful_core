@@ -746,6 +746,47 @@ impl Store {
             .map(|reservation| reservation.session_id))
     }
 
+    pub fn context_package_for_session(
+        &self,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        resource: Option<&str>,
+    ) -> StoreResult<stateful_core::ContextPackage> {
+        let session_id = session_id.as_ref();
+        let workspace_id = workspace_id.as_ref();
+        let mut package = stateful_core::ContextPackage::empty();
+
+        let Some(resource) = resource else {
+            return Ok(package);
+        };
+
+        if let Some(reservation) = self.active_reservation(workspace_id, resource)? {
+            if reservation.session_id == session_id {
+                package = package.with_blocking_item(
+                    reservation.relative_path,
+                    "A reservation is ready for this session.",
+                    "Reread the resource, then call state.intent.claim before writing.",
+                );
+            } else {
+                package = package.with_warning(
+                    reservation.relative_path,
+                    "Another session owns the active reservation for this resource.",
+                );
+            }
+        }
+
+        if let Some(owner) = self.active_lease_owner(workspace_id, resource)?
+            && owner != session_id
+        {
+            package = package.with_warning(
+                resource.to_string(),
+                format!("Active lease is held by session {owner}."),
+            );
+        }
+
+        Ok(package)
+    }
+
     pub fn next_reservation_for_session(
         &self,
         session_id: impl AsRef<str>,

@@ -14,7 +14,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use stateful_core::{ContextPackage, ReconciliationDecision, RenderMode, render_prompt_text};
+use stateful_core::{ReconciliationDecision, RenderMode, render_prompt_text};
 use stateful_store::{Event, OutboxEntry, Store};
 use stateful_validation::{ValidationResult, ValidationStatus, run_validation_profile};
 use std::{
@@ -526,18 +526,48 @@ async fn activity_finalize(
 async fn context_render(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<ContextRenderRequest>,
+    body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
 
-    let mode = match input.mode.as_deref() {
+    let input = match validate_protocol_body::<ContextRenderPayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+
+    let mode = match input.payload.mode.as_deref() {
         Some("detailed") => RenderMode::Detailed,
         _ => RenderMode::Brief,
     };
-    let _resource = input.resource;
-    let package = ContextPackage::empty();
+    let package = match config.store.lock() {
+        Ok(store) => match store.context_package_for_session(
+            &input.session.session_id,
+            &input.workspace.workspace_id,
+            input.payload.resource.as_deref(),
+        ) {
+            Ok(package) => package,
+            Err(message) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "status": "error",
+                        "message": message.to_string()
+                    })),
+                );
+            }
+        },
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "message": "store lock poisoned"
+                })),
+            );
+        }
+    };
     let prompt_text = render_prompt_text(&package, mode);
 
     (
@@ -1037,7 +1067,7 @@ struct AuthorizePayload {
 }
 
 #[derive(Debug, Deserialize)]
-struct ContextRenderRequest {
+struct ContextRenderPayload {
     mode: Option<String>,
     resource: Option<String>,
 }

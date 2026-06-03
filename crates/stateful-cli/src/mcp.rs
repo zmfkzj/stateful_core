@@ -102,6 +102,7 @@ fn protocol_required_http_path(path: &str) -> bool {
             | "/v1/activity/observe"
             | "/v1/activity/finalize"
             | "/v1/conflicts/check"
+            | "/v1/context/render"
             | "/v1/reconcile/ack"
             | "/v1/validation/run"
     )
@@ -144,6 +145,16 @@ fn enrich_arguments(
         object
             .entry("repo_root")
             .or_insert_with(|| Value::String(repo_root.to_string_lossy().into_owned()));
+    }
+    if tool_name == "state.context.render"
+        && let Ok(session) = read_current_session_file(repo_root)
+    {
+        object
+            .entry("session_id")
+            .or_insert_with(|| Value::String(session.session_id));
+        object
+            .entry("workspace_id")
+            .or_insert_with(|| Value::String(session.workspace_id));
     }
     if tool_name == "state.intent.declare" {
         if !object.contains_key("session_id")

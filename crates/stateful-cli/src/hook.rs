@@ -10,8 +10,8 @@ use stateful_core::{BashKind, classify_bash};
 use crate::outbox::queue_session_heartbeat_outbox;
 use crate::{
     CodexHookCommand, CurrentSession, GlobalPaths, HookCommand, ProtocolPostContext, RepoGate,
-    RepoIdentity, ServerRuntime, discover_runtime_with_global, ensure_server, post_json,
-    post_protocol_json, repo_gate, repo_identity_for_enabled_repo, write_current_session_file,
+    RepoIdentity, ServerRuntime, discover_runtime_with_global, ensure_server, post_protocol_json,
+    repo_gate, repo_identity_for_enabled_repo, write_current_session_file,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,11 +327,19 @@ fn handle_user_prompt_submit_with_runtime(
     runtime: &ServerRuntime,
 ) -> anyhow::Result<String> {
     let input: UserPromptSubmitInput = serde_json::from_str(input)?;
-    let response = post_json(
+    let response = post_protocol_json(
         runtime,
         "/v1/context/render",
+        ProtocolPostContext {
+            session_id: &input.session_id,
+            workspace_id: &runtime.workspace_id,
+            source_kind: "hook",
+            source_event: "user_prompt_submit",
+            source_ref: "stateful hook user-prompt-submit",
+            tool_name: None,
+            identity: None,
+        },
         &json!({
-            "session_id": input.session_id,
             "mode": "brief"
         }),
     )?;

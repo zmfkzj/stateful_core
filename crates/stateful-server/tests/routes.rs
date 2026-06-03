@@ -1814,8 +1814,11 @@ async fn context_render_returns_empty_prompt_when_no_blocking_state_exists() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     let response = app
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/context/render",
+            "req-context-empty",
+            "s1",
+            "w1",
             serde_json::json!({
                 "mode": "detailed",
                 "resource": "src/auth.ts"
@@ -1831,6 +1834,78 @@ async fn context_render_returns_empty_prompt_when_no_blocking_state_exists() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["status"], "ok");
     assert_eq!(json["prompt_text"], "");
+}
+
+#[tokio::test]
+async fn context_render_includes_reserved_and_blocking_state() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let lease = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/lease/acquire",
+            "req-context-lease",
+            "s1",
+            "w1",
+            serde_json::json!({ "path": "src/auth.ts" }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let request = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "req-context-wait",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "resources": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(request.status(), StatusCode::OK);
+
+    let release = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/lease/release",
+            "req-context-release",
+            "s1",
+            "w1",
+            serde_json::json!({ "path": "src/auth.ts" }),
+        ))
+        .await
+        .expect("lease release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    let context = app
+        .oneshot(protocol_request(
+            "/v1/context/render",
+            "req-context-render",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "mode": "brief",
+                "resource": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(context.status(), StatusCode::OK);
+    let body = to_bytes(context.into_body(), 4096)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    let prompt = json["prompt_text"]
+        .as_str()
+        .expect("prompt text should be string");
+    assert!(prompt.contains("src/auth.ts"));
+    assert!(prompt.contains("claim"));
 }
 
 #[tokio::test]
