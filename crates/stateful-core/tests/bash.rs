@@ -18,6 +18,7 @@ fn find_is_read_only_only_without_mutating_actions() {
         "find docs -'delete'",
         "find docs -$'delete'",
         "find docs -{delete,print}",
+        "find docs \"x' y\" -{delete,print}",
         "find docs -exec rm {} +",
         "find docs -execdir rm {} +",
         "find docs -ok rm {} +",
@@ -84,6 +85,7 @@ fn git_branch_and_diff_read_only_allowlists_reject_mutating_options() {
         "git diff --out$'put'=file",
         "git diff --out$SUFFIX=file",
         "git diff --out{put,put}=file",
+        "git diff \"x' y\" --out{put,put}=file",
     ];
 
     for command in rejected {
@@ -133,6 +135,7 @@ fn shell_expansion_syntax_is_denied_before_read_only_allowlists() {
         "rg $1 docs",
         "rg $? docs",
         "rg *.rs src",
+        "rg \"x' y\" *.rs src",
     ];
 
     for command in rejected {

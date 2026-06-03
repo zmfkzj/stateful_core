@@ -250,12 +250,15 @@ fn contains_shell_control_syntax(command: &str) -> bool {
 
 fn contains_unsupported_shell_expansion(command: &str) -> bool {
     let mut in_single_quote = false;
+    let mut in_double_quote = false;
     let mut escaped = false;
 
     for ch in command.chars() {
         if escaped {
             escaped = false;
-            if ch == '$' || (!in_single_quote && is_shell_expansion_metachar(ch)) {
+            if ch == '$'
+                || (!in_single_quote && !in_double_quote && is_shell_expansion_metachar(ch))
+            {
                 return true;
             }
             continue;
@@ -266,12 +269,19 @@ fn contains_unsupported_shell_expansion(command: &str) -> bool {
             continue;
         }
 
-        if ch == '\'' {
+        if ch == '\'' && !in_double_quote {
             in_single_quote = !in_single_quote;
             continue;
         }
 
-        if ch == '$' || (!in_single_quote && is_shell_expansion_metachar(ch)) {
+        if ch == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            continue;
+        }
+
+        if ch == '$'
+            || (!in_single_quote && !in_double_quote && is_shell_expansion_metachar(ch))
+        {
             return true;
         }
     }
