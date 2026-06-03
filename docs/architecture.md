@@ -210,9 +210,12 @@ state.activity.observe
 state.activity.finalize
 state.conflicts.check
 state.current.read
+state.events.read
 state.context.render
 state.reconcile.ack
 state.validation.run
+state.notifications.poll
+state.resume.next
 ```
 
 Hooks and MCP tools should call the same state server API. Policy must live in
