@@ -26,7 +26,7 @@ fn structured_commit_rejects_empty_message() {
 
     assert!(
         result
-            .unwrap_err()
+            .expect_err("empty commit message should be rejected")
             .to_string()
             .contains("commit message is required")
     );
@@ -74,7 +74,7 @@ fn structured_commit_rejects_broad_pathspecs() {
 
         assert!(
             result
-                .unwrap_err()
+                .expect_err("broad pathspec should be rejected")
                 .to_string()
                 .contains("explicit file paths are required")
         );
@@ -106,7 +106,7 @@ fn structured_commit_rejects_deleted_tracked_directory_before_staging() {
 
     assert!(
         result
-            .unwrap_err()
+            .expect_err("deleted tracked directory pathspec should be rejected")
             .to_string()
             .contains("explicit file paths are required")
     );
@@ -136,7 +136,7 @@ fn structured_commit_rejects_unrelated_staged_changes() {
 
     assert!(
         result
-            .unwrap_err()
+            .expect_err("unrelated staged changes should be rejected")
             .to_string()
             .contains("unrelated staged changes")
     );
@@ -204,7 +204,7 @@ fn structured_commit_does_not_allow_deleted_file_under_write_authorization() {
 
     assert!(
         result
-            .unwrap_err()
+            .expect_err("delete without delete authorization should be rejected")
             .to_string()
             .contains("delete requires exact file intent")
     );
@@ -238,7 +238,7 @@ fn structured_commit_rejects_unstaged_rename_across_explicit_paths() {
 
     assert!(
         result
-            .unwrap_err()
+            .expect_err("unstaged rename should be rejected")
             .to_string()
             .contains("rename/copy path status")
     );
@@ -270,7 +270,7 @@ fn structured_commit_rejects_staged_git_mv_across_explicit_paths() {
 
     assert!(
         result
-            .unwrap_err()
+            .expect_err("staged rename should be rejected")
             .to_string()
             .contains("rename/copy path status")
     );
