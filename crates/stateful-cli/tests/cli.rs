@@ -1,0 +1,135 @@
+use clap::Parser;
+use stateful_cli::{Cli, Command, HookCommand, McpCommand};
+
+#[test]
+fn parses_structured_commit_command() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "commit",
+        "-m",
+        "docs: add plan",
+        "--",
+        "docs/plan.md",
+    ])
+    .expect("commit command should parse");
+
+    match cli.command {
+        Command::Commit { message, paths } => {
+            assert_eq!(message, "docs: add plan");
+            assert_eq!(paths, vec!["docs/plan.md"]);
+        }
+        other => panic!("expected commit command, got {other:?}"),
+    }
+}
+
+#[test]
+fn hook_pre_tool_use_command_parses() {
+    let cli = Cli::try_parse_from(["stateful", "hook", "pre-tool-use"])
+        .expect("hook pre-tool-use command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Hook(HookCommand::PreToolUse)
+    ));
+}
+
+#[test]
+fn validate_profile_command_parses() {
+    let cli = Cli::try_parse_from(["stateful", "validate", "unit"])
+        .expect("validate command should parse");
+
+    assert!(matches!(cli.command, Command::Validate { profile } if profile == "unit"));
+}
+
+#[test]
+fn intent_declare_command_parses_file_scopes() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "intent",
+        "declare",
+        "--session-id",
+        "s1",
+        "--workspace-id",
+        "w1",
+        "src/auth.ts",
+        "src/session/",
+    ])
+    .expect("intent declare command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Intent(stateful_cli::IntentCommand::Declare {
+            ref session_id,
+            ref workspace_id,
+            ref files_planned,
+        }) if session_id.as_deref() == Some("s1")
+            && workspace_id.as_deref() == Some("w1")
+            && files_planned == &vec!["src/auth.ts".to_string(), "src/session/".to_string()]
+    ));
+}
+
+#[test]
+fn intent_declare_command_can_default_session_and_workspace() {
+    let cli = Cli::try_parse_from(["stateful", "intent", "declare", "src/auth.ts"])
+        .expect("intent declare command should parse without explicit session flags");
+
+    assert!(matches!(
+        cli.command,
+        Command::Intent(stateful_cli::IntentCommand::Declare {
+            session_id: None,
+            workspace_id: None,
+            ref files_planned,
+        }) if files_planned == &vec!["src/auth.ts".to_string()]
+    ));
+}
+
+#[test]
+fn server_command_parses_runtime_options() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "server",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "43873",
+        "--token",
+        "secret-token",
+        "--workspace-id",
+        "w1",
+    ])
+    .expect("server command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Server {
+            ref host,
+            port,
+            ref token,
+            ref workspace_id
+        } if host == "127.0.0.1"
+            && port == 43873
+            && token.as_deref() == Some("secret-token")
+            && workspace_id == "w1"
+    ));
+}
+
+#[test]
+fn mcp_call_command_parses_tool_and_arguments() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "mcp",
+        "call",
+        "state.current.read",
+        r#"{"mode":"brief"}"#,
+    ])
+    .expect("mcp call command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Mcp(McpCommand::Call {
+            ref tool_name,
+            ref arguments_json
+        }) if tool_name == "state.current.read"
+            && arguments_json.as_deref() == Some(r#"{"mode":"brief"}"#)
+    ));
+}

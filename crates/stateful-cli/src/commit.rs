@@ -1,0 +1,190 @@
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use crate::{discover_runtime, post_json};
+
+pub type AuthorizePath = Box<dyn Fn(&str) -> anyhow::Result<()> + Send + Sync>;
+
+pub struct CommitRequest {
+    pub repo_root: PathBuf,
+    pub message: String,
+    pub paths: Vec<String>,
+    pub session_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub authorize: Option<AuthorizePath>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CommitResult {
+    pub commit_sha: String,
+    pub committed_paths: Vec<String>,
+}
+
+pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitResult> {
+    let message = request.message.trim();
+    if message.is_empty() {
+        anyhow::bail!("commit message is required");
+    }
+
+    let paths = normalize_explicit_paths(&request.paths)?;
+    let explicit = paths.iter().cloned().collect::<BTreeSet<_>>();
+
+    deny_unrelated_staged_changes(&request.repo_root, &explicit)?;
+    for path in &paths {
+        authorize_path(&request, path)?;
+    }
+
+    let mut add_args = vec!["add", "--"];
+    add_args.extend(paths.iter().map(String::as_str));
+    git_status(&request.repo_root, &add_args)?;
+
+    deny_unrelated_staged_changes(&request.repo_root, &explicit)?;
+
+    let mut commit_args = vec!["commit", "-m", message, "--"];
+    commit_args.extend(paths.iter().map(String::as_str));
+    git_status(&request.repo_root, &commit_args)?;
+
+    let commit_sha = git_stdout(&request.repo_root, &["rev-parse", "HEAD"])?;
+    Ok(CommitResult {
+        commit_sha: commit_sha.trim().to_string(),
+        committed_paths: paths,
+    })
+}
+
+fn normalize_explicit_paths(paths: &[String]) -> anyhow::Result<Vec<String>> {
+    if paths.is_empty() {
+        anyhow::bail!("at least one explicit file path is required");
+    }
+
+    let mut normalized = Vec::new();
+    for path in paths {
+        let path = path.trim();
+        if path.is_empty()
+            || path == "."
+            || path == "*"
+            || path == ":/"
+            || path.starts_with('-')
+            || path.contains("..")
+        {
+            anyhow::bail!("explicit file paths are required; rejected pathspec `{path}`");
+        }
+        normalized.push(path.replace('\\', "/"));
+    }
+
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
+}
+
+fn deny_unrelated_staged_changes(
+    repo_root: &Path,
+    explicit: &BTreeSet<String>,
+) -> anyhow::Result<()> {
+    let staged = git_stdout(repo_root, &["diff", "--cached", "--name-only"])?;
+    let unrelated = staged
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.replace('\\', "/"))
+        .filter(|path| !explicit.contains(path))
+        .collect::<Vec<_>>();
+
+    if !unrelated.is_empty() {
+        anyhow::bail!(
+            "unrelated staged changes are present: {}",
+            unrelated.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
+fn authorize_path(request: &CommitRequest, path: &str) -> anyhow::Result<()> {
+    if let Some(authorize) = &request.authorize {
+        return authorize(path);
+    }
+
+    let session_id = request
+        .session_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("stateful commit requires a current session id"))?;
+    let runtime = discover_runtime(&request.repo_root)?;
+    let workspace_id = request
+        .workspace_id
+        .as_deref()
+        .unwrap_or(runtime.workspace_id.as_str());
+    let response = post_json(
+        &runtime,
+        "/v1/authorize",
+        &serde_json::json!({
+            "session_id": session_id,
+            "workspace_id": workspace_id,
+            "action": "write_file",
+            "path": path,
+        }),
+    )?;
+
+    if !(200..300).contains(&response.status_code) {
+        anyhow::bail!(
+            "stateful commit authorization failed with HTTP {}: {}",
+            response.status_code,
+            response.body
+        );
+    }
+
+    let decision = serde_json::from_str::<CommitAuthorizeDecision>(&response.body)?;
+    if decision.decision != "allow" {
+        anyhow::bail!(
+            "{}",
+            decision
+                .required_next_action
+                .unwrap_or(decision.message)
+        );
+    }
+
+    Ok(())
+}
+
+fn git_status(repo_root: &Path, args: &[&str]) -> anyhow::Result<()> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    Ok(())
+}
+
+fn git_stdout(repo_root: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CommitAuthorizeDecision {
+    decision: String,
+    message: String,
+    #[serde(default)]
+    required_next_action: Option<String>,
+}
