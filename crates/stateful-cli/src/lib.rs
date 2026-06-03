@@ -37,7 +37,7 @@ pub use runtime::{
     global_state_db_path, post_json, read_current_session_file, write_current_session_file,
     write_global_runtime_file, write_runtime_file,
 };
-pub use server_lifecycle::{ensure_server, ensure_server_with, stop_server};
+pub use server_lifecycle::{ensure_server, ensure_server_with, runtime_is_healthy, stop_server};
 pub use validation::{
     ResultParser, ValidationConfig, ValidationProfile, ValidationResult, ValidationStatus,
     run_validation_profile,
@@ -68,6 +68,14 @@ pub enum Command {
     Server {
         #[command(subcommand)]
         command: Option<ServerCommand>,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 43873)]
+        port: u16,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value = "local")]
+        workspace_id: String,
     },
     Status,
     Current,
@@ -214,12 +222,18 @@ pub fn run() -> anyhow::Result<()> {
                 }))?
             );
         }
-        Command::Server { command } => match command.unwrap_or(ServerCommand::Start {
+        Command::Server {
+            command,
+            host: legacy_host,
+            port: legacy_port,
+            token: legacy_token,
+            workspace_id: legacy_workspace_id,
+        } => match command.unwrap_or(ServerCommand::Start {
             foreground: true,
-            host: "127.0.0.1".to_string(),
-            port: 43873,
-            token: None,
-            workspace_id: "local".to_string(),
+            host: legacy_host,
+            port: legacy_port,
+            token: legacy_token,
+            workspace_id: legacy_workspace_id,
         }) {
             ServerCommand::Start {
                 host,

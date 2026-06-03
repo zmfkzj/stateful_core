@@ -230,7 +230,8 @@ fn server_command_parses_runtime_options() {
                 ref token,
                 ref workspace_id,
                 ..
-            })
+            }),
+            ..
         } if host == "127.0.0.1"
             && port == 43873
             && token.as_deref() == Some("secret-token")
@@ -246,9 +247,41 @@ fn parses_server_start_subcommand() {
     match cli.command {
         Command::Server {
             command: Some(ServerCommand::Start { foreground, .. }),
+            ..
         } => assert!(foreground),
         other => panic!("expected server start command, got {other:?}"),
     }
+}
+
+#[test]
+fn parses_legacy_server_runtime_options() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "server",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "43874",
+        "--token",
+        "secret-token",
+        "--workspace-id",
+        "w1",
+    ])
+    .expect("legacy server command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Server {
+            command: None,
+            ref host,
+            port,
+            ref token,
+            ref workspace_id,
+        } if host == "127.0.0.1"
+            && port == 43874
+            && token.as_deref() == Some("secret-token")
+            && workspace_id == "w1"
+    ));
 }
 
 #[test]
