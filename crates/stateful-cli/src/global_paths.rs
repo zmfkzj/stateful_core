@@ -15,13 +15,14 @@ pub struct GlobalPaths {
 impl GlobalPaths {
     pub fn new(home: impl AsRef<Path>) -> Self {
         let home = home.as_ref().to_path_buf();
+        let runtime_dir = home.join("runtime");
         Self {
             config_yml: home.join("config.yml"),
             state_db: home.join("state.db"),
-            runtime_dir: home.join("runtime"),
-            server_json: home.join("runtime").join("server.json"),
-            server_lock: home.join("runtime").join("server.lock"),
-            server_log: home.join("runtime").join("server.log"),
+            server_json: runtime_dir.join("server.json"),
+            server_lock: runtime_dir.join("server.lock"),
+            server_log: runtime_dir.join("server.log"),
+            runtime_dir,
             repos_dir: home.join("repos"),
             home,
         }
@@ -29,6 +30,9 @@ impl GlobalPaths {
 
     pub fn from_env() -> anyhow::Result<Self> {
         if let Some(path) = std::env::var_os("STATEFUL_HOME") {
+            if path.as_os_str().is_empty() {
+                anyhow::bail!("STATEFUL_HOME is set but empty");
+            }
             return Ok(Self::new(path));
         }
         let home = std::env::var_os("HOME")
