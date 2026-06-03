@@ -1187,7 +1187,7 @@ impl Store {
         Ok(())
     }
 
-    fn waiter(&self, wait_id: &str) -> StoreResult<Option<WaitRecord>> {
+    pub fn waiter(&self, wait_id: impl AsRef<str>) -> StoreResult<Option<WaitRecord>> {
         self.conn
             .query_row(
                 "SELECT
@@ -1203,7 +1203,7 @@ impl Store {
                     request_id
                  FROM wait_queue
                  WHERE wait_id = ?1",
-                params![wait_id],
+                params![wait_id.as_ref()],
                 wait_record_from_row,
             )
             .optional()

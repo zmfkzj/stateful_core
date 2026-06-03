@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 use stateful_core::{AuthorizationInput, Decision, DecisionKind};
-use stateful_store::{Store, WaitRecord};
+use stateful_store::{Event, Store, WaitRecord};
 
 #[derive(Debug, Clone)]
 pub struct WriteAuthorizationRequest {
@@ -132,6 +132,176 @@ impl<'a> PolicyService<'a> {
             wait: None,
             reservation: None,
         })
+    }
+
+    pub fn request_intent(
+        &self,
+        request_id: &str,
+        session_id: &str,
+        workspace_id: &str,
+        action: &str,
+        resources: &[String],
+    ) -> Result<Value, String> {
+        let request = self
+            .store
+            .create_intent_request(request_id, session_id, workspace_id, resources, action)
+            .map_err(|error| error.to_string())?;
+        if request.status != "requested" {
+            return Ok(json!({
+                "status": "ok",
+                "request": request
+            }));
+        }
+
+        for resource in resources {
+            if let Some(reservation) = self
+                .store
+                .active_reservation(workspace_id, resource)
+                .map_err(|error| error.to_string())?
+            {
+                let waiter = self
+                    .store
+                    .enqueue_waiter_for_request(
+                        request_id,
+                        session_id,
+                        workspace_id,
+                        resource,
+                        action,
+                        Some(&reservation.session_id),
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.store
+                    .mark_intent_request_status(request_id, "queued")
+                    .map_err(|error| error.to_string())?;
+                return Ok(json!({
+                    "status": "ok",
+                    "request": self.request_record(request_id)?,
+                    "wait": waiter,
+                    "required_next_action": "Wait for a reservation, then reread the resource and call state.intent.claim."
+                }));
+            }
+
+            if let Some(owner) = self
+                .store
+                .active_lease_owner(workspace_id, resource)
+                .map_err(|error| error.to_string())?
+                && owner != session_id
+            {
+                let waiter = self
+                    .store
+                    .enqueue_waiter_for_request(
+                        request_id,
+                        session_id,
+                        workspace_id,
+                        resource,
+                        action,
+                        Some(&owner),
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.store
+                    .mark_intent_request_status(request_id, "queued")
+                    .map_err(|error| error.to_string())?;
+                return Ok(json!({
+                    "status": "ok",
+                    "request": self.request_record(request_id)?,
+                    "wait": waiter,
+                    "required_next_action": "Wait for a reservation, then reread the resource and call state.intent.claim."
+                }));
+            }
+        }
+
+        for resource in resources {
+            self.store
+                .acquire_lease(session_id, workspace_id, resource)
+                .map_err(|error| error.to_string())?;
+        }
+        self.append_intent_declared(session_id, workspace_id, resources)?;
+        self.store
+            .mark_intent_request_status(request_id, "granted")
+            .map_err(|error| error.to_string())?;
+
+        Ok(json!({
+            "status": "ok",
+            "request": self.request_record(request_id)?,
+            "required_next_action": null
+        }))
+    }
+
+    pub fn claim_intent(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        wait_id: &str,
+        resources: &[String],
+    ) -> Result<Value, String> {
+        let waiter = self
+            .store
+            .waiter(wait_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "reservation owner mismatch".to_string())?;
+        if waiter.workspace_id != workspace_id {
+            return Err("reservation owner mismatch".to_string());
+        }
+        let target_request_id = waiter
+            .request_id
+            .clone()
+            .ok_or_else(|| "reservation is not attached to an intent request".to_string())?;
+
+        self.store
+            .claim_reservation(wait_id, session_id)
+            .map_err(|error| error.to_string())?;
+        for resource in resources {
+            self.store
+                .acquire_lease(session_id, workspace_id, resource)
+                .map_err(|error| error.to_string())?;
+        }
+        self.append_intent_declared(session_id, workspace_id, resources)?;
+        self.store
+            .mark_intent_request_status(&target_request_id, "claimed")
+            .map_err(|error| error.to_string())?;
+
+        Ok(json!({
+            "status": "ok",
+            "request": self.request_record(&target_request_id)?,
+            "wait_id": wait_id,
+            "required_next_action": null
+        }))
+    }
+
+    pub fn cancel_intent(
+        &self,
+        target_request_id: &str,
+        session_id: &str,
+    ) -> Result<Value, String> {
+        self.store
+            .cancel_intent_request(target_request_id, session_id)
+            .map_err(|error| error.to_string())?;
+        Ok(json!({
+            "status": "ok",
+            "request": self.request_record(target_request_id)?
+        }))
+    }
+
+    fn request_record(
+        &self,
+        request_id: &str,
+    ) -> Result<stateful_store::IntentRequestRecord, String> {
+        self.store
+            .intent_request(request_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "intent request not found".to_string())
+    }
+
+    fn append_intent_declared(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        resources: &[String],
+    ) -> Result<(), String> {
+        let files = resources.iter().map(String::as_str).collect::<Vec<_>>();
+        self.store
+            .append(Event::intent_declared(session_id, workspace_id, files))
+            .map_err(|error| error.to_string())
     }
 }
 

@@ -92,7 +92,10 @@ fn call_mcp_tool(
 }
 
 fn protocol_required_http_path(path: &str) -> bool {
-    matches!(path, "/v1/intent/declare" | "/v1/conflicts/check")
+    matches!(
+        path,
+        "/v1/intent/declare" | "/v1/lease/acquire" | "/v1/lease/release" | "/v1/conflicts/check"
+    )
 }
 
 fn protocol_payload(body: &Value) -> Value {

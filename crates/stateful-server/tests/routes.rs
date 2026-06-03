@@ -468,13 +468,12 @@ async fn lease_activity_and_conflict_routes_are_available() {
 
     let lease = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(lease_request(
             "/v1/lease/acquire",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "path": "src/auth.ts"
-            }),
+            "req-lease-activity-acquire",
+            "s1",
+            "w1",
+            "src/auth.ts",
         ))
         .await
         .expect("lease acquire should complete");
@@ -529,13 +528,12 @@ async fn lease_activity_and_conflict_routes_are_available() {
     assert_eq!(json["reason_code"], "missing_intent");
 
     let release = app
-        .oneshot(json_request(
+        .oneshot(lease_request(
             "/v1/lease/release",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "path": "src/auth.ts"
-            }),
+            "req-lease-activity-release",
+            "s1",
+            "w1",
+            "src/auth.ts",
         ))
         .await
         .expect("lease release should complete");
@@ -706,18 +704,313 @@ async fn authorize_valid_protocol_with_malformed_payload_returns_invalid_request
 }
 
 #[tokio::test]
+async fn intent_request_grants_available_resource_and_is_idempotent() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let first = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "req-schedule-1",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "resources": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(first.status(), StatusCode::OK);
+    let body = to_bytes(first.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["request"]["status"], "granted");
+
+    let second = app
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "req-schedule-1",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "resources": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("duplicate intent request should complete");
+    let body = to_bytes(second.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["request"]["request_id"], "req-schedule-1");
+    assert_eq!(json["request"]["status"], "granted");
+}
+
+#[tokio::test]
+async fn intent_request_queues_blocked_resource_and_claim_creates_lease() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let lease = app
+        .clone()
+        .oneshot(lease_request(
+            "/v1/lease/acquire",
+            "req-lease-owner",
+            "s1",
+            "w1",
+            "src/auth.ts",
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let queued = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "req-schedule-2",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "resources": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    let body = to_bytes(queued.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["request"]["status"], "queued");
+    let wait_id = json["wait"]["wait_id"]
+        .as_str()
+        .expect("wait id should be string")
+        .to_string();
+
+    let release = app
+        .clone()
+        .oneshot(lease_request(
+            "/v1/lease/release",
+            "req-release-owner",
+            "s1",
+            "w1",
+            "src/auth.ts",
+        ))
+        .await
+        .expect("lease release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    let claim = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/claim",
+            "req-claim-s2",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "wait_id": wait_id,
+                "resources": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("claim should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+    let body = to_bytes(claim.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["request"]["request_id"], "req-schedule-2");
+    assert_eq!(json["request"]["status"], "claimed");
+
+    let write = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "req-write-after-claim",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("write authorize should complete");
+    let body = to_bytes(write.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "allow");
+}
+
+#[tokio::test]
+async fn reserved_session_write_before_claim_is_denied() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let lease = app
+        .clone()
+        .oneshot(lease_request(
+            "/v1/lease/acquire",
+            "req-lease-owner-deny-before-claim",
+            "s1",
+            "w1",
+            "src/auth.ts",
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let queued = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "req-schedule-deny-before-claim",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "resources": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(queued.status(), StatusCode::OK);
+
+    let release = app
+        .clone()
+        .oneshot(lease_request(
+            "/v1/lease/release",
+            "req-release-deny-before-claim",
+            "s1",
+            "w1",
+            "src/auth.ts",
+        ))
+        .await
+        .expect("lease release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    let write = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "req-write-deny-before-claim",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    let body = to_bytes(write.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "reservation_requires_claim");
+}
+
+#[tokio::test]
+async fn intent_cancel_cancels_owned_queued_request() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let lease = app
+        .clone()
+        .oneshot(lease_request(
+            "/v1/lease/acquire",
+            "req-lease-owner-cancel",
+            "s1",
+            "w1",
+            "src/auth.ts",
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let queued = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "req-schedule-cancel",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "resources": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(queued.status(), StatusCode::OK);
+
+    let cancel = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/cancel",
+            "req-cancel-schedule",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "target_request_id": "req-schedule-cancel"
+            }),
+        ))
+        .await
+        .expect("cancel should complete");
+    assert_eq!(cancel.status(), StatusCode::OK);
+    let body = to_bytes(cancel.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["request"]["status"], "cancelled");
+
+    let release = app
+        .clone()
+        .oneshot(lease_request(
+            "/v1/lease/release",
+            "req-release-owner-cancel",
+            "s1",
+            "w1",
+            "src/auth.ts",
+        ))
+        .await
+        .expect("lease release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    let resume = app
+        .oneshot(json_request(
+            "/v1/resume/next",
+            serde_json::json!({
+                "session_id": "s2",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("resume next should complete");
+    let body = to_bytes(resume.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["resume_available"], false);
+}
+
+#[tokio::test]
 async fn active_lease_by_other_session_denies_authorize_even_with_matching_intent() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     let lease = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(lease_request(
             "/v1/lease/acquire",
-            serde_json::json!({
-                "session_id": "s2",
-                "workspace_id": "w1",
-                "path": "src/auth.ts"
-            }),
+            "req-lease-s2-conflict",
+            "s2",
+            "w1",
+            "src/auth.ts",
         ))
         .await
         .expect("lease acquire should complete");
@@ -767,13 +1060,12 @@ async fn conflicts_check_does_not_enqueue_waiters_on_queue_requested() {
 
     let lease = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(lease_request(
             "/v1/lease/acquire",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "path": "src/auth.ts"
-            }),
+            "req-lease-conflicts-no-queue",
+            "s1",
+            "w1",
+            "src/auth.ts",
         ))
         .await
         .expect("lease acquire should complete");
@@ -806,13 +1098,12 @@ async fn conflicts_check_does_not_enqueue_waiters_on_queue_requested() {
 
     let release = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(lease_request(
             "/v1/lease/release",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "path": "src/auth.ts"
-            }),
+            "req-release-conflicts-no-queue",
+            "s1",
+            "w1",
+            "src/auth.ts",
         ))
         .await
         .expect("lease release should complete");
@@ -842,13 +1133,12 @@ async fn authorize_queue_retries_with_new_request_ids_reuse_waiter() {
 
     let lease = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(lease_request(
             "/v1/lease/acquire",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "path": "src/auth.ts"
-            }),
+            "req-lease-authorize-retry",
+            "s1",
+            "w1",
+            "src/auth.ts",
         ))
         .await
         .expect("lease acquire should complete");
@@ -911,13 +1201,12 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
 
     let lease = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(lease_request(
             "/v1/lease/acquire",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "path": "src/auth.ts"
-            }),
+            "req-lease-queue-owner",
+            "s1",
+            "w1",
+            "src/auth.ts",
         ))
         .await
         .expect("lease acquire should complete");
@@ -990,13 +1279,12 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
 
     let release = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(lease_request(
             "/v1/lease/release",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "path": "src/auth.ts"
-            }),
+            "req-release-queue-owner",
+            "s1",
+            "w1",
+            "src/auth.ts",
         ))
         .await
         .expect("lease release should complete");
@@ -1055,13 +1343,12 @@ async fn activity_finalize_releases_leases_and_notifications_poll_returns_resume
 
     let lease = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(lease_request(
             "/v1/lease/acquire",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "path": "src/auth.ts"
-            }),
+            "req-lease-notify-owner",
+            "s1",
+            "w1",
+            "src/auth.ts",
         ))
         .await
         .expect("lease acquire should complete");
@@ -1143,13 +1430,12 @@ async fn resume_next_returns_active_reservation_for_session() {
 
     let lease = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(lease_request(
             "/v1/lease/acquire",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "path": "src/auth.ts"
-            }),
+            "req-lease-resume-owner",
+            "s1",
+            "w1",
+            "src/auth.ts",
         ))
         .await
         .expect("lease acquire should complete");
@@ -1174,13 +1460,12 @@ async fn resume_next_returns_active_reservation_for_session() {
 
     let release = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(lease_request(
             "/v1/lease/release",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "path": "src/auth.ts"
-            }),
+            "req-release-resume-owner",
+            "s1",
+            "w1",
+            "src/auth.ts",
         ))
         .await
         .expect("lease release should complete");
@@ -1218,13 +1503,12 @@ async fn active_lease_by_same_session_allows_matching_authorize() {
 
     let lease = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(lease_request(
             "/v1/lease/acquire",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "path": "src/auth.ts"
-            }),
+            "req-lease-same-session",
+            "s1",
+            "w1",
+            "src/auth.ts",
         ))
         .await
         .expect("lease acquire should complete");
@@ -1710,6 +1994,24 @@ fn protocol_request(
     json_request(
         path,
         protocol_body(request_id, session_id, workspace_id, payload),
+    )
+}
+
+fn lease_request(
+    path: &str,
+    request_id: &str,
+    session_id: &str,
+    workspace_id: &str,
+    resource_path: &str,
+) -> Request<Body> {
+    protocol_request(
+        path,
+        request_id,
+        session_id,
+        workspace_id,
+        serde_json::json!({
+            "path": resource_path
+        }),
     )
 }
 

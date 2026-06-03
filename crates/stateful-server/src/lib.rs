@@ -58,6 +58,9 @@ pub fn build_router(config: ServerConfig) -> Router {
         .route("/v1/session/register", post(session_register))
         .route("/v1/session/heartbeat", post(session_heartbeat))
         .route("/v1/intent/declare", post(intent_declare))
+        .route("/v1/intent/request", post(intent_request))
+        .route("/v1/intent/claim", post(intent_claim))
+        .route("/v1/intent/cancel", post(intent_cancel))
         .route("/v1/lease/acquire", post(lease_acquire))
         .route("/v1/lease/release", post(lease_release))
         .route("/v1/activity/observe", post(activity_observe))
@@ -283,14 +286,106 @@ async fn intent_declare(
     )
 }
 
-async fn lease_acquire(
+async fn intent_request(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<LeaseRequest>,
+    body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+
+    let input = match validate_protocol_body::<IntentRequestPayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+
+    let result = config
+        .store
+        .lock()
+        .map_err(|_| "store lock poisoned".to_string())
+        .and_then(|store| {
+            PolicyService::new(&store).request_intent(
+                &input.request_id,
+                &input.session.session_id,
+                &input.workspace.workspace_id,
+                &input.payload.action,
+                &input.payload.resources,
+            )
+        });
+
+    json_result(result)
+}
+
+async fn intent_claim(
+    State(config): State<ServerConfig>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, Json<Value>) {
+    if !has_valid_bearer_token(&headers, &config.bearer_token) {
+        return unauthorized();
+    }
+
+    let input = match validate_protocol_body::<IntentClaimPayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+
+    let result = config
+        .store
+        .lock()
+        .map_err(|_| "store lock poisoned".to_string())
+        .and_then(|store| {
+            PolicyService::new(&store).claim_intent(
+                &input.session.session_id,
+                &input.workspace.workspace_id,
+                &input.payload.wait_id,
+                &input.payload.resources,
+            )
+        });
+
+    json_result(result)
+}
+
+async fn intent_cancel(
+    State(config): State<ServerConfig>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, Json<Value>) {
+    if !has_valid_bearer_token(&headers, &config.bearer_token) {
+        return unauthorized();
+    }
+
+    let input = match validate_protocol_body::<IntentCancelPayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+
+    let result = config
+        .store
+        .lock()
+        .map_err(|_| "store lock poisoned".to_string())
+        .and_then(|store| {
+            PolicyService::new(&store)
+                .cancel_intent(&input.payload.target_request_id, &input.session.session_id)
+        });
+
+    json_result(result)
+}
+
+async fn lease_acquire(
+    State(config): State<ServerConfig>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, Json<Value>) {
+    if !has_valid_bearer_token(&headers, &config.bearer_token) {
+        return unauthorized();
+    }
+
+    let input = match validate_protocol_body::<LeasePayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
 
     let result = config
         .store
@@ -298,7 +393,11 @@ async fn lease_acquire(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .acquire_lease(input.session_id, input.workspace_id, input.path)
+                .acquire_lease(
+                    input.session.session_id,
+                    input.workspace.workspace_id,
+                    input.payload.path,
+                )
                 .map_err(|error| error.to_string())
         });
 
@@ -308,11 +407,16 @@ async fn lease_acquire(
 async fn lease_release(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<LeaseRequest>,
+    body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+
+    let input = match validate_protocol_body::<LeasePayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
 
     let result = config
         .store
@@ -320,7 +424,11 @@ async fn lease_release(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .release_lease(input.session_id, input.workspace_id, input.path)
+                .release_lease(
+                    input.session.session_id,
+                    input.workspace.workspace_id,
+                    input.payload.path,
+                )
                 .map_err(|error| error.to_string())
         });
 
@@ -739,6 +847,20 @@ fn status_response(result: Result<(), String>) -> (StatusCode, Json<Value>) {
     }
 }
 
+fn json_result(result: Result<Value, String>) -> (StatusCode, Json<Value>) {
+    match result {
+        Ok(value) => (StatusCode::OK, Json(value)),
+        Err(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "decision": "error",
+                "reason_code": "state_error",
+                "message": message
+            })),
+        ),
+    }
+}
+
 fn unauthorized() -> (StatusCode, Json<Value>) {
     (
         StatusCode::UNAUTHORIZED,
@@ -810,9 +932,24 @@ struct SessionRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct LeaseRequest {
-    session_id: String,
-    workspace_id: String,
+struct IntentRequestPayload {
+    action: String,
+    resources: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IntentClaimPayload {
+    wait_id: String,
+    resources: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IntentCancelPayload {
+    target_request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LeasePayload {
     path: String,
 }
 
