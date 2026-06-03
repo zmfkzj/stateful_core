@@ -47,49 +47,48 @@ impl Store {
     pub fn append(&self, event: Event) -> StoreResult<()> {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
 
-        let inserted = self.conn.execute(
-            "INSERT OR IGNORE INTO events (
-                event_id,
-                event_type,
-                session_id,
-                workspace_id,
-                repo_id,
-                worktree_id,
-                root,
-                branch,
-                payload_json,
-                created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                event.event_id,
-                event.event_type.as_str(),
-                event.session_id,
-                event.workspace_id,
-                event.repo_id,
-                event.worktree_id,
-                event.root,
-                event.branch,
-                serde_json::to_string(&event.payload)
-                    .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
-                event.created_at,
-            ],
-        );
+        let result = (|| -> StoreResult<()> {
+            let inserted = self.conn.execute(
+                "INSERT OR IGNORE INTO events (
+                    event_id,
+                    event_type,
+                    session_id,
+                    workspace_id,
+                    repo_id,
+                    worktree_id,
+                    root,
+                    branch,
+                    payload_json,
+                    created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    event.event_id,
+                    event.event_type.as_str(),
+                    event.session_id,
+                    event.workspace_id,
+                    event.repo_id,
+                    event.worktree_id,
+                    event.root,
+                    event.branch,
+                    serde_json::to_string(&event.payload)
+                        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
+                    event.created_at,
+                ],
+            )?;
 
-        match inserted {
-            Ok(1) => {
+            if inserted == 1 {
                 self.materialize(&event)?;
-                self.conn.execute_batch("COMMIT")?;
-                Ok(())
             }
-            Ok(_) => {
-                self.conn.execute_batch("COMMIT")?;
-                Ok(())
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err.into())
-            }
+
+            self.conn.execute_batch("COMMIT")?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
         }
+
+        result
     }
 
     pub fn session(&self, session_id: &str) -> StoreResult<Option<SessionRecord>> {

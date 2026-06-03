@@ -121,6 +121,24 @@ fn migration_adds_repo_identity_columns_to_existing_events_table() {
                 payload_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            INSERT INTO events (
+                event_id,
+                event_type,
+                session_id,
+                workspace_id,
+                sequence,
+                payload_json,
+                created_at
+            ) VALUES (
+                'legacy-event-1',
+                'SessionRegistered',
+                'legacy-session',
+                'legacy-workspace',
+                NULL,
+                '{}',
+                '2026-05-31T00:00:00Z'
+            );
             ",
         )
         .expect("old events table should be created");
@@ -140,10 +158,74 @@ fn migration_adds_repo_identity_columns_to_existing_events_table() {
 
     let events = store.recent_events(10).expect("events should read");
 
-    assert_eq!(events[0].repo_id.as_deref(), Some("repo-1"));
-    assert_eq!(events[0].worktree_id.as_deref(), Some("worktree-1"));
-    assert_eq!(events[0].root.as_deref(), Some("/repo"));
-    assert_eq!(events[0].branch.as_deref(), Some("main"));
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].event_id, "legacy-event-1");
+    assert_eq!(events[0].repo_id, None);
+    assert_eq!(events[0].worktree_id, None);
+    assert_eq!(events[0].root, None);
+    assert_eq!(events[0].branch, None);
+    assert_eq!(events[1].repo_id.as_deref(), Some("repo-1"));
+    assert_eq!(events[1].worktree_id.as_deref(), Some("worktree-1"));
+    assert_eq!(events[1].root.as_deref(), Some("/repo"));
+    assert_eq!(events[1].branch.as_deref(), Some("main"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn failed_materialization_rolls_back_event_insert_and_allows_future_appends() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-failed-materialize-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("db should open");
+        conn.execute_batch(
+            "
+            CREATE TABLE intents (
+                intent_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                scopes_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                declared_at TEXT NOT NULL,
+                expires_at TEXT
+            );
+
+            CREATE TRIGGER fail_intent_materialization
+            BEFORE INSERT ON intents
+            BEGIN
+                SELECT RAISE(FAIL, 'forced intent materialization failure');
+            END;
+            ",
+        )
+        .expect("failing intent trigger should be created");
+    }
+
+    let store = Store::open(&db_path).expect("store should open");
+
+    let error = store
+        .append(Event::intent_declared("s1", "w1", ["src/auth.ts"]))
+        .expect_err("intent materialization should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("forced intent materialization failure"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(store.event_count().expect("event count should load"), 0);
+
+    store
+        .append(Event::session_registered("s2", "w1"))
+        .expect("subsequent append should start a new transaction");
+    assert_eq!(store.event_count().expect("event count should load"), 1);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
