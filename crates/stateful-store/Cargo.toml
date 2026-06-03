@@ -1,0 +1,22 @@
+[package]
+name = "stateful-store"
+version = "0.1.0"
+description = "SQLite-backed event store and current-state persistence for stateful_core."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+stateful-core = { path = "../stateful-core" }
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

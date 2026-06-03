@@ -1,0 +1,22 @@
+[package]
+name = "stateful-core"
+version = "0.1.0"
+description = "Core domain types and policy engine for current-state agent coordination."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camino.workspace = true
+globset.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

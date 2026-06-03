@@ -279,9 +279,7 @@ fn contains_unsupported_shell_expansion(command: &str) -> bool {
             continue;
         }
 
-        if ch == '$'
-            || (!in_single_quote && !in_double_quote && is_shell_expansion_metachar(ch))
-        {
+        if ch == '$' || (!in_single_quote && !in_double_quote && is_shell_expansion_metachar(ch)) {
             return true;
         }
     }
@@ -573,10 +571,7 @@ fn first_words(command: &str, count: usize) -> Option<String> {
 }
 
 fn shell_words(command: &str) -> Vec<String> {
-    match parse_shell_words(command) {
-        Ok(words) => words,
-        Err(_) => Vec::new(),
-    }
+    parse_shell_words(command).unwrap_or_default()
 }
 
 fn parse_shell_words(command: &str) -> Result<Vec<String>, ShellWordError> {

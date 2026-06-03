@@ -1,0 +1,18 @@
+[package]
+name = "stateful-mcp"
+version = "0.1.0"
+description = "MCP tool surface for stateful_core current-state coordination."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+stateful-core = { path = "../stateful-core" }
+
+[lints]
+workspace = true

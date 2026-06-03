@@ -18,8 +18,14 @@ fn enable_repo_registers_git_root_and_writes_repo_configs() {
         .expect("repo root should canonicalize after creation");
 
     assert_eq!(entry.root, canonical_repo);
-    assert_eq!(entry.validation_config_path, canonical_repo.join(".stateful/validation.yml"));
-    assert_eq!(entry.policy_config_path, canonical_repo.join(".stateful/config.yml"));
+    assert_eq!(
+        entry.validation_config_path,
+        canonical_repo.join(".stateful/validation.yml")
+    );
+    assert_eq!(
+        entry.policy_config_path,
+        canonical_repo.join(".stateful/config.yml")
+    );
     assert_eq!(entry.codex_mode, CodexMode::Global);
     assert!(entry.enabled);
     assert!(!entry.enabled_at.is_empty());
@@ -32,7 +38,13 @@ fn enable_repo_registers_git_root_and_writes_repo_configs() {
 
     assert!(repo.join(".stateful/config.yml").is_file());
     assert!(repo.join(".stateful/validation.yml").is_file());
-    assert!(fixture.paths.repos_dir.join(format!("{}.json", entry.repo_id)).is_file());
+    assert!(
+        fixture
+            .paths
+            .repos_dir
+            .join(format!("{}.json", entry.repo_id))
+            .is_file()
+    );
 
     let saved = fs::read_to_string(&fixture.paths.config_yml).expect("registry yml should exist");
     assert!(saved.contains("codex_mode: global"));
@@ -94,8 +106,7 @@ fn repo_local_codex_uses_absolute_binary_path() {
     assert_eq!(entry.codex_mode, CodexMode::RepoLocal);
     assert!(!repo.join(".codex/hooks.json").exists());
 
-    let config =
-        fs::read_to_string(repo.join(".codex/config.toml")).expect("config should exist");
+    let config = fs::read_to_string(repo.join(".codex/config.toml")).expect("config should exist");
     assert!(config.contains("# stateful-core-owned"));
     assert!(config.contains("[mcp_servers.stateful]"));
     assert!(config.contains("[[hooks.PreToolUse]]"));
@@ -119,7 +130,11 @@ fn repo_local_codex_refuses_to_overwrite_existing_non_stateful_config() {
     let error = enable_repo(&fixture.paths, &repo, true)
         .expect_err("repo-local codex should refuse existing non-stateful config");
 
-    assert!(error.to_string().contains("would overwrite existing Codex config"));
+    assert!(
+        error
+            .to_string()
+            .contains("would overwrite existing Codex config")
+    );
     let config = fs::read_to_string(config_path).expect("existing config should remain readable");
     assert_eq!(config, "[mcp_servers.other]\ncommand = \"other\"\n");
     assert!(!repo.join(".stateful/config.yml").exists());
@@ -149,8 +164,13 @@ fn repo_local_codex_refuses_similar_non_stateful_hooks_without_side_effects() {
     let error = enable_repo(&fixture.paths, &repo, true)
         .expect_err("repo-local codex should refuse similar non-stateful hooks");
 
-    assert!(error.to_string().contains("would overwrite existing Codex config"));
-    let saved_hooks = fs::read_to_string(hooks_path).expect("existing hooks should remain readable");
+    assert!(
+        error
+            .to_string()
+            .contains("would overwrite existing Codex config")
+    );
+    let saved_hooks =
+        fs::read_to_string(hooks_path).expect("existing hooks should remain readable");
     assert_eq!(saved_hooks, hooks);
     assert!(!repo.join(".stateful/config.yml").exists());
     assert!(!repo.join(".stateful/validation.yml").exists());

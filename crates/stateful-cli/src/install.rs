@@ -150,10 +150,7 @@ fn plan_codex_config_update(
     Ok(CodexConfigUpdate::Write { existing, merged })
 }
 
-fn write_codex_config_update(
-    config_path: &Path,
-    update: CodexConfigUpdate,
-) -> anyhow::Result<()> {
+fn write_codex_config_update(config_path: &Path, update: CodexConfigUpdate) -> anyhow::Result<()> {
     let CodexConfigUpdate::Write { existing, merged } = update else {
         return Ok(());
     };
@@ -344,7 +341,9 @@ fn toml_table_header(line: &str) -> anyhow::Result<Option<TomlTableHeader<'_>>> 
             );
         }
         if unsupported_header_may_affect_stateful(line) {
-            anyhow::bail!("unsupported Codex config table header could conflict with stateful install: {line}");
+            anyhow::bail!(
+                "unsupported Codex config table header could conflict with stateful install: {line}"
+            );
         }
         return Ok(Some(TomlTableHeader::Other));
     };
@@ -360,7 +359,9 @@ fn toml_table_header(line: &str) -> anyhow::Result<Option<TomlTableHeader<'_>>> 
     let supported_tail = tail.is_empty() || tail.starts_with('#');
     if is_array || !supported_tail || !is_supported_simple_table_name(body) {
         if unsupported_header_may_affect_stateful(body) {
-            anyhow::bail!("unsupported Codex config table header could conflict with stateful install: {line}");
+            anyhow::bail!(
+                "unsupported Codex config table header could conflict with stateful install: {line}"
+            );
         }
         return Ok(Some(TomlTableHeader::Other));
     }
@@ -428,11 +429,9 @@ fn is_supported_simple_table_name(name: &str) -> bool {
 
     name.split('.').all(|segment| {
         !segment.is_empty()
-            && segment
-                .chars()
-                .all(|character| {
-                    character.is_ascii_alphanumeric() || character == '_' || character == '-'
-                })
+            && segment.chars().all(|character| {
+                character.is_ascii_alphanumeric() || character == '_' || character == '-'
+            })
     })
 }
 
@@ -549,11 +548,7 @@ fn containing_dir(path: &Path) -> &Path {
 }
 
 #[cfg(unix)]
-fn write_text_file_with_mode(
-    path: &Path,
-    contents: &str,
-    mode: Option<u32>,
-) -> anyhow::Result<()> {
+fn write_text_file_with_mode(path: &Path, contents: &str, mode: Option<u32>) -> anyhow::Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     if let Some(mode) = mode {
@@ -568,11 +563,7 @@ fn write_text_file_with_mode(
 }
 
 #[cfg(not(unix))]
-fn write_text_file_with_mode(
-    path: &Path,
-    contents: &str,
-    _mode: Option<()>,
-) -> anyhow::Result<()> {
+fn write_text_file_with_mode(path: &Path, contents: &str, _mode: Option<()>) -> anyhow::Result<()> {
     fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))
 }
 

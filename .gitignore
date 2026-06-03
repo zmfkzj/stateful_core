@@ -1,0 +1,17 @@
+.DS_Store
+
+.env
+.env.*
+!.env.example
+
+target/
+*.log
+
+# Local stateful runtime, hook config, and benchmark artifacts.
+.codex/
+.stateful/
+.stateful_core/
+.stateful_bench/
+
+# Internal implementation plans and scratch specs live outside the public repo.
+docs/superpowers/

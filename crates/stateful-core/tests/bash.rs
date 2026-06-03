@@ -286,18 +286,16 @@ fn stateful_intent_declare_with_shell_control_syntax_is_denied() {
 
 #[test]
 fn stateful_commit_is_allowed_as_structured_git_escape_hatch() {
-    let classification = classify_bash(
-        "stateful commit -m 'docs: add plan' -- docs/superpowers/plans/plan.md",
-    );
+    let classification =
+        classify_bash("stateful commit -m 'docs: add plan' -- docs/superpowers/plans/plan.md");
 
     assert_eq!(classification.kind, BashKind::ReadOnly);
 }
 
 #[test]
 fn stateful_commit_with_shell_control_syntax_is_denied() {
-    let classification = classify_bash(
-        "stateful commit -m 'docs: add plan' -- docs/plan.md; git add .",
-    );
+    let classification =
+        classify_bash("stateful commit -m 'docs: add plan' -- docs/plan.md; git add .");
 
     assert_eq!(classification.kind, BashKind::Mutating);
 }
@@ -343,8 +341,9 @@ fn stateful_commit_with_broad_pathspecs_is_not_allowed() {
     ];
 
     for pathspec in rejected {
-        let classification =
-            classify_bash(&format!("stateful commit -m 'docs: add plan' -- {pathspec}"));
+        let classification = classify_bash(&format!(
+            "stateful commit -m 'docs: add plan' -- {pathspec}"
+        ));
 
         assert_ne!(
             classification.kind,

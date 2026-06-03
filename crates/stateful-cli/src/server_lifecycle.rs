@@ -185,10 +185,7 @@ pub fn detached_server_args(options: &ServerStartOptions) -> Vec<String> {
         args.push(token.clone());
     }
 
-    args.extend([
-        "--workspace-id".to_string(),
-        options.workspace_id.clone(),
-    ]);
+    args.extend(["--workspace-id".to_string(), options.workspace_id.clone()]);
     args
 }
 

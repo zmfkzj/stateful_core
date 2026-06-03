@@ -1,0 +1,27 @@
+[package]
+name = "stateful-server"
+version = "0.1.0"
+description = "Local HTTP state server for current-state agent coordination."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+stateful-core = { path = "../stateful-core" }
+stateful-store = { path = "../stateful-store" }
+stateful-validation = { path = "../stateful-validation" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+
+[lints]
+workspace = true

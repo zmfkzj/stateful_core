@@ -178,19 +178,15 @@ fn ensure_server_rejects_unidentified_http_service_and_overwrites_runtime() {
     let starts = Arc::new(AtomicUsize::new(0));
     let starts_for_closure = starts.clone();
 
-    let discovered = ensure_server_with(
-        &paths,
-        runtime_is_healthy,
-        || {
-            starts_for_closure.fetch_add(1, Ordering::SeqCst);
-            Ok(ServerRuntime::new(
-                "http://127.0.0.1:43873",
-                "token",
-                "w1",
-                902,
-            ))
-        },
-    )
+    let discovered = ensure_server_with(&paths, runtime_is_healthy, || {
+        starts_for_closure.fetch_add(1, Ordering::SeqCst);
+        Ok(ServerRuntime::new(
+            "http://127.0.0.1:43873",
+            "token",
+            "w1",
+            902,
+        ))
+    })
     .expect("unidentified runtime should be replaced by started runtime");
 
     assert_eq!(discovered.pid, 902);
@@ -284,7 +280,9 @@ fn ensure_server_with_options_rejects_healthy_runtime_on_different_port() {
     .expect_err("healthy runtime with different port should be rejected");
 
     assert!(
-        error.to_string().contains("does not match requested server options"),
+        error
+            .to_string()
+            .contains("does not match requested server options"),
         "unexpected error: {error}"
     );
 }
@@ -345,7 +343,9 @@ struct FakeHttpServer {
 impl FakeHttpServer {
     fn start(responses: Vec<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("fake server should bind");
-        let addr = listener.local_addr().expect("fake server addr should be known");
+        let addr = listener
+            .local_addr()
+            .expect("fake server addr should be known");
         thread::spawn(move || {
             for response in responses {
                 if let Ok((mut stream, _addr)) = listener.accept() {

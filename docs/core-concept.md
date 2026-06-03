@@ -1,0 +1,121 @@
+# Core Concept
+
+## Problem
+
+Coding agents are bounded by their own sessions. A session can inspect its own
+conversation and tools, but it cannot reliably see what another session, another
+agent, or a human is doing in the same repository right now.
+
+This creates avoidable coordination failures:
+
+- two agents edit the same file without knowing it
+- one session repeats investigation another session already started
+- an agent overwrites or reverses nearby human work
+- stale memory is mistaken for current activity
+- an interrupted session leaves no structured handoff state
+
+`stateful_core` exists to answer the operational question:
+
+```text
+Who is doing what now, what might conflict, and when does that claim expire?
+```
+
+## Core Thesis
+
+The system should manage current state for coordination, not long-term memory.
+
+Memory helps recover prior information. It can provide evidence, summaries, or
+background context. It cannot by itself say what is actively true now.
+
+```text
+memory = past evidence and recall
+current state = active, expiring operational truth
+```
+
+## Current State
+
+Current state is a scoped, time-bound summary of active work.
+
+Examples:
+
+- An agent session is exploring auth validation.
+- A subagent is editing within its parent session's declared file scope.
+- A session intends to edit `src/auth.ts`.
+- A file has an active advisory lease.
+- A session is testing after a change.
+- A human appears to be editing a nearby file.
+- A session finalized as `done`, `failed`, or `blocked`.
+
+Current state must be compact enough to render into an agent prompt and precise
+enough to drive conflict checks before important tool calls.
+
+## Freshness
+
+Current state decays quickly. Every active claim needs a freshness model:
+
+- `last_updated_at` records the latest observation.
+- `expires_at` defines when the claim stops being current truth.
+- `phase` shows whether the actor is exploring, editing, testing, blocked, done,
+  failed, idle, or expired.
+- heartbeat updates keep active work alive.
+
+Expired state can remain useful as historical evidence, but it should not block
+new work as if it were still active.
+
+V1 intent freshness uses a 15-minute default TTL. Heartbeats can extend active
+intent while the phase is `exploring`, `editing`, or `testing`, but never beyond
+60 minutes from declaration. Blocked or finalized work is visible but does not
+authorize writes.
+
+## Coordination Protocol
+
+The first protocol is intentionally small:
+
+```text
+1. register session
+2. declare intent
+3. acquire advisory lease
+4. send heartbeat while active
+5. observe tool effects
+6. update phase and next intent
+7. finalize as done, failed, or blocked
+8. release or expire lease
+```
+
+Start-only reporting creates stale locks. End-only reporting fails to prevent
+collisions while work is happening. The protocol needs both.
+
+## Enforcement Boundary
+
+The system should not rely only on prompting agents to update state. Important
+actions should pass through a coordination check:
+
+```text
+before important action -> check intent and conflicts
+after important action  -> observe effects and refresh state
+before turn stops       -> require final status
+```
+
+For v1, supported write actions are blocked unless the session has active intent
+with matching file or directory scope. Abstract task, test, port, or migration
+intent can provide context but does not permit writes. Codex lifecycle hooks
+provide the enforcement surface. This is a coordination guardrail, not a
+complete sandbox or security boundary.
+
+V1 only authorizes writes through tool paths with reliable target extraction:
+`apply_patch` and structured MCP filesystem write tools. Bash commands that
+appear to write or have ambiguous mutation targets are denied by default.
+Raw Bash test commands are not allowlisted; tests run through controlled
+validation actions.
+
+## Product Shape
+
+The product is useful when an agent can answer:
+
+- Who else is active in this workspace?
+- Is this activity from a root agent, subagent, human, or system runner?
+- Which files or resources are currently leased?
+- What does another actor plan to do next?
+- Is my intended edit likely to conflict?
+- Is the conflicting state fresh, stale, or expired?
+- What final status did the previous session leave behind?

@@ -39,7 +39,14 @@ fn install_yes_creates_global_files_and_database() {
     assert!(fixture.paths.config_yml.is_file());
     assert!(fixture.paths.state_db.is_file());
     assert!(fixture.codex_config.is_file());
-    assert!(!fixture.codex_config.parent().unwrap().join("hooks.json").exists());
+    assert!(
+        !fixture
+            .codex_config
+            .parent()
+            .unwrap()
+            .join("hooks.json")
+            .exists()
+    );
 
     let registry = RepoRegistry::load(&fixture.paths).expect("registry should load");
     assert_eq!(registry, RepoRegistry::default());
@@ -85,8 +92,7 @@ fn install_yes_backs_up_existing_codex_config_before_merge() {
 #[test]
 fn install_yes_preserves_existing_features_and_enables_hooks() {
     let fixture = TestFixture::new("features");
-    let existing =
-        "[features] # codex feature flags\nexperimental = true\nhooks = false\n\n[tools]\ncustom = true\n";
+    let existing = "[features] # codex feature flags\nexperimental = true\nhooks = false\n\n[tools]\ncustom = true\n";
     fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
@@ -218,9 +224,7 @@ fn install_yes_shell_quotes_dangerous_binary_path() {
     apply_global_install(options).expect("install should quote dangerous shell chars");
 
     let config = fs::read_to_string(&fixture.codex_config).expect("codex config should read");
-    assert!(config.contains(
-        r##"command = "/opt/stateful dir/$(touch x)`cmd`/foo'bar/stateful""##
-    ));
+    assert!(config.contains(r##"command = "/opt/stateful dir/$(touch x)`cmd`/foo'bar/stateful""##));
     assert!(config.contains(
         r##"command = "'/opt/stateful dir/$(touch x)`cmd`/foo'\\''bar/stateful' hook pre-tool-use""##
     ));
@@ -283,7 +287,9 @@ fn single_backup_for(config_path: &Path) -> PathBuf {
 }
 
 fn backup_paths_for(config_path: &Path) -> Vec<PathBuf> {
-    let parent = config_path.parent().expect("config path should have parent");
+    let parent = config_path
+        .parent()
+        .expect("config path should have parent");
     if !parent.exists() {
         return Vec::new();
     }
