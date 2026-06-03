@@ -16,11 +16,12 @@ pub fn call_mcp_tool_in_repo(
     tool_name: impl Into<String>,
     arguments: Value,
 ) -> anyhow::Result<HttpResponse> {
-    let repo_root = repo_root.as_ref();
+    let start = repo_root.as_ref();
     let paths = GlobalPaths::from_env()?;
-    match repo_gate(&paths, repo_root)? {
-        RepoGate::Enabled { .. } => {
+    let repo_root = match repo_gate(&paths, start)? {
+        RepoGate::Enabled { repo_root } => {
             ensure_server(&paths)?;
+            repo_root
         }
         RepoGate::Disabled | RepoGate::OutsideGitRepo => {
             return Ok(HttpResponse {
@@ -32,9 +33,9 @@ pub fn call_mcp_tool_in_repo(
                 .to_string(),
             });
         }
-    }
-    let runtime = discover_runtime_with_global(repo_root, &paths)?;
-    call_mcp_tool(&runtime, repo_root, tool_name, arguments)
+    };
+    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
+    call_mcp_tool(&runtime, &repo_root, tool_name, arguments)
 }
 
 fn call_mcp_tool(

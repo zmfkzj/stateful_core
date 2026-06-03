@@ -87,16 +87,17 @@ pub fn handle_pre_tool_use_in_repo(
     input: &str,
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<HookOutcome> {
-    let repo_root = repo_root.as_ref();
+    let start = repo_root.as_ref();
     let paths = GlobalPaths::from_env()?;
-    match repo_gate(&paths, repo_root)? {
-        RepoGate::Enabled { .. } => {
+    let repo_root = match repo_gate(&paths, start)? {
+        RepoGate::Enabled { repo_root } => {
             ensure_server(&paths)?;
+            repo_root
         }
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(HookOutcome::Allow),
-    }
-    let runtime = discover_runtime_with_global(repo_root, &paths)?;
-    remember_current_session(repo_root, &runtime, input)?;
+    };
+    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
+    remember_current_session(&repo_root, &runtime, input)?;
     handle_pre_tool_use_with_runtime(input, Some(&runtime))
 }
 
@@ -104,16 +105,17 @@ pub fn handle_session_start_in_repo(
     input: &str,
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<()> {
-    let repo_root = repo_root.as_ref();
+    let start = repo_root.as_ref();
     let paths = GlobalPaths::from_env()?;
-    match repo_gate(&paths, repo_root)? {
-        RepoGate::Enabled { .. } => {
+    let repo_root = match repo_gate(&paths, start)? {
+        RepoGate::Enabled { repo_root } => {
             ensure_server(&paths)?;
+            repo_root
         }
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
-    }
-    let runtime = discover_runtime_with_global(repo_root, &paths)?;
-    remember_current_session(repo_root, &runtime, input)?;
+    };
+    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
+    remember_current_session(&repo_root, &runtime, input)?;
     handle_session_start_with_runtime(input, &runtime)
 }
 
@@ -121,20 +123,21 @@ pub fn handle_post_tool_use_in_repo(
     input: &str,
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<()> {
-    let repo_root = repo_root.as_ref();
+    let start = repo_root.as_ref();
     let paths = GlobalPaths::from_env()?;
-    match repo_gate(&paths, repo_root)? {
-        RepoGate::Enabled { .. } => {
+    let repo_root = match repo_gate(&paths, start)? {
+        RepoGate::Enabled { repo_root } => {
             ensure_server(&paths)?;
+            repo_root
         }
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
-    }
-    let runtime = discover_runtime_with_global(repo_root, &paths)?;
-    remember_current_session(repo_root, &runtime, input)?;
+    };
+    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
+    remember_current_session(&repo_root, &runtime, input)?;
     if let Err(error) = handle_post_tool_use_with_runtime(input, &runtime) {
         let input: SessionEventInput = serde_json::from_str(input)?;
         queue_session_heartbeat_outbox(
-            repo_root,
+            &repo_root,
             &runtime.workspace_id,
             &input.session_id,
             &error.to_string(),
@@ -148,30 +151,32 @@ pub fn handle_user_prompt_submit_in_repo(
     input: &str,
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<String> {
-    let repo_root = repo_root.as_ref();
+    let start = repo_root.as_ref();
     let paths = GlobalPaths::from_env()?;
-    match repo_gate(&paths, repo_root)? {
-        RepoGate::Enabled { .. } => {
+    let repo_root = match repo_gate(&paths, start)? {
+        RepoGate::Enabled { repo_root } => {
             ensure_server(&paths)?;
+            repo_root
         }
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(String::new()),
-    }
-    let runtime = discover_runtime_with_global(repo_root, &paths)?;
-    remember_current_session(repo_root, &runtime, input)?;
+    };
+    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
+    remember_current_session(&repo_root, &runtime, input)?;
     handle_user_prompt_submit_with_runtime(input, &runtime)
 }
 
 pub fn handle_stop_in_repo(input: &str, repo_root: impl AsRef<Path>) -> anyhow::Result<()> {
-    let repo_root = repo_root.as_ref();
+    let start = repo_root.as_ref();
     let paths = GlobalPaths::from_env()?;
-    match repo_gate(&paths, repo_root)? {
-        RepoGate::Enabled { .. } => {
+    let repo_root = match repo_gate(&paths, start)? {
+        RepoGate::Enabled { repo_root } => {
             ensure_server(&paths)?;
+            repo_root
         }
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
-    }
-    let runtime = discover_runtime_with_global(repo_root, &paths)?;
-    remember_current_session(repo_root, &runtime, input)?;
+    };
+    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
+    remember_current_session(&repo_root, &runtime, input)?;
     handle_stop_with_runtime(input, &runtime)
 }
 

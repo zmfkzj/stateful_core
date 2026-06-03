@@ -141,6 +141,50 @@ fn pre_tool_use_in_repo_records_current_session_for_mcp() {
 }
 
 #[test]
+fn pre_tool_use_from_enabled_subdir_records_session_at_repo_root() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-subdir-session-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    let subdir = repo_root.join("nested/worktree");
+    fs::create_dir_all(&subdir).expect("subdir should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = r#"{
+      "session_id": "s-subdir",
+      "cwd": "/repo/nested/worktree",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "apply_patch",
+      "tool_input": {
+        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
+      }
+    }"#;
+
+    let output = run_hook_subprocess(&subdir, &paths, &["hook", "pre-tool-use"], input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _request = rx.recv().expect("captured request should arrive");
+    let session = read_current_session_file(&repo_root).expect("root current session should read");
+    assert_eq!(session.session_id, "s-subdir");
+    assert!(!subdir.join(".stateful_core/runtime/session.json").exists());
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn pre_tool_use_in_disabled_repo_noops_without_runtime() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-disabled-test-{}",

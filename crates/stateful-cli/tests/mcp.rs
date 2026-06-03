@@ -105,6 +105,51 @@ fn mcp_validation_run_adds_repo_root_and_workspace_id() {
 }
 
 #[test]
+fn mcp_validation_run_from_enabled_subdir_sends_repo_root() {
+    let temp_root = temp_root("stateful-mcp-validation-subdir");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    let subdir = repo_root.join("nested/worktree");
+    fs::create_dir_all(&subdir).expect("subdir should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"passed"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo(
+        &subdir,
+        &paths,
+        &[
+            "mcp",
+            "call",
+            "state.validation.run",
+            r#"{"profile":"cargo-test"}"#,
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "stateful mcp call failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx.recv().expect("captured request should arrive");
+    let canonical_repo_root = repo_root
+        .canonicalize()
+        .expect("repo root should canonicalize");
+    let canonical_subdir = subdir.canonicalize().expect("subdir should canonicalize");
+    assert!(request.contains("POST /v1/validation/run HTTP/1.1"));
+    assert!(request.contains(&format!(
+        "\"repo_root\":\"{}\"",
+        canonical_repo_root.to_string_lossy()
+    )));
+    assert!(!request.contains(&format!(
+        "\"repo_root\":\"{}\"",
+        canonical_subdir.to_string_lossy()
+    )));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn mcp_tools_list_returns_stateful_tool_descriptors() {
     let temp_root = temp_root("stateful-mcp-tools-list");
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
