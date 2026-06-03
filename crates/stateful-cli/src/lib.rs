@@ -321,6 +321,7 @@ pub struct DoctorReport {
 pub fn doctor_report(repo_root: impl AsRef<Path>) -> DoctorReport {
     let repo_root = repo_root.as_ref();
     let hooks_json = repo_root.join(".codex").join("hooks.json").is_file();
+    let codex_config_toml = repo_root.join(".codex").join("config.toml").is_file();
     let config_yml = repo_root.join(".stateful").join("config.yml").is_file();
     let validation_yml = repo_root.join(".stateful").join("validation.yml").is_file();
     let runtime_server_json = repo_root
@@ -331,7 +332,7 @@ pub fn doctor_report(repo_root: impl AsRef<Path>) -> DoctorReport {
     let state_db = state_db_path(repo_root).is_file();
 
     DoctorReport {
-        installed: hooks_json && config_yml && validation_yml,
+        installed: codex_config_toml && config_yml && validation_yml,
         hooks_json,
         config_yml,
         validation_yml,
@@ -353,7 +354,10 @@ pub fn install_repo_local(
     fs::create_dir_all(repo_root.join(".codex/skills/stateful-command-policy"))?;
     fs::create_dir_all(repo_root.join(".stateful"))?;
 
-    fs::write(repo_root.join(".codex/hooks.json"), hooks_json(binary_path))?;
+    let hooks_json = repo_root.join(".codex/hooks.json");
+    if hooks_json.exists() {
+        fs::remove_file(&hooks_json)?;
+    }
     fs::write(
         repo_root.join(".codex/config.toml"),
         mcp_config_toml(binary_path),
@@ -393,12 +397,14 @@ pub(crate) fn ensure_repo_local_install_can_write(repo_root: &Path) -> anyhow::R
 fn is_stateful_owned_codex_file(path: &Path) -> anyhow::Result<bool> {
     let contents = fs::read_to_string(path)?;
 
-    match path.file_name().and_then(|name| name.to_str()) {
-        Some("hooks.json") => {
-            let value: serde_json::Value = serde_json::from_str(&contents)?;
-            Ok(value
-                .get(STATEFUL_CODEX_JSON_MARKER)
-                .and_then(serde_json::Value::as_bool)
+        match path.file_name().and_then(|name| name.to_str()) {
+            Some("hooks.json") => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+                    return Ok(false);
+                };
+                Ok(value
+                    .get(STATEFUL_CODEX_JSON_MARKER)
+                    .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false))
         }
         Some("config.toml") => Ok(contents
@@ -406,66 +412,6 @@ fn is_stateful_owned_codex_file(path: &Path) -> anyhow::Result<bool> {
             .any(|line| line.trim() == STATEFUL_CODEX_TOML_MARKER)),
         _ => Ok(false),
     }
-}
-
-fn hooks_json(binary_path: &str) -> String {
-    let command = if Path::new(binary_path).is_absolute() {
-        binary_path.to_string()
-    } else {
-        format!("$(git rev-parse --show-toplevel)/{binary_path}")
-    };
-    let command_prefix = format!(
-        "\"{}\" hook",
-        command.replace('\\', "\\\\").replace('"', "\\\"")
-    );
-    let value = serde_json::json!({
-        STATEFUL_CODEX_JSON_MARKER: true,
-        "hooks": {
-            "SessionStart": [{
-                "matcher": "startup|resume|clear|compact",
-                "hooks": [{
-                    "type": "command",
-                    "command": format!("{command_prefix} session-start"),
-                    "statusMessage": "Loading stateful current state"
-                }]
-            }],
-            "UserPromptSubmit": [{
-                "hooks": [{
-                    "type": "command",
-                    "command": format!("{command_prefix} user-prompt-submit"),
-                    "statusMessage": "Checking stateful intent context"
-                }]
-            }],
-            "PreToolUse": [{
-                "matcher": "Bash|apply_patch|Edit|Write|mcp__filesystem__.*",
-                "hooks": [{
-                    "type": "command",
-                    "command": format!("{command_prefix} pre-tool-use"),
-                    "statusMessage": "Authorizing stateful tool use"
-                }]
-            }],
-            "PostToolUse": [{
-                "matcher": "Bash|apply_patch|Edit|Write|mcp__filesystem__.*",
-                "hooks": [{
-                    "type": "command",
-                    "command": format!("{command_prefix} post-tool-use"),
-                    "statusMessage": "Recording stateful activity"
-                }]
-            }],
-            "Stop": [{
-                "hooks": [{
-                    "type": "command",
-                    "command": format!("{command_prefix} stop"),
-                    "statusMessage": "Finalizing stateful activity"
-                }]
-            }]
-        }
-    });
-
-    format!(
-        "{}\n",
-        serde_json::to_string_pretty(&value).expect("static hook config should serialize")
-    )
 }
 
 fn mcp_config_toml(binary_path: &str) -> String {

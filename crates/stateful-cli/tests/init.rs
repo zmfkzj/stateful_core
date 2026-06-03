@@ -3,7 +3,7 @@ use std::fs;
 use stateful_cli::{GlobalPaths, doctor_report, enable_repo, install_repo_local};
 
 #[test]
-fn install_repo_local_writes_codex_hooks_and_stateful_config() {
+fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     let temp_root = std::env::temp_dir().join(format!("stateful-init-test-{}", std::process::id()));
     if temp_root.exists() {
         fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
@@ -12,21 +12,7 @@ fn install_repo_local_writes_codex_hooks_and_stateful_config() {
 
     install_repo_local(&temp_root, "target/debug/stateful").expect("repo install should succeed");
 
-    let hooks =
-        fs::read_to_string(temp_root.join(".codex/hooks.json")).expect("hooks.json should exist");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&hooks).expect("hooks should be valid json");
-    assert_eq!(parsed["stateful_core_owned"], true);
-    assert!(hooks.contains("\"SessionStart\""));
-    assert!(hooks.contains("\"PreToolUse\""));
-    assert!(hooks.contains("\"PostToolUse\""));
-    assert!(hooks.contains("\"Stop\""));
-    assert!(hooks.contains("target/debug/stateful"));
-    assert!(hooks.contains("hook pre-tool-use"));
-    assert_eq!(
-        parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-        "\"$(git rev-parse --show-toplevel)/target/debug/stateful\" hook pre-tool-use"
-    );
+    assert!(!temp_root.join(".codex/hooks.json").exists());
 
     let config =
         fs::read_to_string(temp_root.join(".stateful/config.yml")).expect("config should exist");
@@ -37,7 +23,9 @@ fn install_repo_local_writes_codex_hooks_and_stateful_config() {
         .expect("codex config should exist");
     assert!(codex_config.contains("# stateful-core-owned"));
     assert!(codex_config.contains("hooks = true"));
+    assert!(codex_config.contains("[mcp_servers.stateful]"));
     assert!(codex_config.contains("[[hooks.PreToolUse]]"));
+    assert!(codex_config.contains("$(git rev-parse --show-toplevel)/target/debug/stateful"));
     assert!(codex_config.contains("hook pre-tool-use"));
 
     let command_policy_skill = fs::read_to_string(
@@ -83,6 +71,81 @@ fn install_repo_local_refuses_existing_non_stateful_codex_config() {
 }
 
 #[test]
+fn install_repo_local_refuses_existing_non_stateful_hooks_json() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-init-existing-hooks-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(temp_root.join(".codex")).expect("codex dir should be creatable");
+    let hooks_path = temp_root.join(".codex/hooks.json");
+    let hooks = r#"{
+  "hooks": {
+    "PreToolUse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "custom-tool hook pre-tool-use"
+      }]
+    }]
+  }
+}
+"#;
+    fs::write(&hooks_path, hooks).expect("existing hooks should be writable");
+
+    let error = install_repo_local(&temp_root, "target/debug/stateful")
+        .expect_err("repo install should refuse existing non-stateful hooks");
+
+    assert!(error.to_string().contains("would overwrite existing Codex config"));
+    let saved_hooks = fs::read_to_string(hooks_path).expect("existing hooks should remain readable");
+    assert_eq!(saved_hooks, hooks);
+    assert!(!temp_root.join(".codex/config.toml").exists());
+    assert!(!temp_root.join(".stateful/config.yml").exists());
+    assert!(!temp_root.join(".stateful/validation.yml").exists());
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn install_repo_local_removes_existing_stateful_owned_hooks_json() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-init-old-hooks-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(temp_root.join(".codex")).expect("codex dir should be creatable");
+    fs::write(
+        temp_root.join(".codex/hooks.json"),
+        r#"{
+  "stateful_core_owned": true,
+  "hooks": {
+    "PreToolUse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "old-stateful hook pre-tool-use"
+      }]
+    }]
+  }
+}
+"#,
+    )
+    .expect("old stateful-owned hooks should be writable");
+
+    install_repo_local(&temp_root, "target/debug/stateful").expect("repo install should succeed");
+
+    assert!(!temp_root.join(".codex/hooks.json").exists());
+    let codex_config = fs::read_to_string(temp_root.join(".codex/config.toml"))
+        .expect("codex config should exist");
+    assert!(codex_config.contains("# stateful-core-owned"));
+    assert!(codex_config.contains("[[hooks.PreToolUse]]"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn install_repo_local_output_can_be_enabled_as_repo_local_codex() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-init-enable-repo-local-test-{}",
@@ -100,10 +163,7 @@ fn install_repo_local_output_can_be_enabled_as_repo_local_codex() {
     let entry = enable_repo(&paths, &temp_root, true).expect("repo should enable");
 
     assert!(entry.enabled);
-    let hooks =
-        fs::read_to_string(temp_root.join(".codex/hooks.json")).expect("hooks should exist");
-    let hooks: serde_json::Value = serde_json::from_str(&hooks).expect("hooks should be json");
-    assert_eq!(hooks["stateful_core_owned"], true);
+    assert!(!temp_root.join(".codex/hooks.json").exists());
     let config =
         fs::read_to_string(temp_root.join(".codex/config.toml")).expect("config should exist");
     assert!(config.contains("# stateful-core-owned"));
@@ -125,14 +185,7 @@ fn install_repo_local_preserves_absolute_binary_paths() {
     install_repo_local(&temp_root, "/opt/stateful/bin/stateful")
         .expect("repo install should succeed");
 
-    let hooks =
-        fs::read_to_string(temp_root.join(".codex/hooks.json")).expect("hooks.json should exist");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&hooks).expect("hooks should be valid json");
-    assert_eq!(
-        parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-        "\"/opt/stateful/bin/stateful\" hook pre-tool-use"
-    );
+    assert!(!temp_root.join(".codex/hooks.json").exists());
 
     let config =
         fs::read_to_string(temp_root.join(".codex/config.toml")).expect("config should exist");
@@ -155,7 +208,7 @@ fn doctor_report_marks_repo_local_installation() {
     let report = doctor_report(&temp_root);
 
     assert!(report.installed);
-    assert!(report.hooks_json);
+    assert!(!report.hooks_json);
     assert!(report.config_yml);
     assert!(report.validation_yml);
     assert!(!report.runtime_server_json);

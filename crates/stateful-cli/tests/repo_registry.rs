@@ -92,22 +92,18 @@ fn repo_local_codex_uses_absolute_binary_path() {
     let entry = enable_repo(&fixture.paths, &repo, true).expect("repo should enable");
 
     assert_eq!(entry.codex_mode, CodexMode::RepoLocal);
-    let hooks = fs::read_to_string(repo.join(".codex/hooks.json")).expect("hooks should exist");
-    let hooks: serde_json::Value = serde_json::from_str(&hooks).expect("hooks should be json");
-    let command = hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-        .as_str()
-        .expect("hook command should be a string");
-
-    assert!(!command.contains("$(git rev-parse --show-toplevel)/stateful"));
-    assert!(
-        command.starts_with("\"/"),
-        "repo-local codex command should use an absolute binary path, got {command:?}"
-    );
-    assert_eq!(hooks["stateful_core_owned"], true);
+    assert!(!repo.join(".codex/hooks.json").exists());
 
     let config =
         fs::read_to_string(repo.join(".codex/config.toml")).expect("config should exist");
     assert!(config.contains("# stateful-core-owned"));
+    assert!(config.contains("[mcp_servers.stateful]"));
+    assert!(config.contains("[[hooks.PreToolUse]]"));
+    assert!(!config.contains("$(git rev-parse --show-toplevel)/stateful"));
+    assert!(
+        config.contains("command = \"/"),
+        "repo-local codex config should use absolute command paths, got {config:?}"
+    );
 }
 
 #[test]
