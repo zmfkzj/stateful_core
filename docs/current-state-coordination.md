@@ -169,11 +169,11 @@ next resumable reservation, or receiving that context from a lifecycle hook.
 The state server does not wake a sleeping Codex process by itself; external
 orchestration can build on the notification and resume APIs.
 
-V1 exposes scheduling through immediate request/response plus polling. Intent
-request APIs return `granted`, `queued`, `reserved`, `canceled`, or `expired`
-state without blocking indefinitely. Agents can poll notifications or use
-`resume next`; the CLI may provide `intent wait --timeout <seconds>` as a
-convenience wrapper around polling.
+Full scheduling should work through immediate request/response plus polling.
+Future intent request APIs should return `granted`, `queued`, `reserved`,
+`canceled`, or `expired` state without blocking indefinitely. The prototype
+exposes notifications and `resume next`; a future CLI may provide
+`intent wait --timeout <seconds>` as a convenience wrapper around polling.
 
 `request_id` is required for idempotency. Repeating the same request id returns
 the existing request state and must not create duplicate queue entries. A queued
@@ -376,10 +376,11 @@ git rev-parse
 ```
 
 Anything outside the allowlist that appears to mutate files, start long-running
-processes, run tests, install packages, redirect output, pipe into mutation
-commands, or produce ambiguous side effects is denied by default.
-
-Raw Bash test commands are not allowlisted in v1. Tests should run through
+processes, run unrecognized tests, install packages, redirect output, pipe into
+mutation commands, or produce ambiguous side effects is denied by default.
+Common read-only test commands such as `cargo test`, `npm test`, `pnpm test`,
+`yarn test`, `pytest`, and `go test` are allowlisted by the prototype Bash
+classifier. Arbitrary or project-specific test commands should run through
 `state.validation.run` or an equivalent controlled validation action backed by a
 profile. Validation profiles may allow cache or artifact writes, but source-tree
 writes must be denied unless a later policy explicitly permits them.

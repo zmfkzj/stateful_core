@@ -88,10 +88,7 @@ GET  /v1/current
 GET  /v1/events
 POST /v1/session/register
 POST /v1/session/heartbeat
-POST /v1/intent/request
 POST /v1/intent/declare
-POST /v1/intent/claim
-POST /v1/intent/cancel
 POST /v1/lease/acquire
 POST /v1/lease/release
 POST /v1/activity/observe
@@ -104,6 +101,7 @@ POST /v1/validation/run
 POST /v1/notifications/poll
 POST /v1/resume/next
 POST /v1/outbox/sync
+GET  /v1/runtime/identity
 ```
 
 `/v1/authorize` is the single policy entry point for supported tool actions.
@@ -111,10 +109,12 @@ POST /v1/outbox/sync
 engine and must not create leases or write-authorizing state.
 `/v1/notifications/poll` returns pending coordination notifications for a
 session. `/v1/resume/next` returns the first active reservation that the session
-can claim after rereading the target. `/v1/intent/request` returns immediately
-with `granted`, `queued`, `reserved`, `canceled`, or `expired` request state.
-`/v1/intent/claim` converts a reservation into active write-authorizing intent
-and active leases. `/v1/intent/cancel` cancels a queued or reserved request.
+can claim after rereading the target. `/v1/runtime/identity` is an authenticated
+server identity endpoint used by `stateful server stop` to verify that the
+runtime file and process id describe the same stateful server. Full scheduling
+endpoints such as `intent/request`, `intent/claim`, and `intent/cancel` remain
+future contract work; the prototype implements `intent/declare` plus
+notifications and resume discovery.
 
 MCP tools map directly onto these endpoints. MCP handlers do not implement
 policy branches; they validate tool arguments, call the HTTP API, and return the
@@ -188,12 +188,12 @@ entry for every requested resource queue and none of those resources has an
 active lease. `request_id` is the idempotency key: repeating a request with the
 same id returns the existing state and must not enqueue a duplicate.
 
-V1 scheduling APIs return immediately with request state. Blocking waits are a
-client convenience implemented by polling notifications or resume endpoints, for
-example `stateful intent wait --timeout <seconds>`. Queued and reserved requests
-can be canceled explicitly, and session or activity finalization cancels that
-session's queued and reserved requests. Explicit user overrides do not reorder
-the wait queue or transfer reservations.
+Full scheduling APIs should return immediately with request state. Blocking
+waits can be implemented as a future client convenience by polling
+notifications or resume endpoints. Queued and reserved request cancellation is
+future contract work. Session or activity finalization should cancel that
+session's queued and reserved requests once those queues are implemented.
+Explicit user overrides do not reorder the wait queue or transfer reservations.
 
 ## SQLite Storage
 
@@ -295,8 +295,8 @@ repo-local .stateful_core/runtime/server.json compatibility fallback
 ```
 
 `server.json` contains `base_url`, `token`, `pid`, `workspace_id`,
-`protocol_version`, and `started_at`. It must be written with user-only file
-permissions where the platform supports them.
+`protocol_version`, and `started_at`. The prototype writes it with normal local
+filesystem defaults; user-only file permissions are a future hardening item.
 
 ## Local HTTP Trust
 
@@ -369,10 +369,12 @@ leases while the state server is unavailable.
 The implementation should include a small CLI for setup and debugging:
 
 ```text
+stateful init
 stateful install [--yes]
 stateful enable [--repo <path>] [--repo-local-codex]
 stateful disable [--repo <path>]
 stateful repos list
+stateful server
 stateful server start [--foreground]
 stateful server stop
 stateful server status
@@ -381,6 +383,12 @@ stateful current
 stateful events
 stateful doctor
 stateful validate <profile>
+stateful intent declare [--session-id <id>] [--workspace-id <id>] <paths...>
+stateful notifications poll [--session-id <id>] [--workspace-id <id>]
+stateful resume next [--session-id <id>] [--workspace-id <id>]
+stateful mcp call <tool> [arguments-json]
+stateful mcp serve
+stateful hook <event>
 stateful sync-outbox
 stateful commit -m <message> -- <paths...>
 ```
@@ -391,10 +399,26 @@ opts a repo into enforcement and can install repo-local Codex hooks with
 without `--foreground` uses the detached lazy lifecycle. Bare legacy
 `stateful server` and `stateful server start --foreground` run in the
 foreground and write runtime discovery. `stateful doctor` checks hook
-installation, global install fields, repo enabled status, server reachability,
-config schema, SQLite migrations, and validation profile parseability.
+installation files, repo config files, global install fields, repo enabled
+status, and global path or registry errors. Active server reachability, config
+schema validation, SQLite migration inspection, and validation profile
+parseability checks are future doctor extensions.
 `stateful commit -m <message> -- <paths...>` is the structured commit wrapper.
 Raw `git add` and `git commit` through Bash remain denied.
+
+## Prototype Verification
+
+The prototype alignment pass must run:
+
+```text
+cargo test --workspace
+./target/debug/stateful doctor
+```
+
+The Task 10 verification run passed `cargo test --workspace`. The doctor command
+returned JSON containing the global install fields `global_config_yml`,
+`global_runtime_server_json`, `global_state_db`, `repo_enabled`,
+`global_paths_error`, and `global_registry_error`.
 
 ## Config Defaults
 

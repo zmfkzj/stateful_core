@@ -255,11 +255,11 @@ git rev-parse
 ```
 
 Commands outside the allowlist are denied when they appear to mutate files,
-start long-running processes, run tests, install packages, redirect output, pipe
-into mutation commands, or have ambiguous side effects. Raw Bash tests are not
-promoted into the allowlist.
-
-Raw Bash test commands are not allowlisted in v1. Tests should run through
+start long-running processes, run unrecognized tests, install packages, redirect
+output, pipe into mutation commands, or have ambiguous side effects. Common
+read-only test commands such as `cargo test`, `npm test`, `pnpm test`,
+`yarn test`, `pytest`, and `go test` are allowlisted by the prototype Bash
+classifier. Arbitrary or project-specific test commands should run through
 validation profiles owned by the state server so source-tree writes can be
 denied while cache or artifact writes can be controlled.
 
