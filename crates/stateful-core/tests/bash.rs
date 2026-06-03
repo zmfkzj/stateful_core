@@ -14,6 +14,24 @@ fn redirect_write_is_denied() {
 }
 
 #[test]
+fn shell_control_syntax_is_denied_before_read_only_allowlists() {
+    let rejected = [
+        "stateful status\nrm docs/a.md",
+        "stateful status & rm docs/a.md",
+        "stateful status>docs/a.md",
+        "rg auth\nrm src/a.rs",
+    ];
+
+    for command in rejected {
+        assert_eq!(
+            classify_bash(command).kind,
+            BashKind::Mutating,
+            "command `{command}` should be denied before any read-only allowlist"
+        );
+    }
+}
+
+#[test]
 fn raw_test_commands_are_allowed_as_non_code_edits() {
     assert_eq!(classify_bash("cargo test").kind, BashKind::ReadOnly);
     assert_eq!(

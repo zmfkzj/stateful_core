@@ -74,6 +74,40 @@ fn structured_commit_rejects_broad_pathspecs() {
 }
 
 #[test]
+fn structured_commit_rejects_deleted_tracked_directory_before_staging() {
+    let root = git_repo("stateful-commit-deleted-directory");
+    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
+    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
+    fs::write(root.path().join("docs/other.md"), "other\n").expect("other should write");
+    git(root.path(), &["add", "docs"]);
+    git(root.path(), &["commit", "-m", "docs: seed"]);
+    fs::remove_dir_all(root.path().join("docs")).expect("docs dir should be removable");
+
+    let result = run_structured_commit(CommitRequest {
+        repo_root: root.path().to_path_buf(),
+        message: "docs: remove plan".to_string(),
+        paths: vec!["docs".to_string()],
+        session_id: Some("s1".to_string()),
+        workspace_id: Some("w1".to_string()),
+        authorize: Some(Box::new(|path| {
+            panic!("directory pathspec `{path}` should be rejected before authorization")
+        })),
+    });
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("explicit file paths are required")
+    );
+    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
+    assert!(
+        staged.is_empty(),
+        "deleted tracked directory should not mutate index"
+    );
+}
+
+#[test]
 fn structured_commit_rejects_unrelated_staged_changes() {
     let root = git_repo("stateful-commit-unrelated-staged");
     fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");

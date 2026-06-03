@@ -65,7 +65,11 @@ fn normalize_explicit_paths(repo_root: &Path, paths: &[String]) -> anyhow::Resul
         if is_broad_pathspec(repo_root, path) {
             anyhow::bail!("explicit file paths are required; rejected pathspec `{path}`");
         }
-        normalized.push(path.replace('\\', "/"));
+        let normalized_path = path.replace('\\', "/");
+        if matches_tracked_directory(repo_root, &normalized_path)? {
+            anyhow::bail!("explicit file paths are required; rejected pathspec `{path}`");
+        }
+        normalized.push(normalized_path);
     }
 
     normalized.sort();
@@ -92,6 +96,14 @@ fn is_broad_pathspec(repo_root: &Path, path: &str) -> bool {
         || path.contains('[')
         || path.contains(']')
         || repo_root.join(path).is_dir()
+}
+
+fn matches_tracked_directory(repo_root: &Path, path: &str) -> anyhow::Result<bool> {
+    let tracked = git_stdout(repo_root, &["ls-files", "--", path])?;
+    Ok(tracked
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .any(|line| line.replace('\\', "/") != path))
 }
 
 fn deny_unrelated_staged_changes(

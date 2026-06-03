@@ -23,6 +23,13 @@ pub fn classify_bash(command: &str) -> BashClassification {
         };
     }
 
+    if contains_shell_control_syntax(trimmed) {
+        return BashClassification {
+            kind: BashKind::Mutating,
+            reason: "command uses shell control syntax".to_string(),
+        };
+    }
+
     if is_validation_command(&normalized) {
         return BashClassification {
             kind: BashKind::ReadOnly,
