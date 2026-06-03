@@ -1229,6 +1229,7 @@ fn run_preflight_checks(options: &RunOptions) -> Result<()> {
             Path::new("."),
             None,
             None,
+            &[],
         )
         .context("auth preflight failed; benchmark aborted before spawning agents")?;
     }
@@ -1239,6 +1240,7 @@ fn run_preflight_checks(options: &RunOptions) -> Result<()> {
             Path::new("."),
             None,
             None,
+            &[],
         )
         .context("budget preflight failed; benchmark aborted before spawning agents")?;
     }
@@ -1277,6 +1279,12 @@ fn run_pair_inner(
 ) -> Result<()> {
     let pair_dir = run_dir.join(sanitize_id(&pair.pair_id));
     let workspace = pair_dir.join("workspace");
+    let stateful_home = pair_dir.join("stateful-home");
+    let stateful_env: Vec<(&str, &Path)> = if options.mode == RunMode::Stateful {
+        vec![("STATEFUL_HOME", stateful_home.as_path())]
+    } else {
+        Vec::new()
+    };
     let stateful_workspace_id = format!("{}-{}", options.run_id, pair.pair_id);
     fs::create_dir_all(&workspace)?;
     let pair_json = pair_dir.join("pair.json");
@@ -1303,6 +1311,7 @@ fn run_pair_inner(
             &pair_dir,
             None,
             None,
+            &stateful_env,
         )?;
     }
 
@@ -1317,6 +1326,7 @@ fn run_pair_inner(
                 &pair_dir,
                 &options.stateful_binary,
                 &stateful_workspace_id,
+                &stateful_home,
             )?);
         }
 
@@ -1347,6 +1357,7 @@ fn run_pair_inner(
             &workspace,
             &agent_a_stdout,
             &agent_a_stderr,
+            &stateful_env,
         )?;
         let mut child_b = spawn_agent(
             &options.agent_cmd_template,
@@ -1362,6 +1373,7 @@ fn run_pair_inner(
             &workspace,
             &agent_b_stdout,
             &agent_b_stderr,
+            &stateful_env,
         )?;
 
         let agent_logs = [
@@ -1412,6 +1424,7 @@ fn run_pair_inner(
                 &workspace,
                 Some(&stdout),
                 Some(&stderr),
+                &stateful_env,
             )?;
             Some("harness-result.json".to_string())
         } else {
@@ -1553,18 +1566,20 @@ fn spawn_agent(
     workspace: &Path,
     stdout_path: &Path,
     stderr_path: &Path,
+    extra_env: &[(&str, &Path)],
 ) -> Result<Child> {
     let command = render_template(template, values);
     let stdout = File::create(stdout_path)?;
     let stderr = File::create(stderr_path)?;
-    ProcessCommand::new("sh")
+    let mut process = ProcessCommand::new("sh");
+    process
         .arg("-c")
         .arg(command)
         .current_dir(workspace)
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .context("failed to spawn agent command")
+        .stderr(Stdio::from(stderr));
+    apply_extra_env(&mut process, extra_env);
+    process.spawn().context("failed to spawn agent command")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1798,12 +1813,14 @@ fn start_stateful_workspace(
     pair_dir: &Path,
     stateful_binary: &str,
     workspace_id: &str,
+    stateful_home: &Path,
 ) -> Result<Child> {
     run_shell_command(
         &format!("{stateful_binary} init --binary {stateful_binary}"),
         workspace,
         None,
         None,
+        &[("STATEFUL_HOME", stateful_home)],
     )
     .context("failed to initialize stateful hooks in benchmark workspace")?;
 
@@ -1824,27 +1841,34 @@ fn start_stateful_workspace(
             workspace_id,
         ])
         .current_dir(workspace)
+        .env("STATEFUL_HOME", stateful_home)
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .spawn()
         .context("failed to start stateful server in benchmark workspace")?;
-    wait_for_stateful_ready(workspace, &mut child, Duration::from_secs(10)).with_context(|| {
-        format!(
-            "stateful server did not become ready; see {} and {}",
-            pair_dir.join("stateful-server.stdout.log").display(),
-            pair_dir.join("stateful-server.stderr.log").display()
-        )
-    })?;
+    wait_for_stateful_ready(stateful_home, &mut child, Duration::from_secs(10)).with_context(
+        || {
+            format!(
+                "stateful server did not become ready; see {} and {}",
+                pair_dir.join("stateful-server.stdout.log").display(),
+                pair_dir.join("stateful-server.stderr.log").display()
+            )
+        },
+    )?;
     Ok(child)
 }
 
-fn wait_for_stateful_ready(workspace: &Path, child: &mut Child, timeout: Duration) -> Result<()> {
+fn wait_for_stateful_ready(
+    stateful_home: &Path,
+    child: &mut Child,
+    timeout: Duration,
+) -> Result<()> {
     let started = Instant::now();
     while started.elapsed() < timeout {
         if let Some(status) = child.try_wait()? {
             anyhow::bail!("stateful server exited before readiness with status {status}");
         }
-        if stateful_current_is_ready(workspace) {
+        if stateful_current_is_ready(stateful_home) {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(50));
@@ -1853,8 +1877,8 @@ fn wait_for_stateful_ready(workspace: &Path, child: &mut Child, timeout: Duratio
     anyhow::bail!("timed out waiting for stateful server readiness")
 }
 
-fn stateful_current_is_ready(workspace: &Path) -> bool {
-    let runtime_path = workspace.join(".stateful_core/runtime/server.json");
+fn stateful_current_is_ready(stateful_home: &Path) -> bool {
+    let runtime_path = stateful_home.join("runtime/server.json");
     let Ok(runtime) = read_json_file::<Value>(&runtime_path) else {
         return false;
     };
@@ -1882,9 +1906,11 @@ fn run_shell_command(
     cwd: &Path,
     stdout_path: Option<&Path>,
     stderr_path: Option<&Path>,
+    extra_env: &[(&str, &Path)],
 ) -> Result<()> {
     let mut process = ProcessCommand::new("sh");
     process.arg("-c").arg(command).current_dir(cwd);
+    apply_extra_env(&mut process, extra_env);
     if let Some(path) = stdout_path {
         process.stdout(Stdio::from(File::create(path)?));
     }
@@ -1896,6 +1922,12 @@ fn run_shell_command(
         anyhow::bail!("command failed with status {status}: {command}");
     }
     Ok(())
+}
+
+fn apply_extra_env(process: &mut ProcessCommand, extra_env: &[(&str, &Path)]) {
+    for (key, value) in extra_env {
+        process.env(key, value);
+    }
 }
 
 fn write_combined_diff(workspace: &Path, output_path: &Path) -> Result<()> {
@@ -2068,6 +2100,12 @@ pub struct ModeComparisonSummary {
     pub wall_time_ms: u64,
     pub token_count: Option<u64>,
     pub tool_call_count: Option<u64>,
+    pub preserved_edit_count: u64,
+    pub missing_expected_line_count: u64,
+    pub false_block_count: u64,
+    pub missed_conflict_count: u64,
+    pub manual_intervention_count: u64,
+    pub time_to_converge_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2689,12 +2727,20 @@ fn summarize_mode_for_manifest(
         wall_time_ms: 0,
         token_count: None,
         tool_call_count: None,
+        preserved_edit_count: 0,
+        missing_expected_line_count: 0,
+        false_block_count: 0,
+        missed_conflict_count: 0,
+        manual_intervention_count: 0,
+        time_to_converge_ms: None,
     };
     let mut score_sum = 0.0;
     let mut token_count = 0u64;
     let mut tool_call_count = 0u64;
+    let mut time_to_converge_ms = 0u64;
     let mut has_tokens = false;
     let mut has_tool_calls = false;
+    let mut has_time_to_converge = false;
 
     for pair_id in pair_ids {
         let Some(pair) = pairs.get(pair_id) else {
@@ -2713,6 +2759,11 @@ fn summarize_mode_for_manifest(
         summary.stale_intents += pair.collisions.stale_intents;
         summary.timeouts += pair.collisions.timeouts;
         summary.long_idle_periods += pair.collisions.long_idle_periods;
+        summary.preserved_edit_count += pair.preserved_edit_count;
+        summary.missing_expected_line_count += pair.missing_expected_line_count;
+        summary.false_block_count += pair.false_block_count;
+        summary.missed_conflict_count += pair.missed_conflict_count;
+        summary.manual_intervention_count += pair.manual_intervention_count;
         count_comparison_task_outcome(pair.functional.task_a, &mut summary);
         count_comparison_task_outcome(pair.functional.task_b, &mut summary);
 
@@ -2723,6 +2774,10 @@ fn summarize_mode_for_manifest(
         if let Some(count) = pair.tool_call_count {
             has_tool_calls = true;
             tool_call_count += count;
+        }
+        if let Some(count) = pair.time_to_converge_ms {
+            has_time_to_converge = true;
+            time_to_converge_ms += count;
         }
 
         match comparison_status(Some(pair)) {
@@ -2750,6 +2805,7 @@ fn summarize_mode_for_manifest(
     }
     summary.token_count = has_tokens.then_some(token_count);
     summary.tool_call_count = has_tool_calls.then_some(tool_call_count);
+    summary.time_to_converge_ms = has_time_to_converge.then_some(time_to_converge_ms);
 
     summary
 }
@@ -2893,8 +2949,33 @@ fn render_comparison_markdown(report: &ComparisonReport) -> String {
         report.stateful.coordinated_blocks, report.no_state.coordinated_blocks
     ));
     output.push_str(&format!(
-        "| Denied writes | {} | {} |\n\n",
+        "| Denied writes | {} | {} |\n",
         report.stateful.denied_writes, report.no_state.denied_writes
+    ));
+    output.push_str(&format!(
+        "| Preserved edit count | {} | {} |\n",
+        report.stateful.preserved_edit_count, report.no_state.preserved_edit_count
+    ));
+    output.push_str(&format!(
+        "| Missing expected line count | {} | {} |\n",
+        report.stateful.missing_expected_line_count, report.no_state.missing_expected_line_count
+    ));
+    output.push_str(&format!(
+        "| False block count | {} | {} |\n",
+        report.stateful.false_block_count, report.no_state.false_block_count
+    ));
+    output.push_str(&format!(
+        "| Missed conflict count | {} | {} |\n",
+        report.stateful.missed_conflict_count, report.no_state.missed_conflict_count
+    ));
+    output.push_str(&format!(
+        "| Manual intervention count | {} | {} |\n",
+        report.stateful.manual_intervention_count, report.no_state.manual_intervention_count
+    ));
+    output.push_str(&format!(
+        "| Time to converge ms | {} | {} |\n\n",
+        format_optional_count(report.stateful.time_to_converge_ms),
+        format_optional_count(report.no_state.time_to_converge_ms)
     ));
 
     if !report.excluded_pairs.is_empty() {
@@ -2915,6 +2996,12 @@ fn render_comparison_markdown(report: &ComparisonReport) -> String {
 fn format_optional_score(score: Option<f64>) -> String {
     score
         .map(|score| format!("{score:.3}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn format_optional_count(count: Option<u64>) -> String {
+    count
+        .map(|count| count.to_string())
         .unwrap_or_else(|| "n/a".to_string())
 }
 
@@ -2941,6 +3028,12 @@ pub struct ReportSummary {
     pub wall_time_ms: u64,
     pub token_count: Option<u64>,
     pub tool_call_count: Option<u64>,
+    pub preserved_edit_count: u64,
+    pub missing_expected_line_count: u64,
+    pub false_block_count: u64,
+    pub missed_conflict_count: u64,
+    pub manual_intervention_count: u64,
+    pub time_to_converge_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2952,6 +3045,12 @@ pub struct PairReport {
     pub wall_time_ms: u64,
     pub token_count: Option<u64>,
     pub tool_call_count: Option<u64>,
+    pub preserved_edit_count: u64,
+    pub missing_expected_line_count: u64,
+    pub false_block_count: u64,
+    pub missed_conflict_count: u64,
+    pub manual_intervention_count: u64,
+    pub time_to_converge_ms: Option<u64>,
 }
 
 pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
@@ -2970,8 +3069,10 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
     let mut score_sums = ScoreSums::default();
     let mut token_count = 0u64;
     let mut tool_call_count = 0u64;
+    let mut time_to_converge_ms = 0u64;
     let mut has_tokens = false;
     let mut has_tool_calls = false;
+    let mut has_time_to_converge = false;
 
     for pair_dir in pair_dirs {
         let record: PairRunRecord = read_json_file(pair_dir.join("pair-run.json"))?;
@@ -2998,6 +3099,11 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
         summary.stale_intents += collisions.stale_intents;
         summary.timeouts += collisions.timeouts;
         summary.long_idle_periods += collisions.long_idle_periods;
+        summary.preserved_edit_count += harness.metrics.preserved_edit_count;
+        summary.missing_expected_line_count += harness.metrics.missing_expected_line_count;
+        summary.false_block_count += harness.metrics.false_block_count;
+        summary.missed_conflict_count += harness.metrics.missed_conflict_count;
+        summary.manual_intervention_count += harness.metrics.manual_intervention_count;
         count_task_outcome(functional.task_a, &mut summary);
         count_task_outcome(functional.task_b, &mut summary);
 
@@ -3012,6 +3118,10 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
             has_tool_calls = true;
             tool_call_count += count;
         }
+        if let Some(count) = harness.metrics.time_to_converge_ms {
+            has_time_to_converge = true;
+            time_to_converge_ms += count;
+        }
 
         pairs.push(PairReport {
             pair_id: record.pair_id,
@@ -3021,6 +3131,12 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
             wall_time_ms: record.wall_time_ms,
             token_count: harness.metrics.token_count,
             tool_call_count: harness.metrics.tool_call_count,
+            preserved_edit_count: harness.metrics.preserved_edit_count,
+            missing_expected_line_count: harness.metrics.missing_expected_line_count,
+            false_block_count: harness.metrics.false_block_count,
+            missed_conflict_count: harness.metrics.missed_conflict_count,
+            manual_intervention_count: harness.metrics.manual_intervention_count,
+            time_to_converge_ms: harness.metrics.time_to_converge_ms,
         });
     }
 
@@ -3035,6 +3151,7 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
     }
     summary.token_count = has_tokens.then_some(token_count);
     summary.tool_call_count = has_tool_calls.then_some(tool_call_count);
+    summary.time_to_converge_ms = has_time_to_converge.then_some(time_to_converge_ms);
 
     Ok(RunReport {
         run_id: metadata.run_id,
@@ -3128,6 +3245,12 @@ impl HarnessTaskResult {
 struct HarnessMetrics {
     token_count: Option<u64>,
     tool_call_count: Option<u64>,
+    preserved_edit_count: u64,
+    missing_expected_line_count: u64,
+    false_block_count: u64,
+    missed_conflict_count: u64,
+    manual_intervention_count: u64,
+    time_to_converge_ms: Option<u64>,
 }
 
 fn read_harness_result(path: impl AsRef<Path>) -> Result<HarnessResult> {
@@ -3160,6 +3283,27 @@ fn read_harness_result(path: impl AsRef<Path>) -> Result<HarnessResult> {
         metrics: HarnessMetrics {
             token_count: metrics.get("token_count").and_then(Value::as_u64),
             tool_call_count: metrics.get("tool_call_count").and_then(Value::as_u64),
+            preserved_edit_count: metrics
+                .get("preserved_edit_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            missing_expected_line_count: metrics
+                .get("missing_expected_line_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            false_block_count: metrics
+                .get("false_block_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            missed_conflict_count: metrics
+                .get("missed_conflict_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            manual_intervention_count: metrics
+                .get("manual_intervention_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            time_to_converge_ms: metrics.get("time_to_converge_ms").and_then(Value::as_u64),
         },
     })
 }

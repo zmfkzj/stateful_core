@@ -120,6 +120,72 @@ fn synthetic_benchmark_records_idempotency_and_reload_failures_as_no_state_regre
     fs::remove_dir_all(root).expect("temp root should clean up");
 }
 
+#[test]
+fn chaos_agent_manifest_records_tiers_baselines_schedules_and_lease_conflicts() {
+    let root = repo_root();
+    let full_path = root.join(".stateful_bench/agent_synthetic/chaos_manifest.jsonl");
+    let sample_path =
+        root.join(".stateful_bench/agent_synthetic/chaos_agent_sample30_manifest.jsonl");
+
+    let full: Vec<serde_json::Value> =
+        read_jsonl(&full_path).expect("full chaos manifest should parse");
+    let sample: Vec<serde_json::Value> =
+        read_jsonl(&sample_path).expect("sample chaos manifest should parse");
+
+    assert_eq!(full.len(), 220);
+    assert_eq!(sample.len(), 30);
+
+    let full_metadata = full.iter().map(pair_metadata).collect::<Vec<_>>();
+    let sample_metadata = sample.iter().map(pair_metadata).collect::<Vec<_>>();
+
+    let full_scenarios = full_metadata
+        .iter()
+        .map(|metadata| metadata["scenario"].as_str().expect("scenario"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(full_scenarios.len(), 11);
+    assert!(full_scenarios.contains("agent_agent_lease_conflict"));
+
+    let tiers = sample_metadata
+        .iter()
+        .map(|metadata| metadata["difficulty_tier"].as_str().expect("tier"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        tiers,
+        ["easy", "hard", "medium", "nightmare"]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+
+    let schedule_seed_count = sample_metadata
+        .iter()
+        .map(|metadata| metadata["schedule_seed"].as_u64().expect("schedule_seed"))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    assert!(schedule_seed_count >= 20);
+
+    for metadata in sample_metadata {
+        let expectations = metadata["baseline_expectations"]
+            .as_object()
+            .expect("baseline_expectations should be object");
+        assert_eq!(
+            expectations
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                "no_state",
+                "stateful_full",
+                "stateful_without_commit_tracking",
+                "stateful_without_lease",
+                "stateful_without_replay",
+                "stateful_without_resume",
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+        );
+    }
+}
+
 fn read_harness_statuses(path: &Path) -> Vec<String> {
     let value = read_json(path);
     value["task_results"]
@@ -140,10 +206,27 @@ fn read_json(path: &Path) -> serde_json::Value {
         .expect("json file should parse")
 }
 
+fn pair_metadata(pair: &serde_json::Value) -> serde_json::Value {
+    serde_json::from_str(
+        pair["task_a"]["test_patch"]
+            .as_str()
+            .expect("test_patch should be string"),
+    )
+    .expect("test_patch should parse")
+}
+
 fn temp_root(name: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
     if Path::new(&root).exists() {
         fs::remove_dir_all(&root).expect("old temp root should clean up");
     }
     root
+}
+
+fn repo_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("repo root should be two levels above crate")
+        .to_path_buf()
 }

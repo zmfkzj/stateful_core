@@ -235,7 +235,102 @@ fn compare_runs_can_limit_manifest_to_first_n_pairs() {
     fs::remove_dir_all(root).expect("temp root should clean up");
 }
 
+#[test]
+fn compare_runs_aggregates_discriminating_harness_metrics() {
+    let root = temp_root("stateful-bench-compare-discriminating-metrics");
+    let manifest_path = root.join("pairs.jsonl");
+    let stateful_dir = root.join("runs/stateful");
+    let no_state_dir = root.join("runs/no-state");
+    fs::create_dir_all(&stateful_dir).expect("stateful run dir should exist");
+    fs::create_dir_all(&no_state_dir).expect("no-state run dir should exist");
+    fs::write(
+        stateful_dir.join("run.json"),
+        r#"{"run_id":"stateful","mode":"stateful"}"#,
+    )
+    .expect("stateful metadata should write");
+    fs::write(
+        no_state_dir.join("run.json"),
+        r#"{"run_id":"no-state","mode":"no-state"}"#,
+    )
+    .expect("no-state metadata should write");
+
+    write_jsonl(&manifest_path, &[pair("pair-1")]).expect("manifest should write");
+    write_pair_with_metrics(
+        &stateful_dir,
+        RunMode::Stateful,
+        "pair-1",
+        "passed",
+        "passed",
+        serde_json::json!({
+            "preserved_edit_count": 2,
+            "missing_expected_line_count": 0,
+            "false_block_count": 0,
+            "missed_conflict_count": 0,
+            "manual_intervention_count": 0,
+            "time_to_converge_ms": 12
+        }),
+    );
+    write_pair_with_metrics(
+        &no_state_dir,
+        RunMode::NoState,
+        "pair-1",
+        "failed",
+        "passed",
+        serde_json::json!({
+            "preserved_edit_count": 1,
+            "missing_expected_line_count": 1,
+            "false_block_count": 0,
+            "missed_conflict_count": 1,
+            "manual_intervention_count": 2,
+            "time_to_converge_ms": 40
+        }),
+    );
+
+    let report = compare_runs(CompareOptions {
+        stateful_run_dir: vec![stateful_dir],
+        no_state_run_dir: vec![no_state_dir],
+        manifest: manifest_path,
+        max_pairs: None,
+    })
+    .expect("comparison should build");
+
+    assert_eq!(report.stateful.preserved_edit_count, 2);
+    assert_eq!(report.stateful.missing_expected_line_count, 0);
+    assert_eq!(report.stateful.missed_conflict_count, 0);
+    assert_eq!(report.stateful.manual_intervention_count, 0);
+    assert_eq!(report.stateful.time_to_converge_ms, Some(12));
+    assert_eq!(report.no_state.preserved_edit_count, 1);
+    assert_eq!(report.no_state.missing_expected_line_count, 1);
+    assert_eq!(report.no_state.missed_conflict_count, 1);
+    assert_eq!(report.no_state.manual_intervention_count, 2);
+    assert_eq!(report.no_state.time_to_converge_ms, Some(40));
+
+    let markdown = report.render_markdown();
+    assert!(markdown.contains("| Preserved edit count | 2 | 1 |"));
+    assert!(markdown.contains("| Missed conflict count | 0 | 1 |"));
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
 fn write_pair(run_dir: &Path, mode: RunMode, pair_id: &str, task_a: &str, task_b: &str) {
+    write_pair_with_metrics(
+        run_dir,
+        mode,
+        pair_id,
+        task_a,
+        task_b,
+        serde_json::json!({}),
+    );
+}
+
+fn write_pair_with_metrics(
+    run_dir: &Path,
+    mode: RunMode,
+    pair_id: &str,
+    task_a: &str,
+    task_b: &str,
+    metrics: serde_json::Value,
+) {
     let pair_dir = run_dir.join(pair_id);
     fs::create_dir_all(&pair_dir).expect("pair dir should exist");
     fs::write(
@@ -259,7 +354,8 @@ fn write_pair(run_dir: &Path, mode: RunMode, pair_id: &str, task_a: &str, task_b
             "task_results": [
                 {"status": task_a, "setup_error": task_a == "setup_error"},
                 {"status": task_b, "setup_error": task_b == "setup_error"}
-            ]
+            ],
+            "metrics": metrics
         })
         .to_string(),
     )

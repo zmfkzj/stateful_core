@@ -188,4 +188,6 @@ fn codex_pair_agent_accepts_explicit_stateful_session_arguments() {
     let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
     assert!(stdout.contains("--session-id"));
     assert!(stdout.contains("--workspace-id"));
+    assert!(stdout.contains("--benchmark-model"));
+    assert!(stdout.contains("--benchmark-reasoning-effort"));
 }

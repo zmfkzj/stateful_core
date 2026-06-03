@@ -337,7 +337,7 @@ fn run_pairs_stateful_waits_for_state_server_before_spawning_agents() {
         mode: RunMode::Stateful,
         run_id: "synthetic-stateful".to_string(),
         agent_cmd_template:
-            "test -f {workspace}/.stateful-server-ready && printf changed-{agent_id}-{stateful_workspace_id} > {workspace}/{agent_id}.txt"
+            "test -f \"$STATEFUL_HOME/runtime/server.json\" && printf changed-{agent_id}-{stateful_workspace_id} > {workspace}/{agent_id}.txt"
                 .to_string(),
         output_dir: output_dir.clone(),
         timeout_seconds: 10,
@@ -508,18 +508,20 @@ if [ "${1:-}" = "server" ]; then
         ;;
     esac
   done
-  /usr/bin/python3 - "$port" "$workspace_id" <<'PY'
+  stateful_home="${STATEFUL_HOME:-"$(dirname "$0")/global-stateful-home"}"
+  /usr/bin/python3 - "$port" "$workspace_id" "$stateful_home" <<'PY'
 import http.server
 import json
 import os
 import socketserver
 import sys
-import time
 
 port = int(sys.argv[1])
 workspace_id = sys.argv[2]
-os.makedirs(".stateful_core/runtime", exist_ok=True)
-with open(".stateful_core/runtime/server.json", "w", encoding="utf-8") as handle:
+stateful_home = sys.argv[3]
+runtime_dir = os.path.join(stateful_home, "runtime")
+os.makedirs(runtime_dir, exist_ok=True)
+with open(os.path.join(runtime_dir, "server.json"), "w", encoding="utf-8") as handle:
     json.dump({
         "base_url": f"http://127.0.0.1:{port}",
         "token": "fake-token",
@@ -528,9 +530,6 @@ with open(".stateful_core/runtime/server.json", "w", encoding="utf-8") as handle
         "protocol_version": "stateful.v1",
         "started_at": "2026-05-31T00:00:00Z",
     }, handle)
-time.sleep(0.4)
-with open(".stateful-server-ready", "w", encoding="utf-8") as handle:
-    handle.write("ready\n")
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):

@@ -10,6 +10,10 @@ import sys
 from pathlib import Path
 
 
+DEFAULT_BENCHMARK_MODEL = "gpt-5.4-mini"
+DEFAULT_BENCHMARK_REASONING_EFFORT = "low"
+
+
 def toml_string(value: str) -> str:
     return json.dumps(value)
 
@@ -47,6 +51,38 @@ def stateful_hook_overrides(stateful_binary: str) -> list[str]:
     ]
 
 
+def codex_command(
+    workspace: Path,
+    mode: str,
+    stateful_binary: str,
+    benchmark_model: str = DEFAULT_BENCHMARK_MODEL,
+    benchmark_reasoning_effort: str = DEFAULT_BENCHMARK_REASONING_EFFORT,
+) -> list[str]:
+    command = [
+        "codex",
+        "--model",
+        benchmark_model,
+        "-c",
+        f"model_reasoning_effort={toml_string(benchmark_reasoning_effort)}",
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--json",
+        "--dangerously-bypass-hook-trust",
+        "--cd",
+        str(workspace),
+        "--sandbox",
+        "workspace-write",
+        "-c",
+        "sandbox_workspace_write.network_access=true",
+    ]
+    if mode == "stateful":
+        for override in stateful_hook_overrides(stateful_binary):
+            command.extend(["-c", override])
+    command.append("-")
+    return command
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task-json", required=True)
@@ -55,6 +91,8 @@ def main() -> int:
     parser.add_argument("--stateful-binary", required=True)
     parser.add_argument("--session-id")
     parser.add_argument("--workspace-id")
+    parser.add_argument("--benchmark-model", default=DEFAULT_BENCHMARK_MODEL)
+    parser.add_argument("--benchmark-reasoning-effort", default=DEFAULT_BENCHMARK_REASONING_EFFORT)
     args = parser.parse_args()
 
     if args.mode == "stateful" and (not args.session_id or not args.workspace_id):
@@ -99,24 +137,13 @@ When finished, leave the working tree with only the production code fix for this
 task.
 """.strip()
 
-    command = [
-        "codex",
-        "--ask-for-approval",
-        "never",
-        "exec",
-        "--json",
-        "--dangerously-bypass-hook-trust",
-        "--cd",
-        str(workspace),
-        "--sandbox",
-        "workspace-write",
-        "-c",
-        "sandbox_workspace_write.network_access=true",
-    ]
-    if args.mode == "stateful":
-        for override in stateful_hook_overrides(args.stateful_binary):
-            command.extend(["-c", override])
-    command.append("-")
+    command = codex_command(
+        workspace=workspace,
+        mode=args.mode,
+        stateful_binary=args.stateful_binary,
+        benchmark_model=args.benchmark_model,
+        benchmark_reasoning_effort=args.benchmark_reasoning_effort,
+    )
     completed = subprocess.run(
         command,
         input=prompt,

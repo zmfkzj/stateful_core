@@ -6,6 +6,7 @@
 
 target/
 *.log
+__pycache__/
 
 # Local stateful runtime, hook config, and benchmark artifacts.
 .codex/
