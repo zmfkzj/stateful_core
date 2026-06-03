@@ -243,8 +243,28 @@ async fn side_effecting_routes_fail_closed_on_invalid_v1_protocol_metadata() {
     );
     blank_observed_at["observed_at"] = serde_json::json!("   ");
 
-    let mut invalid_actor_type = protocol_body(
+    let mut blank_request_id = protocol_body(
         "req-declare-7",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    blank_request_id["request_id"] = serde_json::json!("   ");
+
+    let mut empty_request_id = protocol_body(
+        "req-declare-empty",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    empty_request_id["request_id"] = serde_json::json!("");
+
+    let mut invalid_actor_type = protocol_body(
+        "req-declare-8",
         "s1",
         "w1",
         serde_json::json!({
@@ -254,7 +274,7 @@ async fn side_effecting_routes_fail_closed_on_invalid_v1_protocol_metadata() {
     invalid_actor_type["session"]["actor_type"] = serde_json::json!("robot");
 
     let mut invalid_source_kind = protocol_body(
-        "req-declare-8",
+        "req-declare-9",
         "s1",
         "w1",
         serde_json::json!({
@@ -263,11 +283,63 @@ async fn side_effecting_routes_fail_closed_on_invalid_v1_protocol_metadata() {
     );
     invalid_source_kind["source"]["kind"] = serde_json::json!("browser");
 
+    let mut blank_session_id = protocol_body(
+        "req-declare-10",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    blank_session_id["session"]["session_id"] = serde_json::json!(" ");
+
+    let mut missing_actor_id = protocol_body(
+        "req-declare-11",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    missing_actor_id["session"]
+        .as_object_mut()
+        .expect("session should be object")
+        .remove("actor_id");
+
+    let mut blank_workspace_id = protocol_body(
+        "req-declare-12",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    blank_workspace_id["workspace"]["workspace_id"] = serde_json::json!("");
+
+    let mut missing_workspace_root = protocol_body(
+        "req-declare-13",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    missing_workspace_root["workspace"]
+        .as_object_mut()
+        .expect("workspace should be object")
+        .remove("root");
+
     for body in [
         missing_observed_at,
         blank_observed_at,
+        blank_request_id,
+        empty_request_id,
         invalid_actor_type,
         invalid_source_kind,
+        blank_session_id,
+        missing_actor_id,
+        blank_workspace_id,
+        missing_workspace_root,
     ] {
         let response = app
             .clone()
