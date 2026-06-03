@@ -522,14 +522,18 @@ pub struct DoctorReport {
     pub global_runtime_server_json: bool,
     pub global_state_db: bool,
     pub repo_enabled: bool,
+    pub global_paths_error: Option<String>,
+    pub global_registry_error: Option<String>,
 }
 
 pub fn doctor_report(repo_root: impl AsRef<Path>) -> DoctorReport {
     match GlobalPaths::from_env() {
         Ok(paths) => doctor_report_with_global(repo_root, &paths),
-        Err(_) => {
+        Err(error) => {
             let paths = GlobalPaths::new(PathBuf::from(".stateful_core"));
-            doctor_report_with_global(repo_root, &paths)
+            let mut report = doctor_report_with_global(repo_root, &paths);
+            report.global_paths_error = Some(error.to_string());
+            report
         }
     }
 }
@@ -546,9 +550,10 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
         .join("server.json")
         .is_file();
     let state_db = state_db_path(repo_root).is_file();
-    let repo_enabled = RepoRegistry::load(paths)
-        .map(|registry| registry.is_enabled(repo_root))
-        .unwrap_or(false);
+    let (repo_enabled, global_registry_error) = match RepoRegistry::load(paths) {
+        Ok(registry) => (registry.is_enabled(repo_root), None),
+        Err(error) => (false, Some(error.to_string())),
+    };
 
     DoctorReport {
         installed: (hooks_json || codex_config_toml || paths.config_yml.is_file())
@@ -563,6 +568,8 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
         global_runtime_server_json: paths.server_json.is_file(),
         global_state_db: paths.state_db.is_file(),
         repo_enabled,
+        global_paths_error: None,
+        global_registry_error,
     }
 }
 

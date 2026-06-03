@@ -256,3 +256,42 @@ fn doctor_report_includes_global_install_and_repo_enabled_status() {
     fs::remove_dir_all(repo).expect("repo should remove");
     fs::remove_dir_all(home).expect("home should remove");
 }
+
+#[test]
+fn doctor_report_includes_global_registry_error_for_malformed_config() {
+    let repo = std::env::temp_dir().join(format!(
+        "stateful-doctor-malformed-repo-{}",
+        std::process::id()
+    ));
+    let home = std::env::temp_dir().join(format!(
+        "stateful-doctor-malformed-home-{}",
+        std::process::id()
+    ));
+    if repo.exists() {
+        fs::remove_dir_all(&repo).expect("old repo should be removable");
+    }
+    if home.exists() {
+        fs::remove_dir_all(&home).expect("old home should be removable");
+    }
+    fs::create_dir_all(&repo).expect("repo should write");
+    let paths = stateful_cli::GlobalPaths::new(&home);
+    fs::create_dir_all(
+        paths
+            .config_yml
+            .parent()
+            .expect("global config should have a parent"),
+    )
+    .expect("global config parent should write");
+    fs::write(&paths.config_yml, "repos: [\n").expect("malformed global config should write");
+
+    let report = doctor_report_with_global(&repo, &paths);
+
+    assert!(!report.repo_enabled);
+    let error = report
+        .global_registry_error
+        .as_deref()
+        .expect("global registry error should be reported");
+    assert!(error.contains("failed to parse repo registry config"));
+    fs::remove_dir_all(repo).expect("repo should remove");
+    fs::remove_dir_all(home).expect("home should remove");
+}
