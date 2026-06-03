@@ -1,8 +1,12 @@
+pub mod clock;
+
+use clock::{Clock, SystemClock, format_time};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use stateful_core::{IntentScope, PolicyState};
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 use thiserror::Error;
+use time::Duration;
 use uuid::Uuid;
 
 pub const CRATE_NAME: &str = "stateful-store";
@@ -22,26 +26,53 @@ pub type StoreResult<T> = Result<T, StoreError>;
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
+    clock: Arc<dyn Clock>,
 }
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
+        Self::open_with_clock(path, Arc::new(SystemClock))
+    }
+
+    pub fn open_with_clock(path: impl AsRef<Path>, clock: Arc<dyn Clock>) -> StoreResult<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         let conn = Connection::open(path)?;
-        let store = Self { conn };
+        let store = Self { conn, clock };
         store.migrate()?;
         Ok(store)
     }
 
     pub fn open_in_memory() -> StoreResult<Self> {
+        Self::open_in_memory_with_clock(SystemClock)
+    }
+
+    pub fn open_in_memory_with_clock<C>(clock: C) -> StoreResult<Self>
+    where
+        C: Clock + 'static,
+    {
         let conn = Connection::open_in_memory()?;
-        let store = Self { conn };
+        let store = Self {
+            conn,
+            clock: Arc::new(clock),
+        };
         store.migrate()?;
         Ok(store)
+    }
+
+    fn now_string(&self) -> String {
+        format_time(self.clock.now())
+    }
+
+    fn short_expiry_string(&self) -> String {
+        format_time(self.clock.now() + Duration::minutes(2))
+    }
+
+    fn standard_expiry_string(&self) -> String {
+        format_time(self.clock.now() + Duration::minutes(15))
     }
 
     pub fn append(&self, event: Event) -> StoreResult<()> {
@@ -197,17 +228,14 @@ impl Store {
     }
 
     pub fn append_reconciliation_ack(&self, session_id: impl AsRef<str>) -> StoreResult<()> {
+        let created_at = self.now_string();
         self.conn.execute(
             "INSERT INTO reconciliations (
                 reconciliation_id,
                 session_id,
                 created_at
             ) VALUES (?1, ?2, ?3)",
-            params![
-                Uuid::new_v4().to_string(),
-                session_id.as_ref(),
-                "2026-05-31T00:00:00Z",
-            ],
+            params![Uuid::new_v4().to_string(), session_id.as_ref(), created_at,],
         )?;
 
         Ok(())
@@ -260,6 +288,7 @@ impl Store {
         relative_path: impl AsRef<str>,
     ) -> StoreResult<()> {
         let relative_path = normalize_relative_path(relative_path.as_ref());
+        let expires_at = self.standard_expiry_string();
         self.conn.execute(
             "INSERT INTO leases (
                 lease_id,
@@ -276,7 +305,7 @@ impl Store {
                 session_id.as_ref(),
                 workspace_id.as_ref(),
                 relative_path,
-                "2026-05-31T00:15:00Z",
+                expires_at,
             ],
         )?;
 
@@ -338,18 +367,42 @@ impl Store {
         workspace_id: impl AsRef<str>,
         relative_path: impl AsRef<str>,
     ) -> StoreResult<Option<String>> {
+        let workspace_id = workspace_id.as_ref();
         let relative_path = normalize_relative_path(relative_path.as_ref());
+        self.expire_leases_for_resource(workspace_id, &relative_path)?;
         self.conn
             .query_row(
                 "SELECT session_id FROM leases
                  WHERE workspace_id = ?1 AND relative_path = ?2 AND status = 'active'
                  ORDER BY rowid DESC
                  LIMIT 1",
-                params![workspace_id.as_ref(), relative_path],
+                params![workspace_id, relative_path],
                 |row| row.get::<_, String>(0),
             )
             .optional()
             .map_err(StoreError::from)
+    }
+
+    fn expire_leases_for_resource(
+        &self,
+        workspace_id: &str,
+        relative_path: &str,
+    ) -> StoreResult<()> {
+        let now = self.now_string();
+        let expired = self.conn.execute(
+            "UPDATE leases
+             SET status = 'expired'
+             WHERE workspace_id = ?1
+               AND relative_path = ?2
+               AND status = 'active'
+               AND expires_at IS NOT NULL
+               AND expires_at <= ?3",
+            params![workspace_id, relative_path, now],
+        )?;
+        if expired > 0 {
+            self.promote_next_waiter(workspace_id, relative_path)?;
+        }
+        Ok(())
     }
 
     pub fn create_intent_request(
@@ -366,6 +419,7 @@ impl Store {
         let action = action.as_ref();
         let resources_json = serde_json::to_string(resources)
             .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+        let now = self.now_string();
 
         self.conn.execute(
             "INSERT OR IGNORE INTO intent_requests (
@@ -384,7 +438,7 @@ impl Store {
                 workspace_id,
                 resources_json,
                 action,
-                "2026-05-31T00:00:00Z",
+                now,
             ],
         )?;
 
@@ -429,11 +483,12 @@ impl Store {
         request_id: impl AsRef<str>,
         status: impl AsRef<str>,
     ) -> StoreResult<()> {
+        let updated_at = self.now_string();
         let updated = self.conn.execute(
             "UPDATE intent_requests
              SET status = ?1, updated_at = ?2
              WHERE request_id = ?3",
-            params![status.as_ref(), "2026-05-31T00:00:00Z", request_id.as_ref(),],
+            params![status.as_ref(), updated_at, request_id.as_ref(),],
         )?;
         if updated == 0 {
             return Err(StoreError::ReservationOwnerMismatch);
@@ -528,6 +583,7 @@ impl Store {
         }
 
         let wait_id = Uuid::new_v4().to_string();
+        let requested_at = self.now_string();
         self.conn.execute(
             "INSERT INTO wait_queue (
                 wait_id,
@@ -547,7 +603,7 @@ impl Store {
                 workspace_id,
                 relative_path,
                 action,
-                "2026-05-31T00:00:00Z",
+                requested_at,
                 blocking_session_id,
                 request_id,
             ],
@@ -600,11 +656,12 @@ impl Store {
             return Ok(None);
         };
 
+        let reservation_expires_at = self.short_expiry_string();
         self.conn.execute(
             "UPDATE wait_queue
              SET status = 'reserved', reservation_expires_at = ?1
              WHERE wait_id = ?2 AND status = 'queued'",
-            params!["2026-05-31T00:02:00Z", wait_id],
+            params![reservation_expires_at, wait_id],
         )?;
 
         let waiter = self.waiter(&wait_id)?;
@@ -630,7 +687,9 @@ impl Store {
         workspace_id: impl AsRef<str>,
         relative_path: impl AsRef<str>,
     ) -> StoreResult<Option<WaitRecord>> {
+        let workspace_id = workspace_id.as_ref();
         let relative_path = normalize_relative_path(relative_path.as_ref());
+        self.expire_reservations_for_resource(workspace_id, &relative_path)?;
         self.conn
             .query_row(
                 "SELECT
@@ -648,11 +707,33 @@ impl Store {
                  WHERE workspace_id = ?1 AND relative_path = ?2 AND status = 'reserved'
                  ORDER BY rowid ASC
                  LIMIT 1",
-                params![workspace_id.as_ref(), relative_path],
+                params![workspace_id, relative_path],
                 wait_record_from_row,
             )
             .optional()
             .map_err(StoreError::from)
+    }
+
+    fn expire_reservations_for_resource(
+        &self,
+        workspace_id: &str,
+        relative_path: &str,
+    ) -> StoreResult<()> {
+        let now = self.now_string();
+        let expired = self.conn.execute(
+            "UPDATE wait_queue
+             SET status = 'expired'
+             WHERE workspace_id = ?1
+               AND relative_path = ?2
+               AND status = 'reserved'
+               AND reservation_expires_at IS NOT NULL
+               AND reservation_expires_at <= ?3",
+            params![workspace_id, relative_path, now],
+        )?;
+        if expired > 0 {
+            self.promote_next_waiter(workspace_id, relative_path)?;
+        }
+        Ok(())
     }
 
     pub fn active_reservation_owner(
@@ -703,6 +784,11 @@ impl Store {
         let Some(waiter) = waiter else {
             return Err(StoreError::ReservationOwnerMismatch);
         };
+        self.expire_reservations_for_resource(&waiter.workspace_id, &waiter.relative_path)?;
+        let waiter = self.waiter(wait_id.as_ref())?;
+        let Some(waiter) = waiter else {
+            return Err(StoreError::ReservationOwnerMismatch);
+        };
         if waiter.session_id != session_id.as_ref() || waiter.status != "reserved" {
             return Err(StoreError::ReservationOwnerMismatch);
         }
@@ -731,13 +817,14 @@ impl Store {
             return Err(StoreError::ReservationOwnerMismatch);
         }
 
+        let updated_at = self.now_string();
         let updated = self.conn.execute(
             "UPDATE intent_requests
              SET status = 'cancelled', updated_at = ?1
              WHERE request_id = ?2
                 AND session_id = ?3
                 AND status IN ('requested', 'queued', 'reserved')",
-            params!["2026-05-31T00:00:00Z", request_id, session_id],
+            params![updated_at, request_id, session_id],
         )?;
         if updated == 0 {
             return Err(StoreError::ReservationOwnerMismatch);
@@ -808,6 +895,8 @@ impl Store {
         kind: &str,
         payload: serde_json::Value,
     ) -> StoreResult<()> {
+        let created_at = self.now_string();
+        let expires_at = self.short_expiry_string();
         self.conn.execute(
             "INSERT INTO notifications (
                 notification_id,
@@ -825,8 +914,8 @@ impl Store {
                 workspace_id,
                 kind,
                 payload.to_string(),
-                "2026-05-31T00:00:00Z",
-                "2026-05-31T00:02:00Z",
+                created_at,
+                expires_at,
             ],
         )?;
 
@@ -838,6 +927,7 @@ impl Store {
         session_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<()> {
+        let expires_at = self.standard_expiry_string();
         self.conn.execute(
             "INSERT INTO activities (
                 activity_id,
@@ -849,7 +939,7 @@ impl Store {
                 Uuid::new_v4().to_string(),
                 session_id.as_ref(),
                 workspace_id.as_ref(),
-                "2026-05-31T00:15:00Z",
+                expires_at,
             ],
         )?;
 
@@ -1157,6 +1247,7 @@ impl Store {
             }
             EventType::IntentDeclared => {
                 let scopes_json = event.payload["scopes"].to_string();
+                let expires_at = self.standard_expiry_string();
                 self.conn.execute(
                     "UPDATE intents SET status = 'superseded'
                      WHERE session_id = ?1 AND status = 'active'",
@@ -1178,7 +1269,7 @@ impl Store {
                         event.workspace_id,
                         scopes_json,
                         event.created_at,
-                        "2026-05-31T00:15:00Z",
+                        expires_at,
                     ],
                 )?;
             }

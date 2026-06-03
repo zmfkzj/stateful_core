@@ -661,3 +661,52 @@ fn migrations_create_contract_tables_and_indexes() {
         );
     }
 }
+
+#[test]
+fn expired_lease_no_longer_blocks_active_owner_lookup() {
+    let clock = stateful_store::clock::FixedClock::new("2026-05-31T00:00:00Z");
+    let store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");
+
+    store
+        .acquire_lease("s1", "w1", "src/auth.ts")
+        .expect("lease should acquire");
+    clock.set("2026-05-31T00:16:00Z");
+
+    assert_eq!(
+        store
+            .active_lease_owner("w1", "src/auth.ts")
+            .expect("lease owner should load"),
+        None
+    );
+}
+
+#[test]
+fn expired_reservation_promotes_next_waiter_lazily() {
+    let clock = stateful_store::clock::FixedClock::new("2026-05-31T00:00:00Z");
+    let store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");
+
+    let first = store
+        .enqueue_waiter("s2", "w1", "src/auth.ts", "write_file", Some("s1"))
+        .expect("first waiter should enqueue");
+    let second = store
+        .enqueue_waiter("s3", "w1", "src/auth.ts", "write_file", Some("s1"))
+        .expect("second waiter should enqueue");
+    store
+        .promote_next_waiter("w1", "src/auth.ts")
+        .expect("first waiter should promote");
+
+    clock.set("2026-05-31T00:03:00Z");
+    let reservation = store
+        .active_reservation("w1", "src/auth.ts")
+        .expect("reservation lookup should succeed")
+        .expect("second waiter should become active reservation");
+
+    assert_eq!(
+        store
+            .waiter_status(&first.wait_id)
+            .expect("first waiter status should load"),
+        Some("expired".to_string())
+    );
+    assert_eq!(reservation.wait_id, second.wait_id);
+    assert_eq!(reservation.session_id, "s3");
+}
