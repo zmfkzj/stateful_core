@@ -347,6 +347,8 @@ pub fn install_repo_local(
     let repo_root = repo_root.as_ref();
     let binary_path = binary_path.as_ref();
 
+    ensure_repo_local_install_can_write(repo_root)?;
+
     fs::create_dir_all(repo_root.join(".codex"))?;
     fs::create_dir_all(repo_root.join(".codex/skills/stateful-command-policy"))?;
     fs::create_dir_all(repo_root.join(".stateful"))?;
@@ -369,6 +371,43 @@ pub fn install_repo_local(
     Ok(())
 }
 
+const STATEFUL_CODEX_JSON_MARKER: &str = "stateful_core_owned";
+const STATEFUL_CODEX_TOML_MARKER: &str = "# stateful-core-owned";
+
+pub(crate) fn ensure_repo_local_install_can_write(repo_root: &Path) -> anyhow::Result<()> {
+    for path in [
+        repo_root.join(".codex/hooks.json"),
+        repo_root.join(".codex/config.toml"),
+    ] {
+        if path.exists() && !is_stateful_owned_codex_file(&path)? {
+            anyhow::bail!(
+                "repo-local Codex install would overwrite existing Codex config {}",
+                path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn is_stateful_owned_codex_file(path: &Path) -> anyhow::Result<bool> {
+    let contents = fs::read_to_string(path)?;
+
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("hooks.json") => {
+            let value: serde_json::Value = serde_json::from_str(&contents)?;
+            Ok(value
+                .get(STATEFUL_CODEX_JSON_MARKER)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false))
+        }
+        Some("config.toml") => Ok(contents
+            .lines()
+            .any(|line| line.trim() == STATEFUL_CODEX_TOML_MARKER)),
+        _ => Ok(false),
+    }
+}
+
 fn hooks_json(binary_path: &str) -> String {
     let command = if Path::new(binary_path).is_absolute() {
         binary_path.to_string()
@@ -380,6 +419,7 @@ fn hooks_json(binary_path: &str) -> String {
         command.replace('\\', "\\\\").replace('"', "\\\"")
     );
     let value = serde_json::json!({
+        STATEFUL_CODEX_JSON_MARKER: true,
         "hooks": {
             "SessionStart": [{
                 "matcher": "startup|resume|clear|compact",
@@ -444,7 +484,8 @@ fn mcp_config_toml(binary_path: &str) -> String {
     let hook_prefix = format!("\"{hook_binary}\" hook");
 
     format!(
-        r#"[features]
+        r#"{STATEFUL_CODEX_TOML_MARKER}
+[features]
 hooks = true
 
 [mcp_servers.stateful]
