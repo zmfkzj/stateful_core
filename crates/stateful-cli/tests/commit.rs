@@ -1,6 +1,16 @@
-use std::{fs, process::Command};
+use std::{
+    fs,
+    io::{Read, Write},
+    net::TcpListener,
+    process::Command,
+    sync::mpsc,
+    thread,
+};
 
-use stateful_cli::{CommitRequest, run_structured_commit};
+use stateful_cli::{
+    CommitRequest, CurrentSession, GlobalPaths, ServerRuntime, run_structured_commit,
+    write_current_session_file, write_global_runtime_file,
+};
 
 #[test]
 fn structured_commit_rejects_empty_message() {
@@ -137,7 +147,8 @@ fn structured_commit_stages_only_explicit_paths_and_commits() {
     let root = git_repo("stateful-commit-success");
     fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
     fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    fs::write(root.path().join("docs/untracked.md"), "untracked\n").expect("untracked should write");
+    fs::write(root.path().join("docs/untracked.md"), "untracked\n")
+        .expect("untracked should write");
 
     let result = run_structured_commit(CommitRequest {
         repo_root: root.path().to_path_buf(),
@@ -160,11 +171,60 @@ fn structured_commit_stages_only_explicit_paths_and_commits() {
     assert!(!show.lines().any(|line| line == "docs/untracked.md"));
 }
 
+#[test]
+fn structured_commit_command_discovers_global_runtime_for_authorization() {
+    let root = git_repo("stateful-commit-global-runtime");
+    let paths = GlobalPaths::new(root.path().join("home"));
+    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
+    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
+    write_current_session_file(root.path(), &CurrentSession::new("s-global", "w-session"))
+        .expect("current session should write");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request(&mut stream);
+        tx.send(request).expect("request should send to test");
+        write_json_response(
+            &mut stream,
+            r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        );
+    });
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "global-w", 42);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+        .args(["commit", "-m", "docs: add plan", "--", "docs/plan.md"])
+        .current_dir(root.path())
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("STATEFUL_HOME", &paths.home)
+        .output()
+        .expect("stateful commit should run");
+
+    assert!(
+        output.status.success(),
+        "stateful commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("POST /v1/authorize HTTP/1.1"));
+    assert!(request.contains("Authorization: Bearer secret-token"));
+    assert!(request.contains("\"session_id\":\"s-global\""));
+    assert!(request.contains("\"workspace_id\":\"w-session\""));
+    assert!(request.contains("\"path\":\"docs/plan.md\""));
+}
+
 fn git_repo(name: &str) -> tempfile_root::TempRoot {
     let root = tempfile_root::TempRoot::new(name);
     git(root.path(), &["init"]);
     git(root.path(), &["config", "user.name", "stateful test"]);
-    git(root.path(), &["config", "user.email", "stateful@example.invalid"]);
+    git(
+        root.path(),
+        &["config", "user.email", "stateful@example.invalid"],
+    );
     root
 }
 
@@ -185,6 +245,44 @@ fn git_output(root: &std::path::Path, args: &[&str]) -> String {
         .expect("git should run");
     assert!(output.status.success(), "git {args:?} should succeed");
     String::from_utf8(output.stdout).expect("git output should be utf8")
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    let mut buffer = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !buffer.ends_with(b"\r\n\r\n") {
+        stream
+            .read_exact(&mut byte)
+            .expect("request header byte should read");
+        buffer.push(byte[0]);
+    }
+
+    let headers = String::from_utf8(buffer.clone()).expect("headers should be utf8");
+    let content_length = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length: "))
+        .expect("content length should exist")
+        .parse::<usize>()
+        .expect("content length should parse");
+
+    let mut body = vec![0_u8; content_length];
+    stream
+        .read_exact(&mut body)
+        .expect("request body should read");
+    buffer.extend_from_slice(&body);
+
+    String::from_utf8(buffer).expect("request should be utf8")
+}
+
+fn write_json_response(stream: &mut std::net::TcpStream, body: &str) {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .expect("response should write");
 }
 
 mod tempfile_root {

@@ -4,7 +4,7 @@ use std::{
     process::Command,
 };
 
-use crate::{discover_runtime, post_json};
+use crate::{discover_runtime_with_optional_global, post_json};
 
 pub type AuthorizePath = Box<dyn Fn(&str) -> anyhow::Result<()> + Send + Sync>;
 
@@ -137,7 +137,7 @@ fn authorize_path(request: &CommitRequest, path: &str) -> anyhow::Result<()> {
         .session_id
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("stateful commit requires a current session id"))?;
-    let runtime = discover_runtime(&request.repo_root)?;
+    let runtime = discover_runtime_with_optional_global(&request.repo_root)?;
     let workspace_id = request
         .workspace_id
         .as_deref()
@@ -165,9 +165,7 @@ fn authorize_path(request: &CommitRequest, path: &str) -> anyhow::Result<()> {
     if decision.decision != "allow" {
         anyhow::bail!(
             "{}",
-            decision
-                .required_next_action
-                .unwrap_or(decision.message)
+            decision.required_next_action.unwrap_or(decision.message)
         );
     }
 
