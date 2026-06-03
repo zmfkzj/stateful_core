@@ -286,22 +286,24 @@ The MCP surface should expose structured tools for the agent and hooks:
 ```text
 state.session.register
 state.session.heartbeat
-state.intent.request
 state.intent.declare
-state.intent.claim
-state.intent.cancel
 state.lease.acquire
 state.lease.release
 state.activity.observe
 state.activity.finalize
 state.conflicts.check
 state.current.read
+state.events.read
 state.context.render
 state.reconcile.ack
 state.validation.run
 state.notifications.poll
 state.resume.next
 ```
+
+Future scheduling tools should add `state.intent.request`, `state.intent.claim`,
+and `state.intent.cancel` when the corresponding server endpoints are
+implemented.
 
 Hooks should call the same state server API as MCP tools so policy remains
 centralized.

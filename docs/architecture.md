@@ -539,5 +539,7 @@ The system should prefer explicit uncertainty:
 
 V1 defaults to strict enforcement. Supported writes, validation, and
 reconciliation fail closed when state cannot be trusted. To keep this usable,
-denial responses and `stateful doctor` must explain the missing precondition and
-the next action instead of returning opaque policy failures.
+denial responses must explain the missing precondition and the next action
+instead of returning opaque policy failures. The prototype `stateful doctor`
+reports install/config/repo-enabled state plus global path and registry errors;
+prescriptive next-action guidance is future doctor UX work.
