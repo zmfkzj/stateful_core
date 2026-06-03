@@ -32,8 +32,8 @@ pub use repo_registry::{
 };
 pub use runtime::{
     CurrentSession, HttpResponse, IntentDeclareArgs, ServerRuntime, declare_intent_via_http,
-    discover_runtime, get_json, post_json, read_current_session_file, write_current_session_file,
-    write_runtime_file,
+    discover_runtime, discover_runtime_with_global, get_json, post_json, read_current_session_file,
+    write_current_session_file, write_global_runtime_file, write_runtime_file,
 };
 pub use validation::{
     ResultParser, ValidationConfig, ValidationProfile, ValidationResult, ValidationStatus,
@@ -98,6 +98,10 @@ pub enum Command {
     #[command(subcommand)]
     Repos(ReposCommand),
     #[command(subcommand)]
+    Notifications(NotificationsCommand),
+    #[command(subcommand)]
+    Resume(ResumeCommand),
+    #[command(subcommand)]
     Intent(IntentCommand),
     #[command(subcommand)]
     Mcp(McpCommand),
@@ -120,6 +124,26 @@ pub enum IntentCommand {
 #[derive(Debug, Subcommand)]
 pub enum ReposCommand {
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NotificationsCommand {
+    Poll {
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        workspace_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ResumeCommand {
+    Next {
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        workspace_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -186,12 +210,12 @@ pub fn run() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Current => {
-            let runtime = discover_runtime(std::env::current_dir()?)?;
+            let (_repo_root, runtime) = discover_runtime_for_current_dir()?;
             let response = get_json(&runtime, "/v1/current")?;
             print_http_response(response)?;
         }
         Command::Events => {
-            let runtime = discover_runtime(std::env::current_dir()?)?;
+            let (_repo_root, runtime) = discover_runtime_for_current_dir()?;
             let response = get_json(&runtime, "/v1/events")?;
             print_http_response(response)?;
         }
@@ -252,13 +276,46 @@ pub fn run() -> anyhow::Result<()> {
             let registry = RepoRegistry::load(&paths)?;
             println!("{}", serde_json::to_string_pretty(&registry)?);
         }
+        Command::Notifications(NotificationsCommand::Poll {
+            session_id,
+            workspace_id,
+        }) => {
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let (session_id, workspace_id) =
+                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let response = post_json(
+                &runtime,
+                "/v1/notifications/poll",
+                &serde_json::json!({
+                    "session_id": session_id,
+                    "workspace_id": workspace_id,
+                }),
+            )?;
+            print_http_response(response)?;
+        }
+        Command::Resume(ResumeCommand::Next {
+            session_id,
+            workspace_id,
+        }) => {
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let (session_id, workspace_id) =
+                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let response = post_json(
+                &runtime,
+                "/v1/resume/next",
+                &serde_json::json!({
+                    "session_id": session_id,
+                    "workspace_id": workspace_id,
+                }),
+            )?;
+            print_http_response(response)?;
+        }
         Command::Intent(IntentCommand::Declare {
             session_id,
             workspace_id,
             files_planned,
         }) => {
-            let repo_root = std::env::current_dir()?;
-            let runtime = discover_runtime(&repo_root)?;
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let current_session = if session_id.is_none() || workspace_id.is_none() {
                 read_current_session_file(&repo_root).ok()
             } else {
@@ -308,6 +365,43 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn discover_runtime_for_current_dir() -> anyhow::Result<(PathBuf, ServerRuntime)> {
+    let repo_root = std::env::current_dir()?;
+    let paths = GlobalPaths::from_env()?;
+    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
+
+    Ok((repo_root, runtime))
+}
+
+fn resolve_session_workspace(
+    repo_root: &Path,
+    runtime: &ServerRuntime,
+    session_id: Option<String>,
+    workspace_id: Option<String>,
+) -> anyhow::Result<(String, String)> {
+    let current_session = if session_id.is_none() || workspace_id.is_none() {
+        read_current_session_file(repo_root).ok()
+    } else {
+        None
+    };
+    let session_id = session_id
+        .or_else(|| {
+            current_session
+                .as_ref()
+                .map(|session| session.session_id.clone())
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "session id not provided and no current stateful session file was found"
+            )
+        })?;
+    let workspace_id = workspace_id
+        .or_else(|| current_session.map(|session| session.workspace_id))
+        .unwrap_or_else(|| runtime.workspace_id.clone());
+
+    Ok((session_id, workspace_id))
+}
+
 fn parse_json_arguments(arguments_json: Option<String>) -> anyhow::Result<serde_json::Value> {
     match arguments_json {
         Some(arguments_json) => Ok(serde_json::from_str(&arguments_json)?),
@@ -332,10 +426,10 @@ fn run_server(
 ) -> anyhow::Result<()> {
     let token = token.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let base_url = format!("http://{host}:{port}");
-    let repo_root = std::env::current_dir()?;
+    let paths = GlobalPaths::from_env()?;
     let runtime = ServerRuntime::new(&base_url, &token, workspace_id, std::process::id());
-    write_runtime_file(&repo_root, &runtime)?;
-    let store = stateful_store::Store::open(state_db_path(&repo_root))?;
+    write_global_runtime_file(&paths, &runtime)?;
+    let store = stateful_store::Store::open(global_state_db_path(&paths))?;
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let tokio_runtime = tokio::runtime::Runtime::new()?;
@@ -347,6 +441,10 @@ fn run_server(
 
 pub fn state_db_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf {
     repo_root.as_ref().join(".stateful_core").join("state.db")
+}
+
+pub fn global_state_db_path(paths: &GlobalPaths) -> std::path::PathBuf {
+    paths.state_db.clone()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -438,14 +536,14 @@ pub(crate) fn ensure_repo_local_install_can_write(repo_root: &Path) -> anyhow::R
 fn is_stateful_owned_codex_file(path: &Path) -> anyhow::Result<bool> {
     let contents = fs::read_to_string(path)?;
 
-        match path.file_name().and_then(|name| name.to_str()) {
-            Some("hooks.json") => {
-                let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
-                    return Ok(false);
-                };
-                Ok(value
-                    .get(STATEFUL_CODEX_JSON_MARKER)
-                    .and_then(serde_json::Value::as_bool)
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("hooks.json") => {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+                return Ok(false);
+            };
+            Ok(value
+                .get(STATEFUL_CODEX_JSON_MARKER)
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false))
         }
         Some("config.toml") => Ok(contents
