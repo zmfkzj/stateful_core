@@ -30,6 +30,13 @@ pub fn classify_bash(command: &str) -> BashClassification {
         };
     }
 
+    if contains_unsupported_shell_expansion(trimmed) {
+        return BashClassification {
+            kind: BashKind::Mutating,
+            reason: "command uses unsupported shell expansion syntax".to_string(),
+        };
+    }
+
     if parse_shell_words(trimmed).is_err() {
         return BashClassification {
             kind: BashKind::Mutating,
@@ -237,6 +244,12 @@ fn is_broad_commit_pathspec(path: &str) -> bool {
 
 fn contains_shell_control_syntax(command: &str) -> bool {
     ["\n", "\r", ";", "&", "&&", "||", "|", "`", "$(", "<(", ">("]
+        .iter()
+        .any(|token| command.contains(token))
+}
+
+fn contains_unsupported_shell_expansion(command: &str) -> bool {
+    ["$'", "$\"", "${", "$(("]
         .iter()
         .any(|token| command.contains(token))
 }

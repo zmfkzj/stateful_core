@@ -16,6 +16,7 @@ fn find_is_read_only_only_without_mutating_actions() {
         "find docs -delete",
         "find docs \\-delete",
         "find docs -'delete'",
+        "find docs -$'delete'",
         "find docs -exec rm {} +",
         "find docs -execdir rm {} +",
         "find docs -ok rm {} +",
@@ -79,6 +80,7 @@ fn git_branch_and_diff_read_only_allowlists_reject_mutating_options() {
         "git diff --output=file",
         "git diff \\--output=file",
         "git diff --out'put'=file",
+        "git diff --out$'put'=file",
     ];
 
     for command in rejected {
@@ -105,6 +107,10 @@ fn shell_control_syntax_is_denied_before_read_only_allowlists() {
         "stateful status & rm docs/a.md",
         "stateful status>docs/a.md",
         "rg auth\nrm src/a.rs",
+        "find docs $(printf name)",
+        "find docs ${PREDICATE}",
+        "find docs $((1))",
+        "find docs $\"PREDICATE\"",
     ];
 
     for command in rejected {
