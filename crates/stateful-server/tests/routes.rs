@@ -104,6 +104,78 @@ async fn authorize_accepts_matching_bearer_token() {
 }
 
 #[tokio::test]
+async fn side_effecting_routes_fail_closed_without_protocol_metadata() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/intent/declare",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "error");
+    assert_eq!(json["reason_code"], "protocol_mismatch");
+}
+
+#[tokio::test]
+async fn side_effecting_routes_accept_v1_protocol_metadata() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "req-declare-1",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn side_effecting_routes_fail_closed_on_major_protocol_mismatch() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let mut body = protocol_body(
+        "req-declare-2",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    body["protocol_version"] = serde_json::json!("stateful.v2");
+
+    let response = app
+        .oneshot(json_request("/v1/intent/declare", body))
+        .await
+        .expect("intent declaration should complete");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["reason_code"], "protocol_mismatch");
+}
+
+#[tokio::test]
 async fn session_register_and_heartbeat_update_current_summary() {
     let app = build_router(ServerConfig::new("secret-token"));
 
@@ -298,11 +370,12 @@ async fn declared_intent_allows_matching_authorize_request() {
 
     let declare = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/intent/declare",
+            "req-declare-s1-auth",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -337,11 +410,12 @@ async fn declared_intent_denies_out_of_scope_authorize_request() {
 
     let declare = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/intent/declare",
+            "req-declare-s1-scope",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -390,11 +464,12 @@ async fn active_lease_by_other_session_denies_authorize_even_with_matching_inten
 
     let declare = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/intent/declare",
+            "req-declare-s1-lease-conflict",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -444,13 +519,15 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
     assert_eq!(lease.status(), StatusCode::OK);
 
     for session_id in ["s2", "s3"] {
+        let request_id = format!("req-declare-{session_id}-queue");
         let declare = app
             .clone()
-            .oneshot(json_request(
+            .oneshot(protocol_request(
                 "/v1/intent/declare",
+                &request_id,
+                session_id,
+                "w1",
                 serde_json::json!({
-                    "session_id": session_id,
-                    "workspace_id": "w1",
                     "files_planned": ["src/auth.ts"]
                 }),
             ))
@@ -583,11 +660,12 @@ async fn activity_finalize_releases_leases_and_notifications_poll_returns_resume
 
     let declare = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/intent/declare",
+            "req-declare-s2-notify",
+            "s2",
+            "w1",
             serde_json::json!({
-                "session_id": "s2",
-                "workspace_id": "w1",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -743,11 +821,12 @@ async fn active_lease_by_same_session_allows_matching_authorize() {
 
     let declare = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/intent/declare",
+            "req-declare-s1-same-lease",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -783,11 +862,12 @@ async fn delete_file_action_requires_exact_file_intent_over_http() {
 
     let declare = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/intent/declare",
+            "req-declare-s1-delete",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
                 "files_planned": ["src/"]
             }),
         ))
@@ -823,11 +903,12 @@ async fn current_returns_materialized_state_summary() {
 
     let declare = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/intent/declare",
+            "req-declare-s1-current",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -856,11 +937,12 @@ async fn events_returns_recent_audit_events() {
 
     let declare = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/intent/declare",
+            "req-declare-s1-events",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -1123,6 +1205,53 @@ fn json_request(path: &str, body: serde_json::Value) -> Request<Body> {
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .expect("json request should build")
+}
+
+fn protocol_body(
+    request_id: &str,
+    session_id: &str,
+    workspace_id: &str,
+    payload: serde_json::Value,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "protocol_version": "stateful.v1",
+        "request_id": request_id,
+        "session": {
+            "session_id": session_id,
+            "actor_id": session_id,
+            "actor_type": "agent"
+        },
+        "workspace": {
+            "workspace_id": workspace_id,
+            "root": "/repo",
+            "repo_id": "repo-1",
+            "worktree_id": "worktree-1",
+            "branch": "main"
+        },
+        "source": {
+            "kind": "cli",
+            "event": "test",
+            "source_ref": "routes.rs"
+        }
+    });
+    let object = body.as_object_mut().expect("body should be object");
+    for (key, value) in payload.as_object().expect("payload should be object") {
+        object.insert(key.clone(), value.clone());
+    }
+    body
+}
+
+fn protocol_request(
+    path: &str,
+    request_id: &str,
+    session_id: &str,
+    workspace_id: &str,
+    payload: serde_json::Value,
+) -> Request<Body> {
+    json_request(
+        path,
+        protocol_body(request_id, session_id, workspace_id, payload),
+    )
 }
 
 fn authorized_get(path: &str) -> Request<Body> {

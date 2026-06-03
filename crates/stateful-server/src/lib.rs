@@ -1,3 +1,6 @@
+pub mod protocol;
+
+use crate::protocol::{ProtocolRequest, validate_protocol};
 use axum::{
     Json, Router,
     extract::State,
@@ -230,7 +233,7 @@ async fn authorize(
 async fn intent_declare(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<IntentDeclareRequest>,
+    Json(input): Json<ProtocolRequest<IntentDeclareRequest>>,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return (
@@ -241,11 +244,26 @@ async fn intent_declare(
         );
     }
 
+    let input = match validate_protocol(input) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+    let identity = WorkspaceIdentityRequest {
+        repo_id: Some(input.workspace.repo_id),
+        worktree_id: Some(input.workspace.worktree_id),
+        root: Some(input.workspace.root),
+        branch: Some(input.workspace.branch),
+    };
+
     append_event_response(
         &config.store,
         with_request_identity(
-            Event::intent_declared(input.session_id, input.workspace_id, input.files_planned),
-            input.identity,
+            Event::intent_declared(
+                input.session.session_id,
+                input.workspace.workspace_id,
+                input.payload.files_planned,
+            ),
+            identity,
         ),
     )
 }
@@ -918,11 +936,7 @@ fn has_valid_bearer_token(headers: &HeaderMap, expected_token: &str) -> bool {
 
 #[derive(Debug, Deserialize)]
 struct IntentDeclareRequest {
-    session_id: String,
-    workspace_id: String,
     files_planned: Vec<String>,
-    #[serde(flatten)]
-    identity: WorkspaceIdentityRequest,
 }
 
 #[derive(Debug, Deserialize)]
