@@ -249,9 +249,7 @@ fn contains_shell_control_syntax(command: &str) -> bool {
 }
 
 fn contains_unsupported_shell_expansion(command: &str) -> bool {
-    ["$'", "$\"", "${", "$(("]
-        .iter()
-        .any(|token| command.contains(token))
+    command.contains('$')
 }
 
 fn is_stateful_binary(word: &str) -> bool {

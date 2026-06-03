@@ -81,6 +81,7 @@ fn git_branch_and_diff_read_only_allowlists_reject_mutating_options() {
         "git diff \\--output=file",
         "git diff --out'put'=file",
         "git diff --out$'put'=file",
+        "git diff --out$SUFFIX=file",
     ];
 
     for command in rejected {
@@ -107,10 +108,28 @@ fn shell_control_syntax_is_denied_before_read_only_allowlists() {
         "stateful status & rm docs/a.md",
         "stateful status>docs/a.md",
         "rg auth\nrm src/a.rs",
+    ];
+
+    for command in rejected {
+        assert_eq!(
+            classify_bash(command).kind,
+            BashKind::Mutating,
+            "command `{command}` should be denied before any read-only allowlist"
+        );
+    }
+}
+
+#[test]
+fn shell_expansion_syntax_is_denied_before_read_only_allowlists() {
+    let rejected = [
         "find docs $(printf name)",
         "find docs ${PREDICATE}",
         "find docs $((1))",
         "find docs $\"PREDICATE\"",
+        "find docs -$PREDICATE",
+        "rg $PATTERN docs",
+        "rg $1 docs",
+        "rg $? docs",
     ];
 
     for command in rejected {
