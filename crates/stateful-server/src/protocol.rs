@@ -1,6 +1,7 @@
 use axum::{Json, http::StatusCode};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use stateful_core::{ActorType, SourceKind};
 
 const SUPPORTED_PROTOCOL_VERSION: &str = "stateful.v1";
 
@@ -10,6 +11,8 @@ pub struct ProtocolRequest<T> {
     protocol_version: Option<Value>,
     #[serde(default)]
     request_id: Option<Value>,
+    #[serde(default)]
+    observed_at: Option<Value>,
     #[serde(default)]
     session: Option<Value>,
     #[serde(default)]
@@ -52,6 +55,7 @@ pub struct SourceMetadata {
 pub struct ValidatedRequest<T> {
     pub protocol_version: String,
     pub request_id: String,
+    pub observed_at: String,
     pub session: SessionMetadata,
     pub workspace: WorkspaceMetadata,
     pub source: SourceMetadata,
@@ -76,6 +80,11 @@ pub fn validate_protocol<T>(
         Err(message) => return Err(protocol_error(message)),
     };
 
+    let observed_at = match required_string(request.observed_at, "observed_at") {
+        Ok(observed_at) => observed_at,
+        Err(message) => return Err(protocol_error(message)),
+    };
+
     let session = decode_metadata(request.session, "session")
         .and_then(validate_session)
         .map_err(protocol_error)?;
@@ -91,6 +100,7 @@ pub fn validate_protocol<T>(
     Ok(ValidatedRequest {
         protocol_version,
         request_id,
+        observed_at,
         session,
         workspace,
         source,
@@ -162,11 +172,14 @@ struct RawSourceMetadata {
 }
 
 fn validate_session(session: RawSessionMetadata) -> Result<SessionMetadata, String> {
+    let actor_type = required(session.actor_type, "session.actor_type")?;
+    validate_enum::<ActorType>(&actor_type, "session.actor_type")?;
+
     Ok(SessionMetadata {
         session_id: required(session.session_id, "session.session_id")?,
         turn_id: session.turn_id,
         actor_id: required(session.actor_id, "session.actor_id")?,
-        actor_type: required(session.actor_type, "session.actor_type")?,
+        actor_type,
         owner_id: session.owner_id,
         parent_session_id: session.parent_session_id,
         parent_actor_id: session.parent_actor_id,
@@ -184,8 +197,11 @@ fn validate_workspace(workspace: RawWorkspaceMetadata) -> Result<WorkspaceMetada
 }
 
 fn validate_source(source: RawSourceMetadata) -> Result<SourceMetadata, String> {
+    let kind = required(source.kind, "source.kind")?;
+    validate_enum::<SourceKind>(&kind, "source.kind")?;
+
     Ok(SourceMetadata {
-        kind: required(source.kind, "source.kind")?,
+        kind,
         event: required(source.event, "source.event")?,
         tool_name: source.tool_name,
         source_ref: required(source.source_ref, "source.source_ref")?,
@@ -205,4 +221,13 @@ fn required_string(value: Option<Value>, field: &str) -> Result<String, String> 
         Some(Value::String(_)) | None => Err(format!("Missing protocol field: {field}")),
         Some(_) => Err(format!("Invalid protocol field: {field}")),
     }
+}
+
+fn validate_enum<T>(value: &str, field: &str) -> Result<(), String>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value::<T>(Value::String(value.to_string()))
+        .map(|_| ())
+        .map_err(|_| format!("Invalid protocol field: {field}"))
 }

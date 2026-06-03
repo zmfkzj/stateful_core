@@ -217,6 +217,75 @@ async fn side_effecting_routes_fail_closed_on_malformed_protocol_metadata() {
 }
 
 #[tokio::test]
+async fn side_effecting_routes_fail_closed_on_invalid_v1_protocol_metadata() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let mut missing_observed_at = protocol_body(
+        "req-declare-5",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    missing_observed_at
+        .as_object_mut()
+        .expect("body should be object")
+        .remove("observed_at");
+
+    let mut blank_observed_at = protocol_body(
+        "req-declare-6",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    blank_observed_at["observed_at"] = serde_json::json!("   ");
+
+    let mut invalid_actor_type = protocol_body(
+        "req-declare-7",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    invalid_actor_type["session"]["actor_type"] = serde_json::json!("robot");
+
+    let mut invalid_source_kind = protocol_body(
+        "req-declare-8",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    invalid_source_kind["source"]["kind"] = serde_json::json!("browser");
+
+    for body in [
+        missing_observed_at,
+        blank_observed_at,
+        invalid_actor_type,
+        invalid_source_kind,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(json_request("/v1/intent/declare", body))
+            .await
+            .expect("intent declaration should complete");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 2048)
+            .await
+            .expect("body should read");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(json["decision"], "error");
+        assert_eq!(json["reason_code"], "protocol_mismatch");
+    }
+}
+
+#[tokio::test]
 async fn session_register_and_heartbeat_update_current_summary() {
     let app = build_router(ServerConfig::new("secret-token"));
 
@@ -1300,6 +1369,7 @@ fn protocol_body(
     let mut body = serde_json::json!({
         "protocol_version": "stateful.v1",
         "request_id": request_id,
+        "observed_at": "2026-06-03T00:00:00Z",
         "session": {
             "session_id": session_id,
             "actor_id": session_id,
