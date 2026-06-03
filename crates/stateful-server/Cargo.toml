@@ -18,6 +18,7 @@ stateful-core = { path = "../stateful-core" }
 stateful-store = { path = "../stateful-store" }
 stateful-validation = { path = "../stateful-validation" }
 thiserror.workspace = true
+time.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

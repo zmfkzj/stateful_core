@@ -2,6 +2,7 @@ use axum::{Json, http::StatusCode};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use stateful_core::{ActorType, SourceKind};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const SUPPORTED_PROTOCOL_VERSION: &str = "stateful.v1";
 
@@ -84,6 +85,9 @@ pub fn validate_protocol<T>(
         Ok(observed_at) => observed_at,
         Err(message) => return Err(protocol_error(message)),
     };
+    if let Err(message) = validate_timestamp(&observed_at, "observed_at") {
+        return Err(protocol_error(message));
+    }
 
     let session = decode_metadata(request.session, "session")
         .and_then(validate_session)
@@ -228,6 +232,12 @@ where
     T: DeserializeOwned,
 {
     serde_json::from_value::<T>(Value::String(value.to_string()))
+        .map(|_| ())
+        .map_err(|_| format!("Invalid protocol field: {field}"))
+}
+
+fn validate_timestamp(value: &str, field: &str) -> Result<(), String> {
+    OffsetDateTime::parse(value, &Rfc3339)
         .map(|_| ())
         .map_err(|_| format!("Invalid protocol field: {field}"))
 }

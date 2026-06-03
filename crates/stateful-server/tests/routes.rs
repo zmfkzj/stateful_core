@@ -243,6 +243,16 @@ async fn side_effecting_routes_fail_closed_on_invalid_v1_protocol_metadata() {
     );
     blank_observed_at["observed_at"] = serde_json::json!("   ");
 
+    let mut malformed_observed_at = protocol_body(
+        "req-declare-malformed-observed-at",
+        "s1",
+        "w1",
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    malformed_observed_at["observed_at"] = serde_json::json!("not-a-date");
+
     let mut blank_request_id = protocol_body(
         "req-declare-7",
         "s1",
@@ -332,6 +342,7 @@ async fn side_effecting_routes_fail_closed_on_invalid_v1_protocol_metadata() {
     for body in [
         missing_observed_at,
         blank_observed_at,
+        malformed_observed_at,
         blank_request_id,
         empty_request_id,
         invalid_actor_type,
