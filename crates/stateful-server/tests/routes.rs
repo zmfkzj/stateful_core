@@ -81,22 +81,16 @@ async fn authorize_accepts_matching_bearer_token() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/authorize")
-                .header("authorization", "Bearer secret-token")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "session_id": "s1",
-                        "action": "write_file",
-                        "path": "src/auth.ts"
-                    })
-                    .to_string(),
-                ))
-                .expect("authorized request should build"),
-        )
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "req-authorize-token",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
         .await
         .expect("authorized response should complete");
 
@@ -514,10 +508,12 @@ async fn lease_activity_and_conflict_routes_are_available() {
 
     let conflict = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/conflicts/check",
+            "req-conflicts-lease-activity",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
                 "action": "write_file",
                 "path": "src/auth.ts"
             }),
@@ -577,10 +573,12 @@ async fn declared_intent_allows_matching_authorize_request() {
     assert_eq!(declare.status(), StatusCode::OK);
 
     let response = app
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/authorize",
+            "req-authorize-s1-auth",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
                 "action": "write_file",
                 "path": "src/auth.ts"
             }),
@@ -617,10 +615,12 @@ async fn declared_intent_denies_out_of_scope_authorize_request() {
     assert_eq!(declare.status(), StatusCode::OK);
 
     let response = app
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/authorize",
+            "req-authorize-s1-scope",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
                 "action": "write_file",
                 "path": "src/session.ts"
             }),
@@ -630,6 +630,48 @@ async fn declared_intent_denies_out_of_scope_authorize_request() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "scope_mismatch");
+}
+
+#[tokio::test]
+async fn authorize_uses_policy_service_and_preserves_scope_decision() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "req-policy-declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "req-policy-authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/session.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 2048)
         .await
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
@@ -671,11 +713,12 @@ async fn active_lease_by_other_session_denies_authorize_even_with_matching_inten
     assert_eq!(declare.status(), StatusCode::OK);
 
     let response = app
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/authorize",
+            "req-authorize-s1-lease-conflict",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
                 "action": "write_file",
                 "path": "src/auth.ts"
             }),
@@ -690,6 +733,81 @@ async fn active_lease_by_other_session_denies_authorize_even_with_matching_inten
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "active_lease_conflict");
+}
+
+#[tokio::test]
+async fn conflicts_check_does_not_enqueue_waiters_on_queue_requested() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let conflict = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/conflicts/check",
+            "req-conflicts-s2-no-queue",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "queue_on_conflict": true
+            }),
+        ))
+        .await
+        .expect("conflict check should complete");
+    assert_eq!(conflict.status(), StatusCode::OK);
+
+    let body = to_bytes(conflict.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "active_lease_conflict");
+    assert!(json.get("wait").is_none());
+
+    let release = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/release",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    let resume = app
+        .oneshot(json_request(
+            "/v1/resume/next",
+            serde_json::json!({
+                "session_id": "s2",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("resume next should complete");
+    assert_eq!(resume.status(), StatusCode::OK);
+    let body = to_bytes(resume.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["resume_available"], false);
 }
 
 #[tokio::test]
@@ -731,11 +849,12 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
 
     let queued_b = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/authorize",
+            "req-authorize-s2-queue",
+            "s2",
+            "w1",
             serde_json::json!({
-                "session_id": "s2",
-                "workspace_id": "w1",
                 "action": "write_file",
                 "path": "src/auth.ts",
                 "queue_on_conflict": true
@@ -756,11 +875,12 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
 
     let queued_c = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/authorize",
+            "req-authorize-s3-queue",
+            "s3",
+            "w1",
             serde_json::json!({
-                "session_id": "s3",
-                "workspace_id": "w1",
                 "action": "write_file",
                 "path": "src/auth.ts",
                 "queue_on_conflict": true
@@ -790,11 +910,12 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
 
     let blocked_c = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/authorize",
+            "req-authorize-s3-reservation-blocked",
+            "s3",
+            "w1",
             serde_json::json!({
-                "session_id": "s3",
-                "workspace_id": "w1",
                 "action": "write_file",
                 "path": "src/auth.ts",
                 "queue_on_conflict": true
@@ -810,26 +931,27 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
     assert_eq!(json["reason_code"], "reservation_conflict");
     assert_eq!(json["reservation"]["session_id"], "s2");
 
-    let allowed_b = app
+    let requires_claim_b = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/authorize",
+            "req-authorize-s2-reservation-owner",
+            "s2",
+            "w1",
             serde_json::json!({
-                "session_id": "s2",
-                "workspace_id": "w1",
                 "action": "write_file",
                 "path": "src/auth.ts"
             }),
         ))
         .await
         .expect("authorize should complete");
-    let body = to_bytes(allowed_b.into_body(), 2048)
+    let body = to_bytes(requires_claim_b.into_body(), 2048)
         .await
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-    assert_eq!(json["decision"], "allow");
-    assert_eq!(json["reason_code"], "authorized");
-    assert_eq!(json["reservation"]["status"], "claimed");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "reservation_requires_claim");
+    assert_eq!(json["reservation"]["status"], "reserved");
 }
 
 #[tokio::test]
@@ -868,11 +990,12 @@ async fn activity_finalize_releases_leases_and_notifications_poll_returns_resume
 
     let queued = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/authorize",
+            "req-authorize-s2-notify-queue",
+            "s2",
+            "w1",
             serde_json::json!({
-                "session_id": "s2",
-                "workspace_id": "w1",
                 "action": "write_file",
                 "path": "src/auth.ts",
                 "queue_on_conflict": true
@@ -940,11 +1063,12 @@ async fn resume_next_returns_active_reservation_for_session() {
 
     let queued = app
         .clone()
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/authorize",
+            "req-authorize-s2-resume-queue",
+            "s2",
+            "w1",
             serde_json::json!({
-                "session_id": "s2",
-                "workspace_id": "w1",
                 "action": "write_file",
                 "path": "src/auth.ts",
                 "queue_on_conflict": true
@@ -1028,11 +1152,12 @@ async fn active_lease_by_same_session_allows_matching_authorize() {
     assert_eq!(declare.status(), StatusCode::OK);
 
     let response = app
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/authorize",
+            "req-authorize-s1-same-lease",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
                 "action": "write_file",
                 "path": "src/auth.ts"
             }),
@@ -1069,11 +1194,12 @@ async fn delete_file_action_requires_exact_file_intent_over_http() {
     assert_eq!(declare.status(), StatusCode::OK);
 
     let response = app
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/authorize",
+            "req-authorize-s1-delete",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
                 "action": "delete_file",
                 "path": "src/auth.ts"
             }),
@@ -1215,10 +1341,12 @@ async fn authorize_uses_supplied_sqlite_store() {
     let app = build_router(ServerConfig::with_store("secret-token", store));
 
     let response = app
-        .oneshot(json_request(
+        .oneshot(protocol_request(
             "/v1/authorize",
+            "req-authorize-sqlite-store",
+            "s1",
+            "w1",
             serde_json::json!({
-                "session_id": "s1",
                 "action": "write_file",
                 "path": "src/auth.ts"
             }),

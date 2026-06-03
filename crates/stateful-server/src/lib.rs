@@ -1,19 +1,21 @@
+mod policy_service;
 pub mod protocol;
 
-use crate::protocol::{ProtocolRequest, validate_protocol};
+use crate::{
+    policy_service::{PolicyService, WriteAuthorizationRequest, policy_outcome_json},
+    protocol::{ProtocolRequest, ValidatedRequest, validate_protocol},
+};
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use stateful_core::{
-    AuthorizationInput, ContextPackage, Decision, ReconciliationDecision, RenderMode,
-    render_prompt_text,
-};
-use stateful_store::{Event, OutboxEntry, Store, WaitRecord};
+use stateful_core::{ContextPackage, ReconciliationDecision, RenderMode, render_prompt_text};
+use stateful_store::{Event, OutboxEntry, Store};
 use stateful_validation::{ValidationResult, ValidationStatus, run_validation_profile};
 use std::{
     net::SocketAddr,
@@ -202,32 +204,46 @@ async fn session_heartbeat(
 async fn authorize(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<AuthorizeRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
+    body: Bytes,
+) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "error": "unauthorized"
-            })),
-        );
+        return unauthorized();
     }
 
-    let outcome = match authorize_from_store(&config.store, input, true) {
-        Ok(outcome) => outcome,
-        Err(message) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "decision": "error",
-                    "reason_code": "state_error",
-                    "message": message
-                })),
-            );
-        }
+    let input = match validate_protocol_body::<AuthorizePayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
     };
 
-    (StatusCode::OK, Json(authorization_json(outcome)))
+    let result = config
+        .store
+        .lock()
+        .map_err(|_| "store lock poisoned".to_string())
+        .and_then(|store| {
+            PolicyService::new(&store).authorize_write(WriteAuthorizationRequest {
+                request_id: input.request_id,
+                session_id: input.session.session_id,
+                workspace_id: Some(input.workspace.workspace_id),
+                action: input.payload.action,
+                path: input.payload.path,
+                old_path: input.payload.old_path,
+                new_path: input.payload.new_path,
+                queue_on_conflict: input.payload.queue_on_conflict,
+                allow_queue_side_effects: true,
+            })
+        });
+
+    match result {
+        Ok(outcome) => (StatusCode::OK, Json(policy_outcome_json(outcome))),
+        Err(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "decision": "error",
+                "reason_code": "state_error",
+                "message": message
+            })),
+        ),
+    }
 }
 
 async fn intent_declare(
@@ -397,14 +413,37 @@ async fn context_render(
 async fn conflicts_check(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<AuthorizeRequest>,
+    body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
 
-    match authorize_from_store(&config.store, input, false) {
-        Ok(outcome) => (StatusCode::OK, Json(authorization_json(outcome))),
+    let input = match validate_protocol_body::<AuthorizePayload>(&body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+
+    let result = config
+        .store
+        .lock()
+        .map_err(|_| "store lock poisoned".to_string())
+        .and_then(|store| {
+            PolicyService::new(&store).authorize_write(WriteAuthorizationRequest {
+                request_id: input.request_id,
+                session_id: input.session.session_id,
+                workspace_id: Some(input.workspace.workspace_id),
+                action: input.payload.action,
+                path: input.payload.path,
+                old_path: input.payload.old_path,
+                new_path: input.payload.new_path,
+                queue_on_conflict: input.payload.queue_on_conflict,
+                allow_queue_side_effects: false,
+            })
+        });
+
+    match result {
+        Ok(outcome) => (StatusCode::OK, Json(policy_outcome_json(outcome))),
         Err(message) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -639,139 +678,6 @@ async fn validation_run(
     }
 }
 
-#[derive(Debug, Clone)]
-struct AuthorizationOutcome {
-    decision: Decision,
-    wait: Option<WaitQueueInfo>,
-    reservation: Option<WaitRecord>,
-}
-
-#[derive(Debug, Clone)]
-struct WaitQueueInfo {
-    record: WaitRecord,
-    queue_position: Option<u64>,
-}
-
-fn authorize_from_store(
-    store: &SharedStore,
-    input: AuthorizeRequest,
-    allow_queue_side_effects: bool,
-) -> Result<AuthorizationOutcome, String> {
-    let path = input.path.clone();
-    let authorization_input = match input.action.as_str() {
-        "write_file" => AuthorizationInput::write_file(&path),
-        "delete_file" => AuthorizationInput::delete_file(&path),
-        "rename_file" => AuthorizationInput::rename_file(
-            input.old_path.as_deref().unwrap_or(path.as_str()),
-            input.new_path.as_deref().unwrap_or(path.as_str()),
-        ),
-        "move_file" => AuthorizationInput::move_file(
-            input.old_path.as_deref().unwrap_or(path.as_str()),
-            input.new_path.as_deref().unwrap_or(path.as_str()),
-        ),
-        _ => {
-            return Ok(AuthorizationOutcome {
-                decision: Decision::deny(
-                    "unsupported_action",
-                    "Action is not supported by the v1 authorization API.",
-                    "Use a supported action such as write_file.",
-                ),
-                wait: None,
-                reservation: None,
-            });
-        }
-    };
-
-    let store = store
-        .lock()
-        .map_err(|_| "store lock poisoned".to_string())?;
-    let mut active_reservation = None;
-    if let Some(workspace_id) = &input.workspace_id {
-        if let Some(reservation) = store
-            .active_reservation(workspace_id, &path)
-            .map_err(|error| error.to_string())?
-        {
-            if reservation.session_id != input.session_id {
-                return Ok(AuthorizationOutcome {
-                    decision: Decision::deny(
-                        "reservation_conflict",
-                        "Write target is reserved for the next waiting session.",
-                        "Wait for the active reservation to be claimed or expire.",
-                    ),
-                    wait: None,
-                    reservation: Some(reservation),
-                });
-            }
-            active_reservation = Some(reservation);
-        }
-
-        if let Some(owner) = store
-            .active_lease_owner(workspace_id, &path)
-            .map_err(|error| error.to_string())?
-            && owner != input.session_id
-        {
-            let wait = if allow_queue_side_effects && input.queue_on_conflict {
-                let waiter = store
-                    .enqueue_waiter(
-                        &input.session_id,
-                        workspace_id,
-                        &path,
-                        &input.action,
-                        Some(&owner),
-                    )
-                    .map_err(|error| error.to_string())?;
-                let queue_position = store
-                    .queue_position(&waiter.wait_id)
-                    .map_err(|error| error.to_string())?;
-                Some(WaitQueueInfo {
-                    record: waiter,
-                    queue_position,
-                })
-            } else {
-                None
-            };
-
-            return Ok(AuthorizationOutcome {
-                decision: Decision::deny(
-                    "active_lease_conflict",
-                    "Write target is covered by another active session lease.",
-                    "Refresh current state, coordinate with the lease owner, or wait for the lease to release.",
-                ),
-                wait,
-                reservation: None,
-            });
-        }
-    }
-
-    let policy_state = store
-        .policy_state_for_session(&input.session_id)
-        .map_err(|error| error.to_string())?;
-
-    let decision = stateful_core::authorize_action(&policy_state, authorization_input);
-    let mut reservation = active_reservation;
-    if matches!(decision.decision, stateful_core::DecisionKind::Allow)
-        && let Some(active) = &reservation
-    {
-        store
-            .claim_reservation(&active.wait_id, &input.session_id)
-            .map_err(|error| error.to_string())?;
-        if let Some(workspace_id) = &input.workspace_id {
-            store
-                .acquire_lease(&input.session_id, workspace_id, &path)
-                .map_err(|error| error.to_string())?;
-        }
-        if let Some(claimed) = &mut reservation {
-            claimed.status = "claimed".to_string();
-        }
-    }
-
-    Ok(AuthorizationOutcome {
-        decision,
-        wait: None,
-        reservation,
-    })
-}
-
 fn append_event_response(store: &SharedStore, event: Event) -> (StatusCode, Json<Value>) {
     let result = store
         .lock()
@@ -835,48 +741,6 @@ fn status_response(result: Result<(), String>) -> (StatusCode, Json<Value>) {
     }
 }
 
-fn authorization_json(outcome: AuthorizationOutcome) -> Value {
-    let decision = outcome.decision;
-    let mut value = json!({
-        "decision": match decision.decision {
-            stateful_core::DecisionKind::Allow => "allow",
-            stateful_core::DecisionKind::Warn => "warn",
-            stateful_core::DecisionKind::Deny => "deny",
-            stateful_core::DecisionKind::Error => "error",
-        },
-        "reason_code": decision.reason_code,
-        "message": decision.message,
-        "required_next_action": decision.required_next_action,
-    });
-
-    if let Some(wait) = outcome.wait {
-        value["wait"] = json!({
-            "wait_id": wait.record.wait_id,
-            "session_id": wait.record.session_id,
-            "workspace_id": wait.record.workspace_id,
-            "relative_path": wait.record.relative_path,
-            "action": wait.record.action,
-            "status": wait.record.status,
-            "queue_position": wait.queue_position,
-            "blocking_session_id": wait.record.blocking_session_id,
-        });
-    }
-
-    if let Some(reservation) = outcome.reservation {
-        value["reservation"] = json!({
-            "wait_id": reservation.wait_id,
-            "session_id": reservation.session_id,
-            "workspace_id": reservation.workspace_id,
-            "relative_path": reservation.relative_path,
-            "action": reservation.action,
-            "status": reservation.status,
-            "reservation_expires_at": reservation.reservation_expires_at,
-        });
-    }
-
-    value
-}
-
 fn unauthorized() -> (StatusCode, Json<Value>) {
     (
         StatusCode::UNAUTHORIZED,
@@ -894,6 +758,15 @@ fn validation_result_json(result: ValidationResult, workspace_id: String) -> Val
         "exit_code": result.exit_code,
         "message": result.message,
     })
+}
+
+fn validate_protocol_body<T>(body: &Bytes) -> Result<ValidatedRequest<T>, (StatusCode, Json<Value>)>
+where
+    T: DeserializeOwned,
+{
+    let request = serde_json::from_slice::<ProtocolRequest<T>>(body)
+        .map_err(|_| crate::protocol::protocol_error("Invalid protocol request body."))?;
+    validate_protocol(request)
 }
 
 fn record_validation_result(
@@ -985,10 +858,7 @@ struct ResumeNextRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct AuthorizeRequest {
-    session_id: String,
-    #[serde(default)]
-    workspace_id: Option<String>,
+struct AuthorizePayload {
     #[serde(default)]
     queue_on_conflict: bool,
     action: String,
