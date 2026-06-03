@@ -92,6 +92,10 @@ pub fn write_global_runtime_file(
     Ok(())
 }
 
+pub fn global_state_db_path(paths: &GlobalPaths) -> std::path::PathBuf {
+    paths.state_db.clone()
+}
+
 pub fn discover_runtime(repo_root: impl AsRef<Path>) -> anyhow::Result<ServerRuntime> {
     if let Some(runtime) = runtime_from_env() {
         return Ok(runtime);

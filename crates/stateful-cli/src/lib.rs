@@ -32,8 +32,9 @@ pub use repo_registry::{
 };
 pub use runtime::{
     CurrentSession, HttpResponse, IntentDeclareArgs, ServerRuntime, declare_intent_via_http,
-    discover_runtime, discover_runtime_with_global, get_json, post_json, read_current_session_file,
-    write_current_session_file, write_global_runtime_file, write_runtime_file,
+    discover_runtime, discover_runtime_with_global, get_json, global_state_db_path, post_json,
+    read_current_session_file, write_current_session_file, write_global_runtime_file,
+    write_runtime_file,
 };
 pub use validation::{
     ResultParser, ValidationConfig, ValidationProfile, ValidationResult, ValidationStatus,
@@ -441,10 +442,6 @@ fn run_server(
 
 pub fn state_db_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf {
     repo_root.as_ref().join(".stateful_core").join("state.db")
-}
-
-pub fn global_state_db_path(paths: &GlobalPaths) -> std::path::PathBuf {
-    paths.state_db.clone()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
