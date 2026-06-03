@@ -1,7 +1,7 @@
 use clap::Parser;
 use stateful_cli::{
-    Cli, Command, HookCommand, McpCommand, NotificationsCommand, ReposCommand, ResumeCommand,
-    ServerCommand,
+    Cli, CodexHookCommand, Command, HookCommand, McpCommand, NotificationsCommand, ReposCommand,
+    ResumeCommand, ServerCommand,
 };
 use std::path::PathBuf;
 
@@ -151,6 +151,28 @@ fn hook_pre_tool_use_command_parses() {
     assert!(matches!(
         cli.command,
         Command::Hook(HookCommand::PreToolUse)
+    ));
+}
+
+#[test]
+fn hook_codex_pre_tool_use_command_parses() {
+    let cli = Cli::try_parse_from(["stateful", "hook", "codex", "pre-tool-use"])
+        .expect("hook codex pre-tool-use command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Hook(HookCommand::Codex(CodexHookCommand::PreToolUse))
+    ));
+}
+
+#[test]
+fn hook_run_command_parses_event() {
+    let cli = Cli::try_parse_from(["stateful", "hook", "run", "pre-tool-use"])
+        .expect("hook run command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Hook(HookCommand::Run { ref event }) if event == "pre-tool-use"
     ));
 }
 

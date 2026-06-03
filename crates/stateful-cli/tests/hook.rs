@@ -651,6 +651,70 @@ fn pre_tool_use_apply_patch_delete_posts_delete_file_action() {
 }
 
 #[test]
+fn normalized_pre_tool_use_uses_same_authorization_path_as_codex_input() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-normalized-hook-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("runtime should write");
+
+    let input = serde_json::json!({
+        "event": "pre_tool_use",
+        "session_id": "s-normalized",
+        "cwd": repo_root,
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "src/auth.ts"
+        },
+        "source": {
+            "kind": "hook",
+            "agent": "generic"
+        }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "run", "pre-tool-use"], &input);
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx.recv().expect("fake server should receive request");
+    assert!(request.contains("POST /v1/authorize HTTP/1.1"));
+    assert!(request.contains("src/auth.ts"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn codex_hook_subcommand_remains_compatible() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "rg auth src"
+      }
+    }"#;
+
+    let outcome =
+        stateful_cli::handle_codex_pre_tool_use(input).expect("codex hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
 fn session_start_posts_session_register() {
     let temp_root =
         std::env::temp_dir().join(format!("stateful-hook-session-test-{}", std::process::id()));

@@ -9,9 +9,9 @@ use stateful_core::{BashKind, classify_bash};
 
 use crate::outbox::queue_session_heartbeat_outbox;
 use crate::{
-    CurrentSession, GlobalPaths, HookCommand, ProtocolPostContext, RepoGate, RepoIdentity,
-    ServerRuntime, discover_runtime_with_global, ensure_server, post_json, post_protocol_json,
-    repo_gate, repo_identity_for_enabled_repo, write_current_session_file,
+    CodexHookCommand, CurrentSession, GlobalPaths, HookCommand, ProtocolPostContext, RepoGate,
+    RepoIdentity, ServerRuntime, discover_runtime_with_global, ensure_server, post_json,
+    post_protocol_json, repo_gate, repo_identity_for_enabled_repo, write_current_session_file,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,21 +37,43 @@ impl HookOutcome {
 
 pub fn run_hook(command: HookCommand) -> anyhow::Result<()> {
     match command {
-        HookCommand::SessionStart => {
+        HookCommand::Codex(command) => run_codex_hook(command)?,
+        HookCommand::Run { event: _ } => {
+            let mut input = String::new();
+            io::stdin().read_to_string(&mut input)?;
+            if let Some(outcome) = handle_normalized_hook_in_repo(&input, hook_start_dir(&input)?)?
+                && !matches!(outcome, HookOutcome::Allow)
+            {
+                println!("{}", serde_json::to_string(&outcome.to_stdout_json()?)?);
+            }
+        }
+        HookCommand::SessionStart => run_codex_hook(CodexHookCommand::SessionStart)?,
+        HookCommand::PostToolUse => run_codex_hook(CodexHookCommand::PostToolUse)?,
+        HookCommand::UserPromptSubmit => run_codex_hook(CodexHookCommand::UserPromptSubmit)?,
+        HookCommand::Stop => run_codex_hook(CodexHookCommand::Stop)?,
+        HookCommand::PreToolUse => run_codex_hook(CodexHookCommand::PreToolUse)?,
+    }
+
+    Ok(())
+}
+
+fn run_codex_hook(command: CodexHookCommand) -> anyhow::Result<()> {
+    match command {
+        CodexHookCommand::SessionStart => {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input)?;
             if let Err(error) = handle_session_start_in_repo(&input, hook_start_dir(&input)?) {
                 eprintln!("stateful session-start warning: {error}");
             }
         }
-        HookCommand::PostToolUse => {
+        CodexHookCommand::PostToolUse => {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input)?;
             if let Err(error) = handle_post_tool_use_in_repo(&input, hook_start_dir(&input)?) {
                 eprintln!("stateful post-tool-use warning: {error}");
             }
         }
-        HookCommand::UserPromptSubmit => {
+        CodexHookCommand::UserPromptSubmit => {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input)?;
             match handle_user_prompt_submit_in_repo(&input, hook_start_dir(&input)?) {
@@ -60,14 +82,14 @@ pub fn run_hook(command: HookCommand) -> anyhow::Result<()> {
                 Err(error) => eprintln!("stateful user-prompt-submit warning: {error}"),
             }
         }
-        HookCommand::Stop => {
+        CodexHookCommand::Stop => {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input)?;
             if let Err(error) = handle_stop_in_repo(&input, hook_start_dir(&input)?) {
                 eprintln!("stateful stop warning: {error}");
             }
         }
-        HookCommand::PreToolUse => {
+        CodexHookCommand::PreToolUse => {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input)?;
             let outcome = handle_pre_tool_use_in_repo(&input, hook_start_dir(&input)?)?;
@@ -80,8 +102,84 @@ pub fn run_hook(command: HookCommand) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn handle_codex_pre_tool_use(input: &str) -> anyhow::Result<HookOutcome> {
+    handle_pre_tool_use(input)
+}
+
 pub fn handle_pre_tool_use(input: &str) -> anyhow::Result<HookOutcome> {
     handle_pre_tool_use_with_runtime(input, None, None, None)
+}
+
+pub fn handle_normalized_hook_in_repo(
+    input: &str,
+    repo_root: impl AsRef<Path>,
+) -> anyhow::Result<Option<HookOutcome>> {
+    let normalized: NormalizedHookInput = serde_json::from_str(input)?;
+    match normalized.event.as_str() {
+        "pre_tool_use" | "pre-tool-use" => {
+            let codex_shape = normalized.to_pre_tool_use_input().to_string();
+            handle_pre_tool_use_in_repo(&codex_shape, repo_root).map(Some)
+        }
+        "post_tool_use" | "post-tool-use" => {
+            let codex_shape = normalized.to_session_event_input("PostToolUse").to_string();
+            handle_post_tool_use_in_repo(&codex_shape, repo_root)?;
+            Ok(None)
+        }
+        "session_start" | "session-start" => {
+            let codex_shape = normalized
+                .to_session_event_input("SessionStart")
+                .to_string();
+            handle_session_start_in_repo(&codex_shape, repo_root)?;
+            Ok(None)
+        }
+        "stop" => {
+            let codex_shape = normalized.to_session_event_input("Stop").to_string();
+            handle_stop_in_repo(&codex_shape, repo_root)?;
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct NormalizedHookInput {
+    event: String,
+    session_id: String,
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(default)]
+    tool_input: serde_json::Value,
+    #[serde(default, rename = "source")]
+    _source: serde_json::Value,
+}
+
+impl NormalizedHookInput {
+    fn to_pre_tool_use_input(&self) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": &self.session_id,
+            "cwd": self.cwd_string(),
+            "hook_event_name": "PreToolUse",
+            "tool_name": self.tool_name.as_deref().unwrap_or(""),
+            "tool_input": self.tool_input.clone(),
+        })
+    }
+
+    fn to_session_event_input(&self, hook_event_name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": &self.session_id,
+            "cwd": self.cwd_string(),
+            "hook_event_name": hook_event_name,
+            "tool_name": self.tool_name.as_deref().unwrap_or(""),
+            "tool_input": self.tool_input.clone(),
+        })
+    }
+
+    fn cwd_string(&self) -> Option<String> {
+        self.cwd
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+    }
 }
 
 pub fn handle_pre_tool_use_in_repo(

@@ -19,7 +19,8 @@ mod validation;
 pub use commit::{CommitRequest, CommitResult, run_structured_commit};
 pub use global_paths::GlobalPaths;
 pub use hook::{
-    HookOutcome, handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
+    HookOutcome, handle_codex_pre_tool_use, handle_normalized_hook_in_repo,
+    handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
     handle_session_start_in_repo, handle_stop_in_repo, handle_user_prompt_submit_in_repo,
 };
 pub use install::{
@@ -185,6 +186,20 @@ pub enum McpCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum HookCommand {
+    #[command(subcommand)]
+    Codex(CodexHookCommand),
+    Run {
+        event: String,
+    },
+    SessionStart,
+    UserPromptSubmit,
+    PreToolUse,
+    PostToolUse,
+    Stop,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CodexHookCommand {
     SessionStart,
     UserPromptSubmit,
     PreToolUse,
