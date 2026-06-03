@@ -1,7 +1,6 @@
 use std::{
     io::{self, Read},
-    path::{Path, PathBuf},
-    process::Command,
+    path::{Component, Path, PathBuf},
 };
 
 use serde::Deserialize;
@@ -10,8 +9,9 @@ use stateful_core::{BashKind, classify_bash};
 
 use crate::outbox::queue_session_heartbeat_outbox;
 use crate::{
-    CurrentSession, GlobalPaths, HookCommand, RepoGate, RepoRegistry, ServerRuntime,
-    discover_runtime_with_global, ensure_server, post_json, repo_gate, write_current_session_file,
+    CurrentSession, GlobalPaths, HookCommand, RepoGate, RepoIdentity, ServerRuntime,
+    discover_runtime_with_global, ensure_server, post_json, repo_gate,
+    repo_identity_for_enabled_repo, write_current_session_file,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,16 +81,16 @@ pub fn run_hook(command: HookCommand) -> anyhow::Result<()> {
 }
 
 pub fn handle_pre_tool_use(input: &str) -> anyhow::Result<HookOutcome> {
-    handle_pre_tool_use_with_runtime(input, None, None)
+    handle_pre_tool_use_with_runtime(input, None, None, None)
 }
 
 pub fn handle_pre_tool_use_in_repo(
     input: &str,
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<HookOutcome> {
-    let start = repo_root.as_ref();
+    let start = hook_start_dir_or(input, repo_root.as_ref());
     let paths = GlobalPaths::from_env()?;
-    let repo_root = match repo_gate(&paths, start)? {
+    let repo_root = match repo_gate(&paths, &start)? {
         RepoGate::Enabled { repo_root } => {
             ensure_server(&paths)?;
             repo_root
@@ -99,14 +99,19 @@ pub fn handle_pre_tool_use_in_repo(
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     remember_current_session(&repo_root, &runtime, input)?;
-    handle_pre_tool_use_with_runtime(input, Some(&runtime), Some(&repo_root))
+    handle_pre_tool_use_with_runtime(
+        input,
+        Some(&runtime),
+        Some(&repo_root),
+        Some(start.as_path()),
+    )
 }
 
 pub fn handle_session_start_in_repo(
     input: &str,
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<()> {
-    let start = repo_root.as_ref();
+    let start = hook_start_dir_or(input, repo_root.as_ref());
     let paths = GlobalPaths::from_env()?;
     let repo_root = match repo_gate(&paths, start)? {
         RepoGate::Enabled { repo_root } => {
@@ -125,7 +130,7 @@ pub fn handle_post_tool_use_in_repo(
     input: &str,
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<()> {
-    let start = repo_root.as_ref();
+    let start = hook_start_dir_or(input, repo_root.as_ref());
     let paths = GlobalPaths::from_env()?;
     let repo_root = match repo_gate(&paths, start)? {
         RepoGate::Enabled { repo_root } => {
@@ -154,7 +159,7 @@ pub fn handle_user_prompt_submit_in_repo(
     input: &str,
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<String> {
-    let start = repo_root.as_ref();
+    let start = hook_start_dir_or(input, repo_root.as_ref());
     let paths = GlobalPaths::from_env()?;
     let repo_root = match repo_gate(&paths, start)? {
         RepoGate::Enabled { repo_root } => {
@@ -169,7 +174,7 @@ pub fn handle_user_prompt_submit_in_repo(
 }
 
 pub fn handle_stop_in_repo(input: &str, repo_root: impl AsRef<Path>) -> anyhow::Result<()> {
-    let start = repo_root.as_ref();
+    let start = hook_start_dir_or(input, repo_root.as_ref());
     let paths = GlobalPaths::from_env()?;
     let repo_root = match repo_gate(&paths, start)? {
         RepoGate::Enabled { repo_root } => {
@@ -293,13 +298,14 @@ fn handle_pre_tool_use_with_runtime(
     input: &str,
     runtime: Option<&ServerRuntime>,
     repo_root: Option<&Path>,
+    cwd: Option<&Path>,
 ) -> anyhow::Result<HookOutcome> {
     let input: PreToolUseInput = serde_json::from_str(input)?;
 
     match input.tool_name.as_str() {
         "Bash" => authorize_bash(input.command().unwrap_or_default()),
         "apply_patch" => authorize_apply_patch(&input, runtime),
-        "Edit" | "Write" => authorize_file_write_tool(&input, runtime, repo_root),
+        "Edit" | "Write" => authorize_file_write_tool(&input, runtime, repo_root, cwd),
         tool_name if tool_name.starts_with("mcp__filesystem__") => Ok(HookOutcome::Deny {
             reason: "filesystem MCP writes require stateful authorization; read-only MCP calls are not yet classified".to_string(),
         }),
@@ -335,6 +341,7 @@ fn authorize_file_write_tool(
     input: &PreToolUseInput,
     runtime: Option<&ServerRuntime>,
     repo_root: Option<&Path>,
+    cwd: Option<&Path>,
 ) -> anyhow::Result<HookOutcome> {
     let Some(path) = input
         .tool_input
@@ -352,7 +359,7 @@ fn authorize_file_write_tool(
         });
     };
 
-    let Some(target) = normalize_file_tool_target(path, repo_root)? else {
+    let Some(target) = normalize_file_tool_target(path, repo_root, cwd)? else {
         return Ok(HookOutcome::Deny {
             reason: format!("{} target is outside the enabled repo", input.tool_name),
         });
@@ -415,26 +422,36 @@ fn authorize_targets(
 fn normalize_file_tool_target(
     path: &str,
     repo_root: Option<&Path>,
+    cwd: Option<&Path>,
 ) -> anyhow::Result<Option<String>> {
     let path = path.trim();
     let candidate = Path::new(path);
+    let Some(repo_root) = repo_root else {
+        return Ok(Some(path.replace('\\', "/")));
+    };
+    let repo_root = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+
     if candidate.is_absolute() {
-        let Some(repo_root) = repo_root else {
-            return Ok(Some(path.replace('\\', "/")));
-        };
-        let repo_root = repo_root
-            .canonicalize()
-            .unwrap_or_else(|_| repo_root.to_path_buf());
         let canonical = candidate
             .canonicalize()
             .unwrap_or_else(|_| candidate.to_path_buf());
-        let Ok(relative) = canonical.strip_prefix(&repo_root) else {
+        let candidate = normalize_path(canonical);
+        let Ok(relative) = candidate.strip_prefix(&repo_root) else {
             return Ok(None);
         };
         return Ok(Some(relative.to_string_lossy().replace('\\', "/")));
     }
 
-    Ok(Some(path.replace('\\', "/")))
+    let base = cwd.unwrap_or(repo_root.as_path());
+    let base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let candidate = normalize_path(base.join(candidate));
+    let Ok(relative) = candidate.strip_prefix(&repo_root) else {
+        return Ok(None);
+    };
+
+    Ok(Some(relative.to_string_lossy().replace('\\', "/")))
 }
 
 fn extract_apply_patch_write_targets(patch: &str) -> Vec<PatchTarget> {
@@ -476,55 +493,39 @@ impl PatchTarget {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RepoIdentity {
-    repo_id: String,
-    worktree_id: String,
-    root: String,
-    branch: String,
-}
-
 fn repo_identity(paths: &GlobalPaths, repo_root: &Path) -> anyhow::Result<RepoIdentity> {
-    let registry = RepoRegistry::load(paths)?;
-    let entry = registry
-        .enabled_entry(repo_root)
-        .ok_or_else(|| anyhow::anyhow!("enabled repo metadata not found"))?;
-    let branch = current_branch(repo_root).unwrap_or_else(|| "unknown".to_string());
-
-    Ok(RepoIdentity {
-        repo_id: entry.repo_id.clone(),
-        worktree_id: entry.repo_id.clone(),
-        root: entry.root.to_string_lossy().into_owned(),
-        branch,
-    })
-}
-
-fn current_branch(repo_root: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(repo_root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    if branch.is_empty() {
-        None
-    } else {
-        Some(branch)
-    }
+    repo_identity_for_enabled_repo(paths, repo_root)
 }
 
 fn hook_start_dir(input: &str) -> anyhow::Result<PathBuf> {
     let fallback = std::env::current_dir()?;
+    Ok(hook_start_dir_or(input, &fallback))
+}
+
+fn hook_start_dir_or(input: &str, fallback: &Path) -> PathBuf {
     let Ok(input) = serde_json::from_str::<HookCwdInput>(input) else {
-        return Ok(fallback);
+        return fallback.to_path_buf();
     };
-    Ok(input
+    input
         .cwd
         .filter(|cwd| !cwd.as_os_str().is_empty() && cwd.exists())
-        .unwrap_or(fallback))
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+
+fn normalize_path(path: PathBuf) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(segment) => normalized.push(segment),
+        }
+    }
+    normalized
 }
 
 #[derive(Debug, Deserialize)]

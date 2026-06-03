@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -89,6 +90,14 @@ pub struct RepoEntry {
     pub codex_mode: CodexMode,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoIdentity {
+    pub repo_id: String,
+    pub worktree_id: String,
+    pub root: String,
+    pub branch: String,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CodexMode {
@@ -115,6 +124,25 @@ pub fn repo_gate(paths: &GlobalPaths, start: impl AsRef<Path>) -> anyhow::Result
     } else {
         Ok(RepoGate::Disabled)
     }
+}
+
+pub fn repo_identity_for_enabled_repo(
+    paths: &GlobalPaths,
+    repo_root: impl AsRef<Path>,
+) -> anyhow::Result<RepoIdentity> {
+    let repo_root = repo_root.as_ref();
+    let registry = RepoRegistry::load(paths)?;
+    let entry = registry
+        .enabled_entry(repo_root)
+        .ok_or_else(|| anyhow::anyhow!("enabled repo metadata not found"))?;
+    let branch = current_branch(repo_root).unwrap_or_else(|| "unknown".to_string());
+
+    Ok(RepoIdentity {
+        repo_id: entry.repo_id.clone(),
+        worktree_id: entry.repo_id.clone(),
+        root: entry.root.to_string_lossy().into_owned(),
+        branch,
+    })
 }
 
 pub fn enable_repo(
@@ -300,6 +328,23 @@ fn repo_id_for_root(root: &Path) -> String {
     let first = fnv1a64(0xcbf29ce484222325, bytes.as_bytes());
     let second = fnv1a64(0x84222325cbf29ce4, bytes.as_bytes());
     format!("repo-{first:016x}{second:016x}")
+}
+
+fn current_branch(repo_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
 }
 
 fn fnv1a64(seed: u64, bytes: &[u8]) -> u64 {

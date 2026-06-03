@@ -9,6 +9,7 @@ use stateful_mcp::{ToolCall, map_tool_to_http, protocol_tool_name, tool_descript
 use crate::{
     GlobalPaths, HttpResponse, RepoGate, ServerRuntime, discover_runtime_with_global,
     ensure_server, get_json, post_json, read_current_session_file, repo_gate,
+    repo_identity_for_enabled_repo,
 };
 
 pub fn call_mcp_tool_in_repo(
@@ -35,12 +36,13 @@ pub fn call_mcp_tool_in_repo(
         }
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
-    call_mcp_tool(&runtime, &repo_root, tool_name, arguments)
+    call_mcp_tool(&runtime, &repo_root, &paths, tool_name, arguments)
 }
 
 fn call_mcp_tool(
     runtime: &ServerRuntime,
     repo_root: &Path,
+    paths: &GlobalPaths,
     tool_name: impl Into<String>,
     arguments: Value,
 ) -> anyhow::Result<HttpResponse> {
@@ -48,7 +50,7 @@ fn call_mcp_tool(
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;
     let tool = ToolCall::new(
         protocol_name,
-        enrich_arguments(protocol_name, arguments, runtime, repo_root),
+        enrich_arguments(protocol_name, arguments, runtime, repo_root, paths),
     );
     let request = map_tool_to_http(tool).map_err(anyhow::Error::msg)?;
 
@@ -64,6 +66,7 @@ fn enrich_arguments(
     arguments: Value,
     runtime: &ServerRuntime,
     repo_root: &Path,
+    paths: &GlobalPaths,
 ) -> Value {
     let Value::Object(mut object) = arguments else {
         return arguments;
@@ -89,9 +92,32 @@ fn enrich_arguments(
         object
             .entry("workspace_id")
             .or_insert_with(|| Value::String(runtime.workspace_id.clone()));
+        add_repo_identity(&mut object, paths, repo_root);
     }
 
     Value::Object(object)
+}
+
+fn add_repo_identity(
+    object: &mut serde_json::Map<String, Value>,
+    paths: &GlobalPaths,
+    repo_root: &Path,
+) {
+    let Ok(identity) = repo_identity_for_enabled_repo(paths, repo_root) else {
+        return;
+    };
+    object
+        .entry("repo_id")
+        .or_insert_with(|| Value::String(identity.repo_id));
+    object
+        .entry("worktree_id")
+        .or_insert_with(|| Value::String(identity.worktree_id));
+    object
+        .entry("root")
+        .or_insert_with(|| Value::String(identity.root));
+    object
+        .entry("branch")
+        .or_insert_with(|| Value::String(identity.branch));
 }
 
 pub fn handle_mcp_jsonrpc_in_repo(

@@ -33,6 +33,7 @@ pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitRes
     let explicit = paths.iter().cloned().collect::<BTreeSet<_>>();
 
     deny_unrelated_staged_changes(&request.repo_root, &explicit)?;
+    reject_rename_or_copy_status(&request.repo_root, &paths)?;
     let targets = paths
         .iter()
         .map(|path| commit_target(&request.repo_root, path))
@@ -184,7 +185,6 @@ struct CommitTarget {
 }
 
 fn commit_target(repo_root: &Path, path: &str) -> anyhow::Result<CommitTarget> {
-    reject_rename_or_copy_status(repo_root, path)?;
     let action = if is_missing_tracked_file(repo_root, path)? {
         "delete_file"
     } else {
@@ -210,21 +210,51 @@ fn is_missing_tracked_file(repo_root: &Path, path: &str) -> anyhow::Result<bool>
         .success())
 }
 
-fn reject_rename_or_copy_status(repo_root: &Path, path: &str) -> anyhow::Result<()> {
-    let status = git_stdout(
-        repo_root,
-        &["status", "--porcelain=v1", "--find-renames", "--", path],
-    )?;
+fn reject_rename_or_copy_status(repo_root: &Path, paths: &[String]) -> anyhow::Result<()> {
+    let mut args = vec!["status", "--porcelain=v1", "--find-renames", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let status = git_stdout(repo_root, &args)?;
     for line in status.lines() {
         let code = line.get(0..2).unwrap_or_default();
         if code.contains('R') || code.contains('C') || line.contains(" -> ") {
             anyhow::bail!(
-                "stateful commit does not yet support rename/copy path status for `{path}`"
+                "stateful commit does not yet support rename/copy path status for explicit paths"
             );
         }
     }
 
+    let has_missing_tracked = paths
+        .iter()
+        .map(|path| is_missing_tracked_file(repo_root, path))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .any(|missing| missing);
+    let has_new_file = paths
+        .iter()
+        .map(|path| path_is_new_in_worktree_or_index(repo_root, path))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .any(|is_new| is_new);
+    if has_missing_tracked && has_new_file {
+        anyhow::bail!(
+            "stateful commit does not yet support rename/copy path status for explicit paths"
+        );
+    }
+
     Ok(())
+}
+
+fn path_is_new_in_worktree_or_index(repo_root: &Path, path: &str) -> anyhow::Result<bool> {
+    if !repo_root.join(path).exists() {
+        return Ok(false);
+    }
+
+    Ok(!Command::new("git")
+        .args(["cat-file", "-e", &format!("HEAD:{path}")])
+        .current_dir(repo_root)
+        .output()?
+        .status
+        .success())
 }
 
 fn git_status(repo_root: &Path, args: &[&str]) -> anyhow::Result<()> {

@@ -213,6 +213,70 @@ fn structured_commit_does_not_allow_deleted_file_under_write_authorization() {
 }
 
 #[test]
+fn structured_commit_rejects_unstaged_rename_across_explicit_paths() {
+    let root = git_repo("stateful-commit-unstaged-rename");
+    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
+    fs::write(root.path().join("docs/old.md"), "plan\n").expect("old file should write");
+    git(root.path(), &["add", "docs/old.md"]);
+    git(root.path(), &["commit", "-m", "docs: seed"]);
+    fs::rename(
+        root.path().join("docs/old.md"),
+        root.path().join("docs/new.md"),
+    )
+    .expect("file should rename");
+
+    let result = run_structured_commit(CommitRequest {
+        repo_root: root.path().to_path_buf(),
+        message: "docs: rename plan".to_string(),
+        paths: vec!["docs/old.md".to_string(), "docs/new.md".to_string()],
+        session_id: Some("s1".to_string()),
+        workspace_id: Some("w1".to_string()),
+        authorize: Some(Box::new(|action, path| {
+            panic!("rename target `{path}` with `{action}` should be rejected before authorization")
+        })),
+    });
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("rename/copy path status")
+    );
+    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
+    assert!(staged.is_empty(), "rejected rename should not mutate index");
+}
+
+#[test]
+fn structured_commit_rejects_staged_git_mv_across_explicit_paths() {
+    let root = git_repo("stateful-commit-staged-rename");
+    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
+    fs::write(root.path().join("docs/old.md"), "plan\n").expect("old file should write");
+    git(root.path(), &["add", "docs/old.md"]);
+    git(root.path(), &["commit", "-m", "docs: seed"]);
+    git(root.path(), &["mv", "docs/old.md", "docs/new.md"]);
+
+    let result = run_structured_commit(CommitRequest {
+        repo_root: root.path().to_path_buf(),
+        message: "docs: rename plan".to_string(),
+        paths: vec!["docs/old.md".to_string(), "docs/new.md".to_string()],
+        session_id: Some("s1".to_string()),
+        workspace_id: Some("w1".to_string()),
+        authorize: Some(Box::new(|action, path| {
+            panic!(
+                "staged rename target `{path}` with `{action}` should be rejected before authorization"
+            )
+        })),
+    });
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("rename/copy path status")
+    );
+}
+
+#[test]
 fn structured_commit_command_from_subdir_uses_git_root_session_and_paths() {
     let root = git_repo("stateful-commit-subdir");
     let paths = GlobalPaths::new(root.path().join("home"));

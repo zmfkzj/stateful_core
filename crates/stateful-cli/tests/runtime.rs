@@ -255,6 +255,7 @@ fn declare_intent_via_http_posts_expected_payload() {
             session_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             files_planned: vec!["src/auth.ts".to_string()],
+            identity: None,
         },
     )
     .expect("intent declaration should post");

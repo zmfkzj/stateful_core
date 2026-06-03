@@ -29,8 +29,8 @@ pub use install::{
 pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio_in_repo};
 pub use outbox::sync_outbox_in_repo;
 pub use repo_registry::{
-    CodexMode, RepoEntry, RepoGate, RepoRegistry, detect_git_root, disable_repo, enable_repo,
-    repo_gate,
+    CodexMode, RepoEntry, RepoGate, RepoIdentity, RepoRegistry, detect_git_root, disable_repo,
+    enable_repo, repo_gate, repo_identity_for_enabled_repo,
 };
 pub use runtime::{
     CurrentSession, HttpResponse, IntentDeclareArgs, ServerRuntime, declare_intent_via_http,
@@ -412,6 +412,9 @@ pub fn run() -> anyhow::Result<()> {
                     session_id,
                     workspace_id,
                     files_planned,
+                    identity: GlobalPaths::from_env()
+                        .ok()
+                        .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
                 },
             )?;
             println!("declared stateful intent");

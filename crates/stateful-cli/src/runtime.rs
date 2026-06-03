@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::global_paths::GlobalPaths;
+use crate::repo_registry::RepoIdentity;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +15,7 @@ pub struct IntentDeclareArgs {
     pub session_id: String,
     pub workspace_id: String,
     pub files_planned: Vec<String>,
+    pub identity: Option<RepoIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,15 +195,19 @@ pub fn declare_intent_via_http(
     runtime: &ServerRuntime,
     args: IntentDeclareArgs,
 ) -> anyhow::Result<()> {
-    let response = post_json(
-        runtime,
-        "/v1/intent/declare",
-        &serde_json::json!({
-            "session_id": args.session_id,
-            "workspace_id": args.workspace_id,
-            "files_planned": args.files_planned,
-        }),
-    )?;
+    let mut body = serde_json::json!({
+        "session_id": args.session_id,
+        "workspace_id": args.workspace_id,
+        "files_planned": args.files_planned,
+    });
+    if let Some(identity) = args.identity {
+        body["repo_id"] = serde_json::json!(identity.repo_id);
+        body["worktree_id"] = serde_json::json!(identity.worktree_id);
+        body["root"] = serde_json::json!(identity.root);
+        body["branch"] = serde_json::json!(identity.branch);
+    }
+
+    let response = post_json(runtime, "/v1/intent/declare", &body)?;
 
     if !(200..300).contains(&response.status_code) {
         anyhow::bail!(

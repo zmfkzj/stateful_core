@@ -252,6 +252,10 @@ fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
     assert!(request.contains("Authorization: Bearer secret-token"));
     assert!(request.contains("\"session_id\":\"s1\""));
     assert!(request.contains("\"files_planned\":[\"src/auth.ts\"]"));
+    assert!(request.contains("\"repo_id\":\"repo-"));
+    assert!(request.contains("\"worktree_id\":\"repo-"));
+    assert!(request.contains("\"root\":"));
+    assert!(request.contains("\"branch\":"));
 
     let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
     assert_eq!(json["jsonrpc"], "2.0");
@@ -264,6 +268,37 @@ fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
             .unwrap_or_default()
             .contains("\"status\":\"ok\"")
     );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn intent_declare_command_posts_repo_identity() {
+    let temp_root = temp_root("stateful-cli-intent-identity");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+
+    let output = run_stateful_in_repo(&repo_root, &paths, &["intent", "declare", "src/auth.ts"]);
+
+    assert!(
+        output.status.success(),
+        "stateful intent declare failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
+    assert!(request.contains("\"session_id\":\"s-current\""));
+    assert!(request.contains("\"files_planned\":[\"src/auth.ts\"]"));
+    assert!(request.contains("\"repo_id\":\"repo-"));
+    assert!(request.contains("\"worktree_id\":\"repo-"));
+    assert!(request.contains("\"root\":"));
+    assert!(request.contains("\"branch\":"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
