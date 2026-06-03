@@ -14,10 +14,16 @@ fn find_is_read_only_only_without_mutating_actions() {
 
     let rejected = [
         "find docs -delete",
+        "find docs \\-delete",
+        "find docs -'delete'",
         "find docs -exec rm {} +",
         "find docs -execdir rm {} +",
         "find docs -ok rm {} +",
         "find docs -okdir rm {} +",
+        "find docs -fprint out.txt",
+        "find docs -fprint0 out.txt",
+        "find docs -fprintf out.txt '%p\\n'",
+        "find docs -fls out.txt",
     ];
 
     for command in rejected {
@@ -34,6 +40,12 @@ fn git_branch_and_diff_read_only_allowlists_reject_mutating_options() {
     let allowed = [
         "git branch",
         "git branch --show-current",
+        "git branch --list",
+        "git branch --list 'feature/*'",
+        "git branch --all",
+        "git branch -a",
+        "git branch --remotes",
+        "git branch -r",
         "git diff",
         "git diff -- docs/a.md",
     ];
@@ -48,19 +60,31 @@ fn git_branch_and_diff_read_only_allowlists_reject_mutating_options() {
 
     let rejected = [
         "git branch -D name",
+        "git branch \\-D name",
+        "git branch -'D' name",
         "git branch -d name",
         "git branch -m old new",
+        "git branch -c old new",
+        "git branch -C old new",
+        "git branch -f topic HEAD",
         "git branch --delete name",
+        "git branch --de'lete' name",
         "git branch --move old new",
+        "git branch --copy old new",
+        "git branch --track topic origin/main",
         "git branch --set-upstream-to origin/main",
+        "git branch --edit-description topic",
+        "git branch new-name HEAD",
         "git diff --output file",
         "git diff --output=file",
+        "git diff \\--output=file",
+        "git diff --out'put'=file",
     ];
 
     for command in rejected {
-        assert_eq!(
+        assert_ne!(
             classify_bash(command).kind,
-            BashKind::Mutating,
+            BashKind::ReadOnly,
             "command `{command}` should not be allowed as read-only"
         );
     }

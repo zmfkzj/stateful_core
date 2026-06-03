@@ -30,6 +30,13 @@ pub fn classify_bash(command: &str) -> BashClassification {
         };
     }
 
+    if parse_shell_words(trimmed).is_err() {
+        return BashClassification {
+            kind: BashKind::Mutating,
+            reason: "command uses unsupported shell quoting".to_string(),
+        };
+    }
+
     if is_validation_command(&normalized) {
         return BashClassification {
             kind: BashKind::ReadOnly,
@@ -372,15 +379,16 @@ fn normalize_command_path(path: &str) -> String {
 }
 
 fn is_read_only_command(command: &str) -> bool {
-    let Some(first) = command.split_whitespace().next() else {
+    let words = shell_words(command);
+    let Some(first) = words.first().map(String::as_str) else {
         return true;
     };
 
     match first {
         "pwd" | "ls" | "rg" | "cat" | "head" | "tail" | "wc" | "which" => true,
-        "find" => !find_has_mutating_action(&shell_words(command)),
+        "find" => !find_has_mutating_action(&words),
         "sed" => command.starts_with("sed -n "),
-        "git" => is_read_only_git_command(&shell_words(command)),
+        "git" => is_read_only_git_command(&words),
         "docker" => matches!(
             first_words(command, 2).as_deref(),
             Some("docker info") | Some("docker version")
@@ -397,7 +405,7 @@ fn is_read_only_git_command(words: &[String]) -> bool {
     match words.get(1).map(String::as_str) {
         Some("status" | "show" | "log" | "rev-parse") => true,
         Some("diff") => !git_diff_has_output_option(words),
-        Some("branch") => !git_branch_has_mutating_option(words),
+        Some("branch") => git_branch_is_read_only(words),
         _ => false,
     }
 }
@@ -407,10 +415,10 @@ fn is_python_binary(word: &str) -> bool {
 }
 
 fn is_known_mutating_command(command: &str) -> bool {
-    let Some(first) = command.split_whitespace().next() else {
+    let words = shell_words(command);
+    let Some(first) = words.first().map(String::as_str) else {
         return false;
     };
-    let words = shell_words(command);
 
     if matches!(
         first,
@@ -459,26 +467,41 @@ fn find_has_mutating_action(words: &[String]) -> bool {
 
 fn git_has_mutating_read_allowlist_option(words: &[String]) -> bool {
     match words.get(1).map(String::as_str) {
-        Some("branch") => git_branch_has_mutating_option(words),
+        Some("branch") => !git_branch_is_read_only(words),
         Some("diff") => git_diff_has_output_option(words),
         _ => false,
     }
 }
 
-fn git_branch_has_mutating_option(words: &[String]) -> bool {
-    words.iter().skip(2).any(|word| {
-        matches!(
-            word.as_str(),
-            "-D" | "-d"
-                | "-m"
-                | "-M"
-                | "-u"
-                | "--delete"
-                | "--move"
-                | "--set-upstream-to"
-                | "--unset-upstream"
-        ) || word.starts_with("--set-upstream-to=")
-    })
+fn git_branch_is_read_only(words: &[String]) -> bool {
+    let args = &words[2..];
+    if args.is_empty() || matches!(args, [arg] if arg == "--show-current") {
+        return true;
+    }
+
+    let mut has_list = false;
+    for arg in args {
+        if arg == "--list" {
+            has_list = true;
+            continue;
+        }
+        if is_read_only_git_branch_flag(arg) {
+            continue;
+        }
+        if has_list && !arg.starts_with('-') {
+            continue;
+        }
+        return false;
+    }
+
+    true
+}
+
+fn is_read_only_git_branch_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--all" | "-a" | "--remotes" | "-r" | "--verbose" | "-v" | "-vv"
+    )
 }
 
 fn git_diff_has_output_option(words: &[String]) -> bool {
@@ -489,17 +512,86 @@ fn git_diff_has_output_option(words: &[String]) -> bool {
 }
 
 fn first_words(command: &str, count: usize) -> Option<String> {
-    let words = command.split_whitespace().take(count).collect::<Vec<_>>();
-    if words.len() == count {
-        Some(words.join(" "))
+    let words = shell_words(command);
+    if words.len() >= count {
+        Some(words.into_iter().take(count).collect::<Vec<_>>().join(" "))
     } else {
         None
     }
 }
 
 fn shell_words(command: &str) -> Vec<String> {
-    command
-        .split_whitespace()
-        .map(|word| word.trim_matches(&['"', '\''][..]).to_string())
-        .collect()
+    match parse_shell_words(command) {
+        Ok(words) => words,
+        Err(_) => Vec::new(),
+    }
+}
+
+fn parse_shell_words(command: &str) -> Result<Vec<String>, ShellWordError> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut in_word = false;
+    let mut chars = command.chars();
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            Some('"') => {
+                if ch == '"' {
+                    quote = None;
+                } else if ch == '\\' {
+                    let Some(next) = chars.next() else {
+                        return Err(ShellWordError::TrailingEscape);
+                    };
+                    current.push(next);
+                } else {
+                    current.push(ch);
+                }
+            }
+            None if ch == '\'' || ch == '"' => {
+                in_word = true;
+                quote = Some(ch);
+            }
+            None if ch == '\\' => {
+                in_word = true;
+                let Some(next) = chars.next() else {
+                    return Err(ShellWordError::TrailingEscape);
+                };
+                current.push(next);
+            }
+            None if ch.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            None => {
+                in_word = true;
+                current.push(ch);
+            }
+            Some(_) => unreachable!(),
+        }
+    }
+
+    if quote.is_some() {
+        return Err(ShellWordError::UnmatchedQuote);
+    }
+    if in_word {
+        words.push(current);
+    }
+
+    Ok(words)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellWordError {
+    UnmatchedQuote,
+    TrailingEscape,
 }
