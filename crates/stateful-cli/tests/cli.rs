@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::path::PathBuf;
 use stateful_cli::{Cli, Command, HookCommand, McpCommand};
 
 #[test]
@@ -34,6 +35,37 @@ fn structured_commit_command_requires_path_separator() {
     .expect_err("commit paths should require -- separator");
 
     assert!(error.to_string().contains("--"));
+}
+
+#[test]
+fn parses_enable_command() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "enable",
+        "--repo",
+        "/work/repo",
+        "--repo-local-codex",
+    ])
+    .expect("enable command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Enable {
+            ref repo,
+            repo_local_codex: true
+        } if repo == &Some(PathBuf::from("/work/repo"))
+    ));
+}
+
+#[test]
+fn parses_disable_command() {
+    let cli = Cli::try_parse_from(["stateful", "disable", "--repo", "/work/repo"])
+        .expect("disable command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Disable { ref repo } if repo == &Some(PathBuf::from("/work/repo"))
+    ));
 }
 
 #[test]

@@ -1,11 +1,16 @@
 use clap::{Parser, Subcommand};
-use std::{fs, net::SocketAddr, path::Path};
+use std::{
+    fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 mod commit;
 mod global_paths;
 mod hook;
 mod mcp;
 mod outbox;
+mod repo_registry;
 mod runtime;
 mod validation;
 
@@ -17,6 +22,9 @@ pub use hook::{
 };
 pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio_in_repo};
 pub use outbox::sync_outbox_in_repo;
+pub use repo_registry::{
+    CodexMode, RepoEntry, RepoRegistry, detect_git_root, disable_repo, enable_repo,
+};
 pub use runtime::{
     CurrentSession, HttpResponse, IntentDeclareArgs, ServerRuntime, declare_intent_via_http,
     discover_runtime, get_json, post_json, read_current_session_file, write_current_session_file,
@@ -64,6 +72,18 @@ pub enum Command {
         #[arg(required = true, num_args = 1.., last = true)]
         paths: Vec<String>,
     },
+    Enable {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long)]
+        repo_local_codex: bool,
+    },
+    Disable {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    #[command(subcommand)]
+    Repos(ReposCommand),
     #[command(subcommand)]
     Intent(IntentCommand),
     #[command(subcommand)]
@@ -82,6 +102,11 @@ pub enum IntentCommand {
         workspace_id: Option<String>,
         files_planned: Vec<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ReposCommand {
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -165,6 +190,26 @@ pub fn run() -> anyhow::Result<()> {
                     "paths": result.committed_paths
                 }))?
             );
+        }
+        Command::Enable {
+            repo,
+            repo_local_codex,
+        } => {
+            let paths = GlobalPaths::from_env()?;
+            let repo = repo.unwrap_or(std::env::current_dir()?);
+            let entry = enable_repo(&paths, repo, repo_local_codex)?;
+            println!("{}", serde_json::to_string(&entry)?);
+        }
+        Command::Disable { repo } => {
+            let paths = GlobalPaths::from_env()?;
+            let repo = repo.unwrap_or(std::env::current_dir()?);
+            let entry = disable_repo(&paths, repo)?;
+            println!("{}", serde_json::to_string(&entry)?);
+        }
+        Command::Repos(ReposCommand::List) => {
+            let paths = GlobalPaths::from_env()?;
+            let registry = RepoRegistry::load(&paths)?;
+            println!("{}", serde_json::to_string_pretty(&registry)?);
         }
         Command::Intent(IntentCommand::Declare {
             session_id,
