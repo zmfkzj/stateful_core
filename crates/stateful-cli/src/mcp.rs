@@ -7,8 +7,8 @@ use serde_json::Value;
 use stateful_mcp::{ToolCall, map_tool_to_http, protocol_tool_name, tool_descriptors};
 
 use crate::{
-    HttpResponse, ServerRuntime, discover_runtime_with_optional_global, get_json, post_json,
-    read_current_session_file,
+    GlobalPaths, HttpResponse, RepoGate, ServerRuntime, discover_runtime_with_global,
+    ensure_server, get_json, post_json, read_current_session_file, repo_gate,
 };
 
 pub fn call_mcp_tool_in_repo(
@@ -17,7 +17,23 @@ pub fn call_mcp_tool_in_repo(
     arguments: Value,
 ) -> anyhow::Result<HttpResponse> {
     let repo_root = repo_root.as_ref();
-    let runtime = discover_runtime_with_optional_global(repo_root)?;
+    let paths = GlobalPaths::from_env()?;
+    match repo_gate(&paths, repo_root)? {
+        RepoGate::Enabled { .. } => {
+            ensure_server(&paths)?;
+        }
+        RepoGate::Disabled | RepoGate::OutsideGitRepo => {
+            return Ok(HttpResponse {
+                status_code: 409,
+                body: serde_json::json!({
+                    "status": "error",
+                    "message": "repo not enabled"
+                })
+                .to_string(),
+            });
+        }
+    }
+    let runtime = discover_runtime_with_global(repo_root, &paths)?;
     call_mcp_tool(&runtime, repo_root, tool_name, arguments)
 }
 

@@ -9,8 +9,8 @@ use stateful_core::{BashKind, classify_bash};
 
 use crate::outbox::queue_session_heartbeat_outbox;
 use crate::{
-    CurrentSession, HookCommand, ServerRuntime, discover_runtime_with_optional_global, post_json,
-    write_current_session_file,
+    CurrentSession, GlobalPaths, HookCommand, RepoGate, ServerRuntime,
+    discover_runtime_with_global, ensure_server, post_json, repo_gate, write_current_session_file,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +88,14 @@ pub fn handle_pre_tool_use_in_repo(
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<HookOutcome> {
     let repo_root = repo_root.as_ref();
-    let runtime = discover_runtime_with_optional_global(repo_root)?;
+    let paths = GlobalPaths::from_env()?;
+    match repo_gate(&paths, repo_root)? {
+        RepoGate::Enabled { .. } => {
+            ensure_server(&paths)?;
+        }
+        RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(HookOutcome::Allow),
+    }
+    let runtime = discover_runtime_with_global(repo_root, &paths)?;
     remember_current_session(repo_root, &runtime, input)?;
     handle_pre_tool_use_with_runtime(input, Some(&runtime))
 }
@@ -98,7 +105,14 @@ pub fn handle_session_start_in_repo(
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<()> {
     let repo_root = repo_root.as_ref();
-    let runtime = discover_runtime_with_optional_global(repo_root)?;
+    let paths = GlobalPaths::from_env()?;
+    match repo_gate(&paths, repo_root)? {
+        RepoGate::Enabled { .. } => {
+            ensure_server(&paths)?;
+        }
+        RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
+    }
+    let runtime = discover_runtime_with_global(repo_root, &paths)?;
     remember_current_session(repo_root, &runtime, input)?;
     handle_session_start_with_runtime(input, &runtime)
 }
@@ -108,7 +122,14 @@ pub fn handle_post_tool_use_in_repo(
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<()> {
     let repo_root = repo_root.as_ref();
-    let runtime = discover_runtime_with_optional_global(repo_root)?;
+    let paths = GlobalPaths::from_env()?;
+    match repo_gate(&paths, repo_root)? {
+        RepoGate::Enabled { .. } => {
+            ensure_server(&paths)?;
+        }
+        RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
+    }
+    let runtime = discover_runtime_with_global(repo_root, &paths)?;
     remember_current_session(repo_root, &runtime, input)?;
     if let Err(error) = handle_post_tool_use_with_runtime(input, &runtime) {
         let input: SessionEventInput = serde_json::from_str(input)?;
@@ -128,14 +149,28 @@ pub fn handle_user_prompt_submit_in_repo(
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<String> {
     let repo_root = repo_root.as_ref();
-    let runtime = discover_runtime_with_optional_global(repo_root)?;
+    let paths = GlobalPaths::from_env()?;
+    match repo_gate(&paths, repo_root)? {
+        RepoGate::Enabled { .. } => {
+            ensure_server(&paths)?;
+        }
+        RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(String::new()),
+    }
+    let runtime = discover_runtime_with_global(repo_root, &paths)?;
     remember_current_session(repo_root, &runtime, input)?;
     handle_user_prompt_submit_with_runtime(input, &runtime)
 }
 
 pub fn handle_stop_in_repo(input: &str, repo_root: impl AsRef<Path>) -> anyhow::Result<()> {
     let repo_root = repo_root.as_ref();
-    let runtime = discover_runtime_with_optional_global(repo_root)?;
+    let paths = GlobalPaths::from_env()?;
+    match repo_gate(&paths, repo_root)? {
+        RepoGate::Enabled { .. } => {
+            ensure_server(&paths)?;
+        }
+        RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
+    }
+    let runtime = discover_runtime_with_global(repo_root, &paths)?;
     remember_current_session(repo_root, &runtime, input)?;
     handle_stop_with_runtime(input, &runtime)
 }

@@ -41,7 +41,10 @@ impl RepoRegistry {
     pub fn save(&self, paths: &GlobalPaths) -> anyhow::Result<()> {
         if let Some(parent) = paths.config_yml.parent() {
             fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create global config directory {}", parent.display())
+                format!(
+                    "failed to create global config directory {}",
+                    parent.display()
+                )
             })?;
         }
 
@@ -88,6 +91,26 @@ pub enum CodexMode {
     #[default]
     Global,
     RepoLocal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoGate {
+    Enabled { repo_root: PathBuf },
+    Disabled,
+    OutsideGitRepo,
+}
+
+pub fn repo_gate(paths: &GlobalPaths, start: impl AsRef<Path>) -> anyhow::Result<RepoGate> {
+    let root = match detect_git_root(start) {
+        Ok(root) => root,
+        Err(_) => return Ok(RepoGate::OutsideGitRepo),
+    };
+    let registry = RepoRegistry::load(paths)?;
+    if registry.is_enabled(&root) {
+        Ok(RepoGate::Enabled { repo_root: root })
+    } else {
+        Ok(RepoGate::Disabled)
+    }
 }
 
 pub fn enable_repo(
@@ -216,7 +239,8 @@ fn write_repo_metadata(paths: &GlobalPaths, entry: &RepoEntry) -> anyhow::Result
         )
     })?;
     let metadata_path = paths.repos_dir.join(format!("{}.json", entry.repo_id));
-    let metadata = serde_json::to_string_pretty(entry).context("failed to serialize repo metadata")?;
+    let metadata =
+        serde_json::to_string_pretty(entry).context("failed to serialize repo metadata")?;
     fs::write(&metadata_path, format!("{metadata}\n"))
         .with_context(|| format!("failed to write {}", metadata_path.display()))?;
 
@@ -264,11 +288,7 @@ fn registry_temp_path(paths: &GlobalPaths) -> anyhow::Result<PathBuf> {
         .context("system clock is before unix epoch")?
         .as_nanos();
 
-    Ok(parent.join(format!(
-        ".{file_name}.{}.{}.tmp",
-        std::process::id(),
-        nonce
-    )))
+    Ok(parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), nonce)))
 }
 
 fn repo_id_for_root(root: &Path) -> String {

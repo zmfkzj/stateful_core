@@ -2,37 +2,34 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
-    process::Command,
+    process::{Command, Stdio},
     sync::mpsc,
     thread,
 };
 
 use stateful_cli::{
-    CurrentSession, GlobalPaths, ServerRuntime, call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo,
+    CurrentSession, GlobalPaths, ServerRuntime, enable_repo, handle_mcp_jsonrpc_in_repo,
     serve_mcp_stdio_in_repo, write_current_session_file, write_global_runtime_file,
-    write_runtime_file,
 };
 
 #[test]
 fn mcp_current_read_executes_get_request() {
     let temp_root = temp_root("stateful-mcp-current");
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let addr = listener.local_addr().expect("listener addr should load");
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request_without_body(&mut stream);
-        tx.send(request).expect("request should send to test");
-        write_json_response(&mut stream, r#"{"status":"ok","current":{}}"#);
-    });
-    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    write_runtime_file(&temp_root, &runtime).expect("runtime file should write");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok","current":{}}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
-    let response = call_mcp_tool_in_repo(&temp_root, "state.current.read", serde_json::json!({}))
-        .expect("mcp current read should execute");
+    let output = run_stateful_in_repo(&repo_root, &paths, &["mcp", "call", "state.current.read"]);
 
-    assert_eq!(response.status_code, 200);
+    assert!(
+        output.status.success(),
+        "stateful mcp call failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"ok\""));
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("GET /v1/current HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
@@ -47,17 +44,8 @@ fn mcp_call_discovers_global_runtime_file() {
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     let paths = GlobalPaths::new(temp_root.join("home"));
-
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let addr = listener.local_addr().expect("listener addr should load");
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request_without_body(&mut stream);
-        tx.send(request).expect("request should send to test");
-        write_json_response(&mut stream, r#"{"status":"ok","current":{}}"#);
-    });
-    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "global-w", 42);
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok","current":{}}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
@@ -84,27 +72,29 @@ fn mcp_call_discovers_global_runtime_file() {
 #[test]
 fn mcp_validation_run_adds_repo_root_and_workspace_id() {
     let temp_root = temp_root("stateful-mcp-validation");
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let addr = listener.local_addr().expect("listener addr should load");
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request(&mut stream);
-        tx.send(request).expect("request should send to test");
-        write_json_response(&mut stream, r#"{"status":"passed"}"#);
-    });
-    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    write_runtime_file(&temp_root, &runtime).expect("runtime file should write");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"passed"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
-    let response = call_mcp_tool_in_repo(
-        &temp_root,
-        "state.validation.run",
-        serde_json::json!({"profile": "cargo-test"}),
-    )
-    .expect("mcp validation run should execute");
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "mcp",
+            "call",
+            "state.validation.run",
+            r#"{"profile":"cargo-test"}"#,
+        ],
+    );
 
-    assert_eq!(response.status_code, 200);
+    assert!(
+        output.status.success(),
+        "stateful mcp call failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/validation/run HTTP/1.1"));
     assert!(request.contains("\"workspace_id\":\"w1\""));
@@ -154,23 +144,49 @@ fn mcp_tools_list_returns_stateful_tool_descriptors() {
 }
 
 #[test]
-fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
-    let temp_root = temp_root("stateful-mcp-intent-declare");
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let addr = listener.local_addr().expect("listener addr should load");
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request(&mut stream);
-        tx.send(request).expect("request should send to test");
-        write_json_response(&mut stream, r#"{"status":"ok"}"#);
-    });
-    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    write_runtime_file(&temp_root, &runtime).expect("runtime file should write");
+fn mcp_tool_call_in_disabled_repo_returns_repo_not_enabled() {
+    let temp_root = temp_root("stateful-mcp-disabled");
+    fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
 
     let response = handle_mcp_jsonrpc_in_repo(
         &temp_root,
+        r#"{
+          "jsonrpc":"2.0",
+          "id":7,
+          "method":"tools/call",
+          "params":{
+            "name":"state_current_read",
+            "arguments":{}
+          }
+        }"#,
+    )
+    .expect("disabled repo should handle")
+    .expect("tools/call should produce response");
+
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+    assert_eq!(json["result"]["isError"], true);
+    assert!(
+        json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("repo not enabled")
+    );
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
+    let temp_root = temp_root("stateful-mcp-intent-declare");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let response = run_mcp_jsonrpc_in_repo(
+        &repo_root,
+        &paths,
         r#"{
           "jsonrpc":"2.0",
           "id":2,
@@ -184,9 +200,7 @@ fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
             }
           }
         }"#,
-    )
-    .expect("tools/call should handle")
-    .expect("tools/call should produce response");
+    );
 
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
@@ -212,23 +226,18 @@ fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
 #[test]
 fn mcp_intent_declare_defaults_to_current_hook_session() {
     let temp_root = temp_root("stateful-mcp-intent-current-session");
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let addr = listener.local_addr().expect("listener addr should load");
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request(&mut stream);
-        tx.send(request).expect("request should send to test");
-        write_json_response(&mut stream, r#"{"status":"ok"}"#);
-    });
-    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    write_runtime_file(&temp_root, &runtime).expect("runtime file should write");
-    write_current_session_file(&temp_root, &CurrentSession::new("s-current", "w1"))
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
         .expect("current session should write");
 
-    let response = handle_mcp_jsonrpc_in_repo(
-        &temp_root,
+    let response = run_mcp_jsonrpc_in_repo(
+        &repo_root,
+        &paths,
         r#"{
           "jsonrpc":"2.0",
           "id":3,
@@ -240,9 +249,7 @@ fn mcp_intent_declare_defaults_to_current_hook_session() {
             }
           }
         }"#,
-    )
-    .expect("tools/call should handle")
-    .expect("tools/call should produce response");
+    );
 
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("\"session_id\":\"s-current\""));
@@ -304,7 +311,93 @@ fn temp_root(name: &str) -> std::path::PathBuf {
     root
 }
 
-fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+fn enable_test_repo(paths: &GlobalPaths, repo_root: &std::path::Path) {
+    fs::create_dir_all(repo_root.join(".git")).expect("git marker should write");
+    enable_repo(paths, repo_root, false).expect("repo should enable");
+}
+
+fn spawn_fake_stateful_server(
+    actual_response: &'static str,
+) -> (ServerRuntime, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut health_seen = false;
+        let mut current_seen = false;
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().expect("connection should arrive");
+            let request = read_http_request_maybe_body(&mut stream);
+            if request.contains("GET /health HTTP/1.1") && !health_seen {
+                health_seen = true;
+                write_json_response(&mut stream, r#"{"status":"ok"}"#);
+            } else if request.contains("GET /v1/current HTTP/1.1") && !current_seen {
+                current_seen = true;
+                write_json_response(&mut stream, r#"{"status":"ok","current":{}}"#);
+            } else {
+                tx.send(request).expect("request should send to test");
+                write_json_response(&mut stream, actual_response);
+                break;
+            }
+        }
+    });
+
+    (
+        ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42),
+        rx,
+    )
+}
+
+fn run_stateful_in_repo(
+    repo_root: &std::path::Path,
+    paths: &GlobalPaths,
+    args: &[&str],
+) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_stateful"))
+        .args(args)
+        .current_dir(repo_root)
+        .env_clear()
+        .env("STATEFUL_HOME", &paths.home)
+        .output()
+        .expect("stateful command should run")
+}
+
+fn run_mcp_jsonrpc_in_repo(
+    repo_root: &std::path::Path,
+    paths: &GlobalPaths,
+    message: &str,
+) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stateful"))
+        .args(["mcp", "serve"])
+        .current_dir(repo_root)
+        .env_clear()
+        .env("STATEFUL_HOME", &paths.home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("stateful mcp serve should spawn");
+    let mut stdin = child.stdin.take().expect("stdin should be piped");
+    let message = serde_json::to_string(
+        &serde_json::from_str::<serde_json::Value>(message).expect("message should be json"),
+    )
+    .expect("message should serialize");
+    stdin
+        .write_all(format!("{message}\n").as_bytes())
+        .expect("mcp request should write");
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .expect("stateful mcp serve should complete");
+    assert!(
+        output.status.success(),
+        "stateful mcp serve failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("mcp output should be utf8")
+}
+
+fn read_http_request_maybe_body(stream: &mut std::net::TcpStream) -> String {
     let mut buffer = Vec::new();
     let mut byte = [0_u8; 1];
     while !buffer.ends_with(b"\r\n\r\n") {
@@ -318,27 +411,15 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> String {
     let content_length = headers
         .lines()
         .find_map(|line| line.strip_prefix("Content-Length: "))
-        .expect("content length should exist")
-        .parse::<usize>()
-        .expect("content length should parse");
+        .map(|value| value.parse::<usize>().expect("content length should parse"))
+        .unwrap_or(0);
 
     let mut body = vec![0_u8; content_length];
-    stream
-        .read_exact(&mut body)
-        .expect("request body should read");
-    buffer.extend_from_slice(&body);
-
-    String::from_utf8(buffer).expect("request should be utf8")
-}
-
-fn read_http_request_without_body(stream: &mut std::net::TcpStream) -> String {
-    let mut buffer = Vec::new();
-    let mut byte = [0_u8; 1];
-    while !buffer.ends_with(b"\r\n\r\n") {
+    if content_length > 0 {
         stream
-            .read_exact(&mut byte)
-            .expect("request header byte should read");
-        buffer.push(byte[0]);
+            .read_exact(&mut body)
+            .expect("request body should read");
+        buffer.extend_from_slice(&body);
     }
 
     String::from_utf8(buffer).expect("request should be utf8")

@@ -29,13 +29,14 @@ pub use install::{
 pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio_in_repo};
 pub use outbox::sync_outbox_in_repo;
 pub use repo_registry::{
-    CodexMode, RepoEntry, RepoRegistry, detect_git_root, disable_repo, enable_repo,
+    CodexMode, RepoEntry, RepoGate, RepoRegistry, detect_git_root, disable_repo, enable_repo,
+    repo_gate,
 };
 pub use runtime::{
     CurrentSession, HttpResponse, IntentDeclareArgs, ServerRuntime, declare_intent_via_http,
-    discover_runtime, discover_runtime_with_global, discover_runtime_with_optional_global, get_json,
-    global_state_db_path, post_json, read_current_session_file, write_current_session_file,
-    write_global_runtime_file, write_runtime_file,
+    discover_runtime, discover_runtime_with_global, discover_runtime_with_optional_global,
+    get_json, global_state_db_path, post_json, read_current_session_file,
+    write_current_session_file, write_global_runtime_file, write_runtime_file,
 };
 pub use server_lifecycle::{
     ServerStartOptions, detached_server_args, ensure_server, ensure_server_with,
