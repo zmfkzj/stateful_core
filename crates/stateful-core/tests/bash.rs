@@ -6,6 +6,67 @@ fn read_only_rg_is_allowed() {
 }
 
 #[test]
+fn find_is_read_only_only_without_mutating_actions() {
+    assert_eq!(
+        classify_bash("find docs -name '*.md'").kind,
+        BashKind::ReadOnly
+    );
+
+    let rejected = [
+        "find docs -delete",
+        "find docs -exec rm {} +",
+        "find docs -execdir rm {} +",
+        "find docs -ok rm {} +",
+        "find docs -okdir rm {} +",
+    ];
+
+    for command in rejected {
+        assert_eq!(
+            classify_bash(command).kind,
+            BashKind::Mutating,
+            "command `{command}` should not be allowed as read-only"
+        );
+    }
+}
+
+#[test]
+fn git_branch_and_diff_read_only_allowlists_reject_mutating_options() {
+    let allowed = [
+        "git branch",
+        "git branch --show-current",
+        "git diff",
+        "git diff -- docs/a.md",
+    ];
+
+    for command in allowed {
+        assert_eq!(
+            classify_bash(command).kind,
+            BashKind::ReadOnly,
+            "command `{command}` should remain read-only"
+        );
+    }
+
+    let rejected = [
+        "git branch -D name",
+        "git branch -d name",
+        "git branch -m old new",
+        "git branch --delete name",
+        "git branch --move old new",
+        "git branch --set-upstream-to origin/main",
+        "git diff --output file",
+        "git diff --output=file",
+    ];
+
+    for command in rejected {
+        assert_eq!(
+            classify_bash(command).kind,
+            BashKind::Mutating,
+            "command `{command}` should not be allowed as read-only"
+        );
+    }
+}
+
+#[test]
 fn redirect_write_is_denied() {
     assert_eq!(
         classify_bash("echo hi > src/auth.ts").kind,

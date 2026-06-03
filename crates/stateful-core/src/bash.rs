@@ -377,17 +377,10 @@ fn is_read_only_command(command: &str) -> bool {
     };
 
     match first {
-        "pwd" | "ls" | "find" | "rg" | "cat" | "head" | "tail" | "wc" | "which" => true,
+        "pwd" | "ls" | "rg" | "cat" | "head" | "tail" | "wc" | "which" => true,
+        "find" => !find_has_mutating_action(&shell_words(command)),
         "sed" => command.starts_with("sed -n "),
-        "git" => matches!(
-            first_words(command, 2).as_deref(),
-            Some("git status")
-                | Some("git diff")
-                | Some("git show")
-                | Some("git log")
-                | Some("git branch")
-                | Some("git rev-parse")
-        ),
+        "git" => is_read_only_git_command(&shell_words(command)),
         "docker" => matches!(
             first_words(command, 2).as_deref(),
             Some("docker info") | Some("docker version")
@@ -400,6 +393,15 @@ fn is_read_only_command(command: &str) -> bool {
     }
 }
 
+fn is_read_only_git_command(words: &[String]) -> bool {
+    match words.get(1).map(String::as_str) {
+        Some("status" | "show" | "log" | "rev-parse") => true,
+        Some("diff") => !git_diff_has_output_option(words),
+        Some("branch") => !git_branch_has_mutating_option(words),
+        _ => false,
+    }
+}
+
 fn is_python_binary(word: &str) -> bool {
     word == "python" || word == "python3" || word.ends_with("/python") || word.ends_with("/python3")
 }
@@ -408,11 +410,24 @@ fn is_known_mutating_command(command: &str) -> bool {
     let Some(first) = command.split_whitespace().next() else {
         return false;
     };
+    let words = shell_words(command);
 
-    matches!(
+    if matches!(
         first,
         "rm" | "mv" | "cp" | "mkdir" | "touch" | "chmod" | "chown" | "codex"
-    ) || matches!(
+    ) {
+        return true;
+    }
+
+    if first == "find" && find_has_mutating_action(&words) {
+        return true;
+    }
+
+    if first == "git" && git_has_mutating_read_allowlist_option(&words) {
+        return true;
+    }
+
+    matches!(
         first_words(command, 2).as_deref(),
         Some("git checkout")
             | Some("git switch")
@@ -423,6 +438,54 @@ fn is_known_mutating_command(command: &str) -> bool {
             | Some("git merge")
             | Some("git rebase")
     )
+}
+
+fn find_has_mutating_action(words: &[String]) -> bool {
+    words.iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "-delete"
+                | "-exec"
+                | "-execdir"
+                | "-ok"
+                | "-okdir"
+                | "-fprint"
+                | "-fprint0"
+                | "-fprintf"
+                | "-fls"
+        )
+    })
+}
+
+fn git_has_mutating_read_allowlist_option(words: &[String]) -> bool {
+    match words.get(1).map(String::as_str) {
+        Some("branch") => git_branch_has_mutating_option(words),
+        Some("diff") => git_diff_has_output_option(words),
+        _ => false,
+    }
+}
+
+fn git_branch_has_mutating_option(words: &[String]) -> bool {
+    words.iter().skip(2).any(|word| {
+        matches!(
+            word.as_str(),
+            "-D" | "-d"
+                | "-m"
+                | "-M"
+                | "-u"
+                | "--delete"
+                | "--move"
+                | "--set-upstream-to"
+                | "--unset-upstream"
+        ) || word.starts_with("--set-upstream-to=")
+    })
+}
+
+fn git_diff_has_output_option(words: &[String]) -> bool {
+    words
+        .iter()
+        .skip(2)
+        .any(|word| word == "--output" || word.starts_with("--output="))
 }
 
 fn first_words(command: &str, count: usize) -> Option<String> {
