@@ -11,7 +11,7 @@ use crate::codex_wrapper::STATEFUL_TRUSTED_SANDBOX_ENV;
 use crate::outbox::queue_session_heartbeat_outbox;
 use crate::{
     CurrentSession, GlobalPaths, HookCommand, RepoGate, RepoIdentity, ServerRuntime,
-    discover_runtime_with_global, ensure_server, post_json, repo_gate,
+    discover_runtime_with_global, ensure_server, post_json, protocol_envelope, repo_gate,
     repo_identity_for_enabled_repo, write_current_session_file,
 };
 
@@ -543,17 +543,22 @@ fn authorize_targets(
     }
 
     for target in targets {
-        let response = post_json(
+        let body = protocol_envelope(
             runtime,
-            "/v1/authorize",
-            &json!({
-                "session_id": input.session_id,
-                "workspace_id": runtime.workspace_id,
+            uuid::Uuid::new_v4().to_string(),
+            input.session_id.clone(),
+            runtime.workspace_id.clone(),
+            None,
+            "hook",
+            "pre_tool_use",
+            &input.tool_name,
+            json!({
                 "action": target.action,
                 "path": target.path,
                 "queue_on_conflict": true,
             }),
-        )?;
+        );
+        let response = post_json(runtime, "/v1/authorize", &body)?;
 
         if !(200..300).contains(&response.status_code) {
             return Ok(HookOutcome::Deny {

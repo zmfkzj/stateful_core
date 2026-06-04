@@ -4,7 +4,7 @@ use std::{
     process::Command,
 };
 
-use crate::{discover_runtime_with_optional_global, post_json};
+use crate::{discover_runtime_with_optional_global, post_json, protocol_envelope};
 
 pub type AuthorizePath = Box<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 
@@ -148,16 +148,21 @@ fn authorize_path(request: &CommitRequest, target: &CommitTarget) -> anyhow::Res
         .workspace_id
         .as_deref()
         .unwrap_or(runtime.workspace_id.as_str());
-    let response = post_json(
+    let body = protocol_envelope(
         &runtime,
-        "/v1/authorize",
-        &serde_json::json!({
-            "session_id": session_id,
-            "workspace_id": workspace_id,
+        uuid::Uuid::new_v4().to_string(),
+        session_id,
+        workspace_id,
+        None,
+        "cli",
+        "commit_authorize",
+        "stateful-commit",
+        serde_json::json!({
             "action": target.action,
             "path": target.path,
         }),
-    )?;
+    );
+    let response = post_json(&runtime, "/v1/authorize", &body)?;
 
     if !(200..300).contains(&response.status_code) {
         anyhow::bail!(

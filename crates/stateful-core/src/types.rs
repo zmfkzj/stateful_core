@@ -159,3 +159,16 @@ impl Decision {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_kind_accepts_hook_protocol_name() {
+        let kind: SourceKind =
+            serde_json::from_str(r#""hook""#).expect("hook source kind should deserialize");
+
+        assert_eq!(kind, SourceKind::Hook);
+    }
+}

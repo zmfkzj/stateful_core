@@ -832,11 +832,16 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/authorize HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
-    assert!(request.contains("\"session_id\":\"s1\""));
-    assert!(request.contains("\"workspace_id\":\"w1\""));
-    assert!(request.contains("\"action\":\"write_file\""));
-    assert!(request.contains("\"path\":\"src/auth.ts\""));
-    assert!(request.contains("\"queue_on_conflict\":true"));
+    let body = request_json_body(&request);
+    assert_eq!(body["protocol_version"], "stateful.v1");
+    assert_eq!(body["session"]["session_id"], "s1");
+    assert_eq!(body["workspace"]["workspace_id"], "w1");
+    assert_eq!(body["source"]["kind"], "hook");
+    assert_eq!(body["source"]["event"], "pre_tool_use");
+    assert_eq!(body["payload"]["action"], "write_file");
+    assert_eq!(body["payload"]["path"], "src/auth.ts");
+    assert_eq!(body["payload"]["queue_on_conflict"], true);
+    assert!(body.get("action").is_none());
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -1322,6 +1327,13 @@ fn read_http_request_maybe_body(stream: &mut std::net::TcpStream) -> String {
     }
 
     String::from_utf8(buffer).expect("request should be utf8")
+}
+
+fn request_json_body(request: &str) -> serde_json::Value {
+    let (_, body) = request
+        .split_once("\r\n\r\n")
+        .expect("request should contain a body separator");
+    serde_json::from_str(body).expect("request body should be json")
 }
 
 fn enable_test_repo(paths: &GlobalPaths, repo_root: &std::path::Path) {

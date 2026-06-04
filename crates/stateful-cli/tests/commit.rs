@@ -378,11 +378,18 @@ fn structured_commit_command_discovers_global_runtime_for_authorization() {
         String::from_utf8_lossy(&output.stderr)
     );
     let request = rx.recv().expect("captured request should arrive");
+    let body = request_json_body(&request);
     assert!(request.contains("POST /v1/authorize HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
-    assert!(request.contains("\"session_id\":\"s-global\""));
-    assert!(request.contains("\"workspace_id\":\"w-session\""));
-    assert!(request.contains("\"path\":\"docs/plan.md\""));
+    assert_eq!(body["protocol_version"], "stateful.v1");
+    assert_eq!(body["session"]["session_id"], "s-global");
+    assert_eq!(body["workspace"]["workspace_id"], "w-session");
+    assert_eq!(body["source"]["kind"], "cli");
+    assert_eq!(body["source"]["event"], "commit_authorize");
+    assert_eq!(body["source"]["source_ref"], "stateful-commit");
+    assert_eq!(body["payload"]["action"], "write_file");
+    assert_eq!(body["payload"]["path"], "docs/plan.md");
+    assert!(body.get("action").is_none());
 }
 
 fn spawn_fake_authorize_server() -> (ServerRuntime, mpsc::Receiver<String>) {
@@ -457,6 +464,13 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> String {
     buffer.extend_from_slice(&body);
 
     String::from_utf8(buffer).expect("request should be utf8")
+}
+
+fn request_json_body(request: &str) -> serde_json::Value {
+    let (_headers, body) = request
+        .split_once("\r\n\r\n")
+        .expect("request should contain body delimiter");
+    serde_json::from_str(body).expect("request body should be json")
 }
 
 fn write_json_response(stream: &mut std::net::TcpStream, body: &str) {

@@ -1,3 +1,4 @@
+mod policy_service;
 mod protocol;
 
 use axum::{
@@ -6,13 +7,11 @@ use axum::{
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
+use policy_service::{AuthorizationOutcome, AuthorizeWriteInput, PolicyService};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use stateful_core::{
-    AuthorizationInput, ContextPackage, Decision, ReconciliationDecision, RenderMode,
-    render_prompt_text,
-};
-use stateful_store::{Event, OutboxEntry, Store, WaitRecord};
+use stateful_core::{ContextPackage, ReconciliationDecision, RenderMode, render_prompt_text};
+use stateful_store::{Event, OutboxEntry, Store};
 use stateful_validation::{ValidationResult, ValidationStatus, run_validation_profile};
 use std::{
     net::SocketAddr,
@@ -201,7 +200,7 @@ async fn session_heartbeat(
 async fn authorize(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<AuthorizeRequest>,
+    Json(input): Json<Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return (
@@ -212,7 +211,26 @@ async fn authorize(
         );
     }
 
-    let outcome = match authorize_from_store(&config.store, input, true) {
+    let envelope = match protocol::require_v1_envelope(input) {
+        Ok(envelope) => envelope,
+        Err(error) => return error.response(),
+    };
+    let payload: AuthorizePayload = match serde_json::from_value(envelope.payload) {
+        Ok(payload) => payload,
+        Err(_) => return protocol::protocol_mismatch_response(),
+    };
+
+    let input = AuthorizeWriteInput {
+        session_id: envelope.request.session.session_id,
+        workspace_id: Some(envelope.request.workspace.workspace_id),
+        queue_on_conflict: payload.queue_on_conflict,
+        action: payload.action,
+        old_path: payload.old_path,
+        new_path: payload.new_path,
+        path: payload.path,
+    };
+
+    let outcome = match authorize_with_policy(&config.store, input, true) {
         Ok(outcome) => outcome,
         Err(message) => {
             return (
@@ -410,7 +428,17 @@ async fn conflicts_check(
         return unauthorized();
     }
 
-    match authorize_from_store(&config.store, input, false) {
+    let input = AuthorizeWriteInput {
+        session_id: input.session_id,
+        workspace_id: input.workspace_id,
+        queue_on_conflict: input.queue_on_conflict,
+        action: input.action,
+        old_path: input.old_path,
+        new_path: input.new_path,
+        path: input.path,
+    };
+
+    match authorize_with_policy(&config.store, input, false) {
         Ok(outcome) => (StatusCode::OK, Json(authorization_json(outcome))),
         Err(message) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -646,137 +674,15 @@ async fn validation_run(
     }
 }
 
-#[derive(Debug, Clone)]
-struct AuthorizationOutcome {
-    decision: Decision,
-    wait: Option<WaitQueueInfo>,
-    reservation: Option<WaitRecord>,
-}
-
-#[derive(Debug, Clone)]
-struct WaitQueueInfo {
-    record: WaitRecord,
-    queue_position: Option<u64>,
-}
-
-fn authorize_from_store(
+fn authorize_with_policy(
     store: &SharedStore,
-    input: AuthorizeRequest,
+    input: AuthorizeWriteInput,
     allow_queue_side_effects: bool,
 ) -> Result<AuthorizationOutcome, String> {
-    let path = input.path.clone();
-    let authorization_input = match input.action.as_str() {
-        "write_file" => AuthorizationInput::write_file(&path),
-        "delete_file" => AuthorizationInput::delete_file(&path),
-        "rename_file" => AuthorizationInput::rename_file(
-            input.old_path.as_deref().unwrap_or(path.as_str()),
-            input.new_path.as_deref().unwrap_or(path.as_str()),
-        ),
-        "move_file" => AuthorizationInput::move_file(
-            input.old_path.as_deref().unwrap_or(path.as_str()),
-            input.new_path.as_deref().unwrap_or(path.as_str()),
-        ),
-        _ => {
-            return Ok(AuthorizationOutcome {
-                decision: Decision::deny(
-                    "unsupported_action",
-                    "Action is not supported by the v1 authorization API.",
-                    "Use a supported action such as write_file.",
-                ),
-                wait: None,
-                reservation: None,
-            });
-        }
-    };
-
     let store = store
         .lock()
         .map_err(|_| "store lock poisoned".to_string())?;
-    let mut active_reservation = None;
-    if let Some(workspace_id) = &input.workspace_id {
-        if let Some(reservation) = store
-            .active_reservation(workspace_id, &path)
-            .map_err(|error| error.to_string())?
-        {
-            if reservation.session_id != input.session_id {
-                return Ok(AuthorizationOutcome {
-                    decision: Decision::deny(
-                        "reservation_conflict",
-                        "Write target is reserved for the next waiting session.",
-                        "Wait for the active reservation to be claimed or expire.",
-                    ),
-                    wait: None,
-                    reservation: Some(reservation),
-                });
-            }
-            active_reservation = Some(reservation);
-        }
-
-        if let Some(owner) = store
-            .active_lease_owner(workspace_id, &path)
-            .map_err(|error| error.to_string())?
-            && owner != input.session_id
-        {
-            let wait = if allow_queue_side_effects && input.queue_on_conflict {
-                let waiter = store
-                    .enqueue_waiter(
-                        &input.session_id,
-                        workspace_id,
-                        &path,
-                        &input.action,
-                        Some(&owner),
-                    )
-                    .map_err(|error| error.to_string())?;
-                let queue_position = store
-                    .queue_position(&waiter.wait_id)
-                    .map_err(|error| error.to_string())?;
-                Some(WaitQueueInfo {
-                    record: waiter,
-                    queue_position,
-                })
-            } else {
-                None
-            };
-
-            return Ok(AuthorizationOutcome {
-                decision: Decision::deny(
-                    "active_lease_conflict",
-                    "Write target is covered by another active session lease.",
-                    "Refresh current state, coordinate with the lease owner, or wait for the lease to release.",
-                ),
-                wait,
-                reservation: None,
-            });
-        }
-    }
-
-    let policy_state = store
-        .policy_state_for_session(&input.session_id)
-        .map_err(|error| error.to_string())?;
-
-    let decision = stateful_core::authorize_action(&policy_state, authorization_input);
-    let mut reservation = active_reservation;
-    if matches!(decision.decision, stateful_core::DecisionKind::Allow)
-        && let Some(active) = &reservation
-    {
-        store
-            .claim_reservation(&active.wait_id, &input.session_id)
-            .map_err(|error| error.to_string())?;
-        if let Some(workspace_id) = &input.workspace_id {
-            store
-                .acquire_lease(&input.session_id, workspace_id, &path)
-                .map_err(|error| error.to_string())?;
-        }
-        if let Some(claimed) = &mut reservation {
-            claimed.status = "claimed".to_string();
-        }
-    }
-
-    Ok(AuthorizationOutcome {
-        decision,
-        wait: None,
-        reservation,
-    })
+    PolicyService::new(&store).authorize_write(input, allow_queue_side_effects)
 }
 
 fn append_event_response(store: &SharedStore, event: Event) -> (StatusCode, Json<Value>) {
@@ -989,6 +895,18 @@ struct NotificationsPollRequest {
 struct ResumeNextRequest {
     session_id: String,
     workspace_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthorizePayload {
+    #[serde(default)]
+    queue_on_conflict: bool,
+    action: String,
+    #[serde(default)]
+    old_path: Option<String>,
+    #[serde(default)]
+    new_path: Option<String>,
+    path: String,
 }
 
 #[derive(Debug, Deserialize)]
