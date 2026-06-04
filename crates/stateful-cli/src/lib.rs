@@ -561,15 +561,19 @@ fn run_server(
     let base_url = format!("http://{host}:{port}");
     let paths = GlobalPaths::from_env()?;
     let runtime = ServerRuntime::new(&base_url, &token, workspace_id, std::process::id());
-    write_global_runtime_file(&paths, &runtime)?;
     let store = stateful_store::Store::open(global_state_db_path(&paths))?;
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let tokio_runtime = tokio::runtime::Runtime::new()?;
-    tokio_runtime.block_on(stateful_server::serve_addr(
-        addr,
-        stateful_server::ServerConfig::with_store(token, store),
-    ))
+    tokio_runtime.block_on(async move {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        write_global_runtime_file(&paths, &runtime)?;
+        stateful_server::serve_listener(
+            listener,
+            stateful_server::ServerConfig::with_store(token, store),
+        )
+        .await
+    })
 }
 
 pub fn state_db_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf {

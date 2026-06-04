@@ -2,6 +2,7 @@ use std::{
     fs::{self, File, FileTimes},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -311,6 +312,38 @@ fn detached_server_args_include_start_options() {
             "--workspace-id",
             "w2"
         ]
+    );
+}
+
+#[test]
+fn foreground_server_does_not_write_runtime_when_bind_fails() {
+    let home = temp_home("stateful-server-foreground-bind-fail");
+    let paths = GlobalPaths::new(&home);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should reserve a port");
+    let port = listener
+        .local_addr()
+        .expect("listener should expose local address")
+        .port();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+        .args([
+            "server",
+            "start",
+            "--foreground",
+            "--port",
+            &port.to_string(),
+        ])
+        .env("STATEFUL_HOME", &home)
+        .output()
+        .expect("stateful binary should run");
+
+    assert!(
+        !output.status.success(),
+        "server should fail to bind occupied port"
+    );
+    assert!(
+        !paths.server_json.exists(),
+        "failed foreground start must not publish a runtime file"
     );
 }
 

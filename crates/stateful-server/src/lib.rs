@@ -71,6 +71,13 @@ pub fn build_router(config: ServerConfig) -> Router {
 
 pub async fn serve_addr(addr: SocketAddr, config: ServerConfig) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_listener(listener, config).await
+}
+
+pub async fn serve_listener(
+    listener: tokio::net::TcpListener,
+    config: ServerConfig,
+) -> anyhow::Result<()> {
     axum::serve(listener, build_router(config)).await?;
     Ok(())
 }
