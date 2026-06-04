@@ -171,9 +171,9 @@ orchestration can build on the notification and resume APIs.
 
 Full scheduling should work through immediate request/response plus polling.
 Future intent request APIs should return `granted`, `queued`, `reserved`,
-`canceled`, or `expired` state without blocking indefinitely. The prototype
-exposes notifications and `resume next`; a future CLI may provide
-`intent wait --timeout <seconds>` as a convenience wrapper around polling.
+`canceled`, or `expired` state without blocking indefinitely. Waiting is handled
+by polling `stateful notifications poll` or `stateful resume next`.
+`stateful intent wait --timeout` is not part of the v1 hardening implementation.
 
 `request_id` is required for idempotency. Repeating the same request id returns
 the existing request state and must not create duplicate queue entries. A queued

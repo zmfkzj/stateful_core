@@ -7,9 +7,9 @@ use serde_json::Value;
 use stateful_mcp::{ToolCall, map_tool_to_http, protocol_tool_name, tool_descriptors};
 
 use crate::{
-    GlobalPaths, HttpResponse, RepoGate, ServerRuntime, discover_runtime_with_global,
-    ensure_server, get_json, post_json, read_current_session_file, repo_gate,
-    repo_identity_for_enabled_repo,
+    GlobalPaths, HttpResponse, IntentDeclareArgs, RepoGate, RepoIdentity, ServerRuntime,
+    discover_runtime_with_global, ensure_server, get_json, intent_declare_protocol_body, post_json,
+    read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
 };
 
 pub fn call_mcp_tool_in_repo(
@@ -56,9 +56,59 @@ fn call_mcp_tool(
 
     match request.method {
         "GET" => get_json(runtime, request.path),
-        "POST" => post_json(runtime, request.path, &request.body),
+        "POST" => {
+            let body = if protocol_name == "state.intent.declare" {
+                intent_declare_mcp_body(runtime, request.body)?
+            } else {
+                request.body
+            };
+            post_json(runtime, request.path, &body)
+        }
         method => anyhow::bail!("unsupported MCP HTTP method: {method}"),
     }
+}
+
+fn intent_declare_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
+    let Value::Object(mut object) = body else {
+        anyhow::bail!("state.intent.declare arguments must be an object");
+    };
+
+    let files_planned = object
+        .remove("files_planned")
+        .ok_or_else(|| anyhow::anyhow!("state.intent.declare requires files_planned"))
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value).map_err(Into::into))?;
+    let session_id = take_string(&mut object, "session_id")
+        .unwrap_or_else(|| format!("stateful-mcp:{}", runtime.pid));
+    let workspace_id =
+        take_string(&mut object, "workspace_id").unwrap_or_else(|| runtime.workspace_id.clone());
+    let identity = repo_identity_from_object(&mut object);
+
+    Ok(intent_declare_protocol_body(
+        runtime,
+        IntentDeclareArgs {
+            session_id,
+            workspace_id,
+            files_planned,
+            identity,
+        },
+        "mcp",
+        "state.intent.declare",
+    ))
+}
+
+fn repo_identity_from_object(object: &mut serde_json::Map<String, Value>) -> Option<RepoIdentity> {
+    Some(RepoIdentity {
+        repo_id: take_string(object, "repo_id")?,
+        worktree_id: take_string(object, "worktree_id")?,
+        root: take_string(object, "root")?,
+        branch: take_string(object, "branch")?,
+    })
+}
+
+fn take_string(object: &mut serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    object
+        .remove(key)
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
 }
 
 fn enrich_arguments(

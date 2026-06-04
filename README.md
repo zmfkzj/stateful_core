@@ -152,8 +152,6 @@ target/debug/stateful doctor
 - `stateful current` renders active current state.
 - `stateful events` prints recent stored state events.
 - `stateful intent declare <paths...>` declares planned file scope.
-- `stateful intent wait --timeout <seconds>` waits for a queued or reserved
-  intent request as a CLI convenience over notification polling.
 - `stateful notifications poll` reads pending coordination notifications.
 - `stateful resume next` reads the next reservation available to the active
   session.

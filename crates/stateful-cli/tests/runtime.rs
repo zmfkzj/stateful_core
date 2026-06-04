@@ -262,9 +262,39 @@ fn declare_intent_via_http_posts_expected_payload() {
 
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
-    assert!(request.contains("\"session_id\":\"s1\""));
-    assert!(request.contains("\"workspace_id\":\"w1\""));
-    assert!(request.contains("\"files_planned\":[\"src/auth.ts\"]"));
+    let body = request_json_body(&request);
+    assert_eq!(body["protocol_version"], "stateful.v1");
+    assert!(
+        body["request_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert_eq!(body["observed_at"], "2026-05-31T00:00:00Z");
+    assert_eq!(body["session"]["session_id"], "s1");
+    assert_eq!(body["session"]["actor_id"], "stateful-cli:42");
+    assert_eq!(body["session"]["actor_type"], "agent");
+    assert_eq!(body["workspace"]["workspace_id"], "w1");
+    assert_eq!(body["workspace"]["repo_id"], "");
+    assert_eq!(body["workspace"]["worktree_id"], "");
+    assert_eq!(body["workspace"]["root"], "");
+    assert_eq!(body["workspace"]["branch"], "");
+    assert_eq!(body["source"]["kind"], "cli");
+    assert_eq!(body["source"]["event"], "intent_declare");
+    assert_eq!(body["source"]["source_ref"], "stateful-cli");
+    assert_eq!(
+        body["payload"],
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        })
+    );
+    assert!(body.get("files_planned").is_none());
+}
+
+fn request_json_body(request: &str) -> serde_json::Value {
+    let (_, body) = request
+        .split_once("\r\n\r\n")
+        .expect("request should contain a body separator");
+    serde_json::from_str(body).expect("request body should be json")
 }
 
 fn read_http_request(stream: &mut std::net::TcpStream) -> String {

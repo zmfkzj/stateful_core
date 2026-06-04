@@ -195,17 +195,7 @@ pub fn declare_intent_via_http(
     runtime: &ServerRuntime,
     args: IntentDeclareArgs,
 ) -> anyhow::Result<()> {
-    let mut body = serde_json::json!({
-        "session_id": args.session_id,
-        "workspace_id": args.workspace_id,
-        "files_planned": args.files_planned,
-    });
-    if let Some(identity) = args.identity {
-        body["repo_id"] = serde_json::json!(identity.repo_id);
-        body["worktree_id"] = serde_json::json!(identity.worktree_id);
-        body["root"] = serde_json::json!(identity.root);
-        body["branch"] = serde_json::json!(identity.branch);
-    }
+    let body = intent_declare_protocol_body(runtime, args, "cli", "stateful-cli");
 
     let response = post_json(runtime, "/v1/intent/declare", &body)?;
 
@@ -218,6 +208,82 @@ pub fn declare_intent_via_http(
     }
 
     Ok(())
+}
+
+pub fn intent_declare_protocol_body(
+    runtime: &ServerRuntime,
+    args: IntentDeclareArgs,
+    source_kind: &str,
+    source_ref: &str,
+) -> serde_json::Value {
+    let IntentDeclareArgs {
+        session_id,
+        workspace_id,
+        files_planned,
+        identity,
+    } = args;
+    protocol_envelope(
+        runtime,
+        uuid::Uuid::new_v4().to_string(),
+        session_id,
+        workspace_id,
+        identity,
+        source_kind,
+        "intent_declare",
+        source_ref,
+        serde_json::json!({
+            "files_planned": files_planned
+        }),
+    )
+}
+
+pub fn protocol_envelope(
+    runtime: &ServerRuntime,
+    request_id: impl Into<String>,
+    session_id: impl Into<String>,
+    workspace_id: impl Into<String>,
+    identity: Option<RepoIdentity>,
+    source_kind: &str,
+    event: &str,
+    source_ref: &str,
+    payload: serde_json::Value,
+) -> serde_json::Value {
+    let request_id = request_id.into();
+    let session_id = session_id.into();
+    let workspace_id = workspace_id.into();
+    let (repo_id, worktree_id, root, branch) = match identity {
+        Some(identity) => (
+            identity.repo_id,
+            identity.worktree_id,
+            identity.root,
+            identity.branch,
+        ),
+        None => (String::new(), String::new(), String::new(), String::new()),
+    };
+
+    serde_json::json!({
+        "protocol_version": runtime.protocol_version.as_str(),
+        "request_id": request_id,
+        "observed_at": runtime.started_at.as_str(),
+        "session": {
+            "session_id": session_id,
+            "actor_id": format!("stateful-cli:{}", runtime.pid),
+            "actor_type": "agent"
+        },
+        "workspace": {
+            "root": root,
+            "workspace_id": workspace_id,
+            "repo_id": repo_id,
+            "worktree_id": worktree_id,
+            "branch": branch
+        },
+        "source": {
+            "kind": source_kind,
+            "event": event,
+            "source_ref": source_ref
+        },
+        "payload": payload
+    })
 }
 
 fn runtime_file_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf {

@@ -41,8 +41,9 @@ pub use repo_registry::{
 pub use runtime::{
     CurrentSession, HttpResponse, IntentDeclareArgs, ServerRuntime, declare_intent_via_http,
     discover_runtime, discover_runtime_with_global, discover_runtime_with_optional_global,
-    get_json, global_state_db_path, post_json, read_current_session_file,
-    write_current_session_file, write_global_runtime_file, write_runtime_file,
+    get_json, global_state_db_path, intent_declare_protocol_body, post_json, protocol_envelope,
+    read_current_session_file, write_current_session_file, write_global_runtime_file,
+    write_runtime_file,
 };
 pub use server_lifecycle::{
     ServerStartOptions, detached_server_args, ensure_server, ensure_server_with,

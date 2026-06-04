@@ -1,3 +1,5 @@
+mod protocol;
+
 use axum::{
     Json, Router,
     extract::State,
@@ -230,7 +232,7 @@ async fn authorize(
 async fn intent_declare(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<IntentDeclareRequest>,
+    Json(input): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return (
@@ -241,13 +243,36 @@ async fn intent_declare(
         );
     }
 
+    let envelope = match protocol::require_v1_envelope(input) {
+        Ok(envelope) => envelope,
+        Err(error) => return error.response(),
+    };
+    let payload: IntentDeclarePayload = match serde_json::from_value(envelope.payload) {
+        Ok(payload) => payload,
+        Err(_) => return protocol::protocol_mismatch_response(),
+    };
+    let identity = WorkspaceIdentityRequest {
+        repo_id: non_empty_identity(envelope.request.workspace.repo_id),
+        worktree_id: non_empty_identity(envelope.request.workspace.worktree_id),
+        root: non_empty_identity(envelope.request.workspace.root),
+        branch: non_empty_identity(envelope.request.workspace.branch),
+    };
+
     append_event_response(
         &config.store,
         with_request_identity(
-            Event::intent_declared(input.session_id, input.workspace_id, input.files_planned),
-            input.identity,
+            Event::intent_declared(
+                envelope.request.session.session_id,
+                envelope.request.workspace.workspace_id,
+                payload.files_planned,
+            ),
+            identity,
         ),
     )
+}
+
+fn non_empty_identity(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
 }
 
 async fn lease_acquire(
@@ -917,12 +942,8 @@ fn has_valid_bearer_token(headers: &HeaderMap, expected_token: &str) -> bool {
 }
 
 #[derive(Debug, Deserialize)]
-struct IntentDeclareRequest {
-    session_id: String,
-    workspace_id: String,
+struct IntentDeclarePayload {
     files_planned: Vec<String>,
-    #[serde(flatten)]
-    identity: WorkspaceIdentityRequest,
 }
 
 #[derive(Debug, Deserialize)]

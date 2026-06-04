@@ -250,12 +250,44 @@ fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
-    assert!(request.contains("\"session_id\":\"s1\""));
-    assert!(request.contains("\"files_planned\":[\"src/auth.ts\"]"));
-    assert!(request.contains("\"repo_id\":\"repo-"));
-    assert!(request.contains("\"worktree_id\":\"repo-"));
-    assert!(request.contains("\"root\":"));
-    assert!(request.contains("\"branch\":"));
+    let body = request_json_body(&request);
+    assert_eq!(body["protocol_version"], "stateful.v1");
+    assert!(
+        body["request_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert_eq!(body["session"]["session_id"], "s1");
+    assert_eq!(body["workspace"]["workspace_id"], "w1");
+    assert!(
+        body["workspace"]["repo_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("repo-"))
+    );
+    assert!(
+        body["workspace"]["worktree_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("repo-"))
+    );
+    let canonical_repo_root = repo_root
+        .canonicalize()
+        .expect("repo root should canonicalize");
+    assert_eq!(
+        body["workspace"]["root"],
+        canonical_repo_root.to_string_lossy().as_ref()
+    );
+    assert!(
+        body["workspace"]["branch"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert_eq!(
+        body["payload"],
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        })
+    );
+    assert!(body.get("files_planned").is_none());
 
     let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
     assert_eq!(json["jsonrpc"], "2.0");
@@ -293,12 +325,38 @@ fn intent_declare_command_posts_repo_identity() {
     );
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
-    assert!(request.contains("\"session_id\":\"s-current\""));
-    assert!(request.contains("\"files_planned\":[\"src/auth.ts\"]"));
-    assert!(request.contains("\"repo_id\":\"repo-"));
-    assert!(request.contains("\"worktree_id\":\"repo-"));
-    assert!(request.contains("\"root\":"));
-    assert!(request.contains("\"branch\":"));
+    let body = request_json_body(&request);
+    assert_eq!(body["protocol_version"], "stateful.v1");
+    assert_eq!(body["session"]["session_id"], "s-current");
+    assert_eq!(body["workspace"]["workspace_id"], "w1");
+    assert!(
+        body["workspace"]["repo_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("repo-"))
+    );
+    assert!(
+        body["workspace"]["worktree_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("repo-"))
+    );
+    let canonical_repo_root = repo_root
+        .canonicalize()
+        .expect("repo root should canonicalize");
+    assert_eq!(
+        body["workspace"]["root"],
+        canonical_repo_root.to_string_lossy().as_ref()
+    );
+    assert!(
+        body["workspace"]["branch"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert_eq!(
+        body["payload"],
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        })
+    );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -332,9 +390,16 @@ fn mcp_intent_declare_defaults_to_current_hook_session() {
     );
 
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("\"session_id\":\"s-current\""));
-    assert!(request.contains("\"workspace_id\":\"w1\""));
-    assert!(request.contains("\"files_planned\":[\"src/auth.ts\"]"));
+    let body = request_json_body(&request);
+    assert_eq!(body["protocol_version"], "stateful.v1");
+    assert_eq!(body["session"]["session_id"], "s-current");
+    assert_eq!(body["workspace"]["workspace_id"], "w1");
+    assert_eq!(
+        body["payload"],
+        serde_json::json!({
+            "files_planned": ["src/auth.ts"]
+        })
+    );
 
     let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
     assert_eq!(json["jsonrpc"], "2.0");
@@ -503,6 +568,13 @@ fn read_http_request_maybe_body(stream: &mut std::net::TcpStream) -> String {
     }
 
     String::from_utf8(buffer).expect("request should be utf8")
+}
+
+fn request_json_body(request: &str) -> serde_json::Value {
+    let (_, body) = request
+        .split_once("\r\n\r\n")
+        .expect("request should contain a body separator");
+    serde_json::from_str(body).expect("request body should be json")
 }
 
 fn write_json_response(stream: &mut std::net::TcpStream, body: &str) {
