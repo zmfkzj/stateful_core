@@ -5,10 +5,11 @@ use std::{
     process::Command,
     sync::mpsc,
     thread,
+    time::Duration,
 };
 
 use stateful_cli::{
-    GlobalPaths, ServerRuntime, sync_outbox_in_repo, write_global_runtime_file, write_runtime_file,
+    GlobalPaths, ServerRuntime, sync_outbox_in_repo_with_runtime, write_global_runtime_file,
 };
 
 #[test]
@@ -34,7 +35,6 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    write_runtime_file(&temp_root, &runtime).expect("runtime file should write");
     let outbox_file = temp_root.join(".stateful_core/outbox/s1.jsonl");
     fs::write(
         &outbox_file,
@@ -44,13 +44,18 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
     )
     .expect("outbox file should write");
 
-    let synced = sync_outbox_in_repo(&temp_root).expect("outbox should sync");
+    let synced =
+        sync_outbox_in_repo_with_runtime(&temp_root, &runtime).expect("outbox should sync");
 
     assert_eq!(synced, 2);
     assert!(!outbox_file.exists());
 
-    let first = rx.recv().expect("first request should arrive");
-    let second = rx.recv().expect("second request should arrive");
+    let first = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("first request should arrive");
+    let second = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("second request should arrive");
     assert!(first.contains("POST /v1/outbox/sync HTTP/1.1"));
     assert!(first.contains("\"outbox_id\":\"outbox-1\""));
     assert!(first.contains("\"sequence\":1"));
@@ -109,7 +114,9 @@ fn sync_outbox_command_discovers_global_runtime_file() {
     assert!(!outbox_file.exists());
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"synced\":1"));
 
-    let request = rx.recv().expect("captured request should arrive");
+    let request = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("captured request should arrive");
     assert!(request.contains("POST /v1/outbox/sync HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
     assert!(request.contains("\"outbox_id\":\"outbox-global\""));

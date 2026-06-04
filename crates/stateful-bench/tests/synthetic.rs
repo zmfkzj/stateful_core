@@ -126,24 +126,34 @@ fn chaos_agent_manifest_records_tiers_baselines_schedules_and_lease_conflicts() 
     let full_path = root.join(".stateful_bench/agent_synthetic/chaos_manifest.jsonl");
     let sample_path =
         root.join(".stateful_bench/agent_synthetic/chaos_agent_sample30_manifest.jsonl");
+    let sample60_path =
+        root.join(".stateful_bench/agent_synthetic/chaos_agent_sample60_manifest.jsonl");
 
     let full: Vec<serde_json::Value> =
         read_jsonl(&full_path).expect("full chaos manifest should parse");
     let sample: Vec<serde_json::Value> =
         read_jsonl(&sample_path).expect("sample chaos manifest should parse");
+    let sample60: Vec<serde_json::Value> =
+        read_jsonl(&sample60_path).expect("sample60 chaos manifest should parse");
 
-    assert_eq!(full.len(), 220);
+    assert_eq!(full.len(), 300);
     assert_eq!(sample.len(), 30);
+    assert_eq!(sample60.len(), 60);
 
     let full_metadata = full.iter().map(pair_metadata).collect::<Vec<_>>();
     let sample_metadata = sample.iter().map(pair_metadata).collect::<Vec<_>>();
+    let sample60_metadata = sample60.iter().map(pair_metadata).collect::<Vec<_>>();
 
     let full_scenarios = full_metadata
         .iter()
         .map(|metadata| metadata["scenario"].as_str().expect("scenario"))
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(full_scenarios.len(), 11);
+    assert_eq!(full_scenarios.len(), 15);
     assert!(full_scenarios.contains("agent_agent_lease_conflict"));
+    assert!(full_scenarios.contains("duplicate_anchor_insert"));
+    assert!(full_scenarios.contains("move_vs_insert"));
+    assert!(full_scenarios.contains("delete_vs_replace"));
+    assert!(full_scenarios.contains("persisted_stale_overwrite_conflict"));
 
     let tiers = sample_metadata
         .iter()
@@ -163,7 +173,19 @@ fn chaos_agent_manifest_records_tiers_baselines_schedules_and_lease_conflicts() 
         .len();
     assert!(schedule_seed_count >= 20);
 
-    for metadata in sample_metadata {
+    let sample60_scenarios = sample60_metadata
+        .iter()
+        .map(|metadata| metadata["scenario"].as_str().expect("scenario"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(sample60_scenarios.len(), 15);
+    let sample60_seed_count = sample60_metadata
+        .iter()
+        .map(|metadata| metadata["schedule_seed"].as_u64().expect("schedule_seed"))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    assert!(sample60_seed_count >= 50);
+
+    for metadata in sample_metadata.into_iter().chain(sample60_metadata) {
         let expectations = metadata["baseline_expectations"]
             .as_object()
             .expect("baseline_expectations should be object");

@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod codex_wrapper;
 mod commit;
 mod global_paths;
 mod hook;
@@ -16,18 +17,23 @@ mod runtime;
 mod server_lifecycle;
 mod validation;
 
+pub use codex_wrapper::{
+    CodexInvocation, CodexSandboxMode, CodexWrapperOptions, STATEFUL_TRUSTED_SANDBOX_ENV,
+    build_codex_invocation, run_codex,
+};
 pub use commit::{CommitRequest, CommitResult, run_structured_commit};
 pub use global_paths::GlobalPaths;
 pub use hook::{
     HookOutcome, handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
-    handle_session_start_in_repo, handle_stop_in_repo, handle_user_prompt_submit_in_repo,
+    handle_pre_tool_use_with_trusted_sandbox, handle_session_start_in_repo, handle_stop_in_repo,
+    handle_user_prompt_submit_in_repo,
 };
 pub use install::{
     InstallOptions, InstallPlan, apply_global_install, current_stateful_binary_path,
     default_codex_config_path, plan_global_install,
 };
 pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio_in_repo};
-pub use outbox::sync_outbox_in_repo;
+pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime};
 pub use repo_registry::{
     CodexMode, RepoEntry, RepoGate, RepoIdentity, RepoRegistry, detect_git_root, disable_repo,
     enable_repo, repo_gate, repo_identity_for_enabled_repo,
@@ -93,6 +99,14 @@ pub enum Command {
         message: String,
         #[arg(required = true, num_args = 1.., last = true)]
         paths: Vec<String>,
+    },
+    Codex {
+        #[arg(long, default_value = "codex")]
+        codex_bin: String,
+        #[arg(long, value_enum, default_value = "read-only-tmp")]
+        sandbox: CodexSandboxMode,
+        #[arg(num_args = 0.., allow_hyphen_values = true, trailing_var_arg = true)]
+        args: Vec<String>,
     },
     Enable {
         #[arg(long)]
@@ -326,6 +340,18 @@ pub fn run() -> anyhow::Result<()> {
                     "paths": result.committed_paths
                 }))?
             );
+        }
+        Command::Codex {
+            codex_bin,
+            sandbox,
+            args,
+        } => {
+            let code = run_codex(CodexWrapperOptions {
+                codex_bin,
+                sandbox,
+                args,
+            })?;
+            std::process::exit(code);
         }
         Command::Enable {
             repo,
@@ -727,7 +753,7 @@ command = "{} user-prompt-submit"
 statusMessage = "Checking stateful intent context"
 
 [[hooks.PreToolUse]]
-matcher = "Bash|apply_patch|Edit|Write|mcp__filesystem__.*"
+matcher = "Bash|apply_patch|Edit|Write|file_change|mcp__filesystem__.*"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
@@ -735,7 +761,7 @@ command = "{} pre-tool-use"
 statusMessage = "Authorizing stateful tool use"
 
 [[hooks.PostToolUse]]
-matcher = "Bash|apply_patch|Edit|Write|mcp__filesystem__.*"
+matcher = "Bash|apply_patch|Edit|Write|file_change|mcp__filesystem__.*"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"

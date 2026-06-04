@@ -738,7 +738,7 @@ command = {}
 statusMessage = "Checking stateful intent context"
 
 [[hooks.PreToolUse]]
-matcher = "Bash|apply_patch|Edit|Write|mcp__filesystem__.*"
+matcher = "Bash|apply_patch|Edit|Write|file_change|mcp__filesystem__.*"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
@@ -746,7 +746,7 @@ command = {}
 statusMessage = "Authorizing stateful tool use"
 
 [[hooks.PostToolUse]]
-matcher = "Bash|apply_patch|Edit|Write|mcp__filesystem__.*"
+matcher = "Bash|apply_patch|Edit|Write|file_change|mcp__filesystem__.*"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"

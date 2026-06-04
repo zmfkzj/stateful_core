@@ -124,6 +124,61 @@ fn shell_control_syntax_is_denied_before_read_only_allowlists() {
 }
 
 #[test]
+fn quoted_search_patterns_do_not_count_as_shell_control_syntax() {
+    let allowed = [
+        r#"rg -n "future work|Future work" docs crates README.md .stateful"#,
+        "rg -n 'future work|Future work' docs crates README.md .stateful",
+        "rg -n 'literal;semicolon' docs",
+        "rg -n 'literal&background' docs",
+    ];
+
+    for command in allowed {
+        assert_eq!(
+            classify_bash(command).kind,
+            BashKind::ReadOnly,
+            "command `{command}` should allow shell metacharacters inside quoted search patterns"
+        );
+    }
+
+    assert_eq!(
+        classify_bash("rg -n future docs | head").kind,
+        BashKind::Mutating
+    );
+}
+
+#[test]
+fn read_only_search_allows_stderr_redirection_to_dev_null_only() {
+    let allowed = [
+        r#"rg -n "future work" docs 2>/dev/null"#,
+        r#"rg -n "future work" docs 2> /dev/null"#,
+        r#"rg -n "future work" docs 1>/dev/null"#,
+        r#"rg -n "future work" docs >/dev/null"#,
+        r#"rg -n "future work" docs > /dev/null"#,
+    ];
+
+    for command in allowed {
+        assert_eq!(
+            classify_bash(command).kind,
+            BashKind::ReadOnly,
+            "command `{command}` should allow discarding read-only command output"
+        );
+    }
+
+    let rejected = [
+        r#"rg -n "future work" docs >/tmp/stateful-rg.out"#,
+        r#"rg -n "future work" docs 2>/tmp/stateful-rg.err"#,
+    ];
+
+    for command in rejected {
+        assert_eq!(
+            classify_bash(command).kind,
+            BashKind::Mutating,
+            "command `{command}` should not allow stdout or file redirection without sandbox metadata"
+        );
+    }
+}
+
+#[test]
 fn shell_expansion_syntax_is_denied_before_read_only_allowlists() {
     let rejected = [
         "find docs $(printf name)",
@@ -223,6 +278,24 @@ fn stateful_validate_is_the_bash_controlled_validation_escape_hatch() {
         classify_bash("./target/debug/stateful validate cargo-test").kind,
         BashKind::ReadOnly
     );
+}
+
+#[test]
+fn stateful_server_lifecycle_commands_are_bash_allowed_for_local_runtime_management() {
+    let allowed = [
+        "stateful server status",
+        "stateful server stop",
+        "stateful server start",
+        "target/debug/stateful server start --host 127.0.0.1 --port 43873",
+    ];
+
+    for command in allowed {
+        assert_eq!(
+            classify_bash(command).kind,
+            BashKind::ReadOnly,
+            "command `{command}` should be allowed as controlled local server lifecycle"
+        );
+    }
 }
 
 #[test]

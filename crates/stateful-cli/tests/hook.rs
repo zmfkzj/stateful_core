@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     fs,
     io::{Read, Write},
     net::TcpListener,
@@ -6,12 +7,13 @@ use std::{
     process::{Command, Stdio},
     sync::mpsc,
     thread,
+    time::Duration,
 };
 
 use stateful_cli::{
     GlobalPaths, HookOutcome, ServerRuntime, enable_repo, handle_post_tool_use_in_repo,
-    handle_pre_tool_use, handle_pre_tool_use_in_repo, read_current_session_file,
-    write_global_runtime_file,
+    handle_pre_tool_use, handle_pre_tool_use_in_repo, handle_pre_tool_use_with_trusted_sandbox,
+    read_current_session_file, write_global_runtime_file,
 };
 
 #[test]
@@ -23,6 +25,40 @@ fn pre_tool_use_allows_read_only_bash() {
       "tool_name": "Bash",
       "tool_input": {
         "command": "rg auth src"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_allows_quoted_rg_regex_alternation_without_sandbox() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "rg -n \"future work|Future work\" docs crates README.md .stateful"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_allows_read_only_bash_dev_null_redirection_without_sandbox() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "rg -n \"future work\" docs 2>/dev/null"
       }
     }"#;
 
@@ -263,6 +299,309 @@ fn pre_tool_use_denies_other_stateful_control_commands_in_bash() {
 }
 
 #[test]
+fn pre_tool_use_allows_bash_control_syntax_in_read_only_tmp_sandbox() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "sandbox": {
+        "mode": "read-only",
+        "writable_roots": ["/tmp"],
+        "network_access": false
+      },
+      "tool_input": {
+        "command": "rg auth src | head > /tmp/stateful-rg.out"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_allows_sandbox_pipeline_with_quoted_regex_alternation() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "sandbox": {
+        "mode": "read-only",
+        "writable_roots": ["/tmp"],
+        "network_access": false
+      },
+      "tool_input": {
+        "command": "rg -n \"future work|Future work\" docs | head > /tmp/stateful-rg.out"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_allows_bash_control_syntax_with_wrapper_trusted_sandbox() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "rg auth src | head > /tmp/stateful-rg.out"
+      }
+    }"#;
+    let trusted_sandbox = serde_json::json!({
+        "mode": "read-only",
+        "writable_roots": ["/tmp"],
+        "network_access": false,
+        "source": "stateful-codex-wrapper"
+    });
+
+    let outcome = handle_pre_tool_use_with_trusted_sandbox(input, Some(trusted_sandbox))
+        .expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn run_hook_pre_tool_use_uses_wrapper_trusted_sandbox_env() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-sandbox-env-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "rg auth src | head > /tmp/stateful-rg.out"
+      }
+    }"#;
+    let trusted_sandbox = serde_json::json!({
+        "mode": "read-only",
+        "writable_roots": ["/tmp"],
+        "network_access": false,
+        "source": "stateful-codex-wrapper"
+    })
+    .to_string();
+
+    let output = run_hook_subprocess_with_extra_env(
+        &repo_root,
+        &paths,
+        &["hook", "pre-tool-use"],
+        input,
+        &[("STATEFUL_HOOK_TRUSTED_SANDBOX", trusted_sandbox.as_str())],
+    );
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_denies_tool_input_spoofed_read_only_bash_sandbox() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "rg auth src | head",
+        "sandbox": {
+          "mode": "read-only",
+          "writable_roots": ["/tmp"],
+          "network_access": false
+        }
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert!(matches!(outcome, HookOutcome::Deny { .. }));
+    let json = outcome
+        .to_stdout_json()
+        .expect("deny outcome should serialize");
+    assert!(
+        json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("reason should be string")
+            .contains("shell control syntax")
+    );
+}
+
+#[test]
+fn pre_tool_use_denies_read_only_bash_sandbox_with_repo_writable_root() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "sandbox": {
+        "mode": "read-only",
+        "writable_roots": ["/repo"],
+        "network_access": false
+      },
+      "tool_input": {
+        "command": "rg auth src | head"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert!(matches!(outcome, HookOutcome::Deny { .. }));
+    let json = outcome
+        .to_stdout_json()
+        .expect("deny outcome should serialize");
+    assert!(
+        json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("reason should be string")
+            .contains("outside the trusted tmp writable roots")
+    );
+}
+
+#[test]
+fn pre_tool_use_denies_read_only_bash_sandbox_with_network_access() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "sandbox": {
+        "mode": "read-only",
+        "writable_roots": ["/tmp"],
+        "network_access": true
+      },
+      "tool_input": {
+        "command": "rg auth src | head"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert!(matches!(outcome, HookOutcome::Deny { .. }));
+    let json = outcome
+        .to_stdout_json()
+        .expect("deny outcome should serialize");
+    assert!(
+        json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("reason should be string")
+            .contains("network access")
+    );
+}
+
+#[test]
+fn pre_tool_use_denies_read_only_bash_sandbox_without_explicit_network_disabled() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "sandbox": {
+        "mode": "read-only",
+        "writable_roots": ["/tmp"]
+      },
+      "tool_input": {
+        "command": "rg auth src | head"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert!(matches!(outcome, HookOutcome::Deny { .. }));
+    let json = outcome
+        .to_stdout_json()
+        .expect("deny outcome should serialize");
+    assert!(
+        json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("reason should be string")
+            .contains("network access")
+    );
+}
+
+#[test]
+fn pre_tool_use_denies_known_mutating_command_in_read_only_bash_sandbox() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "sandbox": {
+        "mode": "read-only",
+        "writable_roots": ["/tmp"],
+        "network_access": false
+      },
+      "tool_input": {
+        "command": "rm /tmp/stateful-rg.out"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert!(matches!(outcome, HookOutcome::Deny { .. }));
+    let json = outcome
+        .to_stdout_json()
+        .expect("deny outcome should serialize");
+    assert!(
+        json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("reason should be string")
+            .contains("known mutating")
+    );
+}
+
+#[test]
+fn pre_tool_use_denies_stateful_control_command_even_in_read_only_bash_sandbox() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "sandbox": {
+        "mode": "read-only",
+        "writable_roots": ["/tmp"],
+        "network_access": false
+      },
+      "tool_input": {
+        "command": "stateful sync-outbox"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert!(matches!(outcome, HookOutcome::Deny { .. }));
+    let json = outcome
+        .to_stdout_json()
+        .expect("deny outcome should serialize");
+    assert!(
+        json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("reason should be string")
+            .contains("known mutating")
+    );
+}
+
+#[test]
 fn pre_tool_use_denies_apply_patch_until_intent_protocol_exists() {
     let input = r#"{
       "session_id": "s1",
@@ -498,6 +837,152 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     assert!(request.contains("\"action\":\"write_file\""));
     assert!(request.contains("\"path\":\"src/auth.ts\""));
     assert!(request.contains("\"queue_on_conflict\":true"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_apply_patch_patch_field_authorizes_every_file_target() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-patch-field-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Write target is outside active intent scope.","required_next_action":"Declare matching intent."}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "apply_patch",
+        "tool_input": {
+            "patch": "*** Begin Patch\n*** Update File: doc.txt\n@@\n base\n*** Update File: persisted_doc.txt\n@@\n base\n*** End Patch\n"
+        }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let first = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("first authorize request should arrive");
+    let second = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("second authorize request should arrive");
+    assert!(first.contains("\"path\":\"doc.txt\""));
+    assert!(second.contains("\"path\":\"persisted_doc.txt\""));
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
+    assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(
+        json["hookSpecificOutput"]["permissionDecisionReason"],
+        "Declare matching intent."
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_apply_patch_raw_string_payload_posts_authorize() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-raw-patch-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "apply_patch",
+        "tool_input": "*** Begin Patch\n*** Update File: doc.txt\n@@\n base\n*** End Patch\n"
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("authorize request should arrive");
+    assert!(request.contains("\"action\":\"write_file\""));
+    assert!(request.contains("\"path\":\"doc.txt\""));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_file_change_posts_authorize_for_changed_paths() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-file-change-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "file_change",
+        "tool_input": {
+            "changes": [
+                {"path": "doc.txt", "kind": "update"}
+            ]
+        }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("authorize request should arrive");
+    assert!(request.contains("\"action\":\"write_file\""));
+    assert!(request.contains("\"path\":\"doc.txt\""));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -847,11 +1332,18 @@ fn enable_test_repo(paths: &GlobalPaths, repo_root: &std::path::Path) {
 fn spawn_fake_stateful_server(
     actual_response: &'static str,
 ) -> (ServerRuntime, mpsc::Receiver<String>) {
+    spawn_fake_stateful_server_sequence(vec![actual_response])
+}
+
+fn spawn_fake_stateful_server_sequence(
+    actual_responses: Vec<&'static str>,
+) -> (ServerRuntime, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        for _ in 0..3 {
+        let mut actual_responses = VecDeque::from(actual_responses);
+        while !actual_responses.is_empty() {
             let (mut stream, _) = listener.accept().expect("connection should arrive");
             let request = read_http_request_maybe_body(&mut stream);
             if request.contains("GET /health HTTP/1.1") {
@@ -860,8 +1352,10 @@ fn spawn_fake_stateful_server(
                 write_json_response(&mut stream, r#"{"status":"ok","current":{}}"#);
             } else {
                 tx.send(request).expect("request should send to test");
-                write_json_response(&mut stream, actual_response);
-                break;
+                let response = actual_responses
+                    .pop_front()
+                    .expect("response should exist while loop is active");
+                write_json_response(&mut stream, response);
             }
         }
     });
@@ -881,17 +1375,42 @@ fn run_hook_subprocess(
     run_hook_subprocess_from(repo_root, paths, args, input)
 }
 
+fn run_hook_subprocess_with_extra_env(
+    repo_root: &std::path::Path,
+    paths: &GlobalPaths,
+    args: &[&str],
+    input: &str,
+    extra_env: &[(&str, &str)],
+) -> std::process::Output {
+    run_hook_subprocess_from_with_extra_env(repo_root, paths, args, input, extra_env)
+}
+
 fn run_hook_subprocess_from(
     cwd: &Path,
     paths: &GlobalPaths,
     args: &[&str],
     input: &str,
 ) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_stateful"))
+    run_hook_subprocess_from_with_extra_env(cwd, paths, args, input, &[])
+}
+
+fn run_hook_subprocess_from_with_extra_env(
+    cwd: &Path,
+    paths: &GlobalPaths,
+    args: &[&str],
+    input: &str,
+    extra_env: &[(&str, &str)],
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_stateful"));
+    command
         .args(args)
         .current_dir(cwd)
         .env_clear()
-        .env("STATEFUL_HOME", &paths.home)
+        .env("STATEFUL_HOME", &paths.home);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

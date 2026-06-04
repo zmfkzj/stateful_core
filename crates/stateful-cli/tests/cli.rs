@@ -1,7 +1,7 @@
 use clap::Parser;
 use stateful_cli::{
-    Cli, Command, HookCommand, McpCommand, NotificationsCommand, ReposCommand, ResumeCommand,
-    ServerCommand,
+    Cli, CodexSandboxMode, Command, HookCommand, McpCommand, NotificationsCommand, ReposCommand,
+    ResumeCommand, ServerCommand,
 };
 use std::path::PathBuf;
 
@@ -62,6 +62,32 @@ fn parses_disable_command() {
     assert!(matches!(
         cli.command,
         Command::Disable { ref repo } if repo == &Some(PathBuf::from("/work/repo"))
+    ));
+}
+
+#[test]
+fn parses_codex_wrapper_command() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "codex",
+        "--codex-bin",
+        "/opt/codex/bin/codex",
+        "--sandbox",
+        "read-only-tmp",
+        "exec",
+        "--json",
+        "-",
+    ])
+    .expect("codex wrapper command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Codex {
+            ref codex_bin,
+            sandbox: CodexSandboxMode::ReadOnlyTmp,
+            ref args,
+        } if codex_bin == "/opt/codex/bin/codex"
+            && args == &vec!["exec".to_string(), "--json".to_string(), "-".to_string()]
     ));
 }
 

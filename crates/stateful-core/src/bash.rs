@@ -14,30 +14,39 @@ pub struct BashClassification {
 
 pub fn classify_bash(command: &str) -> BashClassification {
     let trimmed = command.trim();
-    let normalized = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    let command = match remove_allowed_dev_null_redirections(trimmed) {
+        Ok(command) => command,
+        Err(()) => {
+            return BashClassification {
+                kind: BashKind::Mutating,
+                reason: "command uses shell redirection or mutation syntax".to_string(),
+            };
+        }
+    };
+    let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    if contains_write_syntax(trimmed) {
+    if contains_write_syntax(&command) {
         return BashClassification {
             kind: BashKind::Mutating,
             reason: "command uses shell redirection or mutation syntax".to_string(),
         };
     }
 
-    if contains_shell_control_syntax(trimmed) {
+    if contains_shell_control_syntax(&command) {
         return BashClassification {
             kind: BashKind::Mutating,
             reason: "command uses shell control syntax".to_string(),
         };
     }
 
-    if contains_unsupported_shell_expansion(trimmed) {
+    if contains_unsupported_shell_expansion(&command) {
         return BashClassification {
             kind: BashKind::Mutating,
             reason: "command uses unsupported shell expansion syntax".to_string(),
         };
     }
 
-    if parse_shell_words(trimmed).is_err() {
+    if parse_shell_words(&command).is_err() {
         return BashClassification {
             kind: BashKind::Mutating,
             reason: "command uses unsupported shell quoting".to_string(),
@@ -66,7 +75,7 @@ pub fn classify_bash(command: &str) -> BashClassification {
         };
     }
 
-    if is_stateful_intent_declare_command(trimmed) {
+    if is_stateful_intent_declare_command(&command) {
         return BashClassification {
             kind: BashKind::ReadOnly,
             reason: "stateful intent declaration is a coordination gate, not a code write"
@@ -74,7 +83,7 @@ pub fn classify_bash(command: &str) -> BashClassification {
         };
     }
 
-    if is_stateful_commit_command(trimmed) {
+    if is_stateful_commit_command(&command) {
         return BashClassification {
             kind: BashKind::ReadOnly,
             reason: "stateful commit is a structured git operation with explicit path checks"
@@ -115,13 +124,24 @@ pub fn classify_bash(command: &str) -> BashClassification {
 }
 
 fn contains_write_syntax(command: &str) -> bool {
-    command.contains('>')
-        || command.contains(" >")
-        || command.contains(">>")
-        || command.contains(" 2>")
-        || command.contains("| tee")
-        || command.contains("|tee")
-        || command.contains("<<")
+    let mut scanner = ShellScanner::new(command);
+    while let Some((_, ch)) = scanner.next() {
+        if scanner.last_escaped() || scanner.in_single_quote() || scanner.in_double_quote() {
+            continue;
+        }
+        if ch == '>' {
+            return true;
+        }
+        if ch == '<'
+            && scanner
+                .peek_char()
+                .is_some_and(|next| matches!(next, '<' | '('))
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn is_validation_command(command: &str) -> bool {
@@ -185,6 +205,13 @@ fn is_stateful_escape_hatch(command: &str) -> bool {
         words[1].as_str(),
         "doctor" | "current" | "events" | "status"
     ) || words[1] == "validate" && words.len() >= 3
+        || is_stateful_server_lifecycle_command(&words)
+}
+
+fn is_stateful_server_lifecycle_command(words: &[String]) -> bool {
+    words.len() >= 3
+        && words[1] == "server"
+        && matches!(words[2].as_str(), "status" | "stop" | "start")
 }
 
 fn is_stateful_command(command: &str) -> bool {
@@ -243,9 +270,27 @@ fn is_broad_commit_pathspec(path: &str) -> bool {
 }
 
 fn contains_shell_control_syntax(command: &str) -> bool {
-    ["\n", "\r", ";", "&", "&&", "||", "|", "`", "$(", "<(", ">("]
-        .iter()
-        .any(|token| command.contains(token))
+    let mut scanner = ShellScanner::new(command);
+    while let Some((_, ch)) = scanner.next() {
+        if scanner.last_escaped() || scanner.in_single_quote() {
+            continue;
+        }
+        if scanner.in_double_quote() {
+            if ch == '`' {
+                return true;
+            }
+            continue;
+        }
+
+        if matches!(ch, '\n' | '\r' | ';' | '&' | '|' | '`') {
+            return true;
+        }
+        if matches!(ch, '$' | '<' | '>') && scanner.peek_char().is_some_and(|next| next == '(') {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn contains_unsupported_shell_expansion(command: &str) -> bool {
@@ -279,7 +324,9 @@ fn contains_unsupported_shell_expansion(command: &str) -> bool {
             continue;
         }
 
-        if ch == '$' || (!in_single_quote && !in_double_quote && is_shell_expansion_metachar(ch)) {
+        if (!in_single_quote && ch == '$')
+            || (!in_single_quote && !in_double_quote && is_shell_expansion_metachar(ch))
+        {
             return true;
         }
     }
@@ -289,6 +336,176 @@ fn contains_unsupported_shell_expansion(command: &str) -> bool {
 
 fn is_shell_expansion_metachar(ch: char) -> bool {
     matches!(ch, '{' | '}' | '*' | '?' | '[' | ']')
+}
+
+fn remove_allowed_dev_null_redirections(command: &str) -> Result<String, ()> {
+    let mut output = String::with_capacity(command.len());
+    let mut scanner = ShellScanner::new(command);
+
+    while let Some((_index, ch)) = scanner.next() {
+        if !scanner.last_escaped()
+            && !scanner.in_single_quote()
+            && !scanner.in_double_quote()
+            && ch == '>'
+        {
+            if scanner.peek_char() == Some('>') {
+                scanner.next();
+            }
+
+            let fd_start = redirection_fd_start(&output);
+            let Some((target, _target_start, target_end)) =
+                scan_redirection_target(command, scanner.position())
+            else {
+                return Err(());
+            };
+            let target = parse_redirection_target(&target)?;
+            if target != "/dev/null" {
+                return Err(());
+            }
+
+            output.truncate(fd_start.unwrap_or(output.len()));
+            scanner.set_position(target_end);
+            continue;
+        }
+
+        if !scanner.last_escaped()
+            && !scanner.in_single_quote()
+            && !scanner.in_double_quote()
+            && ch == '<'
+            && scanner.peek_char() == Some('<')
+        {
+            return Err(());
+        }
+
+        output.push(ch);
+    }
+
+    Ok(output)
+}
+
+fn redirection_fd_start(output: &str) -> Option<usize> {
+    let token_start = output
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(index, ch)| index + ch.len_utf8())
+        .unwrap_or(0);
+    let token = &output[token_start..];
+    (!token.is_empty() && token.chars().all(|ch| ch.is_ascii_digit())).then_some(token_start)
+}
+
+fn scan_redirection_target(command: &str, start: usize) -> Option<(String, usize, usize)> {
+    let mut scanner = ShellScanner::new_at(command, start);
+    while let Some((_, ch)) = scanner.peek_indexed_char() {
+        if ch.is_whitespace() {
+            scanner.next();
+        } else {
+            break;
+        }
+    }
+
+    let target_start = scanner.position();
+    let mut target = String::new();
+    while let Some((index, ch)) = scanner.next() {
+        if !scanner.in_single_quote()
+            && !scanner.in_double_quote()
+            && (ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '<' | '>'))
+        {
+            return Some((target, target_start, index));
+        }
+        target.push(ch);
+    }
+
+    (!target.is_empty()).then_some((target, target_start, command.len()))
+}
+
+fn parse_redirection_target(target: &str) -> Result<String, ()> {
+    let words = parse_shell_words(target).map_err(|_| ())?;
+    match words.as_slice() {
+        [target] => Ok(target.clone()),
+        _ => Err(()),
+    }
+}
+
+struct ShellScanner<'a> {
+    command: &'a str,
+    position: usize,
+    quote: Option<char>,
+    escaped: bool,
+    last_escaped: bool,
+}
+
+impl<'a> ShellScanner<'a> {
+    fn new(command: &'a str) -> Self {
+        Self::new_at(command, 0)
+    }
+
+    fn new_at(command: &'a str, position: usize) -> Self {
+        Self {
+            command,
+            position,
+            quote: None,
+            escaped: false,
+            last_escaped: false,
+        }
+    }
+
+    fn next(&mut self) -> Option<(usize, char)> {
+        let (index, ch) = self.peek_indexed_char()?;
+        self.position = index + ch.len_utf8();
+        self.last_escaped = self.escaped;
+
+        if self.escaped {
+            self.escaped = false;
+            return Some((index, ch));
+        }
+
+        match self.quote {
+            Some('\'') if ch == '\'' => self.quote = None,
+            Some('"') if ch == '"' => self.quote = None,
+            Some('"') if ch == '\\' => self.escaped = true,
+            Some(_) => {}
+            None if ch == '\'' || ch == '"' => self.quote = Some(ch),
+            None if ch == '\\' => self.escaped = true,
+            None => {}
+        }
+
+        Some((index, ch))
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        self.peek_indexed_char().map(|(_, ch)| ch)
+    }
+
+    fn peek_indexed_char(&self) -> Option<(usize, char)> {
+        self.command[self.position..]
+            .char_indices()
+            .next()
+            .map(|(offset, ch)| (self.position + offset, ch))
+    }
+
+    fn position(&self) -> usize {
+        self.position
+    }
+
+    fn set_position(&mut self, position: usize) {
+        self.position = position;
+        self.quote = None;
+        self.escaped = false;
+        self.last_escaped = false;
+    }
+
+    fn in_single_quote(&self) -> bool {
+        self.quote == Some('\'')
+    }
+
+    fn in_double_quote(&self) -> bool {
+        self.quote == Some('"')
+    }
+
+    fn last_escaped(&self) -> bool {
+        self.last_escaped
+    }
 }
 
 fn is_stateful_binary(word: &str) -> bool {

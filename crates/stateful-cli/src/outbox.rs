@@ -7,7 +7,7 @@ use std::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{discover_runtime_with_optional_global, post_json};
+use crate::{ServerRuntime, discover_runtime_with_optional_global, post_json};
 
 #[derive(Debug, Clone, Deserialize)]
 struct LocalOutboxRecord {
@@ -23,6 +23,14 @@ struct LocalOutboxRecord {
 pub fn sync_outbox_in_repo(repo_root: impl AsRef<Path>) -> anyhow::Result<usize> {
     let repo_root = repo_root.as_ref();
     let runtime = discover_runtime_with_optional_global(repo_root)?;
+    sync_outbox_in_repo_with_runtime(repo_root, &runtime)
+}
+
+pub fn sync_outbox_in_repo_with_runtime(
+    repo_root: impl AsRef<Path>,
+    runtime: &ServerRuntime,
+) -> anyhow::Result<usize> {
+    let repo_root = repo_root.as_ref();
     let outbox_dir = outbox_dir_path(repo_root);
     if !outbox_dir.is_dir() {
         return Ok(0);
