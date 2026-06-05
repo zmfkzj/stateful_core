@@ -144,10 +144,10 @@ Only `file` and `directory` resources can authorize filesystem writes. Other
 resource types can warn, coordinate, or constrain controlled actions, but cannot
 authorize filesystem mutation.
 
-`test` resources are tied to controlled validation profiles. They may constrain
-`state_validation_run` / `state.validation.run`, including denying concurrent
-execution when a profile is marked `exclusive`, but they do not authorize source
-writes.
+`test` resources are tied to controlled validation profiles and may inform
+future validation concurrency policy. The current runner parses `exclusive`, but
+does not yet enforce concurrent-run denial, and test resources do not authorize
+source writes.
 
 `task`, `port`, and `migration` resources are context and warning signals in v1.
 They can appear in prompt context and conflict records, but cannot block general
