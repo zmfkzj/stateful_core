@@ -1,12 +1,9 @@
 use std::{
     collections::BTreeSet,
-    ffi::OsString,
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use serde_json::Value;
@@ -17,6 +14,7 @@ use crate::{
     ServerRuntime, discover_runtime_with_global, ensure_server, get_json,
     intent_declare_protocol_body, post_json, protocol_envelope, read_current_session_file,
     repo_gate, repo_identity_for_enabled_repo,
+    sandbox::{SandboxNetworkPolicy, run_sandboxed_command},
 };
 
 pub fn call_mcp_tool_in_repo(
@@ -264,14 +262,28 @@ fn call_bash_write_tool(
         };
     let timeout = Duration::from_secs(args.timeout_seconds.unwrap_or(300).max(1));
 
-    let run = match run_sandboxed_bash(&args.command, &cwd, &writable_files, timeout) {
+    let run = match run_sandboxed_command(
+        &args.command,
+        &cwd,
+        &writable_files,
+        SandboxNetworkPolicy::Disabled,
+        timeout,
+    ) {
         Ok(run) => run,
         Err(error) => return Ok(error_response(500, error.to_string())),
     };
 
     Ok(HttpResponse {
         status_code: 200,
-        body: run.to_json(allowed).to_string(),
+        body: serde_json::json!({
+            "status": run.status,
+            "exit_code": run.exit_code,
+            "stdout": run.stdout,
+            "stderr": run.stderr,
+            "allowed_write_targets": allowed,
+            "denied_write_targets": [],
+        })
+        .to_string(),
     })
 }
 
@@ -626,174 +638,6 @@ fn prepare_bash_writable_files(
     Ok(writable_files)
 }
 
-fn run_sandboxed_bash(
-    command: &str,
-    cwd: &Path,
-    writable_files: &[PathBuf],
-    timeout: Duration,
-) -> anyhow::Result<BashWriteRun> {
-    #[cfg(target_os = "macos")]
-    {
-        return run_command_with_timeout(seatbelt_command(command, cwd, writable_files), timeout);
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        return run_command_with_timeout(bubblewrap_command(command, cwd, writable_files), timeout);
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = (command, cwd, writable_files, timeout);
-        anyhow::bail!("state.bash.write is only supported on macOS and Linux");
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn seatbelt_command(command: &str, cwd: &Path, writable_files: &[PathBuf]) -> Command {
-    let profile = seatbelt_profile(writable_files);
-    let mut sandbox = Command::new("/usr/bin/sandbox-exec");
-    sandbox
-        .arg("-p")
-        .arg(profile)
-        .arg("/bin/sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd);
-    sandbox
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn seatbelt_profile(writable_files: &[PathBuf]) -> String {
-    let mut profile = String::from(
-        "(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n(allow file-write*",
-    );
-    for file in writable_files {
-        profile.push_str(" (literal \"");
-        profile.push_str(&seatbelt_escape(&file.to_string_lossy()));
-        profile.push_str("\")");
-    }
-    profile.push_str(")\n");
-    profile
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn seatbelt_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-#[cfg(target_os = "linux")]
-fn bubblewrap_command(command: &str, cwd: &Path, writable_files: &[PathBuf]) -> Command {
-    let mut bwrap = Command::new("bwrap");
-    bwrap.args(bubblewrap_args(command, cwd, writable_files));
-    bwrap
-}
-
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn bubblewrap_args(command: &str, cwd: &Path, writable_files: &[PathBuf]) -> Vec<OsString> {
-    let mut args = vec![
-        OsString::from("--unshare-all"),
-        OsString::from("--die-with-parent"),
-        OsString::from("--unshare-net"),
-        OsString::from("--ro-bind"),
-        OsString::from("/"),
-        OsString::from("/"),
-        OsString::from("--proc"),
-        OsString::from("/proc"),
-    ];
-
-    for file in writable_files {
-        args.push(OsString::from("--bind"));
-        args.push(file.as_os_str().to_owned());
-        args.push(file.as_os_str().to_owned());
-    }
-
-    args.push(OsString::from("--chdir"));
-    args.push(cwd.as_os_str().to_owned());
-    args.push(OsString::from("--"));
-    args.push(OsString::from("/bin/sh"));
-    args.push(OsString::from("-c"));
-    args.push(OsString::from(command));
-
-    args
-}
-
-fn run_command_with_timeout(
-    mut command: Command,
-    timeout: Duration,
-) -> anyhow::Result<BashWriteRun> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("failed to capture sandbox stdout"))?;
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("failed to capture sandbox stderr"))?;
-    let stdout_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
-
-    let deadline = Instant::now() + timeout;
-    let mut timed_out = false;
-    let exit_status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            timed_out = true;
-            match child.kill() {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {}
-                Err(error) => return Err(error.into()),
-            }
-            break child.wait()?;
-        }
-        thread::sleep(Duration::from_millis(25));
-    };
-
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("sandbox stdout reader panicked"))??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("sandbox stderr reader panicked"))??;
-
-    Ok(BashWriteRun {
-        status: if timed_out { "timed_out" } else { "exited" },
-        exit_code: exit_status.code(),
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-    })
-}
-
-struct BashWriteRun {
-    status: &'static str,
-    exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
-impl BashWriteRun {
-    fn to_json(&self, allowed_write_targets: Vec<String>) -> Value {
-        serde_json::json!({
-            "status": self.status,
-            "exit_code": self.exit_code,
-            "stdout": self.stdout,
-            "stderr": self.stderr,
-            "allowed_write_targets": allowed_write_targets,
-            "denied_write_targets": [],
-        })
-    }
-}
-
 fn error_response(status_code: u16, message: impl Into<String>) -> HttpResponse {
     HttpResponse {
         status_code,
@@ -1140,63 +984,4 @@ fn write_mcp_message(
     }
     output.flush()?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bubblewrap_args_mount_root_read_only_and_bind_authorized_files() {
-        let cwd = Path::new("/repo");
-        let writable_files = vec![
-            PathBuf::from("/repo/src/allowed.ts"),
-            PathBuf::from("/repo/src/new.ts"),
-        ];
-
-        let args = bubblewrap_args("printf ok", cwd, &writable_files);
-        let args = args
-            .into_iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert!(args.starts_with(&[
-            "--unshare-all".to_string(),
-            "--die-with-parent".to_string(),
-            "--unshare-net".to_string(),
-            "--ro-bind".to_string(),
-            "/".to_string(),
-            "/".to_string(),
-            "--proc".to_string(),
-            "/proc".to_string(),
-        ]));
-        assert!(args.windows(3).any(|window| {
-            window == ["--bind", "/repo/src/allowed.ts", "/repo/src/allowed.ts"]
-        }));
-        assert!(
-            args.windows(3)
-                .any(|window| { window == ["--bind", "/repo/src/new.ts", "/repo/src/new.ts"] })
-        );
-        assert!(args.windows(2).any(|window| window == ["--chdir", "/repo"]));
-        assert!(args.ends_with(&[
-            "--".to_string(),
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            "printf ok".to_string(),
-        ]));
-    }
-
-    #[test]
-    fn seatbelt_profile_allows_only_literal_write_targets() {
-        let profile = seatbelt_profile(&[
-            PathBuf::from("/repo/src/allowed.ts"),
-            PathBuf::from("/repo/src/quoted\"path.ts"),
-        ]);
-
-        assert!(profile.contains("(deny default)"));
-        assert!(profile.contains("(allow file-read*)"));
-        assert!(profile.contains("(literal \"/repo/src/allowed.ts\")"));
-        assert!(profile.contains("(literal \"/repo/src/quoted\\\"path.ts\")"));
-        assert!(!profile.contains("subpath \"/repo/src\""));
-    }
 }
