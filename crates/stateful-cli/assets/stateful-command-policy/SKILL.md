@@ -17,18 +17,43 @@ Stateful hooks are authoritative. Pick commands that match the installed hooks b
 - `apply_patch`, `Edit`, `Write`, and `file_change` are hook-authorized only when targets are visible to stateful policy. If denied, switch to structured write instead of retrying patch variants.
 - If a hook denies an action, read the denial and choose the documented alternative instead of retrying variants.
 
+## Sandbox Examples
+
+Examples assume `/Users/arthur/.cargo/bin/stateful` is the trusted absolute binary installed in Codex hook configuration.
+
+Read-only inspection:
+
+```bash
+"/Users/arthur/.cargo/bin/stateful" sandbox run --fs read-only --network disabled --command 'rg auth crates'
+```
+
+Write an existing file:
+
+```bash
+"/Users/arthur/.cargo/bin/stateful" sandbox run --fs write-targets --network enabled --write-target README.md --command 'printf "%s\n" updated > README.md'
+```
+
+Create a new file:
+
+```bash
+"/Users/arthur/.cargo/bin/stateful" sandbox run --fs write-targets --network enabled --create-target docs/new.md --command 'printf "%s\n" notes > docs/new.md'
+```
+
+Targets must be repo-relative. Do not target `.git`, directories, symlinks, paths outside the repo, or paths with control characters. Use `--write-target` for existing files and `--create-target` for new files. `/dev/null` is writable inside the sandbox; do not declare it as a target. `stateful sandbox run` is supported on macOS and Linux.
+
 ## Prefer
 
 - MCP or native read tools for search and inspection when available.
 - `<absolute-stateful-binary> sandbox run --fs read-only --network disabled --command <cmd>` for Bash-tool command-shaped read-only inspection that needs a real shell.
 - `<absolute-stateful-binary> sandbox run --fs write-targets ... --command ...` for Bash-tool command-shaped writes that need a real shell but can be limited to exact file targets.
-- Validation: use `state_validation_run` / `state.validation.run` in Codex sessions, or `stateful validate <profile>` outside hook-mediated Bash.
+- Validation: use `state_validation_run` / `state.validation.run` in Codex sessions, or `stateful validate cargo-test` / `stateful validate <profile>` outside hook-mediated Bash.
+- Use `stateful commit` / `stateful push` for structured commit and push flows when available.
 - Stateful diagnostics through MCP tools, native tools, validation profiles, or sandbox-run wrappers through the trusted absolute `stateful` binary.
 
 ## Avoid In Bash
 
-- Raw Bash is denied by stateful hooks; use a sandbox-run wrapper through the trusted absolute `stateful` binary, MCP/native tools, or validation profiles instead.
-- Shell write syntax: `>`, `>>`, heredocs, and `| tee`.
+- Raw Bash is denied by stateful hooks; use a sandbox-run wrapper through the trusted absolute `stateful` binary, MCP/native tools, or validation profiles instead. Raw read-only Bash is also denied, including commands such as `rg`, `git status`, and `sed`.
+- Shell write syntax outside a sandbox-run `--command`: `>`, `>>`, heredocs, and `| tee`.
 - Direct file mutation: `rm`, `mv`, `cp`, `mkdir`, `touch`, `chmod`, `chown`.
 - Any generator, formatter, package manager, or script that creates, updates, deletes, or moves repo files.
 - Raw mutation git commands: `git checkout`, `git switch`, `git restore`, `git reset`, `git clean`, `git apply`, `git merge`, `git rebase`.
