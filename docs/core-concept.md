@@ -107,9 +107,13 @@ Repo file writes use the stateful structured write path,
 `state_file_write` / `state.file.write`, after declared intent. Native Codex
 edit tools such as `apply_patch`, `Edit`, and `Write` remain subject to hook
 authorization when their targets are exposed. Bash command text alone is never
-an authorization source; Bash requires top-level read-only sandbox metadata with
-network access disabled. Raw Bash test commands are not allowlisted; tests run
-through controlled validation actions.
+an authorization source; raw Bash is denied by stateful hooks. Command-shaped
+read-only inspection must use the trusted absolute `stateful` wrapper:
+`<absolute-stateful-binary> sandbox run --fs read-only --network disabled
+--command <cmd>`. Command-shaped writes must use the wrapper with
+`--fs write-targets` and explicit target flags. Raw Bash test commands are not
+allowlisted; validation uses `state_validation_run` / `state.validation.run` in
+Codex sessions, or `stateful validate <profile>` outside hook-mediated Bash.
 
 ## Product Shape
 

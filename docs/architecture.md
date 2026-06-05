@@ -17,8 +17,9 @@ Codex hooks observe and gate important agent actions. MCP tools give agents a
 structured way to read and update coordination state. The state server owns
 policy, persistence, TTLs, and conflict checks.
 
-The v1 MVP includes controlled validation through `state.validation.run` and
-human-write reconciliation through `state.reconcile.ack`.
+The v1 MVP includes controlled validation through
+`state_validation_run` / `state.validation.run` and human-write reconciliation
+through `state.reconcile.ack`.
 
 V1 is local-only. It coordinates sessions, agents, subagents, and local human
 activity inside one machine/workspace boundary. Team-shared, cross-machine, or
@@ -213,7 +214,7 @@ state.current.read
 state.events.read
 state.context.render
 state.reconcile.ack
-state.validation.run
+state_validation_run / state.validation.run
 state.notifications.poll
 state.resume.next
 ```
@@ -231,23 +232,28 @@ V1 enforcement is strict about write target extraction:
   targets can be inspected when the runtime exposes them, but the
   `stateful codex` read-only tmp profile does not make them the normal repo
   write path.
-- Bash commands: deny unless the top-level Bash tool payload includes
-  structured read-only sandbox metadata, network access is explicitly disabled,
-  and writable roots are absent or limited to trusted tmp roots.
+- Bash commands: deny raw Bash. Hook-mediated Bash is allowed only when the
+  outer command is a single strict invocation of the trusted absolute `stateful`
+  binary running `<absolute-stateful-binary> sandbox run ... --command <cmd>`.
+  Read-only command-shaped inspection uses `--fs read-only --network disabled`;
+  command-shaped writes use `--fs write-targets` with explicit
+  `--write-target` / `--create-target` values and target authorization.
 - Test execution: run only through controlled validation actions such as
-  `state.validation.run`.
+  `state_validation_run` / `state.validation.run` in Codex sessions, or
+  `stateful validate <profile>` outside hook-mediated Bash.
 - Bash command text alone never authorizes tool use, even when it appears
   read-only.
 
-Denied Bash should direct the agent to use a structured Bash tool call with
-read-only sandbox metadata, or use stateful MCP tools for writes and
-validation.
+Denied Bash should direct the agent to the wrapper for command-shaped shell
+execution, `state_file_write` / `state.file.write` for structured repo file
+writes, and validation profiles for tests.
 
-The Bash classifier is a deny-by-default diagnostic. It no longer has command
-allowlists for `rg`, `git diff`, test runners, or stateful operational
-commands. Arbitrary or project-specific test commands should run through
-validation profiles owned by the state server so source-tree writes can be
-denied while cache or artifact writes can be controlled.
+MCP does not perform local command-shaped file writes. Shell execution uses
+`stateful sandbox run`. The MVP ships `read-only` and `write-targets` profiles;
+`git-metadata` and `workspace` profiles are deferred and fail closed.
+`/dev/null` is writable in every sandbox profile so common shell and Git
+behavior works. Command text alone does not authorize `rg`, `git diff`, test
+runners, stateful operational commands, or any other Bash command.
 
 ## Validation Profiles
 
@@ -256,7 +262,7 @@ Validation profiles live at `.stateful/validation.yml`.
 Agents cannot supply arbitrary test commands. They call:
 
 ```text
-state.validation.run(profile)
+state_validation_run(profile) / state.validation.run(profile)
 ```
 
 The state server loads the named profile and executes its configured command.
@@ -504,8 +510,10 @@ The system should prefer explicit uncertainty:
 - hook failure -> warn and fail closed only for high-risk writes
 - state server unavailable -> deny supported writes that cannot prove active
   intent
-- state server unavailable -> deny Bash without structured top-level read-only
-  sandbox metadata
+- state server unavailable -> deny raw Bash and any Bash call that is not a
+  strict `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper;
+  command-shaped writes through `--fs write-targets` fail closed when target
+  authorization cannot be proven
 - state server unavailable -> return `error: state_unavailable` for controlled
   validation and do not run the validation command
 - state server unavailable -> fail closed for `state.reconcile.ack`, intent

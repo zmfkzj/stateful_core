@@ -255,8 +255,9 @@ mismatch fails closed for write, validation, and reconciliation paths.
 
 - intercept supported tool calls before execution
 - deny supported write calls when the session has no active intent
-- deny Bash unless the top-level tool payload supplies read-only sandbox
-  metadata with network disabled
+- deny raw Bash and allow Bash only when the outer command is a single strict
+  invocation of the trusted absolute `stateful` binary running
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>`
 - check whether requested files or resources conflict with active leases
 - deny, warn, or add context based on policy
 
@@ -296,7 +297,7 @@ state.current.read
 state.events.read
 state.context.render
 state.reconcile.ack
-state.validation.run
+state_validation_run / state.validation.run
 state.notifications.poll
 state.resume.next
 ```
@@ -350,22 +351,29 @@ reliably:
 state_file_write / state.file.write -> enforce from structured file arguments
 native Codex edit tools -> inspectable by hook when exposed, but not the normal
   repo write path under the stateful read-only tmp profile
-Bash -> allow only with top-level read-only sandbox metadata, network disabled,
-  and no non-tmp writable roots
+Bash read-only inspection -> require a strict trusted wrapper:
+  <absolute-stateful-binary> sandbox run --fs read-only --network disabled
+  --command <cmd>
+Bash command-shaped writes -> require the trusted wrapper with
+  --fs write-targets plus explicit --write-target/--create-target values
 test execution -> run through controlled validation action
-raw Bash without structured sandbox metadata -> deny
+raw Bash or non-wrapper Bash -> deny
 ```
 
-Bash denial should tell the agent to use a structured Bash tool call with
-read-only sandbox metadata, or use stateful MCP tools for repo writes and
-validation.
+Bash denial should tell the agent to use
+`<absolute-stateful-binary> sandbox run --fs read-only --network disabled
+--command <cmd>` for read-only inspection,
+`<absolute-stateful-binary> sandbox run --fs write-targets ... --command <cmd>`
+for command-shaped writes, `state_file_write` / `state.file.write` for
+structured file writes, and validation profiles for tests.
 
-The Bash classifier is deny-by-default. Command text alone does not authorize
-`rg`, `git diff`, test runners, stateful operational commands, or any other
-Bash command. Arbitrary or project-specific test commands should run through
-`state.validation.run` or an equivalent controlled validation action backed by a
-profile. Validation profiles may allow cache or artifact writes, but source-tree
-writes must be denied unless a later policy explicitly permits them.
+There is no command-text authorization path. Command text alone does not
+authorize `rg`, `git diff`, test runners, stateful operational commands, or any
+other Bash command. Arbitrary or project-specific test commands should run
+through `state_validation_run` / `state.validation.run` in Codex sessions, or
+`stateful validate <profile>` outside hook-mediated Bash. Validation profiles
+may allow cache or artifact writes, but source-tree writes must be denied unless
+a later policy explicitly permits them.
 
 Validation profiles are static repo-defined config at `.stateful/validation.yml`.
 Agents cannot provide arbitrary commands at runtime.
@@ -409,7 +417,8 @@ Initial policy should prefer advisory leases:
 - supported write while phase is `blocked`: deny
 - supported write after session finalization: deny
 - supported write outside matching file or directory scope: deny
-- Bash without structured top-level read-only sandbox metadata: deny
+- raw Bash or a Bash call that is not a strict trusted
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper: deny
 - directory scope permits writes only up to depth 2 below that directory
 - delete without exact file scope: deny
 - rename or move without exact file scope for both source and destination: deny
@@ -566,9 +575,11 @@ When the state server is unavailable:
 
 - supported writes are denied because active intent, lease conflict, and
   reconciliation state cannot be proven
-- Bash without structured top-level read-only sandbox metadata remains denied
-- `state.validation.run` returns `error: state_unavailable` and does not run the
-  validation command
+- raw Bash and Bash calls that are not strict trusted
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrappers remain
+  denied
+- `state_validation_run` / `state.validation.run` returns
+  `error: state_unavailable` and does not run the validation command
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block
 - intent declaration, lease acquisition, and lease refresh fail
 - non-Bash read, search, and diff actions are allowed
@@ -651,7 +662,7 @@ supported write action + expired intent -> deny
 supported write action + blocked phase or finalized session -> deny
 supported write action + intent without file/directory scope -> deny
 supported write action + target outside intent scope -> deny
-Bash without structured top-level read-only sandbox metadata -> deny
+raw Bash or non-wrapper Bash -> deny
 delete action + non-exact file scope -> deny
 rename/move action + non-exact source or destination scope -> deny
 active write lease in hard conflict domain -> deny unless explicit user override

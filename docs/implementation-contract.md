@@ -146,9 +146,14 @@ structured tool arguments before calling `/v1/authorize`. Native Codex edit
 tools such as `apply_patch`, `Edit`, and `Write` may expose targets to hooks,
 but the `stateful codex` read-only tmp profile does not rely on them as the
 normal repo write path. For Bash, command text alone never authorizes tool use.
-The hook allows Bash only when the top-level tool payload supplies structured
-read-only sandbox metadata, network access is explicitly disabled, and writable
-roots are absent or limited to trusted tmp roots.
+Raw Bash is denied by stateful hooks. Bash hook calls are allowed only when the
+outer command is a single strict invocation of the trusted absolute `stateful`
+binary running `<absolute-stateful-binary> sandbox run ... --command <cmd>`.
+Read-only command-shaped inspection uses `<absolute-stateful-binary> sandbox run
+--fs read-only --network disabled --command <cmd>`. Command-shaped writes use
+`--fs write-targets` with explicit `--write-target` / `--create-target` values
+and target authorization. Structured repo file writes use
+`state_file_write` / `state.file.write` after intent.
 
 ## Decision Output
 
