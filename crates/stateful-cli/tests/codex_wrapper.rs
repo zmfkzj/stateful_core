@@ -1,7 +1,8 @@
 use stateful_cli::{
-    CodexSandboxMode, CodexWrapperOptions, STATEFUL_CODEX_RUN_ID_ENV, STATEFUL_TRUSTED_SANDBOX_ENV,
-    build_codex_invocation,
+    CodexSandboxMode, CodexWrapperOptions, STATEFUL_CODEX_RUN_ID_ENV, build_codex_invocation,
 };
+
+const LEGACY_TRUSTED_SANDBOX_ENV: &str = "STATEFUL_HOOK_TRUSTED_SANDBOX";
 
 #[test]
 fn codex_wrapper_defaults_to_passthrough_session_configuration() {
@@ -30,8 +31,8 @@ fn codex_wrapper_defaults_to_passthrough_session_configuration() {
         invocation
             .env
             .iter()
-            .all(|(key, _)| key != STATEFUL_TRUSTED_SANDBOX_ENV),
-        "wrapper env must not authorize Bash without top-level sandbox metadata"
+            .all(|(key, _)| key != LEGACY_TRUSTED_SANDBOX_ENV),
+        "wrapper env must not authorize raw Bash with legacy trusted sandbox metadata"
     );
 }
 
@@ -112,7 +113,7 @@ fn codex_wrapper_explicit_read_only_tmp_profile_remains_available_without_bash_a
         invocation
             .env
             .iter()
-            .all(|(key, _)| key != STATEFUL_TRUSTED_SANDBOX_ENV),
+            .all(|(key, _)| key != LEGACY_TRUSTED_SANDBOX_ENV),
         "read-only tmp wrapper mode should not provide trusted Bash attestation env"
     );
 }

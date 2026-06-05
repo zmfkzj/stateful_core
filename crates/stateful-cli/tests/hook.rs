@@ -13,13 +13,12 @@ use std::{
 use stateful_cli::{
     GlobalPaths, HookOutcome, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime, enable_repo,
     handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
-    handle_pre_tool_use_with_trusted_sandbox, read_current_session_file,
-    read_current_session_file_for_codex_run, write_global_runtime_file,
+    read_current_session_file, read_current_session_file_for_codex_run, write_global_runtime_file,
 };
 
-fn assert_bash_requires_structured_sandbox(outcome: HookOutcome) {
+fn assert_raw_bash_denied_with_sandbox_run_guidance(outcome: HookOutcome) {
     let HookOutcome::Deny { reason } = outcome else {
-        panic!("Bash without top-level sandbox metadata should be denied");
+        panic!("raw Bash should be denied");
     };
 
     assert!(
@@ -71,7 +70,7 @@ fn pre_tool_use_allows_canonical_sandbox_run_read_only() {
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
         "tool_input": {
-            "command": format!("{stateful} sandbox run --fs read-only --network disabled --command 'rg auth src'")
+            "command": format!("{stateful} sandbox run --fs read-only --network disabled --timeout-seconds 30 --command 'rg auth src'")
         }
     })
     .to_string();
@@ -233,7 +232,7 @@ fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
 }
 
 #[test]
-fn pre_tool_use_denies_read_only_bash_without_top_level_sandbox() {
+fn pre_tool_use_denies_raw_read_only_bash_with_sandbox_run_guidance() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -246,35 +245,33 @@ fn pre_tool_use_denies_read_only_bash_without_top_level_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_wrapper_trusted_sandbox_env_without_top_level_sandbox() {
+fn pre_tool_use_denies_raw_bash_even_when_legacy_sandbox_metadata_exists() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
+      "sandbox": {
+        "mode": "read-only",
+        "writable_roots": ["/tmp"],
+        "network_access": false
+      },
       "tool_input": {
         "command": "rg auth src"
       }
     }"#;
-    let trusted_sandbox = serde_json::json!({
-        "mode": "read-only",
-        "writable_roots": ["/tmp"],
-        "network_access": false,
-        "source": "stateful-codex-wrapper"
-    });
 
-    let outcome = handle_pre_tool_use_with_trusted_sandbox(input, Some(trusted_sandbox))
-        .expect("hook input should parse");
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_quoted_rg_regex_alternation_without_top_level_sandbox() {
+fn pre_tool_use_denies_raw_quoted_rg_regex_alternation() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -287,11 +284,11 @@ fn pre_tool_use_denies_quoted_rg_regex_alternation_without_top_level_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_read_only_bash_dev_null_redirection_without_top_level_sandbox() {
+fn pre_tool_use_denies_raw_read_only_bash_dev_null_redirection() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -304,11 +301,11 @@ fn pre_tool_use_denies_read_only_bash_dev_null_redirection_without_top_level_san
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_raw_test_bash_without_top_level_sandbox() {
+fn pre_tool_use_denies_raw_test_bash_with_sandbox_run_guidance() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -321,11 +318,11 @@ fn pre_tool_use_denies_raw_test_bash_without_top_level_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_stateful_diagnostic_bash_without_top_level_sandbox() {
+fn pre_tool_use_denies_raw_stateful_diagnostic_bash() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -338,11 +335,11 @@ fn pre_tool_use_denies_stateful_diagnostic_bash_without_top_level_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_stateful_controlled_validation_bash_without_top_level_sandbox() {
+fn pre_tool_use_denies_raw_stateful_controlled_validation_bash() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -355,11 +352,11 @@ fn pre_tool_use_denies_stateful_controlled_validation_bash_without_top_level_san
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_stateful_bench_operational_bash_without_top_level_sandbox() {
+fn pre_tool_use_denies_raw_stateful_bench_operational_bash() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -372,7 +369,7 @@ fn pre_tool_use_denies_stateful_bench_operational_bash_without_top_level_sandbox
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
@@ -544,7 +541,7 @@ fn pre_tool_use_in_disabled_repo_noops_without_runtime() {
 }
 
 #[test]
-fn pre_tool_use_denies_stateful_intent_declare_without_top_level_sandbox() {
+fn pre_tool_use_denies_raw_stateful_intent_declare() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -557,11 +554,11 @@ fn pre_tool_use_denies_stateful_intent_declare_without_top_level_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_other_stateful_control_commands_without_top_level_sandbox() {
+fn pre_tool_use_denies_raw_other_stateful_control_commands() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -574,11 +571,11 @@ fn pre_tool_use_denies_other_stateful_control_commands_without_top_level_sandbox
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_allows_bash_control_syntax_in_read_only_tmp_sandbox() {
+fn pre_tool_use_denies_raw_bash_control_syntax_even_with_legacy_read_only_tmp_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -596,11 +593,11 @@ fn pre_tool_use_allows_bash_control_syntax_in_read_only_tmp_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_allows_sandbox_pipeline_with_quoted_regex_alternation() {
+fn pre_tool_use_denies_raw_pipeline_even_with_legacy_read_only_tmp_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -618,11 +615,11 @@ fn pre_tool_use_allows_sandbox_pipeline_with_quoted_regex_alternation() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_bash_control_syntax_with_wrapper_trusted_sandbox_only() {
+fn pre_tool_use_denies_bash_control_syntax_without_sandbox_run_wrapper() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -632,21 +629,14 @@ fn pre_tool_use_denies_bash_control_syntax_with_wrapper_trusted_sandbox_only() {
         "command": "rg auth src | head > /tmp/stateful-rg.out"
       }
     }"#;
-    let trusted_sandbox = serde_json::json!({
-        "mode": "read-only",
-        "writable_roots": ["/tmp"],
-        "network_access": false,
-        "source": "stateful-codex-wrapper"
-    });
 
-    let outcome = handle_pre_tool_use_with_trusted_sandbox(input, Some(trusted_sandbox))
-        .expect("hook input should parse");
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn run_hook_pre_tool_use_denies_wrapper_trusted_sandbox_env_without_top_level_sandbox() {
+fn run_hook_pre_tool_use_denies_raw_bash_with_legacy_trusted_sandbox_env() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-sandbox-env-test-{}",
         std::process::id()
@@ -722,11 +712,11 @@ fn pre_tool_use_denies_tool_input_spoofed_read_only_bash_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_read_only_bash_sandbox_with_repo_writable_root() {
+fn pre_tool_use_denies_raw_bash_even_with_legacy_repo_writable_root_metadata() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -744,11 +734,11 @@ fn pre_tool_use_denies_read_only_bash_sandbox_with_repo_writable_root() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_read_only_bash_sandbox_with_network_access() {
+fn pre_tool_use_denies_raw_bash_even_with_legacy_network_access_metadata() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -766,11 +756,11 @@ fn pre_tool_use_denies_read_only_bash_sandbox_with_network_access() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_read_only_bash_sandbox_without_explicit_network_disabled() {
+fn pre_tool_use_denies_raw_bash_even_with_incomplete_legacy_network_metadata() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -787,11 +777,11 @@ fn pre_tool_use_denies_read_only_bash_sandbox_without_explicit_network_disabled(
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_allows_known_mutating_command_in_read_only_bash_sandbox() {
+fn pre_tool_use_denies_raw_mutating_command_even_with_legacy_read_only_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -809,11 +799,11 @@ fn pre_tool_use_allows_known_mutating_command_in_read_only_bash_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_allows_stateful_control_command_in_read_only_bash_sandbox() {
+fn pre_tool_use_denies_raw_stateful_control_command_even_with_legacy_read_only_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -831,11 +821,11 @@ fn pre_tool_use_allows_stateful_control_command_in_read_only_bash_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_allows_arbitrary_bash_syntax_in_read_only_network_disabled_sandbox() {
+fn pre_tool_use_denies_arbitrary_raw_bash_even_with_legacy_read_only_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -853,7 +843,7 @@ fn pre_tool_use_allows_arbitrary_bash_syntax_in_read_only_network_disabled_sandb
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_requires_structured_sandbox(outcome);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]

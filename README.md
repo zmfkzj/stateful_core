@@ -246,9 +246,9 @@ stateful enable --repo-local-codex
   branch, requires a clean worktree, and rejects force-like target values.
 - `stateful codex [--codex-bin <path>] [--sandbox passthrough|read-only-tmp] [--no-stateful] -- <args...>`
   runs Codex with pass-through session configuration by default while setting a
-  run-bound session id. `--sandbox read-only-tmp` remains available as an
-  explicit wrapper profile, and `--no-stateful` disables Codex lifecycle hooks
-  for that run.
+  run-bound session id. `--sandbox read-only-tmp` remains available as a Codex
+  filesystem profile, not as Bash authorization metadata, and `--no-stateful`
+  disables Codex lifecycle hooks for that run.
 - `stateful mcp serve` exposes the MCP adapter over stdio.
 - `stateful mcp call <tool> [arguments_json]` calls an MCP tool. Most tools map
   to the local HTTP server; `state.file.write` is handled by the CLI bridge
@@ -308,10 +308,14 @@ Repo file writes should use the stateful structured write path,
 is handled locally by the stateful CLI bridge: it normalizes a repo-relative
 path, rejects paths outside the repo, Git internals, symlink file targets or
 parent directories, and current-session mismatches, then calls `/v1/authorize`
-with `write_file` and writes only after an allow decision. Bash commands are
-denied unless the top-level Bash tool payload includes structured read-only
-sandbox metadata with network access explicitly disabled and only trusted tmp
-writable roots.
+with `write_file` and writes only after an allow decision.
+
+Raw Bash commands are denied by stateful hooks. Bash tool calls are authorized
+only when the outer command is a single strict invocation of the trusted
+absolute `stateful` binary running `stateful sandbox run ... --command <cmd>`.
+Use `stateful sandbox run --fs read-only --command <cmd>` for command-shaped
+read-only inspection that needs a shell, and use `--fs write-targets` with
+explicit targets for command-shaped writes.
 
 Command-shaped writes should use
 `stateful sandbox run --fs write-targets --write-target <path> ... --command <cmd>`,
@@ -374,9 +378,9 @@ dirty.
 
 `allowed_writes` and `exclusive` are parsed as profile fields, but the current
 runner does not yet enforce an exclusive validation lock or a full
-allowlist-only write policy. Raw Bash test commands are denied without
-structured read-only sandbox metadata; use validation profiles for
-project-specific commands that need controlled artifact writes.
+allowlist-only write policy. Raw Bash test commands are denied by hooks; use
+validation profiles for project-specific commands that need controlled artifact
+writes.
 
 ## Core Loop
 
@@ -428,13 +432,13 @@ Commit reusable documentation and source code, not local generated state.
   `.stateful_core/runtime/sessions/`. The `stateful codex` wrapper sets it
   automatically.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
-  authorize Bash. Bash authorization requires top-level structured sandbox
-  metadata on the tool payload.
+  authorize Bash. Bash authorization goes through a trusted
+  `stateful sandbox run` wrapper command.
 
 ## Project Layout
 
 - `crates/stateful-core`: domain types, resource scope matching, current-state
-  rendering, reconciliation, Bash classification, and policy engine.
+  rendering, reconciliation, and policy engine.
 - `crates/stateful-store`: SQLite event store and current-state persistence.
 - `crates/stateful-server`: local HTTP API over the shared policy and store.
 - `crates/stateful-cli`: user-facing CLI, hook adapter, runtime discovery,

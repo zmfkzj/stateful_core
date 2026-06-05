@@ -8,8 +8,6 @@ use clap::ValueEnum;
 
 use crate::runtime::STATEFUL_CODEX_RUN_ID_ENV;
 
-pub const STATEFUL_TRUSTED_SANDBOX_ENV: &str = "STATEFUL_HOOK_TRUSTED_SANDBOX";
-
 const READ_ONLY_TMP_PROFILE: &str = "stateful-read-only-tmp";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

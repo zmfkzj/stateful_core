@@ -20,15 +20,13 @@ mod server_lifecycle;
 mod validation;
 
 pub use codex_wrapper::{
-    CodexInvocation, CodexSandboxMode, CodexWrapperOptions, STATEFUL_TRUSTED_SANDBOX_ENV,
-    build_codex_invocation, run_codex,
+    CodexInvocation, CodexSandboxMode, CodexWrapperOptions, build_codex_invocation, run_codex,
 };
 pub use commit::{CommitRequest, CommitResult, run_structured_commit};
 pub use global_paths::GlobalPaths;
 pub use hook::{
     HookOutcome, handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
-    handle_pre_tool_use_with_trusted_sandbox, handle_session_start_in_repo, handle_stop_in_repo,
-    handle_user_prompt_submit_in_repo,
+    handle_session_start_in_repo, handle_stop_in_repo, handle_user_prompt_submit_in_repo,
 };
 pub use install::{
     InstallOptions, InstallPlan, apply_global_install, current_stateful_binary_path,
@@ -936,14 +934,14 @@ Stateful hooks are authoritative. Pick commands that match the installed hooks b
 ## Prefer
 
 - MCP or native read tools for search and inspection when available.
+- `stateful sandbox run --fs read-only --command <cmd>` for command-shaped read-only inspection that needs a real shell.
 - `stateful sandbox run --fs write-targets ... --command ...` for command-shaped writes that need a real shell but can be limited to exact file targets.
-- Structured Bash only when the tool call carries top-level read-only sandbox metadata with network disabled.
 - Validation: `state_validation_run` / `state.validation.run`, or `stateful validate <profile>`.
-- Stateful diagnostics through MCP tools or a structured sandboxed Bash call.
+- Stateful diagnostics through MCP tools, native tools, validation profiles, or `stateful sandbox run` wrappers.
 
 ## Avoid In Bash
 
-- Any Bash command without top-level read-only sandbox metadata and explicit network disabled metadata.
+- Raw Bash is denied by stateful hooks; use `stateful sandbox run`, MCP/native tools, or validation profiles instead.
 - Shell write syntax: `>`, `>>`, heredocs, and `| tee`.
 - Direct file mutation: `rm`, `mv`, `cp`, `mkdir`, `touch`, `chmod`, `chown`.
 - Any generator, formatter, package manager, or script that creates, updates, deletes, or moves repo files.
@@ -955,7 +953,7 @@ Stateful hooks are authoritative. Pick commands that match the installed hooks b
 
 - Do not retry the same command with small variations.
 - If the denial asks for scope, declare or narrow intent, then use `state_file_write` for repo changes.
-- If Bash is blocked, choose MCP/native inspection, structured MCP write, `stateful sandbox run --fs write-targets`, a validation profile, or a Bash tool call with top-level read-only sandbox metadata and network disabled.
+- If raw Bash is blocked, choose MCP/native inspection, structured MCP write, `stateful sandbox run --fs read-only`, `stateful sandbox run --fs write-targets`, or a validation profile.
 - If a denial mentions a structured tool, prefer the stateful MCP tool in Codex sessions.
 - If no policy-compliant path is available, report the exact command and denial reason.
 "#
