@@ -469,9 +469,10 @@ Run the Rust test suite:
 cargo test --workspace
 ```
 
-Some benchmark tests use ignored `.stateful_bench/agent_synthetic/` fixtures. If
-those local fixtures are absent, run focused crate tests or regenerate the
-benchmark fixtures before running the full workspace suite.
+Some benchmark tests validate ignored `.stateful_bench/agent_synthetic/`
+fixtures when they are present. The local fixture validation is skipped when
+those files are absent; regenerate the benchmark fixtures before changing or
+evaluating chaos manifest coverage.
 
 Run formatting and lint checks:
 
