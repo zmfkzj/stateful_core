@@ -28,6 +28,121 @@ fn assert_bash_requires_structured_sandbox(outcome: HookOutcome) {
     );
 }
 
+fn assert_bash_denial_mentions(outcome: HookOutcome, expected: &str) {
+    let HookOutcome::Deny { reason } = outcome else {
+        panic!("expected Bash denial");
+    };
+    assert!(
+        reason.contains(expected),
+        "reason `{reason}` should contain `{expected}`"
+    );
+}
+
+#[test]
+fn pre_tool_use_denies_raw_read_only_bash_after_sandbox_runner_migration() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "rg auth src"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(outcome, "stateful sandbox run");
+}
+
+#[test]
+fn pre_tool_use_allows_canonical_sandbox_run_read_only() {
+    let stateful = std::env::current_exe()
+        .expect("test executable path should resolve")
+        .to_string_lossy()
+        .into_owned();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs read-only --network disabled --command 'rg auth src'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_allows_canonical_sandbox_run_write_targets() {
+    let stateful = std::env::current_exe()
+        .expect("test executable path should resolve")
+        .to_string_lossy()
+        .into_owned();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs write-targets --network enabled --write-target README.md --command 'printf x > README.md'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_run_with_outer_command_separator() {
+    let stateful = std::env::current_exe()
+        .expect("test executable path should resolve")
+        .to_string_lossy()
+        .into_owned();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs read-only --command 'rg auth src'; rm README.md")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(outcome, "single stateful sandbox run command");
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_run_write_targets_without_target() {
+    let stateful = std::env::current_exe()
+        .expect("test executable path should resolve")
+        .to_string_lossy()
+        .into_owned();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs write-targets --network enabled --command 'printf x > README.md'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(outcome, "requires at least one write target");
+}
+
 #[test]
 fn pre_tool_use_denies_read_only_bash_without_top_level_sandbox() {
     let input = r#"{
