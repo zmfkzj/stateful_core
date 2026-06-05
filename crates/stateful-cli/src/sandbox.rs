@@ -120,8 +120,9 @@ fn bubblewrap_args(
         OsString::from("--die-with-parent"),
     ];
 
-    if matches!(network, SandboxNetworkPolicy::Disabled) {
-        args.push(OsString::from("--unshare-net"));
+    match network {
+        SandboxNetworkPolicy::Disabled => args.push(OsString::from("--unshare-net")),
+        SandboxNetworkPolicy::Enabled => args.push(OsString::from("--share-net")),
     }
 
     args.extend([
@@ -225,6 +226,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(args.contains(&"--unshare-net".to_string()));
+        assert!(!args.contains(&"--share-net".to_string()));
         assert!(
             args.windows(3)
                 .any(|window| { window == ["--dev-bind", "/dev/null", "/dev/null"] })
@@ -238,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn bubblewrap_network_enabled_omits_unshare_net() {
+    fn bubblewrap_network_enabled_uses_share_net_and_omits_unshare_net() {
         let args = bubblewrap_args(
             "git ls-remote origin",
             Path::new("/repo"),
@@ -250,6 +252,7 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
+        assert!(args.contains(&"--share-net".to_string()));
         assert!(!args.contains(&"--unshare-net".to_string()));
     }
 
@@ -281,6 +284,8 @@ mod tests {
             args.windows(3)
                 .any(|window| { window == ["--dev-bind", "/dev/null", "/dev/null"] })
         );
+        assert!(args.contains(&"--unshare-net".to_string()));
+        assert!(!args.contains(&"--share-net".to_string()));
     }
 
     #[test]
