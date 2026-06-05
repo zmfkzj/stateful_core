@@ -39,7 +39,7 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     .expect("source stateful command policy skill should exist");
     assert_eq!(command_policy_skill, source_command_policy_skill);
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
-    assert!(command_policy_skill.contains("Use when running shell commands"));
+    assert!(command_policy_skill.contains("Use before any Bash or shell command"));
     assert!(command_policy_skill.contains("state_intent_declare"));
     assert!(command_policy_skill.contains("Raw Bash is denied by stateful hooks"));
     assert!(

@@ -1,6 +1,6 @@
 ---
 name: stateful-command-policy
-description: Use when running shell commands, editing files, or responding to stateful hook denials in a repo with stateful Codex hooks
+description: Use before any Bash or shell command, file write, validation run, commit, push, or response to stateful hook denials in a repo with stateful Codex hooks
 ---
 
 # Stateful Command Policy

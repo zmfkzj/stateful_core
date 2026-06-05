@@ -263,7 +263,23 @@ fn handle_user_prompt_submit_with_runtime(
     }
 
     let response: ContextRenderResponse = serde_json::from_str(&response.body)?;
-    Ok(response.prompt_text)
+    Ok(with_stateful_command_policy_reminder(response.prompt_text))
+}
+
+fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
+    let reminder = stateful_command_policy_reminder();
+    if prompt_text.trim().is_empty() {
+        reminder
+    } else {
+        format!("{reminder}\n\n{prompt_text}")
+    }
+}
+
+fn stateful_command_policy_reminder() -> String {
+    let binary = trusted_stateful_binary_for_guidance();
+    format!(
+        "Stateful command policy reminder:\n- Before using Bash, use the `stateful-command-policy` skill.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For writes, use `state_file_write` or `{binary} sandbox run --fs write-targets --write-target <path> --command '<cmd>'`."
+    )
 }
 
 fn handle_stop_with_runtime(
@@ -338,48 +354,58 @@ fn authorize_bash(input: &PreToolUseInput) -> anyhow::Result<HookOutcome> {
 fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
     let invocation = match parse_sandbox_run_invocation(command) {
         Ok(invocation) => invocation,
-        Err(reason) => return HookOutcome::Deny { reason },
+        Err(reason) => return bash_policy_deny(reason),
     };
 
     if !is_trusted_stateful_executable(&invocation.executable) {
-        return HookOutcome::Deny {
-            reason: "stateful sandbox run requires the trusted absolute stateful binary"
-                .to_string(),
-        };
+        return bash_policy_deny(
+            "stateful sandbox run requires the trusted absolute stateful binary",
+        );
     }
     if !matches!(invocation.fs.as_str(), "read-only" | "write-targets") {
-        return HookOutcome::Deny {
-            reason: "stateful sandbox run supports only read-only and write-targets profiles"
-                .to_string(),
-        };
+        return bash_policy_deny(
+            "stateful sandbox run supports only read-only and write-targets profiles",
+        );
     }
     if !matches!(invocation.network.as_str(), "disabled" | "enabled") {
-        return HookOutcome::Deny {
-            reason: "stateful sandbox run network must be disabled or enabled".to_string(),
-        };
+        return bash_policy_deny("stateful sandbox run network must be disabled or enabled");
     }
     if invocation.command.trim().is_empty() {
-        return HookOutcome::Deny {
-            reason: "stateful sandbox run requires a non-empty --command".to_string(),
-        };
+        return bash_policy_deny("stateful sandbox run requires a non-empty --command");
     }
     if invocation.fs == "read-only"
         && (!invocation.write_targets.is_empty() || !invocation.create_targets.is_empty())
     {
-        return HookOutcome::Deny {
-            reason: "read-only sandbox run rejects write targets".to_string(),
-        };
+        return bash_policy_deny("read-only sandbox run rejects write targets");
     }
     if invocation.fs == "write-targets"
         && invocation.write_targets.is_empty()
         && invocation.create_targets.is_empty()
     {
-        return HookOutcome::Deny {
-            reason: "write-targets sandbox run requires at least one write target".to_string(),
-        };
+        return bash_policy_deny("write-targets sandbox run requires at least one write target");
     }
 
     HookOutcome::Allow
+}
+
+fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
+    HookOutcome::Deny {
+        reason: format!("{} {}", reason.into(), bash_policy_guidance()),
+    }
+}
+
+fn bash_policy_guidance() -> String {
+    format!(
+        "Use the `stateful-command-policy` skill before Bash. Raw Bash is denied; for read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`.",
+        trusted_stateful_binary_for_guidance()
+    )
+}
+
+fn trusted_stateful_binary_for_guidance() -> String {
+    std::env::current_exe()
+        .ok()
+        .map(|path| format!("\"{}\"", path.to_string_lossy()))
+        .unwrap_or_else(|| "<absolute-stateful-binary>".to_string())
 }
 
 fn parse_sandbox_run_invocation(command: &str) -> Result<SandboxRunInvocation, String> {

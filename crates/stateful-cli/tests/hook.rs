@@ -62,6 +62,28 @@ fn pre_tool_use_denies_raw_read_only_bash_after_sandbox_runner_migration() {
 }
 
 #[test]
+fn pre_tool_use_raw_bash_denial_mentions_command_policy_skill_and_example() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "git status"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+    let HookOutcome::Deny { reason } = outcome else {
+        panic!("raw Bash should be denied");
+    };
+
+    assert!(reason.contains("stateful-command-policy"));
+    assert!(reason.contains("--fs read-only --network disabled"));
+    assert!(reason.contains("--command"));
+}
+
+#[test]
 fn pre_tool_use_allows_canonical_sandbox_run_read_only() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
@@ -1515,6 +1537,9 @@ fn user_prompt_submit_posts_context_render() {
     );
     let rendered = String::from_utf8(output.stdout).expect("prompt output should be utf8");
     assert!(rendered.contains("Nearby Activity"));
+    assert!(rendered.contains("Before using Bash"));
+    assert!(rendered.contains("stateful-command-policy"));
+    assert!(rendered.contains("--fs read-only --network disabled"));
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/context/render HTTP/1.1"));
     assert!(request.contains("\"mode\":\"brief\""));
