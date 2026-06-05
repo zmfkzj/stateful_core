@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, path::Path};
 
 use stateful_cli::{
     GlobalPaths, doctor_report, doctor_report_with_global, enable_repo, install_repo_local,
@@ -33,6 +33,11 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     let command_policy_skill =
         fs::read_to_string(temp_root.join(".codex/skills/stateful-command-policy/SKILL.md"))
             .expect("stateful command policy skill should exist");
+    let source_command_policy_skill = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/stateful-command-policy/SKILL.md"),
+    )
+    .expect("source stateful command policy skill should exist");
+    assert_eq!(command_policy_skill, source_command_policy_skill);
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
     assert!(command_policy_skill.contains("Use when running shell commands"));
     assert!(command_policy_skill.contains("state_intent_declare"));
