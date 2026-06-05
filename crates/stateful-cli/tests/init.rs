@@ -137,6 +137,129 @@ fn install_repo_local_refuses_existing_non_stateful_hooks_json() {
 }
 
 #[test]
+fn install_repo_local_refuses_unmarked_stateful_mcp_config_without_legacy_hooks() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-init-unmarked-stateful-config-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(temp_root.join(".codex")).expect("codex dir should be creatable");
+    let config_path = temp_root.join(".codex/config.toml");
+    let config = r#"[mcp_servers.stateful]
+command = "stateful"
+args = ["mcp", "serve"]
+startup_timeout_sec = 20
+"#;
+    fs::write(&config_path, config).expect("existing codex config should be writable");
+
+    let error = install_repo_local(&temp_root, "target/debug/stateful")
+        .expect_err("repo install should refuse unmarked stateful config without legacy hooks");
+
+    assert!(
+        error
+            .to_string()
+            .contains("would overwrite existing Codex config")
+    );
+    let saved_config =
+        fs::read_to_string(config_path).expect("existing config should remain readable");
+    assert_eq!(saved_config, config);
+    assert!(!temp_root.join(".codex/hooks.json").exists());
+    assert!(!temp_root.join(".stateful/config.yml").exists());
+    assert!(!temp_root.join(".stateful/validation.yml").exists());
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn install_repo_local_replaces_unmarked_legacy_stateful_codex_files() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-init-legacy-codex-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(temp_root.join(".codex")).expect("codex dir should be creatable");
+    fs::write(
+        temp_root.join(".codex/hooks.json"),
+        r#"{
+  "hooks": {
+    "PostToolUse": [{
+      "hooks": [{
+        "command": "stateful hook post-tool-use",
+        "statusMessage": "Recording stateful activity",
+        "type": "command"
+      }],
+      "matcher": "Bash|apply_patch|Edit|Write|mcp__filesystem__.*"
+    }],
+    "PreToolUse": [{
+      "hooks": [{
+        "command": "stateful hook pre-tool-use",
+        "statusMessage": "Authorizing stateful tool use",
+        "type": "command"
+      }],
+      "matcher": "Bash|apply_patch|Edit|Write|mcp__filesystem__.*"
+    }],
+    "SessionStart": [{
+      "hooks": [{
+        "command": "stateful hook session-start",
+        "statusMessage": "Loading stateful current state",
+        "type": "command"
+      }],
+      "matcher": "startup|resume|clear|compact"
+    }],
+    "Stop": [{
+      "hooks": [{
+        "command": "stateful hook stop",
+        "statusMessage": "Finalizing stateful activity",
+        "type": "command"
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "command": "stateful hook user-prompt-submit",
+        "statusMessage": "Checking stateful intent context",
+        "type": "command"
+      }]
+    }]
+  }
+}
+"#,
+    )
+    .expect("legacy hooks should be writable");
+    fs::write(
+        temp_root.join(".codex/config.toml"),
+        r#"[mcp_servers.stateful]
+command = "stateful"
+args = ["mcp", "serve"]
+startup_timeout_sec = 20
+
+[mcp_servers.stateful.tools.state_intent_declare]
+approval_mode = "approve"
+
+[mcp_servers.stateful.tools.state_conflicts_check]
+approval_mode = "approve"
+"#,
+    )
+    .expect("legacy config should be writable");
+
+    install_repo_local(&temp_root, "target/debug/stateful").expect("repo install should succeed");
+
+    assert!(!temp_root.join(".codex/hooks.json").exists());
+    let codex_config = fs::read_to_string(temp_root.join(".codex/config.toml"))
+        .expect("codex config should exist");
+    assert!(codex_config.contains("# stateful-core-owned"));
+    assert!(codex_config.contains("[[hooks.PreToolUse]]"));
+    assert!(codex_config.contains("hook pre-tool-use"));
+    assert!(temp_root.join(".stateful/config.yml").exists());
+    assert!(temp_root.join(".stateful/validation.yml").exists());
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn install_repo_local_removes_existing_stateful_owned_hooks_json() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-init-old-hooks-test-{}",

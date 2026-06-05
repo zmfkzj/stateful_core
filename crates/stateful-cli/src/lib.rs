@@ -769,16 +769,29 @@ const STATEFUL_CODEX_JSON_MARKER: &str = "stateful_core_owned";
 const STATEFUL_CODEX_TOML_MARKER: &str = "# stateful-core-owned";
 
 pub(crate) fn ensure_repo_local_install_can_write(repo_root: &Path) -> anyhow::Result<()> {
-    for path in [
-        repo_root.join(".codex/hooks.json"),
-        repo_root.join(".codex/config.toml"),
-    ] {
-        if path.exists() && !is_stateful_owned_codex_file(&path)? {
-            anyhow::bail!(
-                "repo-local Codex install would overwrite existing Codex config {}",
-                path.display()
-            );
-        }
+    let hooks_json = repo_root.join(".codex/hooks.json");
+    let config_toml = repo_root.join(".codex/config.toml");
+    let has_legacy_stateful_hooks =
+        hooks_json.exists() && is_legacy_stateful_hooks_file(&hooks_json)?;
+
+    if hooks_json.exists()
+        && !is_stateful_owned_codex_file(&hooks_json)?
+        && !has_legacy_stateful_hooks
+    {
+        anyhow::bail!(
+            "repo-local Codex install would overwrite existing Codex config {}",
+            hooks_json.display()
+        );
+    }
+
+    if config_toml.exists()
+        && !is_stateful_owned_codex_file(&config_toml)?
+        && !(has_legacy_stateful_hooks && is_legacy_stateful_codex_toml_file(&config_toml)?)
+    {
+        anyhow::bail!(
+            "repo-local Codex install would overwrite existing Codex config {}",
+            config_toml.display()
+        );
     }
 
     Ok(())
@@ -802,6 +815,167 @@ fn is_stateful_owned_codex_file(path: &Path) -> anyhow::Result<bool> {
             .any(|line| line.trim() == STATEFUL_CODEX_TOML_MARKER)),
         _ => Ok(false),
     }
+}
+
+fn is_legacy_stateful_hooks_file(path: &Path) -> anyhow::Result<bool> {
+    let contents = fs::read_to_string(path)?;
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return Ok(false);
+    };
+
+    Ok(is_legacy_stateful_hooks_json(&value))
+}
+
+fn is_legacy_stateful_codex_toml_file(path: &Path) -> anyhow::Result<bool> {
+    let contents = fs::read_to_string(path)?;
+    Ok(is_legacy_stateful_codex_toml(&contents))
+}
+
+const LEGACY_STATEFUL_HOOKS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "user-prompt-submit"),
+    ("PreToolUse", "pre-tool-use"),
+    ("PostToolUse", "post-tool-use"),
+    ("Stop", "stop"),
+];
+
+fn is_legacy_stateful_hooks_json(value: &serde_json::Value) -> bool {
+    let Some(root) = value.as_object() else {
+        return false;
+    };
+    if root.keys().any(|key| key != "hooks") {
+        return false;
+    }
+
+    let Some(hooks) = root.get("hooks").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    if hooks.len() != LEGACY_STATEFUL_HOOKS.len() {
+        return false;
+    }
+
+    LEGACY_STATEFUL_HOOKS.iter().all(|(event, action)| {
+        let Some(entries) = hooks.get(*event).and_then(serde_json::Value::as_array) else {
+            return false;
+        };
+        if entries.is_empty() {
+            return false;
+        }
+
+        entries.iter().all(|entry| {
+            let Some(commands) = entry.get("hooks").and_then(serde_json::Value::as_array) else {
+                return false;
+            };
+            if commands.is_empty() {
+                return false;
+            }
+
+            commands.iter().all(|command_hook| {
+                let hook_type = command_hook
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let command = command_hook
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+
+                hook_type == "command" && command_invokes_stateful_hook(command, action)
+            })
+        })
+    })
+}
+
+fn command_invokes_stateful_hook(command: &str, action: &str) -> bool {
+    let suffix = format!(" hook {action}");
+    let Some(binary) = command.trim().strip_suffix(&suffix) else {
+        return false;
+    };
+
+    is_stateful_binary_reference(binary.trim())
+}
+
+fn is_stateful_binary_reference(binary: &str) -> bool {
+    let binary = strip_matching_double_quotes(binary.trim());
+    binary == "stateful" || binary.ends_with("/stateful")
+}
+
+fn strip_matching_double_quotes(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value)
+}
+
+fn is_legacy_stateful_codex_toml(contents: &str) -> bool {
+    let mut saw_section = false;
+    let mut current_section_is_stateful_mcp = false;
+    let mut saw_stateful_mcp_server = false;
+    let mut saw_stateful_command = false;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if trimmed.starts_with('[') {
+            let Some(section) = simple_toml_table_name(trimmed) else {
+                return false;
+            };
+            if !is_legacy_stateful_codex_toml_section(section) {
+                return false;
+            }
+
+            saw_stateful_mcp_server |= section == "mcp_servers.stateful";
+            current_section_is_stateful_mcp = section == "mcp_servers.stateful";
+            saw_section = true;
+            continue;
+        }
+
+        if !saw_section {
+            return false;
+        }
+
+        if current_section_is_stateful_mcp {
+            if let Some(command) = simple_toml_string_assignment(trimmed, "command") {
+                saw_stateful_command = is_stateful_binary_reference(&command);
+            }
+        }
+    }
+
+    saw_stateful_mcp_server && saw_stateful_command
+}
+
+fn simple_toml_table_name(line: &str) -> Option<&str> {
+    let body = line.strip_prefix('[')?.strip_suffix(']')?;
+    if body.starts_with('[') || body.ends_with(']') || body.is_empty() {
+        return None;
+    }
+
+    if body.split('.').all(|segment| {
+        !segment.is_empty()
+            && segment.chars().all(|character| {
+                character.is_ascii_alphanumeric() || character == '_' || character == '-'
+            })
+    }) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+fn is_legacy_stateful_codex_toml_section(section: &str) -> bool {
+    section == "mcp_servers.stateful" || section.starts_with("mcp_servers.stateful.tools.")
+}
+
+fn simple_toml_string_assignment(line: &str, key: &str) -> Option<String> {
+    let (left, right) = line.split_once('=')?;
+    if left.trim() != key {
+        return None;
+    }
+
+    serde_json::from_str(right.trim()).ok()
 }
 
 fn mcp_config_toml(binary_path: &str) -> String {
