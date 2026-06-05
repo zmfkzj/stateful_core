@@ -251,8 +251,11 @@ stateful enable --repo-local-codex
   for that run.
 - `stateful mcp serve` exposes the MCP adapter over stdio.
 - `stateful mcp call <tool> [arguments_json]` calls an MCP tool. Most tools map
-  to the local HTTP server; `state.file.write` and `state.bash.write` are
-  handled by the CLI bridge because they write repo files after authorization.
+  to the local HTTP server; `state.file.write` is handled by the CLI bridge
+  because it writes repo files after authorization. Stale
+  `state_bash_write` / `state.bash.write` calls are removed; use
+  `stateful sandbox run --fs write-targets ... --command ...` for
+  command-shaped writes.
 - `stateful sync-outbox` replays pending local outbox records to the server.
 - `stateful hook <event>` runs Codex hook integration entry points:
   `session-start`, `user-prompt-submit`, `pre-tool-use`, `post-tool-use`, and
@@ -310,18 +313,17 @@ denied unless the top-level Bash tool payload includes structured read-only
 sandbox metadata with network access explicitly disabled and only trusted tmp
 writable roots.
 
-Write-capable Bash is exposed separately through
-`state_bash_write` / `state.bash.write`. The tool requires a command and an
-explicit repo-relative `write_targets` list, optionally plus `create_targets`
-for files that should be pre-created before sandboxing. The CLI bridge
-authorizes every listed target with `/v1/authorize` as `write_file`; if any
-target is denied, the command is not executed and the response includes both
-allowed and denied target lists. When all targets are allowed, the command runs
-through an OS sandbox with the repo readable and only the listed files writable.
-macOS uses Seatbelt via `/usr/bin/sandbox-exec`; Linux uses bubblewrap
-(`bwrap`) with a read-only root bind and writable exact-file binds. The Linux
-bubblewrap backend is implemented but has not been verified in this macOS
-development environment.
+Command-shaped writes should use
+`stateful sandbox run --fs write-targets --write-target <path> ... --command <cmd>`,
+optionally with `--create-target` for files that should be pre-created before
+sandboxing. The wrapper authorizes every listed target with `/v1/authorize` as
+`write_file`; if any target is denied, the command is not executed and the
+response includes both allowed and denied target lists. When all targets are
+allowed, the command runs through an OS sandbox with the repo readable and only
+the listed files writable. macOS uses Seatbelt via `/usr/bin/sandbox-exec`;
+Linux uses bubblewrap (`bwrap`) with a read-only root bind and writable
+exact-file binds. The Linux bubblewrap backend is implemented but has not been
+verified in this macOS development environment.
 
 ## HTTP And MCP Surface
 
@@ -348,16 +350,15 @@ names:
 - `state_reconcile_ack` / `state.reconcile.ack`
 - `state_validation_run` / `state.validation.run`
 - `state_file_write` / `state.file.write`
-- `state_bash_write` / `state.bash.write`
 - `state_notifications_poll` / `state.notifications.poll`
 - `state_resume_next` / `state.resume.next`
 
-Most MCP tools map directly to HTTP routes. `state.file.write` and
-`state.bash.write` are intentionally CLI-local. `state.file.write` first posts
-a `write_file` authorization request to `/v1/authorize`, then writes UTF-8
-contents to the repo file only after the server returns `allow`.
-`state.bash.write` authorizes each requested write/create target before
-executing the command in the platform sandbox.
+Most MCP tools map directly to HTTP routes. `state.file.write` is intentionally
+CLI-local: it first posts a `write_file` authorization request to
+`/v1/authorize`, then writes UTF-8 contents to the repo file only after the
+server returns `allow`. `state_bash_write` / `state.bash.write` was removed;
+use `stateful sandbox run --fs write-targets ... --command ...` for
+command-shaped writes.
 
 Side-effecting write authorization and intent declaration endpoints require the
 `stateful.v1` request envelope with `payload`. Flat legacy bodies are rejected

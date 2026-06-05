@@ -25,7 +25,7 @@ pub fn call_mcp_tool_in_repo(
     if matches!(tool_name.as_str(), "state_bash_write" | "state.bash.write") {
         return Ok(error_response(
             410,
-            "state_bash_write was removed; use `stateful sandbox run ... --command ...`.",
+            "state_bash_write was removed; use stateful sandbox run ... --command ...",
         ));
     }
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;

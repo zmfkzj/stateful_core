@@ -928,7 +928,7 @@ Stateful hooks are authoritative. Pick commands that match the installed hooks b
 - Declare exact file intent first with `state_intent_declare` / `state.intent.declare`. Use Bash `stateful intent declare <paths...>` only when MCP tools are unavailable.
 - Keep declared paths narrow; prefer exact files for edits, deletes, renames, and moves.
 - Write repo files with `state_file_write` / `state.file.write` after intent. It authorizes and writes from structured arguments.
-- Use `state_bash_write` / `state.bash.write` for write-capable Bash. Pass explicit repo-relative `write_targets`, and `create_targets` for new files; the bridge authorizes each file and then runs the command in the OS sandbox.
+- Use `stateful sandbox run --fs write-targets --write-target <path> ... --command <cmd>` for command-shaped writes. Add `--create-target` for new files; the wrapper authorizes each target and then runs the command in the OS sandbox.
 - Re-read a file immediately before `state_file_write`; it writes full contents, so preserve unrelated user changes.
 - `apply_patch`, `Edit`, `Write`, and `file_change` are hook-authorized only when targets are visible to stateful policy. If denied, switch to structured write instead of retrying patch variants.
 - If a hook denies an action, read the denial and choose the documented alternative instead of retrying variants.
@@ -936,7 +936,7 @@ Stateful hooks are authoritative. Pick commands that match the installed hooks b
 ## Prefer
 
 - MCP or native read tools for search and inspection when available.
-- `state_bash_write` for command-shaped writes that need a real shell but can be limited to exact file targets.
+- `stateful sandbox run --fs write-targets ... --command ...` for command-shaped writes that need a real shell but can be limited to exact file targets.
 - Structured Bash only when the tool call carries top-level read-only sandbox metadata with network disabled.
 - Validation: `state_validation_run` / `state.validation.run`, or `stateful validate <profile>`.
 - Stateful diagnostics through MCP tools or a structured sandboxed Bash call.
@@ -955,7 +955,7 @@ Stateful hooks are authoritative. Pick commands that match the installed hooks b
 
 - Do not retry the same command with small variations.
 - If the denial asks for scope, declare or narrow intent, then use `state_file_write` for repo changes.
-- If Bash is blocked, choose MCP/native inspection, structured MCP write, `state_bash_write`, a validation profile, or a Bash tool call with top-level read-only sandbox metadata and network disabled.
+- If Bash is blocked, choose MCP/native inspection, structured MCP write, `stateful sandbox run --fs write-targets`, a validation profile, or a Bash tool call with top-level read-only sandbox metadata and network disabled.
 - If a denial mentions a structured tool, prefer the stateful MCP tool in Codex sessions.
 - If no policy-compliant path is available, report the exact command and denial reason.
 "#

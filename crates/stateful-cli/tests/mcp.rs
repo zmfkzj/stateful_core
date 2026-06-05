@@ -578,38 +578,46 @@ fn mcp_tools_list_returns_stateful_tool_descriptors() {
 
 #[test]
 fn mcp_stale_bash_write_call_returns_removed_guidance() {
-    let temp_root = temp_root("stateful-mcp-stale-bash-write");
-    let paths = GlobalPaths::new(temp_root.join("home"));
-    let repo_root = temp_root.join("repo");
-    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
-    enable_test_repo(&paths, &repo_root);
-    let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    for tool_name in ["state_bash_write", "state.bash.write"] {
+        let temp_root = temp_root(&format!("stateful-mcp-stale-bash-write-{tool_name}"));
+        let paths = GlobalPaths::new(temp_root.join("home"));
+        let repo_root = temp_root.join("repo");
+        fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+        enable_test_repo(&paths, &repo_root);
+        let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+        write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
-    let response = run_mcp_jsonrpc_in_repo(
-        &repo_root,
-        &paths,
-        r#"{
-          "jsonrpc":"2.0",
-          "id":4,
-          "method":"tools/call",
-          "params":{
-            "name":"state_bash_write",
-            "arguments":{"command":"true","write_targets":["README.md"]}
-          }
-        }"#,
-    );
+        let response = run_mcp_jsonrpc_in_repo(
+            &repo_root,
+            &paths,
+            &format!(
+                r#"{{
+                  "jsonrpc":"2.0",
+                  "id":4,
+                  "method":"tools/call",
+                  "params":{{
+                    "name":"{tool_name}",
+                    "arguments":{{"command":"true","write_targets":["README.md"]}}
+                  }}
+                }}"#
+            ),
+        );
 
-    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
-    assert_eq!(json["result"]["isError"], true);
-    assert!(
-        json["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("state_bash_write was removed")
-    );
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("response should be json");
+        assert_eq!(json["result"]["isError"], true, "{tool_name}");
+        assert!(
+            json["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(
+                    "state_bash_write was removed; use stateful sandbox run ... --command ..."
+                ),
+            "{tool_name}"
+        );
 
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+        fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+    }
 }
 
 #[test]
