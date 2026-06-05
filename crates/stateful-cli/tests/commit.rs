@@ -8,8 +8,9 @@ use std::{
 };
 
 use stateful_cli::{
-    CommitRequest, CurrentSession, GlobalPaths, ServerRuntime, run_structured_commit,
-    write_current_session_file, write_global_runtime_file,
+    CommitRequest, CurrentSession, GlobalPaths, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime,
+    run_structured_commit, write_current_session_file, write_current_session_file_for_codex_run,
+    write_global_runtime_file,
 };
 
 #[test]
@@ -307,6 +308,45 @@ fn structured_commit_command_from_subdir_uses_git_root_session_and_paths() {
     assert!(request.contains("\"path\":\"docs/plan.md\""));
     let show = git_output(root.path(), &["show", "--name-only", "--format=", "HEAD"]);
     assert!(show.lines().any(|line| line == "docs/plan.md"));
+}
+
+#[test]
+fn structured_commit_command_uses_codex_run_session_when_legacy_current_session_changed() {
+    let root = git_repo("stateful-commit-codex-run-session");
+    let paths = GlobalPaths::new(root.path().join("home"));
+    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
+    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
+    write_current_session_file(root.path(), &CurrentSession::new("s-other", "w-session"))
+        .expect("legacy current session should write");
+    write_current_session_file_for_codex_run(
+        root.path(),
+        "run-a",
+        &CurrentSession::new("s-run", "w-session"),
+    )
+    .expect("run-bound current session should write");
+    let (runtime, rx) = spawn_fake_authorize_server();
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+        .args(["commit", "-m", "docs: add plan", "--", "docs/plan.md"])
+        .current_dir(root.path())
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("STATEFUL_HOME", &paths.home)
+        .env(STATEFUL_CODEX_RUN_ID_ENV, "run-a")
+        .output()
+        .expect("stateful commit should run");
+
+    assert!(
+        output.status.success(),
+        "stateful commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx.recv().expect("captured request should arrive");
+    let body = request_json_body(&request);
+    assert_eq!(body["session"]["session_id"], "s-run");
+    assert_eq!(body["workspace"]["workspace_id"], "w-session");
+    assert_eq!(body["payload"]["path"], "docs/plan.md");
 }
 
 #[test]

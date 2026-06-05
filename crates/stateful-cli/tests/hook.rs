@@ -11,9 +11,10 @@ use std::{
 };
 
 use stateful_cli::{
-    GlobalPaths, HookOutcome, ServerRuntime, enable_repo, handle_post_tool_use_in_repo,
-    handle_pre_tool_use, handle_pre_tool_use_in_repo, handle_pre_tool_use_with_trusted_sandbox,
-    read_current_session_file, write_global_runtime_file,
+    GlobalPaths, HookOutcome, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime, enable_repo,
+    handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
+    handle_pre_tool_use_with_trusted_sandbox, read_current_session_file,
+    read_current_session_file_for_codex_run, write_global_runtime_file,
 };
 
 #[test]
@@ -171,6 +172,55 @@ fn pre_tool_use_in_repo_records_current_session_for_mcp() {
         String::from_utf8_lossy(&output.stderr)
     );
     let session = read_current_session_file(&repo_root).expect("current session should read");
+    assert_eq!(session.session_id, "s-current");
+    assert_eq!(session.workspace_id, "w1");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_records_current_session_for_codex_run() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-codex-run-session-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, _rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = r#"{
+      "session_id": "s-current",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "rg auth src"
+      }
+    }"#;
+
+    let output = run_hook_subprocess_with_extra_env(
+        &repo_root,
+        &paths,
+        &["hook", "pre-tool-use"],
+        input,
+        &[(STATEFUL_CODEX_RUN_ID_ENV, "run-a")],
+    );
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let session = read_current_session_file_for_codex_run(&repo_root, "run-a")
+        .expect("run-bound current session should read");
     assert_eq!(session.session_id, "s-current");
     assert_eq!(session.workspace_id, "w1");
 

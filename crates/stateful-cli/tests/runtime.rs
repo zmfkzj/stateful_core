@@ -10,7 +10,8 @@ use std::{
 use stateful_cli::{
     CurrentSession, GlobalPaths, IntentDeclareArgs, ServerRuntime, declare_intent_via_http,
     discover_runtime, discover_runtime_with_global, get_json, global_state_db_path, post_json,
-    read_current_session_file, state_db_path, write_current_session_file,
+    read_current_session_file, read_current_session_file_for_codex_run, state_db_path,
+    write_current_session_file, write_current_session_file_for_codex_run,
     write_global_runtime_file, write_runtime_file,
 };
 
@@ -145,6 +146,65 @@ fn current_session_file_round_trips_for_mcp_enrichment() {
     let session = read_current_session_file(&temp_root).expect("current session should read");
     assert_eq!(session.session_id, "s1");
     assert_eq!(session.workspace_id, "w1");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn codex_run_session_file_is_isolated_from_legacy_current_session() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-codex-run-session-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    write_current_session_file(&temp_root, &CurrentSession::new("s-legacy", "w1"))
+        .expect("legacy current session should write");
+    write_current_session_file_for_codex_run(
+        &temp_root,
+        "run-a",
+        &CurrentSession::new("s-run-a", "w1"),
+    )
+    .expect("run-bound current session should write");
+
+    let session =
+        read_current_session_file_for_codex_run(&temp_root, "run-a").expect("run session reads");
+
+    assert_eq!(session.session_id, "s-run-a");
+    assert_eq!(session.workspace_id, "w1");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn codex_run_session_file_refuses_to_rebind_to_different_codex_session() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-codex-run-session-rebind-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    write_current_session_file_for_codex_run(
+        &temp_root,
+        "run-a",
+        &CurrentSession::new("s-run-a", "w1"),
+    )
+    .expect("run-bound current session should write");
+
+    let error = write_current_session_file_for_codex_run(
+        &temp_root,
+        "run-a",
+        &CurrentSession::new("s-run-b", "w1"),
+    )
+    .expect_err("same codex run should not rebind to a different Codex session");
+
+    assert!(error.to_string().contains("already bound"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

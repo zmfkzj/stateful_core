@@ -1,5 +1,6 @@
 use stateful_cli::{
-    CodexSandboxMode, CodexWrapperOptions, STATEFUL_TRUSTED_SANDBOX_ENV, build_codex_invocation,
+    CodexSandboxMode, CodexWrapperOptions, STATEFUL_CODEX_RUN_ID_ENV, STATEFUL_TRUSTED_SANDBOX_ENV,
+    build_codex_invocation,
 };
 
 #[test]
@@ -83,6 +84,12 @@ fn codex_wrapper_builds_read_only_tmp_profile_and_attestation() {
             .iter()
             .any(|root| root == "/tmp")
     );
+    let codex_run_id = invocation
+        .env
+        .iter()
+        .find_map(|(key, value)| (key == STATEFUL_CODEX_RUN_ID_ENV).then_some(value))
+        .expect("codex run id env should be set");
+    uuid::Uuid::parse_str(codex_run_id).expect("codex run id should be a uuid");
 }
 
 #[test]

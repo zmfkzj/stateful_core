@@ -6,6 +6,8 @@ use std::{
 
 use clap::ValueEnum;
 
+use crate::runtime::STATEFUL_CODEX_RUN_ID_ENV;
+
 pub const STATEFUL_TRUSTED_SANDBOX_ENV: &str = "STATEFUL_HOOK_TRUSTED_SANDBOX";
 
 const READ_ONLY_TMP_PROFILE: &str = "stateful-read-only-tmp";
@@ -98,10 +100,16 @@ fn build_read_only_tmp_invocation(options: CodexWrapperOptions) -> anyhow::Resul
     Ok(CodexInvocation {
         program: options.codex_bin,
         args,
-        env: vec![(
-            STATEFUL_TRUSTED_SANDBOX_ENV.to_string(),
-            serde_json::to_string(&sandbox)?,
-        )],
+        env: vec![
+            (
+                STATEFUL_TRUSTED_SANDBOX_ENV.to_string(),
+                serde_json::to_string(&sandbox)?,
+            ),
+            (
+                STATEFUL_CODEX_RUN_ID_ENV.to_string(),
+                uuid::Uuid::new_v4().to_string(),
+            ),
+        ],
     })
 }
 

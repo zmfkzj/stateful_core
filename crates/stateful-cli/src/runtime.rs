@@ -10,6 +10,8 @@ use crate::global_paths::GlobalPaths;
 use crate::repo_registry::RepoIdentity;
 use serde::{Deserialize, Serialize};
 
+pub const STATEFUL_CODEX_RUN_ID_ENV: &str = "STATEFUL_CODEX_RUN_ID";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntentDeclareArgs {
     pub session_id: String,
@@ -138,6 +140,11 @@ pub fn write_current_session_file(
     repo_root: impl AsRef<Path>,
     session: &CurrentSession,
 ) -> anyhow::Result<()> {
+    let repo_root = repo_root.as_ref();
+    if let Some(codex_run_id) = current_codex_run_id()? {
+        write_current_session_file_for_codex_run(repo_root, &codex_run_id, session)?;
+    }
+
     let path = current_session_file_path(repo_root);
     let Some(parent) = path.parent() else {
         anyhow::bail!("current session file path has no parent");
@@ -149,7 +156,52 @@ pub fn write_current_session_file(
 }
 
 pub fn read_current_session_file(repo_root: impl AsRef<Path>) -> anyhow::Result<CurrentSession> {
+    let repo_root = repo_root.as_ref();
+    if let Some(codex_run_id) = current_codex_run_id()? {
+        return read_current_session_file_for_codex_run(repo_root, &codex_run_id);
+    }
+
     let contents = fs::read_to_string(current_session_file_path(repo_root))?;
+    Ok(serde_json::from_str(&contents)?)
+}
+
+pub fn write_current_session_file_for_codex_run(
+    repo_root: impl AsRef<Path>,
+    codex_run_id: &str,
+    session: &CurrentSession,
+) -> anyhow::Result<()> {
+    let path = current_session_file_path_for_codex_run(repo_root, codex_run_id)?;
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let existing: CurrentSession = serde_json::from_str(&contents)?;
+            if existing != *session {
+                anyhow::bail!(
+                    "Codex run `{codex_run_id}` is already bound to session `{}`",
+                    existing.session_id
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("current session file path has no parent");
+    };
+
+    fs::create_dir_all(parent)?;
+    fs::write(path, serde_json::to_string_pretty(session)?)?;
+    Ok(())
+}
+
+pub fn read_current_session_file_for_codex_run(
+    repo_root: impl AsRef<Path>,
+    codex_run_id: &str,
+) -> anyhow::Result<CurrentSession> {
+    let contents = fs::read_to_string(current_session_file_path_for_codex_run(
+        repo_root,
+        codex_run_id,
+    )?)?;
     Ok(serde_json::from_str(&contents)?)
 }
 
@@ -300,6 +352,41 @@ fn current_session_file_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf 
         .join(".stateful_core")
         .join("runtime")
         .join("session.json")
+}
+
+fn current_session_file_path_for_codex_run(
+    repo_root: impl AsRef<Path>,
+    codex_run_id: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    validate_codex_run_id(codex_run_id)?;
+    Ok(repo_root
+        .as_ref()
+        .join(".stateful_core")
+        .join("runtime")
+        .join("sessions")
+        .join(format!("{codex_run_id}.json")))
+}
+
+fn current_codex_run_id() -> anyhow::Result<Option<String>> {
+    let Some(codex_run_id) = std::env::var_os(STATEFUL_CODEX_RUN_ID_ENV) else {
+        return Ok(None);
+    };
+    let codex_run_id = codex_run_id.to_string_lossy().into_owned();
+    validate_codex_run_id(&codex_run_id)?;
+    Ok(Some(codex_run_id))
+}
+
+fn validate_codex_run_id(codex_run_id: &str) -> anyhow::Result<()> {
+    if codex_run_id.is_empty() {
+        anyhow::bail!("{STATEFUL_CODEX_RUN_ID_ENV} is set but empty");
+    }
+    if !codex_run_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        anyhow::bail!("{STATEFUL_CODEX_RUN_ID_ENV} contains unsupported characters");
+    }
+    Ok(())
 }
 
 fn runtime_from_env() -> Option<ServerRuntime> {

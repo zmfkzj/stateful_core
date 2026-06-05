@@ -41,11 +41,12 @@ pub use repo_registry::{
     enable_repo, repo_gate, repo_identity_for_enabled_repo,
 };
 pub use runtime::{
-    CurrentSession, HttpResponse, IntentDeclareArgs, ServerRuntime, declare_intent_via_http,
-    discover_runtime, discover_runtime_with_global, discover_runtime_with_optional_global,
-    get_json, global_state_db_path, intent_declare_protocol_body, post_json, protocol_envelope,
-    read_current_session_file, write_current_session_file, write_global_runtime_file,
-    write_runtime_file,
+    CurrentSession, HttpResponse, IntentDeclareArgs, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime,
+    declare_intent_via_http, discover_runtime, discover_runtime_with_global,
+    discover_runtime_with_optional_global, get_json, global_state_db_path,
+    intent_declare_protocol_body, post_json, protocol_envelope, read_current_session_file,
+    read_current_session_file_for_codex_run, write_current_session_file,
+    write_current_session_file_for_codex_run, write_global_runtime_file, write_runtime_file,
 };
 pub use server_lifecycle::{
     ServerStartOptions, detached_server_args, ensure_server, ensure_server_with,
@@ -860,39 +861,40 @@ description: Use when running shell commands, editing files, or responding to st
 
 # Stateful Command Policy
 
-Stateful hooks are authoritative. Use this skill to choose policy-aligned commands before invoking tools.
+Stateful hooks are authoritative. Pick commands that match the installed hooks before invoking tools.
 
-## Before Writes
+## Default Write Flow
 
-- Declare intent for planned files first: `stateful intent declare <paths...>`.
-- Keep declared paths narrow; prefer exact files for edits, deletes, and renames.
-- In `stateful codex` read-only tmp mode, use `state_file_write` /
-  `state.file.write` for repo file writes after declaring intent. Native Codex
-  edit tools such as `apply_patch`, `Edit`, and `Write` remain subject to the
-  Codex filesystem sandbox.
+- Declare exact file intent first with `state_intent_declare` / `state.intent.declare`. Use Bash `stateful intent declare <paths...>` only when MCP tools are unavailable.
+- Keep declared paths narrow; prefer exact files for edits, deletes, renames, and moves.
+- In `stateful codex` read-only tmp mode, write repo files with `state_file_write` / `state.file.write` after intent. It authorizes and writes from structured arguments.
+- Re-read a file immediately before `state_file_write`; it writes full contents, so preserve unrelated user changes.
+- Do not use `apply_patch`, `Edit`, or `Write` as the first repo write path in read-only tmp mode. They are hook-authorized native edit tools, but still have to pass the Codex filesystem sandbox.
+- Use `apply_patch` only outside read-only tmp mode, and only when the patch includes file targets. If denied, switch to structured write instead of retrying patch variants.
 - If a hook denies an action, read the denial and choose the documented alternative instead of retrying variants.
 
 ## Prefer
 
 - Search and inspect: `rg`, `rg --files`, `sed -n`, `cat`, `ls`, read-only `find`, `wc`.
 - Git inspection: `git status`, `git diff`, `git show`, `git log`, `git branch`, `git rev-parse`.
-- Validation: `cargo test`, `npm test`, `pnpm test`, `yarn test`, `pytest`, `go test`.
-- Stateful diagnostics: `stateful doctor`, `stateful status`, `stateful current`, `stateful events`, `stateful validate <profile>`.
+- Validation: `state_validation_run` / `state.validation.run`, or `stateful validate <profile>`.
+- Stateful diagnostics: `stateful doctor`, `stateful status`, `stateful current`, `stateful events`.
 
 ## Avoid In Bash
 
 - Shell write syntax: `>`, `>>`, heredocs, and `| tee`.
 - Direct file mutation: `rm`, `mv`, `cp`, `mkdir`, `touch`, `chmod`, `chown`.
+- Any generator, formatter, package manager, or script that creates, updates, deletes, or moves repo files.
 - Raw mutation git commands: `git checkout`, `git switch`, `git restore`, `git reset`, `git clean`, `git apply`, `git merge`, `git rebase`.
-- Package installs, long-running processes, broad filesystem edits, and ad hoc scripts that mutate code.
-- Most `stateful` control commands through Bash; use MCP tools when available. `stateful intent declare` is the Bash-safe coordination exception.
+- Raw test commands may be denied as validation bypasses; use validation profiles for commands that write build or test artifacts.
+- Most `stateful` control commands through Bash; use MCP tools when available.
 
 ## If Blocked
 
 - Do not retry the same command with small variations.
-- Declare or narrow intent if the denial asks for scope.
-- Use `state_file_write` / `state.file.write` for repo file changes in
-  `stateful codex` read-only tmp mode, and validation profiles for controlled checks.
+- If the denial asks for scope, declare or narrow intent, then use `state_file_write` for repo changes.
+- If Bash is blocked because it may mutate files, choose read-only inspection, structured MCP write, or a validation profile.
+- If a denial mentions `apply_patch or a structured tool`, prefer the structured tool in Codex sessions.
 - If no policy-compliant path is available, report the exact command and denial reason.
 "#
 }

@@ -1,10 +1,12 @@
 # stateful_core
 
-`stateful_core` is a local-first current-state coordination layer for coding
-agents.
+Current-state coordination for coding agents and humans working in the same
+repository.
 
-It helps agents, sessions, subagents, and nearby human work answer a practical
-question before important actions:
+Git coordinates committed history. `stateful_core` coordinates active work
+before it becomes history.
+
+Before a write occurs, tools can ask a practical question:
 
 ```text
 Who is doing what now, what might conflict, and when does that claim expire?
@@ -37,10 +39,16 @@ what another agent, another session, or a human is doing in the same repository
 right now. That creates avoidable failures:
 
 - two agents edit the same file without seeing each other
+- a human edits one file while an agent rewrites nearby docs
 - an interrupted session leaves no structured handoff state
 - stale memory is treated as active truth
 - a tool writes before the session has declared its intended scope
 - validation or reconciliation happens outside the coordination loop
+
+For example, a human can be editing `README.md`, one Codex session can be
+updating `docs/`, and another Codex session can be waiting for `README.md`.
+The work on `docs/` can continue while the conflicting `README.md` write is
+queued instead of turning into a surprise merge conflict later.
 
 `stateful_core` provides a small protocol for declaring intent, tracking active
 leases, recording session activity, reading current-state summaries, and
@@ -55,11 +63,16 @@ runners.
 - Branches and worktrees isolate longer-running lines of work.
 - Editors and agent runners manage task execution and local context.
 - `stateful_core` coordinates active work in a shared workspace: current
-  claims, leases, waiters, reservation TTL metadata, and resume signals.
+  claims, active leases, waiting sessions, and resume signals.
 
 The current implementation is Codex-first, but the coordination problem is not
 Codex-specific. Any tool that writes into a repository can benefit from a shared
 answer to "who is working on this right now?"
+
+Intent and lease are separate on purpose. Intent declares planned work and the
+scope a session expects to touch. A lease declares active ownership of a scoped
+resource and expires when the session stops being fresh. Intent answers "what
+may this session work on?" Lease answers "who is actively holding this now?"
 
 ## Wait Queue and Resume
 
@@ -67,19 +80,20 @@ Write conflicts are scoped to the file or resource being modified. If session A
 holds an active lease on `src/auth.ts`, sessions B and C can still read,
 search, validate, or work on other files. Writes to `src/auth.ts` are blocked.
 
-When a blocked write uses the hook or API with `queue_on_conflict: true`,
-`stateful_core` records the blocked session in a FIFO wait queue for that
-resource. When A explicitly releases the lease, or finalizes activity that
-releases active leases, the first waiter receives a short reservation and a
-pending notification. While that reservation is active, later sessions cannot
-take the same resource ahead of the reserved session. Automatic time-based lease
-expiry and promotion are part of the v1 hardening scope; the current
-implementation promotes waiters on explicit release or finalization.
+At the README level, the flow is intentionally simple:
 
-Reservations are not active write authority by themselves. The reserved session
-must reread the target and retry the authorized write. That retry implicitly
-claims the reservation, marks it `claimed`, and acquires an active lease. The
-default reservation TTL is 120 seconds.
+```text
+blocked -> waiting -> reserved -> active
+```
+
+A conflicting writer is blocked by the active lease and can enter a FIFO wait
+queue. When the active lease is released or the owning activity finalizes, the
+first waiter receives a short reservation. The reserved session must reread the
+target and retry the write; that retry claims the reservation and acquires the
+active lease. The default reservation TTL is 120 seconds.
+
+Detailed queue states, lease expiry behavior, and promotion rules are covered
+in the state model and implementation contract docs.
 
 Resume signals are available through:
 
@@ -98,17 +112,18 @@ Resume signals are available through:
 - A SQLite event store and materialized current-state summary.
 - Codex lifecycle hook integration for observing and gating important actions.
 - An MCP adapter exposing the current-state protocol to compatible tools.
-- A `stateful codex` wrapper for a read-only Codex profile with trusted tmp
-  writes and network disabled.
+- A Codex integration path, including lifecycle hooks, MCP, and an optional
+  wrapper for running Codex with a conservative read-only tmp profile.
 - Repo-local validation profiles for controlled test and check execution.
 - Benchmark tooling for SWE-bench pair runs, reports, comparisons, and
   synthetic coordination experiments.
 
 ## What It Is Not
 
-`stateful_core` is not a sandbox, access-control system, distributed lock
-service, durable secret store, or long-term memory product. It is designed to
-coordinate trusted local tools in one workspace. See the
+`stateful_core` is not a sandbox, access-control system, file lock manager,
+distributed lock service, durable secret store, or long-term memory product. It
+stores shared operational state that trusted local tools can consult before
+coordination-sensitive actions. See the
 [security model](SECURITY.md#local-trust-model) for details.
 
 ## Install From Source
@@ -148,6 +163,14 @@ Opt the current git repository into stateful enforcement:
 stateful enable
 ```
 
+Run Codex through the stateful wrapper:
+
+```bash
+stateful codex
+```
+
+## Useful Next Steps
+
 Start the local server explicitly. Codex hooks also start it lazily for enabled
 repos when needed.
 
@@ -156,9 +179,10 @@ stateful server start
 stateful server status
 ```
 
-Declare what you plan to edit and inspect the active current state. In a hooked
-Codex session, the session and workspace default from
-`.stateful_core/runtime/session.json`; outside hooks, pass them explicitly.
+Declare what you plan to edit and inspect the active current state. In
+`stateful codex`, lifecycle hooks bind the current Codex session to the wrapper
+run and use that run-bound session by default. Outside hooks, pass session and
+workspace IDs explicitly.
 
 ```bash
 stateful intent declare README.md
@@ -225,6 +249,10 @@ stateful enable --repo-local-codex
 Run `stateful <command> --help` for command-specific options.
 
 ## Write Authorization
+
+Write authorization is the current implementation's coordination gate. It is a
+policy check over shared operational state, not a security boundary or a global
+file lock manager.
 
 The v1 authorization API currently supports `write_file`, `delete_file`,
 `rename_file`, and `move_file`.

@@ -8,8 +8,9 @@ use std::{
 };
 
 use stateful_cli::{
-    CurrentSession, GlobalPaths, ServerRuntime, enable_repo, handle_mcp_jsonrpc_in_repo,
-    serve_mcp_stdio_in_repo, write_current_session_file, write_global_runtime_file,
+    CurrentSession, GlobalPaths, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime, enable_repo,
+    handle_mcp_jsonrpc_in_repo, serve_mcp_stdio_in_repo, write_current_session_file,
+    write_current_session_file_for_codex_run, write_global_runtime_file,
 };
 
 #[test]
@@ -193,6 +194,54 @@ fn mcp_file_write_posts_authorize_and_writes_repo_file() {
         "export const ok = true;\n"
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"ok\""));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_file_write_uses_codex_run_session_when_legacy_current_session_changed() {
+    let temp_root = temp_root("stateful-mcp-file-write-codex-run-session");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-other", "w1"))
+        .expect("legacy current session should write");
+    write_current_session_file_for_codex_run(
+        &repo_root,
+        "run-a",
+        &CurrentSession::new("s-current", "w1"),
+    )
+    .expect("run-bound current session should write");
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[(STATEFUL_CODEX_RUN_ID_ENV, "run-a")],
+        &[
+            "mcp",
+            "call",
+            "state.file.write",
+            r#"{"path":"src/auth.ts","contents":"export const ok = true;\n"}"#,
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "stateful mcp file write failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx.recv().expect("captured request should arrive");
+    let body = request_json_body(&request);
+    assert_eq!(body["session"]["session_id"], "s-current");
+    assert_eq!(
+        fs::read_to_string(repo_root.join("src/auth.ts")).expect("file should be written"),
+        "export const ok = true;\n"
+    );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -699,13 +748,25 @@ fn run_stateful_in_repo(
     paths: &GlobalPaths,
     args: &[&str],
 ) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_stateful"))
+    run_stateful_in_repo_with_env(repo_root, paths, &[], args)
+}
+
+fn run_stateful_in_repo_with_env(
+    repo_root: &std::path::Path,
+    paths: &GlobalPaths,
+    env: &[(&str, &str)],
+    args: &[&str],
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_stateful"));
+    command
         .args(args)
         .current_dir(repo_root)
         .env_clear()
-        .env("STATEFUL_HOME", &paths.home)
-        .output()
-        .expect("stateful command should run")
+        .env("STATEFUL_HOME", &paths.home);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("stateful command should run")
 }
 
 fn run_mcp_jsonrpc_in_repo(

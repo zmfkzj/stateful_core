@@ -36,6 +36,10 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
     assert!(command_policy_skill.contains("Use when running shell commands"));
     assert!(command_policy_skill.contains("stateful intent declare"));
+    assert!(command_policy_skill.contains("state_intent_declare"));
+    assert!(command_policy_skill.contains("Do not use `apply_patch`"));
+    assert!(command_policy_skill.contains("state_file_write"));
+    assert!(command_policy_skill.contains("Raw test commands may be denied"));
 
     let validation = fs::read_to_string(temp_root.join(".stateful/validation.yml"))
         .expect("validation config should exist");
