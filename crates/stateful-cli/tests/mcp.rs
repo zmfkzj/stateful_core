@@ -412,6 +412,105 @@ fn mcp_bash_write_reports_allowed_and_denied_targets_without_running_command() {
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
+#[test]
+fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command() {
+    let temp_root = temp_root("stateful-sandbox-run-deny");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+    fs::write(repo_root.join("src/allowed.ts"), "old\n").expect("allowed file should seed");
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Target is outside active intent scope.","required_next_action":"Declare matching intent."}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "write-targets",
+            "--network",
+            "enabled",
+            "--write-target",
+            "src/allowed.ts",
+            "--write-target",
+            "src/denied.ts",
+            "--command",
+            "printf changed > src/allowed.ts",
+        ],
+    );
+
+    assert!(!output.status.success(), "denied target should fail");
+    let first = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first authorize request should arrive");
+    let second = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("second authorize request should arrive");
+    assert_eq!(
+        request_json_body(&first)["payload"]["path"],
+        "src/allowed.ts"
+    );
+    assert_eq!(
+        request_json_body(&second)["payload"]["path"],
+        "src/denied.ts"
+    );
+    assert_eq!(
+        fs::read_to_string(repo_root.join("src/allowed.ts")).expect("allowed file should read"),
+        "old\n",
+        "command should not run when any target is denied"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"allowed_write_targets\":[\"src/allowed.ts\"]"));
+    assert!(stdout.contains("\"path\":\"src/denied.ts\""));
+    assert!(stdout.contains("\"decision\":\"deny\""));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn sandbox_run_read_only_rejects_write_targets() {
+    let temp_root = temp_root("stateful-sandbox-run-readonly-target");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "read-only",
+            "--write-target",
+            "README.md",
+            "--command",
+            "rg README",
+        ],
+    );
+
+    assert!(
+        !output.status.success(),
+        "read-only must reject write targets"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("read-only profile rejects write targets")
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn mcp_bash_write_macos_seatbelt_allows_only_authorized_targets() {

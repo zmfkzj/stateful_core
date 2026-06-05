@@ -405,8 +405,43 @@ pub fn run() -> anyhow::Result<()> {
             })?;
             std::process::exit(code);
         }
-        Command::Sandbox(SandboxCommand::Run { .. }) => {
-            anyhow::bail!("stateful sandbox run is not implemented yet");
+        Command::Sandbox(SandboxCommand::Run {
+            fs,
+            network,
+            write_targets,
+            create_targets,
+            command,
+            timeout_seconds,
+        }) => {
+            let paths = GlobalPaths::from_env()?;
+            let repo_root = current_repo_root_or_current_dir()?;
+            let output = match sandbox::run_sandbox_in_repo(
+                &repo_root,
+                &paths,
+                sandbox::SandboxRunRequest {
+                    fs,
+                    network,
+                    write_targets,
+                    create_targets,
+                    command,
+                    timeout_seconds,
+                },
+            ) {
+                Ok(output) => output,
+                Err(error) => {
+                    if let Some(denied) =
+                        error.downcast_ref::<sandbox::SandboxAuthorizationDenied>()
+                    {
+                        println!("{}", denied.body());
+                        std::process::exit(1);
+                    }
+                    return Err(error);
+                }
+            };
+            println!("{}", serde_json::to_string(&output)?);
+            if output.status != "exited" || output.exit_code != Some(0) {
+                std::process::exit(output.exit_code.unwrap_or(1));
+            }
         }
         Command::Enable {
             repo,
