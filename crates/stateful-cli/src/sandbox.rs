@@ -327,17 +327,6 @@ fn prepare_sandbox_writable_files(
         ensure_repo_file_target(repo_root, path).map_err(|error| {
             anyhow::anyhow!("stateful sandbox run create target `{path}` is unsafe: {error}")
         })?;
-        let target = repo_root.join(path);
-        let Some(parent) = target.parent() else {
-            anyhow::bail!("stateful sandbox run create target `{path}` has no parent directory");
-        };
-        fs::create_dir_all(parent)?;
-        if !target.exists() {
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&target)?;
-        }
     }
 
     for path in write_targets {
@@ -349,6 +338,20 @@ fn prepare_sandbox_writable_files(
             anyhow::bail!(
                 "stateful sandbox run write target `{path}` must already exist or be listed in create_targets"
             );
+        }
+    }
+
+    for path in create_targets {
+        let target = repo_root.join(path);
+        let Some(parent) = target.parent() else {
+            anyhow::bail!("stateful sandbox run create target `{path}` has no parent directory");
+        };
+        fs::create_dir_all(parent)?;
+        if !target.exists() {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)?;
         }
     }
 
@@ -616,7 +619,10 @@ fn run_command_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::{Path, PathBuf};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     #[test]
     fn sandbox_run_cli_exit_code_maps_non_exited_results_to_one() {
@@ -727,6 +733,38 @@ mod tests {
         );
         assert!(args.contains(&"--unshare-net".to_string()));
         assert!(!args.contains(&"--share-net".to_string()));
+    }
+
+    #[test]
+    fn prepare_writable_files_validates_all_targets_before_creating_files() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "stateful-sandbox-create-target-order-{}",
+            std::process::id()
+        ));
+        if repo_root.exists() {
+            fs::remove_dir_all(&repo_root).expect("old temp root should be removable");
+        }
+        fs::create_dir_all(repo_root.join("src")).expect("repo src dir should be creatable");
+
+        let error = prepare_sandbox_writable_files(
+            &repo_root,
+            &["src/missing.txt".to_string()],
+            &["src/new.txt".to_string()],
+        )
+        .expect_err("missing write target should fail before create target is materialized");
+
+        assert!(
+            error
+                .to_string()
+                .contains("must already exist or be listed in create_targets"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !repo_root.join("src/new.txt").exists(),
+            "failed sandbox run should not leave create target behind"
+        );
+
+        fs::remove_dir_all(&repo_root).expect("temp root should be removable");
     }
 
     #[test]
