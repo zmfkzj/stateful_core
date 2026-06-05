@@ -1,9 +1,83 @@
 use clap::Parser;
 use stateful_cli::{
     Cli, CodexSandboxMode, Command, HookCommand, McpCommand, NotificationsCommand, ReposCommand,
-    ResumeCommand, ServerCommand,
+    ResumeCommand, SandboxCommand, SandboxFsProfile, SandboxNetworkPolicy, ServerCommand,
 };
 use std::path::PathBuf;
+
+#[test]
+fn parses_sandbox_run_read_only_defaults() {
+    let cli = Cli::try_parse_from(["stateful", "sandbox", "run", "--command", "rg auth src"])
+        .expect("sandbox run should parse");
+
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Run {
+            fs,
+            network,
+            write_targets,
+            create_targets,
+            command,
+            timeout_seconds,
+        }) => {
+            assert_eq!(fs, SandboxFsProfile::ReadOnly);
+            assert_eq!(network, SandboxNetworkPolicy::Disabled);
+            assert!(write_targets.is_empty());
+            assert!(create_targets.is_empty());
+            assert_eq!(command, "rg auth src");
+            assert_eq!(timeout_seconds, None);
+        }
+        other => panic!("expected sandbox run command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_sandbox_run_write_targets_network_enabled() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "run",
+        "--fs",
+        "write-targets",
+        "--network",
+        "enabled",
+        "--write-target",
+        "README.md",
+        "--create-target",
+        "docs/new.md",
+        "--timeout-seconds",
+        "12",
+        "--command",
+        "printf x > README.md",
+    ])
+    .expect("sandbox run should parse");
+
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Run {
+            fs,
+            network,
+            write_targets,
+            create_targets,
+            command,
+            timeout_seconds,
+        }) => {
+            assert_eq!(fs, SandboxFsProfile::WriteTargets);
+            assert_eq!(network, SandboxNetworkPolicy::Enabled);
+            assert_eq!(write_targets, vec!["README.md"]);
+            assert_eq!(create_targets, vec!["docs/new.md"]);
+            assert_eq!(command, "printf x > README.md");
+            assert_eq!(timeout_seconds, Some(12));
+        }
+        other => panic!("expected sandbox run command, got {other:?}"),
+    }
+}
+
+#[test]
+fn sandbox_run_rejects_missing_command() {
+    let error = Cli::try_parse_from(["stateful", "sandbox", "run"])
+        .expect_err("sandbox run requires --command");
+
+    assert!(error.to_string().contains("--command"));
+}
 
 #[test]
 fn parses_structured_commit_command() {

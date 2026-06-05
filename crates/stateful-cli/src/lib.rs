@@ -15,6 +15,7 @@ mod outbox;
 mod push;
 mod repo_registry;
 mod runtime;
+mod sandbox;
 mod server_lifecycle;
 mod validation;
 
@@ -48,6 +49,7 @@ pub use runtime::{
     read_current_session_file_for_codex_run, write_current_session_file,
     write_current_session_file_for_codex_run, write_global_runtime_file, write_runtime_file,
 };
+pub use sandbox::{SandboxFsProfile, SandboxNetworkPolicy};
 pub use server_lifecycle::{
     ServerStartOptions, detached_server_args, ensure_server, ensure_server_with,
     ensure_server_with_options, runtime_is_healthy, stop_server,
@@ -119,6 +121,8 @@ pub enum Command {
         #[arg(num_args = 0.., allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
+    #[command(subcommand)]
+    Sandbox(SandboxCommand),
     Enable {
         #[arg(long)]
         repo: Option<PathBuf>,
@@ -160,6 +164,24 @@ pub enum ServerCommand {
     },
     Stop,
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SandboxCommand {
+    Run {
+        #[arg(long, value_enum, default_value = "read-only")]
+        fs: SandboxFsProfile,
+        #[arg(long, value_enum, default_value = "disabled")]
+        network: SandboxNetworkPolicy,
+        #[arg(long = "write-target")]
+        write_targets: Vec<String>,
+        #[arg(long = "create-target")]
+        create_targets: Vec<String>,
+        #[arg(long)]
+        command: String,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -382,6 +404,9 @@ pub fn run() -> anyhow::Result<()> {
                 args,
             })?;
             std::process::exit(code);
+        }
+        Command::Sandbox(SandboxCommand::Run { .. }) => {
+            anyhow::bail!("stateful sandbox run is not implemented yet");
         }
         Command::Enable {
             repo,
