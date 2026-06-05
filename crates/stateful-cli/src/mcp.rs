@@ -8,9 +8,10 @@ use serde_json::Value;
 use stateful_mcp::{ToolCall, map_tool_to_http, protocol_tool_name, tool_descriptors};
 
 use crate::{
-    GlobalPaths, HttpResponse, IntentDeclareArgs, RepoGate, RepoIdentity, ServerRuntime,
-    discover_runtime_with_global, ensure_server, get_json, intent_declare_protocol_body, post_json,
-    protocol_envelope, read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
+    CurrentSession, GlobalPaths, HttpResponse, IntentDeclareArgs, RepoGate, RepoIdentity,
+    ServerRuntime, discover_runtime_with_global, ensure_server, get_json,
+    intent_declare_protocol_body, post_json, protocol_envelope, read_current_session_file,
+    repo_gate, repo_identity_for_enabled_repo,
 };
 
 pub fn call_mcp_tool_in_repo(
@@ -20,8 +21,15 @@ pub fn call_mcp_tool_in_repo(
 ) -> anyhow::Result<HttpResponse> {
     let start = repo_root.as_ref();
     let paths = GlobalPaths::from_env()?;
+    let tool_name = tool_name.into();
+    let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;
     let repo_root = match repo_gate(&paths, start)? {
         RepoGate::Enabled { repo_root } => {
+            if let Some(response) =
+                reject_mismatched_current_session(protocol_name, &arguments, &repo_root)
+            {
+                return Ok(response);
+            }
             ensure_server(&paths)?;
             repo_root
         }
@@ -51,6 +59,10 @@ fn call_mcp_tool(
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;
     if protocol_name == "state.file.write" {
         return call_file_write_tool(runtime, repo_root, paths, arguments);
+    }
+    if let Some(response) = reject_mismatched_current_session(protocol_name, &arguments, repo_root)
+    {
+        return Ok(response);
     }
 
     let tool = ToolCall::new(
@@ -92,16 +104,20 @@ fn call_file_write_tool(
         Ok(path) => path,
         Err(error) => return Ok(error_response(400, error.to_string())),
     };
-    let current_session = if args.session_id.is_none() || args.workspace_id.is_none() {
-        read_current_session_file(repo_root).ok()
-    } else {
-        None
-    };
-    let session_id = match args.session_id.or_else(|| {
-        current_session
-            .as_ref()
-            .map(|session| session.session_id.clone())
-    }) {
+    let current_session = read_current_session_file(repo_root).ok();
+    if let Some(response) = reject_argument_session_mismatch(
+        "state.file.write",
+        args.session_id.as_deref(),
+        args.workspace_id.as_deref(),
+        current_session.as_ref(),
+    ) {
+        return Ok(response);
+    }
+    let session_id = match current_session
+        .as_ref()
+        .map(|session| session.session_id.clone())
+        .or(args.session_id)
+    {
         Some(session_id) => session_id,
         None => {
             return Ok(error_response(
@@ -110,9 +126,9 @@ fn call_file_write_tool(
             ));
         }
     };
-    let workspace_id = args
-        .workspace_id
-        .or_else(|| current_session.map(|session| session.workspace_id))
+    let workspace_id = current_session
+        .map(|session| session.workspace_id)
+        .or(args.workspace_id)
         .unwrap_or_else(|| runtime.workspace_id.clone());
 
     let response =
@@ -142,6 +158,86 @@ fn call_file_write_tool(
         })
         .to_string(),
     })
+}
+
+fn reject_mismatched_current_session(
+    protocol_name: &str,
+    arguments: &Value,
+    repo_root: &Path,
+) -> Option<HttpResponse> {
+    if !is_session_bound_mcp_tool(protocol_name) {
+        return None;
+    }
+    let current_session = read_current_session_file(repo_root).ok()?;
+    let object = arguments.as_object()?;
+    reject_argument_session_mismatch(
+        protocol_name,
+        object.get("session_id").and_then(Value::as_str),
+        object.get("workspace_id").and_then(Value::as_str),
+        Some(&current_session),
+    )
+}
+
+fn reject_argument_session_mismatch(
+    tool_name: &str,
+    session_id: Option<&str>,
+    workspace_id: Option<&str>,
+    current_session: Option<&CurrentSession>,
+) -> Option<HttpResponse> {
+    let current_session = current_session?;
+    if let Some(session_id) = session_id
+        && session_id != current_session.session_id
+    {
+        return Some(current_session_mismatch_response(
+            tool_name,
+            "session_id",
+            session_id,
+            &current_session.session_id,
+        ));
+    }
+    if let Some(workspace_id) = workspace_id
+        && workspace_id != current_session.workspace_id
+    {
+        return Some(current_session_mismatch_response(
+            tool_name,
+            "workspace_id",
+            workspace_id,
+            &current_session.workspace_id,
+        ));
+    }
+    None
+}
+
+fn current_session_mismatch_response(
+    tool_name: &str,
+    field: &str,
+    requested: &str,
+    current: &str,
+) -> HttpResponse {
+    error_response(
+        403,
+        format!(
+            "{tool_name} cannot use {field} `{requested}` while the current stateful session uses `{current}`"
+        ),
+    )
+}
+
+fn is_session_bound_mcp_tool(protocol_name: &str) -> bool {
+    matches!(
+        protocol_name,
+        "state.session.register"
+            | "state.session.heartbeat"
+            | "state.intent.declare"
+            | "state.lease.acquire"
+            | "state.lease.release"
+            | "state.activity.observe"
+            | "state.activity.finalize"
+            | "state.conflicts.check"
+            | "state.reconcile.ack"
+            | "state.file.write"
+            | "state.notifications.poll"
+            | "state.resume.next"
+    )
 }
 
 fn authorize_file_write(

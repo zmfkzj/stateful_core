@@ -198,6 +198,44 @@ fn mcp_file_write_posts_authorize_and_writes_repo_file() {
 }
 
 #[test]
+fn mcp_file_write_refuses_session_id_that_differs_from_current_session() {
+    let temp_root = temp_root("stateful-mcp-file-write-session-mismatch");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "mcp",
+            "call",
+            "state_file_write",
+            r#"{"session_id":"s-other","workspace_id":"w1","path":"src/auth.ts","contents":"wrong session\n"}"#,
+        ],
+    );
+
+    assert!(
+        !output.status.success(),
+        "mismatched session write should fail"
+    );
+    assert!(
+        !repo_root.join("src/auth.ts").exists(),
+        "mismatched session should not write the file"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("current stateful session"),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn mcp_file_write_refuses_outside_repo_path_before_writing() {
     let temp_root = temp_root("stateful-mcp-file-write-outside");
     let paths = GlobalPaths::new(temp_root.join("home"));
@@ -526,6 +564,48 @@ fn mcp_intent_declare_defaults_to_current_hook_session() {
     assert_eq!(json["jsonrpc"], "2.0");
     assert_eq!(json["id"], 3);
     assert_eq!(json["result"]["isError"], false);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_intent_declare_refuses_session_id_that_differs_from_current_session() {
+    let temp_root = temp_root("stateful-mcp-intent-session-mismatch");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+
+    let response = run_mcp_jsonrpc_in_repo(
+        &repo_root,
+        &paths,
+        r#"{
+          "jsonrpc":"2.0",
+          "id":4,
+          "method":"tools/call",
+          "params":{
+            "name":"state_intent_declare",
+            "arguments":{
+              "session_id":"s-other",
+              "workspace_id":"w1",
+              "files_planned":["src/auth.ts"]
+            }
+          }
+        }"#,
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 4);
+    assert_eq!(json["result"]["isError"], true);
+    assert!(
+        json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("current stateful session")
+    );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

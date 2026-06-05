@@ -225,17 +225,20 @@ the state server, not in duplicated hook scripts.
 
 V1 enforcement is strict about write target extraction:
 
-- `apply_patch`: enforce by parsing patch file headers.
-- MCP filesystem write/edit/delete/rename tools: enforce using structured tool
-  arguments.
+- `state_file_write` / `state.file.write`: enforce using structured file
+  arguments before writing.
+- Native Codex edit tools such as `apply_patch`, `Edit`, and `Write`: hook
+  targets can be inspected when the runtime exposes them, but the
+  `stateful codex` read-only tmp profile does not make them the normal repo
+  write path.
 - Bash read and search commands: allow when they do not appear to write.
 - Test execution: run only through controlled validation actions such as
   `state.validation.run`.
 - Bash commands that appear to write, mutate, generate files, or have ambiguous
   write targets: deny by default.
 
-Denied Bash writes should direct the agent to use `apply_patch` or a structured
-MCP filesystem write tool after declaring file or directory intent.
+Denied Bash writes should direct the agent to declare intent and use
+`state_file_write` / `state.file.write` for repo file changes.
 
 The Bash classifier is allowlist-based. Initial read/search commands include:
 

@@ -3,9 +3,15 @@ use serde::{Deserialize, Serialize};
 use stateful_core::{IntentScope, PolicyState};
 use std::path::Path;
 use thiserror::Error;
+use time::{Date, Duration, Month, OffsetDateTime, Time};
 use uuid::Uuid;
 
 pub const CRATE_NAME: &str = "stateful-store";
+
+const INTENT_TTL_SECONDS: i64 = 900;
+const LEASE_TTL_SECONDS: i64 = 300;
+const RESERVATION_TTL_SECONDS: i64 = 120;
+const ACTIVITY_TTL_SECONDS: i64 = 900;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -116,6 +122,7 @@ impl Store {
     }
 
     pub fn current_summary(&self) -> StoreResult<CurrentSummary> {
+        self.expire_stale()?;
         let session_count = self
             .conn
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| {
@@ -206,7 +213,7 @@ impl Store {
             params![
                 Uuid::new_v4().to_string(),
                 session_id.as_ref(),
-                "2026-05-31T00:00:00Z",
+                now_timestamp(),
             ],
         )?;
 
@@ -259,7 +266,9 @@ impl Store {
         workspace_id: impl AsRef<str>,
         relative_path: impl AsRef<str>,
     ) -> StoreResult<()> {
+        self.expire_stale()?;
         let relative_path = normalize_relative_path(relative_path.as_ref());
+        let now = now_timestamp();
         self.conn.execute(
             "INSERT INTO leases (
                 lease_id,
@@ -276,7 +285,7 @@ impl Store {
                 session_id.as_ref(),
                 workspace_id.as_ref(),
                 relative_path,
-                "2026-05-31T00:15:00Z",
+                timestamp_after(&now, LEASE_TTL_SECONDS),
             ],
         )?;
 
@@ -289,6 +298,7 @@ impl Store {
         workspace_id: impl AsRef<str>,
         relative_path: impl AsRef<str>,
     ) -> StoreResult<()> {
+        self.expire_stale()?;
         let relative_path = normalize_relative_path(relative_path.as_ref());
         let workspace_id = workspace_id.as_ref().to_string();
         self.conn.execute(
@@ -307,6 +317,7 @@ impl Store {
         session_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<u64> {
+        self.expire_stale()?;
         let mut statement = self.conn.prepare(
             "SELECT relative_path FROM leases
              WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'",
@@ -338,6 +349,7 @@ impl Store {
         workspace_id: impl AsRef<str>,
         relative_path: impl AsRef<str>,
     ) -> StoreResult<Option<String>> {
+        self.expire_stale()?;
         let relative_path = normalize_relative_path(relative_path.as_ref());
         self.conn
             .query_row(
@@ -360,6 +372,7 @@ impl Store {
         action: impl AsRef<str>,
         blocking_session_id: Option<&str>,
     ) -> StoreResult<WaitRecord> {
+        self.expire_stale()?;
         let relative_path = normalize_relative_path(relative_path.as_ref());
         let existing = self
             .conn
@@ -406,7 +419,7 @@ impl Store {
                 workspace_id.as_ref(),
                 relative_path,
                 action.as_ref(),
-                "2026-05-31T00:00:00Z",
+                now_timestamp(),
                 blocking_session_id,
             ],
         )?;
@@ -441,7 +454,23 @@ impl Store {
         workspace_id: impl AsRef<str>,
         relative_path: impl AsRef<str>,
     ) -> StoreResult<Option<WaitRecord>> {
+        let workspace_id = workspace_id.as_ref().to_string();
         let relative_path = normalize_relative_path(relative_path.as_ref());
+        let active_reservation = self
+            .conn
+            .query_row(
+                "SELECT wait_id FROM wait_queue
+                 WHERE workspace_id = ?1 AND relative_path = ?2 AND status = 'reserved'
+                 ORDER BY rowid ASC
+                 LIMIT 1",
+                params![workspace_id, relative_path],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(wait_id) = active_reservation {
+            return self.waiter(&wait_id);
+        }
+
         let wait_id = self
             .conn
             .query_row(
@@ -449,7 +478,7 @@ impl Store {
                  WHERE workspace_id = ?1 AND relative_path = ?2 AND status = 'queued'
                  ORDER BY rowid ASC
                  LIMIT 1",
-                params![workspace_id.as_ref(), relative_path],
+                params![workspace_id, relative_path],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
@@ -458,11 +487,12 @@ impl Store {
             return Ok(None);
         };
 
+        let now = now_timestamp();
         self.conn.execute(
             "UPDATE wait_queue
              SET status = 'reserved', reservation_expires_at = ?1
              WHERE wait_id = ?2 AND status = 'queued'",
-            params!["2026-05-31T00:02:00Z", wait_id],
+            params![timestamp_after(&now, RESERVATION_TTL_SECONDS), wait_id],
         )?;
 
         let waiter = self.waiter(&wait_id)?;
@@ -488,6 +518,7 @@ impl Store {
         workspace_id: impl AsRef<str>,
         relative_path: impl AsRef<str>,
     ) -> StoreResult<Option<WaitRecord>> {
+        self.expire_stale()?;
         let relative_path = normalize_relative_path(relative_path.as_ref());
         self.conn
             .query_row(
@@ -527,6 +558,7 @@ impl Store {
         session_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<Option<WaitRecord>> {
+        self.expire_stale()?;
         self.conn
             .query_row(
                 "SELECT
@@ -555,6 +587,7 @@ impl Store {
         wait_id: impl AsRef<str>,
         session_id: impl AsRef<str>,
     ) -> StoreResult<()> {
+        self.expire_stale()?;
         let waiter = self.waiter(wait_id.as_ref())?;
         let Some(waiter) = waiter else {
             return Err(StoreError::ReservationOwnerMismatch);
@@ -599,6 +632,7 @@ impl Store {
         &self,
         target_session_id: impl AsRef<str>,
     ) -> StoreResult<Vec<NotificationRecord>> {
+        self.expire_stale()?;
         let mut statement = self.conn.prepare(
             "SELECT
                 notification_id,
@@ -626,6 +660,7 @@ impl Store {
         kind: &str,
         payload: serde_json::Value,
     ) -> StoreResult<()> {
+        let now = now_timestamp();
         self.conn.execute(
             "INSERT INTO notifications (
                 notification_id,
@@ -643,8 +678,8 @@ impl Store {
                 workspace_id,
                 kind,
                 payload.to_string(),
-                "2026-05-31T00:00:00Z",
-                "2026-05-31T00:02:00Z",
+                now,
+                timestamp_after(&now, RESERVATION_TTL_SECONDS),
             ],
         )?;
 
@@ -656,6 +691,7 @@ impl Store {
         session_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<()> {
+        let now = now_timestamp();
         self.conn.execute(
             "INSERT INTO activities (
                 activity_id,
@@ -667,7 +703,7 @@ impl Store {
                 Uuid::new_v4().to_string(),
                 session_id.as_ref(),
                 workspace_id.as_ref(),
-                "2026-05-31T00:15:00Z",
+                timestamp_after(&now, ACTIVITY_TTL_SECONDS),
             ],
         )?;
 
@@ -703,6 +739,7 @@ impl Store {
     }
 
     pub fn policy_state_for_session(&self, session_id: &str) -> StoreResult<PolicyState> {
+        self.expire_stale()?;
         let scopes = self
             .conn
             .query_row(
@@ -724,6 +761,57 @@ impl Store {
         })?;
 
         Ok(PolicyState::default().with_active_intent_scopes(scopes))
+    }
+
+    pub fn expire_stale(&self) -> StoreResult<()> {
+        self.expire_stale_at(&now_timestamp())
+    }
+
+    pub fn expire_stale_at(&self, now: &str) -> StoreResult<()> {
+        self.conn.execute(
+            "UPDATE intents
+             SET status = 'expired'
+             WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?1",
+            [now],
+        )?;
+
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT workspace_id, relative_path FROM leases
+             WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?1",
+        )?;
+        let expired_leases = statement
+            .query_map([now], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        self.conn.execute(
+            "UPDATE leases
+             SET status = 'expired'
+             WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?1",
+            [now],
+        )?;
+        for (workspace_id, relative_path) in expired_leases {
+            self.promote_next_waiter(workspace_id, relative_path)?;
+        }
+
+        self.conn.execute(
+            "UPDATE wait_queue
+             SET status = 'expired'
+             WHERE status = 'reserved'
+                AND reservation_expires_at IS NOT NULL
+                AND reservation_expires_at <= ?1",
+            [now],
+        )?;
+        self.conn.execute(
+            "UPDATE notifications
+             SET status = 'expired'
+             WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?1",
+            [now],
+        )?;
+
+        Ok(())
     }
 
     fn migrate(&self) -> StoreResult<()> {
@@ -967,7 +1055,7 @@ impl Store {
                         event.workspace_id,
                         scopes_json,
                         event.created_at,
-                        "2026-05-31T00:15:00Z",
+                        timestamp_after(&event.created_at, INTENT_TTL_SECONDS),
                     ],
                 )?;
             }
@@ -1012,6 +1100,53 @@ fn normalize_relative_path(path: &str) -> String {
             segments
         })
         .join("/")
+}
+
+fn now_timestamp() -> String {
+    format_timestamp(OffsetDateTime::now_utc())
+}
+
+fn timestamp_after(timestamp: &str, seconds: i64) -> String {
+    let base = parse_timestamp(timestamp).unwrap_or_else(OffsetDateTime::now_utc);
+    format_timestamp(base + Duration::seconds(seconds))
+}
+
+fn parse_timestamp(timestamp: &str) -> Option<OffsetDateTime> {
+    let timestamp = timestamp.strip_suffix('Z')?;
+    let (date, time) = timestamp.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i32>().ok()?;
+    let month = date_parts.next()?.parse::<u8>().ok()?;
+    let day = date_parts.next()?.parse::<u8>().ok()?;
+    if date_parts.next().is_some() {
+        return None;
+    }
+
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next()?.parse::<u8>().ok()?;
+    let minute = time_parts.next()?.parse::<u8>().ok()?;
+    let second_text = time_parts.next()?.split('.').next()?;
+    let second = second_text.parse::<u8>().ok()?;
+    if time_parts.next().is_some() {
+        return None;
+    }
+
+    let month = Month::try_from(month).ok()?;
+    let date = Date::from_calendar_date(year, month, day).ok()?;
+    let time = Time::from_hms(hour, minute, second).ok()?;
+    Some(date.with_time(time).assume_utc())
+}
+
+fn format_timestamp(timestamp: OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        timestamp.year(),
+        u8::from(timestamp.month()),
+        timestamp.day(),
+        timestamp.hour(),
+        timestamp.minute(),
+        timestamp.second()
+    )
 }
 
 fn wait_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WaitRecord> {
@@ -1080,7 +1215,7 @@ impl Event {
             worktree_id: None,
             root: None,
             branch: None,
-            created_at: "2026-05-31T00:00:00Z".to_string(),
+            created_at: now_timestamp(),
         }
     }
 
@@ -1104,7 +1239,7 @@ impl Event {
             worktree_id: None,
             root: None,
             branch: None,
-            created_at: "2026-05-31T00:00:00Z".to_string(),
+            created_at: now_timestamp(),
         }
     }
 
@@ -1164,7 +1299,7 @@ impl Event {
             worktree_id: None,
             root: None,
             branch: None,
-            created_at: "2026-05-31T00:00:00Z".to_string(),
+            created_at: now_timestamp(),
         }
     }
 }

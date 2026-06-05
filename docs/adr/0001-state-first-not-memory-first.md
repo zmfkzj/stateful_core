@@ -46,8 +46,9 @@ a 60-minute maximum from declaration. Blocked or finalized work does not
 authorize writes.
 
 V1 denies Bash commands that appear to write or have ambiguous mutation targets.
-Write authorization starts with `apply_patch` and structured MCP filesystem
-write tools where target paths can be checked.
+For the `stateful codex` read-only tmp profile, write authorization starts with
+the stateful structured write path, `state_file_write` / `state.file.write`,
+where target paths can be checked before writing.
 Raw Bash test commands are not allowlisted; tests run through controlled
 validation actions such as `state.validation.run`.
 

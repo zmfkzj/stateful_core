@@ -213,9 +213,9 @@ stateful enable --repo-local-codex
 - `stateful validate <profile>` runs a configured validation profile.
 - `stateful commit -m <message> -- <paths...>` creates a structured commit for
   explicit file paths. The `--` separator is required.
-- `stateful codex [--codex-bin <path>] [--sandbox read-only-tmp] -- <args...>`
+- `stateful codex [--codex-bin <path>] [--sandbox read-only-tmp] [--no-stateful] -- <args...>`
   runs Codex with the stateful read-only tmp profile and rejects sandbox
-  overrides.
+  overrides. `--no-stateful` disables Codex lifecycle hooks for that run.
 - `stateful mcp serve` exposes the MCP adapter over stdio.
 - `stateful mcp call <tool> [arguments_json]` calls an MCP tool through the
   local HTTP server.
@@ -234,10 +234,13 @@ authorizes writes one or two path segments below that directory. Delete,
 rename, and move operations require exact file intents for the affected paths;
 directory intent does not authorize them.
 
-For Codex hooks, `apply_patch`, `file_change`, `Edit`, and `Write` targets are
-normalized relative to the enabled repo before authorization. Ambiguous or
-mutating Bash commands are denied by default unless they match the read-only
-allowlist or the trusted `stateful codex` read-only tmp sandbox profile.
+The `stateful codex` wrapper runs Codex in a read-only tmp profile, so native
+Codex edit tools such as `apply_patch`, `Edit`, and `Write` are not the normal
+repo write path for that mode. Repo file writes should use the stateful
+structured write path, `state_file_write` / `state.file.write`, after declaring
+intent. Ambiguous or mutating Bash commands are denied by default unless they
+match the read-only allowlist or the trusted `stateful codex` read-only tmp
+sandbox profile.
 
 ## HTTP And MCP Surface
 

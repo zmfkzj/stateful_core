@@ -347,15 +347,16 @@ V1 write enforcement is limited to tool paths where targets can be determined
 reliably:
 
 ```text
-apply_patch -> enforce from patch file headers
-MCP filesystem write/edit/delete/rename -> enforce from structured arguments
+state_file_write / state.file.write -> enforce from structured file arguments
+native Codex edit tools -> inspectable by hook when exposed, but not the normal
+  repo write path under the stateful read-only tmp profile
 Bash read/search -> allow when no mutation is detected
 test execution -> run through controlled validation action
 Bash write or ambiguous mutation -> deny by default
 ```
 
-Bash write denial should tell the agent to use `apply_patch` or a structured
-MCP filesystem write tool after declaring file or directory intent.
+Bash write denial should tell the agent to declare file or directory intent and
+use `state_file_write` / `state.file.write` for repo file changes.
 
 The Bash classifier is allowlist-based. Initial read/search commands include:
 

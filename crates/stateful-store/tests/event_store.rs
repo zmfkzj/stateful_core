@@ -67,6 +67,28 @@ fn intent_declared_materializes_active_policy_state() {
 }
 
 #[test]
+fn expired_intent_is_not_write_authorizing_or_counted_active() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    let mut stale_intent = Event::intent_declared("stale-session", "w1", ["src/auth.ts"]);
+    stale_intent.created_at = "1970-01-01T00:00:00Z".to_string();
+
+    store
+        .append(stale_intent)
+        .expect("stale intent event should append");
+
+    let state = store
+        .policy_state_for_session("stale-session")
+        .expect("policy state should load");
+    let decision =
+        stateful_core::authorize_action(&state, AuthorizationInput::write_file("src/auth.ts"));
+    let summary = store.current_summary().expect("summary should load");
+
+    assert_eq!(decision.decision, DecisionKind::Deny);
+    assert_eq!(decision.reason_code, "missing_intent");
+    assert_eq!(summary.active_intent_count, 0);
+}
+
+#[test]
 fn file_store_persists_events_and_materialized_views_across_reopen() {
     let temp_root =
         std::env::temp_dir().join(format!("stateful-store-file-{}", std::process::id()));
@@ -300,6 +322,40 @@ fn active_lease_owner_uses_normalized_relative_paths() {
             .expect("lease owner should load"),
         Some("s1".to_string())
     );
+}
+
+#[test]
+fn expired_lease_is_not_returned_as_active_owner() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-expired-lease-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    store
+        .acquire_lease("stale-session", "w1", "src/auth.ts")
+        .expect("lease should acquire");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
+    conn.execute("UPDATE leases SET expires_at = '1970-01-01T00:00:00Z'", [])
+        .expect("lease should be made stale");
+    drop(conn);
+
+    let store = Store::open(&db_path).expect("file store should reopen");
+    assert_eq!(
+        store
+            .active_lease_owner("w1", "src/auth.ts")
+            .expect("lease owner should load"),
+        None
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]

@@ -866,6 +866,10 @@ Stateful hooks are authoritative. Use this skill to choose policy-aligned comman
 
 - Declare intent for planned files first: `stateful intent declare <paths...>`.
 - Keep declared paths narrow; prefer exact files for edits, deletes, and renames.
+- In `stateful codex` read-only tmp mode, use `state_file_write` /
+  `state.file.write` for repo file writes after declaring intent. Native Codex
+  edit tools such as `apply_patch`, `Edit`, and `Write` remain subject to the
+  Codex filesystem sandbox.
 - If a hook denies an action, read the denial and choose the documented alternative instead of retrying variants.
 
 ## Prefer
@@ -887,7 +891,8 @@ Stateful hooks are authoritative. Use this skill to choose policy-aligned comman
 
 - Do not retry the same command with small variations.
 - Declare or narrow intent if the denial asks for scope.
-- Use structured edit tools for file changes and validation profiles for controlled checks.
+- Use `state_file_write` / `state.file.write` for repo file changes in
+  `stateful codex` read-only tmp mode, and validation profiles for controlled checks.
 - If no policy-compliant path is available, report the exact command and denial reason.
 "#
 }

@@ -125,7 +125,7 @@ server result.
 ```text
 action:
   read | search | diff
-  write_file | edit_file | apply_patch
+  write_file
   delete_file | rename_file | move_file
   bash
   validation_run
@@ -141,9 +141,11 @@ validation_profile
 override_instruction
 ```
 
-For `apply_patch`, the hook adapter extracts targets from patch file headers
-before calling `/v1/authorize`. For structured MCP filesystem tools, targets
-come from tool arguments. For Bash, the adapter sends the command string and any
+`state.file.write` maps to `write_file` and supplies the target path through
+structured tool arguments before calling `/v1/authorize`. Native Codex edit
+tools such as `apply_patch`, `Edit`, and `Write` may expose targets to hooks,
+but the `stateful codex` read-only tmp profile does not rely on them as the
+normal repo write path. For Bash, the adapter sends the command string and any
 extracted paths; ambiguous mutation targets are denied by default.
 
 ## Decision Output
@@ -456,7 +458,7 @@ V1 must have tests for:
 - intent scope matching, including depth-2 directory behavior
 - exact file scope for delete, rename, and move
 - Bash allowlist and mutation-deny classification
-- hook input fixtures for `apply_patch`, Bash, and structured filesystem tools
+- `state_file_write` authorization plus Bash and native Codex edit hook fixtures
 - prompt renderer golden output for brief and detailed modes
 - SQLite event append plus materialized-view transaction behavior
 - validation profile execution in a temporary git worktree

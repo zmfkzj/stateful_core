@@ -102,11 +102,14 @@ intent can provide context but does not permit writes. Codex lifecycle hooks
 provide the enforcement surface. This is a coordination guardrail, not a
 complete sandbox or security boundary.
 
-V1 only authorizes writes through tool paths with reliable target extraction:
-`apply_patch` and structured MCP filesystem write tools. Bash commands that
-appear to write or have ambiguous mutation targets are denied by default.
-Raw Bash test commands are not allowlisted; tests run through controlled
-validation actions.
+V1 only authorizes writes through tool paths with reliable target extraction.
+For the `stateful codex` read-only tmp profile, repo file writes use the
+stateful structured write path, `state_file_write` / `state.file.write`, after
+declared intent. Native Codex edit tools such as `apply_patch`, `Edit`, and
+`Write` remain subject to the Codex filesystem sandbox and are not the normal
+repo write path in that mode. Bash commands that appear to write or have
+ambiguous mutation targets are denied by default. Raw Bash test commands are not
+allowlisted; tests run through controlled validation actions.
 
 ## Product Shape
 
