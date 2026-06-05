@@ -1,9 +1,7 @@
 use std::{
-    collections::BTreeSet,
     fs,
     io::{Read, Write},
-    path::{Path, PathBuf},
-    time::Duration,
+    path::Path,
 };
 
 use serde_json::Value;
@@ -14,7 +12,6 @@ use crate::{
     ServerRuntime, discover_runtime_with_global, ensure_server, get_json,
     intent_declare_protocol_body, post_json, protocol_envelope, read_current_session_file,
     repo_gate, repo_identity_for_enabled_repo,
-    sandbox::{SandboxNetworkPolicy, run_sandboxed_command},
 };
 
 pub fn call_mcp_tool_in_repo(
@@ -25,6 +22,12 @@ pub fn call_mcp_tool_in_repo(
     let start = repo_root.as_ref();
     let paths = GlobalPaths::from_env()?;
     let tool_name = tool_name.into();
+    if matches!(tool_name.as_str(), "state_bash_write" | "state.bash.write") {
+        return Ok(error_response(
+            410,
+            "state_bash_write was removed; use `stateful sandbox run ... --command ...`.",
+        ));
+    }
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;
     let repo_root = match repo_gate(&paths, start)? {
         RepoGate::Enabled { repo_root } => {
@@ -62,9 +65,6 @@ fn call_mcp_tool(
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;
     if protocol_name == "state.file.write" {
         return call_file_write_tool(runtime, repo_root, paths, arguments);
-    }
-    if protocol_name == "state.bash.write" {
-        return call_bash_write_tool(runtime, repo_root, paths, arguments);
     }
     if let Some(response) = reject_mismatched_current_session(protocol_name, &arguments, repo_root)
     {
@@ -166,127 +166,6 @@ fn call_file_write_tool(
     })
 }
 
-fn call_bash_write_tool(
-    runtime: &ServerRuntime,
-    repo_root: &Path,
-    paths: &GlobalPaths,
-    arguments: Value,
-) -> anyhow::Result<HttpResponse> {
-    let args = match serde_json::from_value::<BashWriteArguments>(arguments) {
-        Ok(args) => args,
-        Err(error) => {
-            return Ok(error_response(
-                400,
-                format!("invalid state.bash.write arguments: {error}"),
-            ));
-        }
-    };
-    if args.command.trim().is_empty() {
-        return Ok(error_response(400, "state.bash.write command is required"));
-    }
-    let write_targets = match normalize_bash_target_paths("write_targets", &args.write_targets) {
-        Ok(paths) => paths,
-        Err(error) => return Ok(error_response(400, error.to_string())),
-    };
-    let create_targets = match normalize_bash_target_paths("create_targets", &args.create_targets) {
-        Ok(paths) => paths,
-        Err(error) => return Ok(error_response(400, error.to_string())),
-    };
-    let current_session = read_current_session_file(repo_root).ok();
-    if let Some(response) = reject_argument_session_mismatch(
-        "state.bash.write",
-        args.session_id.as_deref(),
-        args.workspace_id.as_deref(),
-        current_session.as_ref(),
-    ) {
-        return Ok(response);
-    }
-    let session_id = match current_session
-        .as_ref()
-        .map(|session| session.session_id.clone())
-        .or(args.session_id)
-    {
-        Some(session_id) => session_id,
-        None => {
-            return Ok(error_response(
-                400,
-                "state.bash.write requires session_id or a current stateful session file",
-            ));
-        }
-    };
-    let workspace_id = current_session
-        .map(|session| session.workspace_id)
-        .or(args.workspace_id)
-        .unwrap_or_else(|| runtime.workspace_id.clone());
-
-    let mut allowed = Vec::new();
-    let mut denied = Vec::new();
-    for path in write_targets.iter().chain(create_targets.iter()) {
-        let response =
-            authorize_file_write(runtime, repo_root, paths, &session_id, &workspace_id, path)?;
-        let body = serde_json::from_str::<Value>(&response.body)
-            .unwrap_or_else(|_| serde_json::json!({ "message": response.body }));
-        if (200..300).contains(&response.status_code)
-            && body.get("decision").and_then(Value::as_str) == Some("allow")
-        {
-            allowed.push(path.clone());
-        } else {
-            denied.push(serde_json::json!({
-                "path": path,
-                "authorization": body,
-            }));
-        }
-    }
-
-    if !denied.is_empty() {
-        return Ok(HttpResponse {
-            status_code: 403,
-            body: serde_json::json!({
-                "status": "error",
-                "message": "state.bash.write target authorization denied",
-                "allowed_write_targets": allowed,
-                "denied_write_targets": denied,
-            })
-            .to_string(),
-        });
-    }
-
-    let cwd = match resolve_bash_cwd(repo_root, args.cwd.as_deref()) {
-        Ok(cwd) => cwd,
-        Err(error) => return Ok(error_response(400, error.to_string())),
-    };
-    let writable_files =
-        match prepare_bash_writable_files(repo_root, &write_targets, &create_targets) {
-            Ok(paths) => paths,
-            Err(error) => return Ok(error_response(400, error.to_string())),
-        };
-    let timeout = Duration::from_secs(args.timeout_seconds.unwrap_or(300).max(1));
-
-    let run = match run_sandboxed_command(
-        &args.command,
-        &cwd,
-        &writable_files,
-        SandboxNetworkPolicy::Disabled,
-        timeout,
-    ) {
-        Ok(run) => run,
-        Err(error) => return Ok(error_response(500, error.to_string())),
-    };
-
-    Ok(HttpResponse {
-        status_code: 200,
-        body: serde_json::json!({
-            "status": run.status,
-            "exit_code": run.exit_code,
-            "stdout": run.stdout,
-            "stderr": run.stderr,
-            "allowed_write_targets": allowed,
-            "denied_write_targets": [],
-        })
-        .to_string(),
-    })
-}
-
 fn reject_mismatched_current_session(
     protocol_name: &str,
     arguments: &Value,
@@ -362,7 +241,6 @@ fn is_session_bound_mcp_tool(protocol_name: &str) -> bool {
             | "state.conflicts.check"
             | "state.reconcile.ack"
             | "state.file.write"
-            | "state.bash.write"
             | "state.notifications.poll"
             | "state.resume.next"
     )
@@ -481,161 +359,6 @@ fn normalize_repo_file_path(path: &str) -> anyhow::Result<String> {
     }
 
     Ok(segments.join("/"))
-}
-
-fn normalize_bash_target_paths(field: &str, paths: &[String]) -> anyhow::Result<Vec<String>> {
-    if field == "write_targets" && paths.is_empty() {
-        anyhow::bail!("state.bash.write write_targets is required");
-    }
-    let mut seen = BTreeSet::new();
-    let mut normalized = Vec::new();
-    for path in paths {
-        let path = normalize_bash_target_path(field, path)?;
-        if seen.insert(path.clone()) {
-            normalized.push(path);
-        }
-    }
-
-    Ok(normalized)
-}
-
-fn normalize_bash_target_path(field: &str, path: &str) -> anyhow::Result<String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("state.bash.write {field} entries must not be empty");
-    }
-    if Path::new(trimmed).is_absolute() {
-        anyhow::bail!("state.bash.write {field} entries must be repo-relative");
-    }
-
-    let normalized = trimmed.replace('\\', "/");
-    let mut segments = Vec::new();
-    for segment in normalized.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            anyhow::bail!("state.bash.write {field} entries must stay inside the repo");
-        }
-        if is_git_internal_segment(segment) {
-            anyhow::bail!("state.bash.write refuses Git internals");
-        }
-        if segment.chars().any(char::is_control) {
-            anyhow::bail!("state.bash.write paths must not contain control characters");
-        }
-        segments.push(segment);
-    }
-
-    if segments.is_empty() {
-        anyhow::bail!("state.bash.write {field} entries must not be empty");
-    }
-
-    Ok(segments.join("/"))
-}
-
-fn resolve_bash_cwd(repo_root: &Path, cwd: Option<&str>) -> anyhow::Result<PathBuf> {
-    let canonical_repo = repo_root
-        .canonicalize()
-        .unwrap_or_else(|_| repo_root.to_path_buf());
-    let Some(cwd) = cwd else {
-        return Ok(canonical_repo);
-    };
-    let trimmed = cwd.trim();
-    if trimmed.is_empty() || trimmed == "." {
-        return Ok(canonical_repo);
-    }
-    if Path::new(trimmed).is_absolute() {
-        anyhow::bail!("state.bash.write cwd must be repo-relative");
-    }
-
-    let normalized = trimmed.replace('\\', "/");
-    let mut relative = PathBuf::new();
-    for segment in normalized.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            anyhow::bail!("state.bash.write cwd must stay inside the repo");
-        }
-        if is_git_internal_segment(segment) {
-            anyhow::bail!("state.bash.write refuses Git internals as cwd");
-        }
-        if segment.chars().any(char::is_control) {
-            anyhow::bail!("state.bash.write cwd must not contain control characters");
-        }
-        relative.push(segment);
-    }
-
-    if relative.as_os_str().is_empty() {
-        return Ok(canonical_repo);
-    }
-
-    let target = repo_root.join(relative);
-    let canonical = target
-        .canonicalize()
-        .map_err(|error| anyhow::anyhow!("state.bash.write cwd must exist: {error}"))?;
-    if !canonical.starts_with(&canonical_repo) {
-        anyhow::bail!("state.bash.write cwd escapes the repo");
-    }
-    if !canonical.is_dir() {
-        anyhow::bail!("state.bash.write cwd must be a directory");
-    }
-
-    Ok(canonical)
-}
-
-fn prepare_bash_writable_files(
-    repo_root: &Path,
-    write_targets: &[String],
-    create_targets: &[String],
-) -> anyhow::Result<Vec<PathBuf>> {
-    let create_set = create_targets
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-
-    for path in create_targets {
-        ensure_repo_file_target(repo_root, path).map_err(|error| {
-            anyhow::anyhow!("state.bash.write create target `{path}` is unsafe: {error}")
-        })?;
-        let target = repo_root.join(path);
-        let Some(parent) = target.parent() else {
-            anyhow::bail!("state.bash.write create target `{path}` has no parent directory");
-        };
-        fs::create_dir_all(parent)?;
-        if !target.exists() {
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&target)?;
-        }
-    }
-
-    for path in write_targets {
-        ensure_repo_file_target(repo_root, path).map_err(|error| {
-            anyhow::anyhow!("state.bash.write write target `{path}` is unsafe: {error}")
-        })?;
-        let target = repo_root.join(path);
-        if !target.exists() && !create_set.contains(path.as_str()) {
-            anyhow::bail!(
-                "state.bash.write write target `{path}` must already exist or be listed in create_targets"
-            );
-        }
-    }
-
-    let mut seen = BTreeSet::new();
-    let mut writable_files = Vec::new();
-    for path in write_targets.iter().chain(create_targets.iter()) {
-        if !seen.insert(path.clone()) {
-            continue;
-        }
-        let canonical = repo_root.join(path).canonicalize().map_err(|error| {
-            anyhow::anyhow!("state.bash.write target `{path}` must exist: {error}")
-        })?;
-        writable_files.push(canonical);
-    }
-
-    Ok(writable_files)
 }
 
 fn error_response(status_code: u16, message: impl Into<String>) -> HttpResponse {
@@ -763,22 +486,6 @@ struct FileWriteArguments {
     workspace_id: Option<String>,
     path: String,
     contents: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct BashWriteArguments {
-    #[serde(default)]
-    session_id: Option<String>,
-    #[serde(default)]
-    workspace_id: Option<String>,
-    command: String,
-    write_targets: Vec<String>,
-    #[serde(default)]
-    create_targets: Vec<String>,
-    #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default)]
-    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize)]

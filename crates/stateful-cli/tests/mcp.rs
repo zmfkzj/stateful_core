@@ -358,92 +358,6 @@ fn mcp_file_write_refuses_when_authorization_denies() {
 }
 
 #[test]
-fn mcp_bash_write_reports_allowed_and_denied_targets_without_running_command() {
-    let temp_root = temp_root("stateful-mcp-bash-write-deny");
-    let paths = GlobalPaths::new(temp_root.join("home"));
-    let repo_root = temp_root.join("repo");
-    fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
-    enable_test_repo(&paths, &repo_root);
-    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
-        .expect("current session should write");
-    fs::write(repo_root.join("src/allowed.ts"), "old\n").expect("allowed file should seed");
-    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Target is outside active intent scope.","required_next_action":"Declare matching intent."}"#,
-    ]);
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let output = run_stateful_in_repo(
-        &repo_root,
-        &paths,
-        &[
-            "mcp",
-            "call",
-            "state_bash_write",
-            r#"{"command":"printf changed > src/allowed.ts","write_targets":["src/allowed.ts","src/denied.ts"]}"#,
-        ],
-    );
-
-    assert!(!output.status.success(), "denied target should fail");
-    let first = rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("first authorize request should arrive");
-    let second = rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("second authorize request should arrive");
-    assert_eq!(
-        request_json_body(&first)["payload"]["path"],
-        "src/allowed.ts"
-    );
-    assert_eq!(
-        request_json_body(&second)["payload"]["path"],
-        "src/denied.ts"
-    );
-    assert_eq!(
-        fs::read_to_string(repo_root.join("src/allowed.ts")).expect("allowed file should read"),
-        "old\n",
-        "command should not run when any target is denied"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"allowed_write_targets\":[\"src/allowed.ts\"]"));
-    assert!(stdout.contains("\"path\":\"src/denied.ts\""));
-    assert!(stdout.contains("\"decision\":\"deny\""));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[test]
-fn mcp_bash_write_rejects_case_insensitive_git_targets() {
-    let temp_root = temp_root("stateful-mcp-bash-write-git-case");
-    let paths = GlobalPaths::new(temp_root.join("home"));
-    let repo_root = temp_root.join("repo");
-    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
-    enable_test_repo(&paths, &repo_root);
-    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
-        .expect("current session should write");
-    let (runtime, _rx) = spawn_fake_stateful_server(
-        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-    );
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let output = run_stateful_in_repo(
-        &repo_root,
-        &paths,
-        &[
-            "mcp",
-            "call",
-            "state_bash_write",
-            r#"{"command":"true","write_targets":[".GIT/config"]}"#,
-        ],
-    );
-
-    assert!(!output.status.success(), "Git internals target should fail");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Git internals"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[test]
 fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command() {
     let temp_root = temp_root("stateful-sandbox-run-deny");
     let paths = GlobalPaths::new(temp_root.join("home"));
@@ -621,61 +535,6 @@ fn sandbox_run_read_only_rejects_write_targets() {
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
-#[cfg(target_os = "macos")]
-#[test]
-fn mcp_bash_write_macos_seatbelt_allows_only_authorized_targets() {
-    let temp_root = temp_root("stateful-mcp-bash-write-seatbelt");
-    let paths = GlobalPaths::new(temp_root.join("home"));
-    let repo_root = temp_root.join("repo");
-    fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
-    enable_test_repo(&paths, &repo_root);
-    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
-        .expect("current session should write");
-    fs::write(repo_root.join("src/allowed.ts"), "old\n").expect("allowed file should seed");
-    let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-    );
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let output = run_stateful_in_repo(
-        &repo_root,
-        &paths,
-        &[
-            "mcp",
-            "call",
-            "state_bash_write",
-            r#"{"command":"printf changed > src/allowed.ts; printf denied > src/denied.ts","write_targets":["src/allowed.ts"]}"#,
-        ],
-    );
-
-    assert!(
-        output.status.success(),
-        "sandboxed command result should be returned even when command exits nonzero: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let request = rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("authorize request should arrive");
-    assert_eq!(
-        request_json_body(&request)["payload"]["path"],
-        "src/allowed.ts"
-    );
-    assert_eq!(
-        fs::read_to_string(repo_root.join("src/allowed.ts")).expect("allowed file should read"),
-        "changed",
-    );
-    assert!(
-        !repo_root.join("src/denied.ts").exists(),
-        "unlisted file should not be created"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"status\":\"exited\""));
-    assert!(stdout.contains("\"exit_code\":1"));
-    assert!(stdout.contains("Operation not permitted"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
 #[test]
 fn mcp_tools_list_returns_stateful_tool_descriptors() {
     let temp_root = temp_root("stateful-mcp-tools-list");
@@ -700,6 +559,7 @@ fn mcp_tools_list_returns_stateful_tool_descriptors() {
             .any(|tool| tool["name"] == "state_intent_declare")
     );
     assert!(tools.iter().any(|tool| tool["name"] == "state_file_write"));
+    assert!(!tools.iter().any(|tool| tool["name"] == "state_bash_write"));
     let intent_tool = tools
         .iter()
         .find(|tool| tool["name"] == "state_intent_declare")
@@ -711,6 +571,42 @@ fn mcp_tools_list_returns_stateful_tool_descriptors() {
     assert_eq!(
         intent_tool["inputSchema"]["properties"]["files_planned"]["items"]["type"],
         "string"
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_stale_bash_write_call_returns_removed_guidance() {
+    let temp_root = temp_root("stateful-mcp-stale-bash-write");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let response = run_mcp_jsonrpc_in_repo(
+        &repo_root,
+        &paths,
+        r#"{
+          "jsonrpc":"2.0",
+          "id":4,
+          "method":"tools/call",
+          "params":{
+            "name":"state_bash_write",
+            "arguments":{"command":"true","write_targets":["README.md"]}
+          }
+        }"#,
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+    assert_eq!(json["result"]["isError"], true);
+    assert!(
+        json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("state_bash_write was removed")
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");

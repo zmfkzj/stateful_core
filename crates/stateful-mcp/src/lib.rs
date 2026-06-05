@@ -74,11 +74,6 @@ const TOOLS: &[(&str, &str, &str)] = &[
         "Write UTF-8 contents to a repo file after stateful authorization.",
     ),
     (
-        "state_bash_write",
-        "state.bash.write",
-        "Run a write-capable Bash command in an OS sandbox after target authorization.",
-    ),
-    (
         "state_notifications_poll",
         "state.notifications.poll",
         "Poll pending coordination notifications for the active session.",
@@ -232,18 +227,6 @@ fn input_schema_for(protocol_name: &str) -> Value {
             ],
             ["path", "contents"],
         ),
-        "state.bash.write" => object_schema(
-            [
-                ("session_id", string_schema()),
-                ("workspace_id", string_schema()),
-                ("command", string_schema()),
-                ("write_targets", string_array_schema()),
-                ("create_targets", string_array_schema()),
-                ("cwd", string_schema()),
-                ("timeout_seconds", integer_schema()),
-            ],
-            ["command", "write_targets"],
-        ),
         _ => empty_object_schema(),
     }
 }
@@ -277,10 +260,6 @@ fn object_schema<const P: usize, const R: usize>(
 
 fn string_schema() -> Value {
     serde_json::json!({ "type": "string" })
-}
-
-fn integer_schema() -> Value {
-    serde_json::json!({ "type": "integer", "minimum": 1 })
 }
 
 fn string_array_schema() -> Value {
@@ -318,11 +297,6 @@ pub fn map_tool_to_http(tool: ToolCall) -> Result<HttpToolRequest, String> {
         "state.file.write" => {
             return Err(
                 "state.file.write is handled locally by the stateful CLI MCP bridge".to_string(),
-            );
-        }
-        "state.bash.write" => {
-            return Err(
-                "state.bash.write is handled locally by the stateful CLI MCP bridge".to_string(),
             );
         }
         "state.notifications.poll" => ("POST", "/v1/notifications/poll"),
