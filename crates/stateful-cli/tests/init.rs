@@ -35,11 +35,17 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
             .expect("stateful command policy skill should exist");
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
     assert!(command_policy_skill.contains("Use when running shell commands"));
-    assert!(command_policy_skill.contains("stateful intent declare"));
     assert!(command_policy_skill.contains("state_intent_declare"));
     assert!(command_policy_skill.contains("Raw Bash is denied by stateful hooks"));
-    assert!(command_policy_skill.contains("stateful sandbox run --fs read-only"));
-    assert!(command_policy_skill.contains("stateful sandbox run --fs write-targets"));
+    assert!(command_policy_skill.contains("<absolute-stateful-binary> sandbox run --fs read-only"));
+    assert!(
+        command_policy_skill.contains("<absolute-stateful-binary> sandbox run --fs write-targets")
+    );
+    assert!(
+        command_policy_skill
+            .contains("trusted absolute `stateful` binary installed in the hook configuration")
+    );
+    assert!(!command_policy_skill.contains("stateful intent declare"));
     assert!(!command_policy_skill.contains("state_bash_write"));
     assert!(!command_policy_skill.contains("state.bash.write"));
     assert!(!command_policy_skill.contains("top-level read-only sandbox metadata"));

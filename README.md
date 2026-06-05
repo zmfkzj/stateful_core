@@ -312,15 +312,19 @@ with `write_file` and writes only after an allow decision.
 
 Raw Bash commands are denied by stateful hooks. Bash tool calls are authorized
 only when the outer command is a single strict invocation of the trusted
-absolute `stateful` binary running `stateful sandbox run ... --command <cmd>`.
-Use `stateful sandbox run --fs read-only --command <cmd>` for command-shaped
-read-only inspection that needs a shell, and use `--fs write-targets` with
-explicit targets for command-shaped writes.
+absolute `stateful` binary running
+`<absolute-stateful-binary> sandbox run ... --command <cmd>`. Use
+`<absolute-stateful-binary> sandbox run --fs read-only --command <cmd>` for
+Bash-hook command-shaped read-only inspection that needs a shell, and use
+`--fs write-targets` with explicit targets for Bash-hook command-shaped writes.
 
 Command-shaped writes should use
 `stateful sandbox run --fs write-targets --write-target <path> ... --command <cmd>`,
 optionally with `--create-target` for files that should be pre-created before
-sandboxing. The wrapper authorizes every listed target with `/v1/authorize` as
+sandboxing. Inside a Bash hook tool call, the outer executable must be the
+trusted absolute binary path from the hook configuration, for example
+`<absolute-stateful-binary> sandbox run --fs write-targets ... --command <cmd>`.
+The wrapper authorizes every listed target with `/v1/authorize` as
 `write_file`; if any target is denied, the command is not executed and the
 response includes both allowed and denied target lists. When all targets are
 allowed, the command runs through an OS sandbox with the repo readable and only
@@ -433,7 +437,7 @@ Commit reusable documentation and source code, not local generated state.
   automatically.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
   authorize Bash. Bash authorization goes through a trusted
-  `stateful sandbox run` wrapper command.
+  `<absolute-stateful-binary> sandbox run` wrapper command.
 
 ## Project Layout
 

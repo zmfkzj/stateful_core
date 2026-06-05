@@ -343,7 +343,8 @@ fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
 
     if !is_trusted_stateful_executable(&invocation.executable) {
         return HookOutcome::Deny {
-            reason: "stateful sandbox run requires the trusted stateful binary".to_string(),
+            reason: "stateful sandbox run requires the trusted absolute stateful binary"
+                .to_string(),
         };
     }
     if !matches!(invocation.fs.as_str(), "read-only" | "write-targets") {

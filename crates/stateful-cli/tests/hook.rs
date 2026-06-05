@@ -183,7 +183,7 @@ fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
         (
             "untrusted executable",
             "/bin/echo sandbox run --command 'rg auth src'".to_string(),
-            "trusted stateful binary",
+            "trusted absolute stateful binary",
         ),
         (
             "duplicate command",
@@ -204,6 +204,16 @@ fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
             "missing option value",
             format!("{stateful} sandbox run --command 'rg auth src' --write-target"),
             "argument `--write-target` requires a value",
+        ),
+        (
+            "missing timeout value",
+            format!("{stateful} sandbox run --command 'rg auth src' --timeout-seconds"),
+            "argument `--timeout-seconds` requires a value",
+        ),
+        (
+            "non-integer timeout value",
+            format!("{stateful} sandbox run --timeout-seconds nope --command 'rg auth src'"),
+            "--timeout-seconds requires an integer value",
         ),
     ];
 
