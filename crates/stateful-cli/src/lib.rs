@@ -934,7 +934,7 @@ Stateful hooks are authoritative. Pick commands that match the installed hooks b
 ## Prefer
 
 - MCP or native read tools for search and inspection when available.
-- `<absolute-stateful-binary> sandbox run --fs read-only --command <cmd>` for Bash-tool command-shaped read-only inspection that needs a real shell.
+- `<absolute-stateful-binary> sandbox run --fs read-only --network disabled --command <cmd>` for Bash-tool command-shaped read-only inspection that needs a real shell.
 - `<absolute-stateful-binary> sandbox run --fs write-targets ... --command ...` for Bash-tool command-shaped writes that need a real shell but can be limited to exact file targets.
 - Validation: use `state_validation_run` / `state.validation.run` in Codex sessions, or `stateful validate <profile>` outside hook-mediated Bash.
 - Stateful diagnostics through MCP tools, native tools, validation profiles, or sandbox-run wrappers through the trusted absolute `stateful` binary.
@@ -953,7 +953,7 @@ Stateful hooks are authoritative. Pick commands that match the installed hooks b
 
 - Do not retry the same command with small variations.
 - If the denial asks for scope, declare or narrow intent, then use `state_file_write` for repo changes.
-- If raw Bash is blocked, choose MCP/native inspection, structured MCP write, `<absolute-stateful-binary> sandbox run --fs read-only`, `<absolute-stateful-binary> sandbox run --fs write-targets`, or a validation profile.
+- If raw Bash is blocked, choose MCP/native inspection, structured MCP write, `<absolute-stateful-binary> sandbox run --fs read-only --network disabled`, `<absolute-stateful-binary> sandbox run --fs write-targets`, or a validation profile.
 - If a denial mentions a structured tool, prefer the stateful MCP tool in Codex sessions.
 - If no policy-compliant path is available, report the exact command and denial reason.
 "#

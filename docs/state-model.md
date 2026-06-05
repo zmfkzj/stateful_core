@@ -405,9 +405,10 @@ V1 detects this by comparing `git status --porcelain` before and after
 validation. A denied path that is already dirty before validation produces
 `error`; a newly dirty denied path after validation produces `failed_policy`.
 
-If `exclusive` is true, only one run of that validation profile may be active in
-the workspace. A concurrent request for the same exclusive profile is denied. If
-`exclusive` is false or unset, concurrent runs produce warning context only.
+The current runner parses `exclusive`, but does not yet enforce a validation
+concurrency lock. Future policy should use `exclusive` to deny concurrent runs
+of the same profile in the workspace and warn for concurrent non-exclusive
+runs.
 
 ## Finalization Record
 

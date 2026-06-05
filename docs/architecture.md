@@ -183,8 +183,9 @@ valid intent scope. They still record activity and leases with their own
 - deny raw Bash and allow Bash only when the outer command is a single strict
   invocation of the trusted absolute `stateful` binary running
   `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
-  command-shaped inspection uses `--fs read-only`; command-shaped writes use
-  `--fs write-targets` with explicit write/create targets.
+  command-shaped inspection uses `--fs read-only --network disabled`;
+  command-shaped writes use `--fs write-targets` with explicit write/create
+  targets.
 - check leases and planned edits for likely conflicts
 - return allow, warning context, or deny based on policy
 
@@ -218,12 +219,15 @@ state.events.read
 state.context.render
 state.reconcile.ack
 state_validation_run / state.validation.run
+state_file_write / state.file.write
 state.notifications.poll
 state.resume.next
 ```
 
 Hooks and MCP tools should call the same state server API. Policy must live in
-the state server, not in duplicated hook scripts.
+the state server, not in duplicated hook scripts. `state_file_write` /
+`state.file.write` is the structured repo file write path; command-shaped shell
+writes remain outside MCP and go through the sandbox-run wrapper.
 
 ## Tool Classification
 
@@ -251,12 +255,14 @@ Denied Bash should direct the agent to the wrapper for command-shaped shell
 execution, `state_file_write` / `state.file.write` for structured repo file
 writes, and validation profiles for tests.
 
-MCP does not perform local command-shaped file writes. Shell execution uses
-`stateful sandbox run`. The MVP ships `read-only` and `write-targets` profiles;
-`git-metadata` and `workspace` profiles are deferred and fail closed.
-`/dev/null` is writable in every sandbox profile so common shell and Git
-behavior works. Command text alone does not authorize `rg`, `git diff`, test
-runners, stateful operational commands, or any other Bash command.
+MCP does not perform local command-shaped file writes. Hook-mediated shell
+execution uses `<absolute-stateful-binary> sandbox run ... --command <cmd>`;
+plain CLI-context usage outside hooks can use `stateful sandbox run`. The MVP
+ships `read-only` and `write-targets` profiles; `git-metadata` and `workspace`
+profiles are deferred and fail closed. `/dev/null` is writable in every sandbox
+profile so common shell and Git behavior works. Command text alone does not
+authorize `rg`, `git diff`, test runners, stateful operational commands, or any
+other Bash command.
 
 ## Validation Profiles
 
@@ -295,9 +301,9 @@ validation command starts, every path matching `denied_writes` must be clean in
 command, any newly dirty path matching `denied_writes` returns `failed_policy`.
 Paths matching `allowed_writes` are ignored for policy failure.
 
-Validation profile concurrency is controlled by `exclusive`. Concurrent runs of
-the same exclusive profile are denied. Concurrent runs of non-exclusive profiles
-warn only.
+The current runner parses `exclusive`, but does not yet enforce a validation
+concurrency lock. Future policy should use `exclusive` to deny concurrent runs
+of the same profile and warn for concurrent non-exclusive runs.
 
 ## State Server
 
@@ -435,8 +441,9 @@ Initial policy:
 - unrelated reads and searches: allow
 - reads, searches, diffs, and controlled validation after human writes: allow
 - tests: allow only through controlled validation actions
-- same non-exclusive validation profile active elsewhere: warn
-- same exclusive validation profile active elsewhere: deny
+- same validation profile active elsewhere: no current hard block; future
+  exclusive-profile locking should deny exclusive conflicts and warn for
+  non-exclusive conflicts
 - task, port, or migration resource conflict: warn or info only in v1
 
 Conflict decisions must be auditable. Overrides are never automatic. They are

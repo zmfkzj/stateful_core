@@ -314,9 +314,10 @@ Raw Bash commands are denied by stateful hooks. Bash tool calls are authorized
 only when the outer command is a single strict invocation of the trusted
 absolute `stateful` binary running
 `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Use
-`<absolute-stateful-binary> sandbox run --fs read-only --command <cmd>` for
-Bash-hook command-shaped read-only inspection that needs a shell, and use
-`--fs write-targets` with explicit targets for Bash-hook command-shaped writes.
+`<absolute-stateful-binary> sandbox run --fs read-only --network disabled
+--command <cmd>` for Bash-hook command-shaped read-only inspection that needs a
+shell, and use `--fs write-targets` with explicit targets for Bash-hook
+command-shaped writes.
 
 Command-shaped writes should use
 `stateful sandbox run --fs write-targets --write-target <path> ... --command <cmd>`,

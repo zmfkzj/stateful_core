@@ -37,7 +37,10 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(command_policy_skill.contains("Use when running shell commands"));
     assert!(command_policy_skill.contains("state_intent_declare"));
     assert!(command_policy_skill.contains("Raw Bash is denied by stateful hooks"));
-    assert!(command_policy_skill.contains("<absolute-stateful-binary> sandbox run --fs read-only"));
+    assert!(
+        command_policy_skill
+            .contains("<absolute-stateful-binary> sandbox run --fs read-only --network disabled")
+    );
     assert!(
         command_policy_skill.contains("<absolute-stateful-binary> sandbox run --fs write-targets")
     );

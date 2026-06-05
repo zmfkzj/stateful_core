@@ -298,6 +298,7 @@ state.events.read
 state.context.render
 state.reconcile.ack
 state_validation_run / state.validation.run
+state_file_write / state.file.write
 state.notifications.poll
 state.resume.next
 ```
@@ -307,7 +308,9 @@ and `state.intent.cancel` when the corresponding server endpoints are
 implemented.
 
 Hooks should call the same state server API as MCP tools so policy remains
-centralized.
+centralized. `state_file_write` / `state.file.write` is the structured repo file
+write path; sandbox-run remains the Bash wrapper for command-shaped shell
+writes.
 
 ### State Server Responsibilities
 
@@ -403,9 +406,10 @@ the run, validation does not start and returns `error`. If the run creates a new
 dirty path matching `denied_writes`, validation returns `failed_policy`.
 `allowed_writes` paths are ignored for policy failure.
 
-If a validation profile is marked `exclusive`, concurrent runs of the same
-profile in the workspace are denied. Non-exclusive concurrent runs produce
-warning context only.
+The current runner parses `exclusive`, but does not yet enforce a validation
+concurrency lock. Future policy should use `exclusive` to deny concurrent runs
+of the same profile in the workspace and warn for concurrent non-exclusive
+runs.
 
 ## Conflict Policy
 
@@ -433,8 +437,9 @@ Initial policy should prefer advisory leases:
   repo-relative similarity is an unknown-confidence warning
 - expired lease: allow but surface stale-state context
 - test execution: allow only through controlled validation action
-- same non-exclusive validation profile active elsewhere: warn
-- same exclusive validation profile active elsewhere: deny
+- same validation profile active elsewhere: no current hard block; future
+  exclusive-profile locking should deny exclusive conflicts and warn for
+  non-exclusive conflicts
 - task, port, or migration resource conflict: warn or info only in v1
 - human local changes detected: warn before edits and require extra care
 - human save observed after an agent lease or write: deny further agent writes
