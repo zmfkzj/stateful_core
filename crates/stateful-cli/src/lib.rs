@@ -439,8 +439,8 @@ pub fn run() -> anyhow::Result<()> {
                 }
             };
             println!("{}", serde_json::to_string(&output)?);
-            if output.status != "exited" || output.exit_code != Some(0) {
-                std::process::exit(output.exit_code.unwrap_or(1));
+            if let Some(exit_code) = sandbox::sandbox_run_cli_exit_code(&output) {
+                std::process::exit(exit_code);
             }
         }
         Command::Enable {

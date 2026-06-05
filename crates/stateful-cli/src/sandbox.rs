@@ -81,6 +81,15 @@ pub struct SandboxCommandResult {
     pub stderr: String,
 }
 
+pub(crate) fn sandbox_run_cli_exit_code(output: &SandboxRunOutput) -> Option<i32> {
+    match (output.status, output.exit_code) {
+        ("exited", Some(0)) => None,
+        ("exited", Some(code)) => Some(code),
+        ("exited", None) => Some(1),
+        _ => Some(1),
+    }
+}
+
 pub fn run_sandbox_in_repo(
     repo_root: &Path,
     paths: &GlobalPaths,
@@ -567,6 +576,41 @@ fn run_command_with_timeout(
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn sandbox_run_cli_exit_code_maps_non_exited_results_to_one() {
+        assert_eq!(
+            sandbox_run_cli_exit_code(&sandbox_output("exited", Some(0))),
+            None
+        );
+        assert_eq!(
+            sandbox_run_cli_exit_code(&sandbox_output("exited", Some(7))),
+            Some(7)
+        );
+        assert_eq!(
+            sandbox_run_cli_exit_code(&sandbox_output("exited", None)),
+            Some(1)
+        );
+        assert_eq!(
+            sandbox_run_cli_exit_code(&sandbox_output("timed_out", Some(0))),
+            Some(1)
+        );
+        assert_eq!(
+            sandbox_run_cli_exit_code(&sandbox_output("timed_out", Some(9))),
+            Some(1)
+        );
+    }
+
+    fn sandbox_output(status: &'static str, exit_code: Option<i32>) -> SandboxRunOutput {
+        SandboxRunOutput {
+            status,
+            exit_code,
+            stdout: String::new(),
+            stderr: String::new(),
+            allowed_write_targets: Vec::new(),
+            denied_write_targets: Vec::new(),
+        }
+    }
 
     #[test]
     fn bubblewrap_read_only_uses_unshare_net_and_dev_null_device() {
