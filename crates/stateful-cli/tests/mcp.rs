@@ -413,6 +413,37 @@ fn mcp_bash_write_reports_allowed_and_denied_targets_without_running_command() {
 }
 
 #[test]
+fn mcp_bash_write_rejects_case_insensitive_git_targets() {
+    let temp_root = temp_root("stateful-mcp-bash-write-git-case");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+    let (runtime, _rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "mcp",
+            "call",
+            "state_bash_write",
+            r#"{"command":"true","write_targets":[".GIT/config"]}"#,
+        ],
+    );
+
+    assert!(!output.status.success(), "Git internals target should fail");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Git internals"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command() {
     let temp_root = temp_root("stateful-sandbox-run-deny");
     let paths = GlobalPaths::new(temp_root.join("home"));
@@ -471,6 +502,85 @@ fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command(
     assert!(stdout.contains("\"allowed_write_targets\":[\"src/allowed.ts\"]"));
     assert!(stdout.contains("\"path\":\"src/denied.ts\""));
     assert!(stdout.contains("\"decision\":\"deny\""));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn sandbox_run_rejects_case_insensitive_git_targets() {
+    let temp_root = temp_root("stateful-sandbox-run-git-case");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+    let (runtime, _rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "write-targets",
+            "--write-target",
+            ".GIT/config",
+            "--command",
+            "true",
+        ],
+    );
+
+    assert!(!output.status.success(), "Git internals target should fail");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Git internals"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn sandbox_run_reports_authorize_server_errors_on_stderr() {
+    let temp_root = temp_root("stateful-sandbox-run-authorize-500");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+    fs::write(repo_root.join("src/allowed.ts"), "old\n").expect("allowed file should seed");
+    let (runtime, _rx) =
+        spawn_fake_stateful_server_sequence_with_status(vec![(500, r#"{"status":"error"}"#)]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "write-targets",
+            "--write-target",
+            "src/allowed.ts",
+            "--command",
+            "true",
+        ],
+    );
+
+    assert!(
+        !output.status.success(),
+        "authorize server error should fail"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("denied_write_targets"),
+        "non-policy authorize errors should not use denial stdout"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("authorize"));
+    assert!(stderr.contains("500"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -930,6 +1040,17 @@ fn spawn_fake_stateful_server(
 fn spawn_fake_stateful_server_sequence(
     responses: Vec<&'static str>,
 ) -> (ServerRuntime, mpsc::Receiver<String>) {
+    spawn_fake_stateful_server_sequence_with_status(
+        responses
+            .into_iter()
+            .map(|response| (200, response))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn spawn_fake_stateful_server_sequence_with_status(
+    responses: Vec<(u16, &'static str)>,
+) -> (ServerRuntime, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
@@ -948,8 +1069,9 @@ fn spawn_fake_stateful_server_sequence(
                 write_json_response(&mut stream, r#"{"status":"ok","current":{}}"#);
             } else {
                 tx.send(request).expect("request should send to test");
-                let response = responses.next().unwrap_or(r#"{"status":"ok"}"#);
-                write_json_response(&mut stream, response);
+                let (status_code, response) =
+                    responses.next().unwrap_or((200, r#"{"status":"ok"}"#));
+                write_json_response_with_status(&mut stream, status_code, response);
                 if responses.as_slice().is_empty() {
                     break;
                 }
@@ -1060,8 +1182,17 @@ fn request_json_body(request: &str) -> serde_json::Value {
 }
 
 fn write_json_response(stream: &mut std::net::TcpStream, body: &str) {
+    write_json_response_with_status(stream, 200, body);
+}
+
+fn write_json_response_with_status(stream: &mut std::net::TcpStream, status_code: u16, body: &str) {
+    let reason = match status_code {
+        200 => "OK",
+        500 => "Internal Server Error",
+        _ => "Unknown",
+    };
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+        "HTTP/1.1 {status_code} {reason}\r\nContent-Length: {}\r\n\r\n{}",
         body.len(),
         body
     );

@@ -132,17 +132,14 @@ pub fn run_sandbox_in_repo(
                     request.network,
                     path,
                 )?;
-                let body = serde_json::from_str::<Value>(&response.body)
-                    .unwrap_or_else(|_| serde_json::json!({ "message": response.body.clone() }));
-                if (200..300).contains(&response.status_code)
-                    && body.get("decision").and_then(Value::as_str) == Some("allow")
-                {
-                    allowed_write_targets.push(path.clone());
-                } else {
-                    denied_write_targets.push(serde_json::json!({
-                        "path": path,
-                        "authorization": body,
-                    }));
+                match classify_sandbox_authorize_response(path, response)? {
+                    SandboxAuthorizeDecision::Allow => allowed_write_targets.push(path.clone()),
+                    SandboxAuthorizeDecision::Deny(body) => {
+                        denied_write_targets.push(serde_json::json!({
+                            "path": path,
+                            "authorization": body,
+                        }));
+                    }
                 }
             }
 
@@ -246,7 +243,7 @@ fn normalize_sandbox_target_path(field: &str, path: &str) -> anyhow::Result<Stri
         if segment == ".." {
             anyhow::bail!("stateful sandbox run {field} entries must stay inside the repo");
         }
-        if segment == ".git" {
+        if is_git_internal_segment(segment) {
             anyhow::bail!("stateful sandbox run refuses Git internals");
         }
         if segment.chars().any(char::is_control) {
@@ -423,14 +420,55 @@ fn authorize_sandbox_write(
     post_json(runtime, "/v1/authorize", &body)
 }
 
+enum SandboxAuthorizeDecision {
+    Allow,
+    Deny(Value),
+}
+
+fn classify_sandbox_authorize_response(
+    path: &str,
+    response: HttpResponse,
+) -> anyhow::Result<SandboxAuthorizeDecision> {
+    if !(200..300).contains(&response.status_code) {
+        anyhow::bail!(
+            "stateful sandbox run authorize request for `{path}` failed with HTTP {}: {}",
+            response.status_code,
+            response.body
+        );
+    }
+
+    let body = serde_json::from_str::<Value>(&response.body).map_err(|error| {
+        anyhow::anyhow!(
+            "stateful sandbox run authorize response for `{path}` was not valid JSON: {error}"
+        )
+    })?;
+
+    match body.get("decision").and_then(Value::as_str) {
+        Some("allow") => Ok(SandboxAuthorizeDecision::Allow),
+        Some("deny") => Ok(SandboxAuthorizeDecision::Deny(body)),
+        Some(decision) => {
+            anyhow::bail!(
+                "stateful sandbox run authorize response for `{path}` returned unsupported decision `{decision}`"
+            );
+        }
+        None => {
+            anyhow::bail!("stateful sandbox run authorize response for `{path}` missing decision");
+        }
+    }
+}
+
+fn is_git_internal_segment(segment: &str) -> bool {
+    segment.eq_ignore_ascii_case(".git")
+}
+
 #[cfg(target_os = "macos")]
 fn seatbelt_command(
     command: &str,
     cwd: &Path,
     writable_files: &[PathBuf],
-    _network: SandboxNetworkPolicy,
+    network: SandboxNetworkPolicy,
 ) -> Command {
-    let profile = seatbelt_profile(writable_files);
+    let profile = seatbelt_profile(writable_files, network);
     let mut sandbox = Command::new("/usr/bin/sandbox-exec");
     sandbox
         .arg("-p")
@@ -443,7 +481,7 @@ fn seatbelt_command(
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn seatbelt_profile(writable_files: &[PathBuf]) -> String {
+fn seatbelt_profile(writable_files: &[PathBuf], network: SandboxNetworkPolicy) -> String {
     let mut profile = String::from(
         "(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n(allow file-write* (literal \"/dev/null\")",
     );
@@ -453,6 +491,9 @@ fn seatbelt_profile(writable_files: &[PathBuf]) -> String {
         profile.push_str("\")");
     }
     profile.push_str(")\n");
+    if network == SandboxNetworkPolicy::Enabled {
+        profile.push_str("(allow network*)\n");
+    }
     profile
 }
 
@@ -690,10 +731,13 @@ mod tests {
 
     #[test]
     fn seatbelt_profile_allows_dev_null_and_exact_targets() {
-        let profile = seatbelt_profile(&[
-            PathBuf::from("/repo/src/allowed.ts"),
-            PathBuf::from("/repo/src/quoted\"path.ts"),
-        ]);
+        let profile = seatbelt_profile(
+            &[
+                PathBuf::from("/repo/src/allowed.ts"),
+                PathBuf::from("/repo/src/quoted\"path.ts"),
+            ],
+            SandboxNetworkPolicy::Disabled,
+        );
 
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("(allow file-read*)"));
@@ -702,5 +746,15 @@ mod tests {
         assert!(profile.contains("(literal \"/repo/src/quoted\\\"path.ts\")"));
         assert!(!profile.contains("subpath \"/repo/src\""));
         assert!(!profile.contains("subpath \"/dev\""));
+        assert!(!profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn seatbelt_profile_allows_network_only_when_enabled() {
+        let disabled = seatbelt_profile(&[], SandboxNetworkPolicy::Disabled);
+        let enabled = seatbelt_profile(&[], SandboxNetworkPolicy::Enabled);
+
+        assert!(!disabled.contains("(allow network*)"));
+        assert!(enabled.contains("(allow network*)"));
     }
 }

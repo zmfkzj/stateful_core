@@ -467,7 +467,7 @@ fn normalize_repo_file_path(path: &str) -> anyhow::Result<String> {
         if segment == ".." {
             anyhow::bail!("state.file.write path must stay inside the repo");
         }
-        if segment == ".git" {
+        if is_git_internal_segment(segment) {
             anyhow::bail!("state.file.write refuses to write Git internals");
         }
         if segment.chars().any(char::is_control) {
@@ -517,7 +517,7 @@ fn normalize_bash_target_path(field: &str, path: &str) -> anyhow::Result<String>
         if segment == ".." {
             anyhow::bail!("state.bash.write {field} entries must stay inside the repo");
         }
-        if segment == ".git" {
+        if is_git_internal_segment(segment) {
             anyhow::bail!("state.bash.write refuses Git internals");
         }
         if segment.chars().any(char::is_control) {
@@ -557,7 +557,7 @@ fn resolve_bash_cwd(repo_root: &Path, cwd: Option<&str>) -> anyhow::Result<PathB
         if segment == ".." {
             anyhow::bail!("state.bash.write cwd must stay inside the repo");
         }
-        if segment == ".git" {
+        if is_git_internal_segment(segment) {
             anyhow::bail!("state.bash.write refuses Git internals as cwd");
         }
         if segment.chars().any(char::is_control) {
@@ -647,6 +647,10 @@ fn error_response(status_code: u16, message: impl Into<String>) -> HttpResponse 
         })
         .to_string(),
     }
+}
+
+fn is_git_internal_segment(segment: &str) -> bool {
+    segment.eq_ignore_ascii_case(".git")
 }
 
 fn intent_declare_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
