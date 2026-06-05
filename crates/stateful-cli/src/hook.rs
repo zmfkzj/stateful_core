@@ -508,6 +508,9 @@ fn reject_outer_shell_syntax(command: &str) -> Result<(), String> {
                 '$' if chars.peek().is_some_and(|next| *next == '(') => {
                     return Err("Bash wrapper must not use command substitution".to_string());
                 }
+                '\\' => {
+                    return Err("Bash wrapper must not use shell escapes".to_string());
+                }
                 ';' | '|' | '&' | '<' | '>' | '\n' | '\r' | '`' => {
                     return Err(
                         "Bash wrapper must be a single stateful sandbox run command".to_string()
@@ -527,6 +530,9 @@ fn reject_outer_shell_syntax(command: &str) -> Result<(), String> {
                 }
                 '`' => {
                     return Err("Bash wrapper must not use command substitution".to_string());
+                }
+                '\\' => {
+                    return Err("Bash wrapper must not use shell escapes".to_string());
                 }
                 _ => {}
             },

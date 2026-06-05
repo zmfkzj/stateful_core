@@ -23,8 +23,8 @@ fn assert_bash_requires_structured_sandbox(outcome: HookOutcome) {
     };
 
     assert!(
-        reason.contains("structured read-only sandbox metadata"),
-        "reason `{reason}` should direct callers to structured sandbox metadata"
+        reason.contains("stateful sandbox run"),
+        "reason `{reason}` should direct callers to stateful sandbox run"
     );
 }
 
@@ -36,6 +36,13 @@ fn assert_bash_denial_mentions(outcome: HookOutcome, expected: &str) {
         reason.contains(expected),
         "reason `{reason}` should contain `{expected}`"
     );
+}
+
+fn trusted_stateful_path() -> String {
+    std::env::current_exe()
+        .expect("test executable path should resolve")
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[test]
@@ -57,10 +64,7 @@ fn pre_tool_use_denies_raw_read_only_bash_after_sandbox_runner_migration() {
 
 #[test]
 fn pre_tool_use_allows_canonical_sandbox_run_read_only() {
-    let stateful = std::env::current_exe()
-        .expect("test executable path should resolve")
-        .to_string_lossy()
-        .into_owned();
+    let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "s1",
         "cwd": "/repo",
@@ -79,10 +83,7 @@ fn pre_tool_use_allows_canonical_sandbox_run_read_only() {
 
 #[test]
 fn pre_tool_use_allows_canonical_sandbox_run_write_targets() {
-    let stateful = std::env::current_exe()
-        .expect("test executable path should resolve")
-        .to_string_lossy()
-        .into_owned();
+    let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "s1",
         "cwd": "/repo",
@@ -101,10 +102,7 @@ fn pre_tool_use_allows_canonical_sandbox_run_write_targets() {
 
 #[test]
 fn pre_tool_use_denies_sandbox_run_with_outer_command_separator() {
-    let stateful = std::env::current_exe()
-        .expect("test executable path should resolve")
-        .to_string_lossy()
-        .into_owned();
+    let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "s1",
         "cwd": "/repo",
@@ -123,10 +121,7 @@ fn pre_tool_use_denies_sandbox_run_with_outer_command_separator() {
 
 #[test]
 fn pre_tool_use_denies_sandbox_run_write_targets_without_target() {
-    let stateful = std::env::current_exe()
-        .expect("test executable path should resolve")
-        .to_string_lossy()
-        .into_owned();
+    let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "s1",
         "cwd": "/repo",
@@ -141,6 +136,100 @@ fn pre_tool_use_denies_sandbox_run_write_targets_without_target() {
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
     assert_bash_denial_mentions(outcome, "requires at least one write target");
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_run_with_shell_escape_quote_mismatch() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --command \\\"rg; rm README.md #\\\"")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(outcome, "shell escapes");
+}
+
+#[test]
+fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
+    let stateful = trusted_stateful_path();
+    let cases = [
+        (
+            "outer env assignment",
+            format!("FOO=bar {stateful} sandbox run --command 'rg auth src'"),
+            "environment assignments",
+        ),
+        (
+            "command substitution",
+            format!("{stateful} sandbox run --command \"$(pwd)\""),
+            "command substitution",
+        ),
+        (
+            "outer redirect",
+            format!("{stateful} sandbox run --command 'rg auth src' > /tmp/out"),
+            "single stateful sandbox run command",
+        ),
+        (
+            "outer pipeline",
+            format!("{stateful} sandbox run --command 'rg auth src' | cat"),
+            "single stateful sandbox run command",
+        ),
+        (
+            "untrusted executable",
+            "/bin/echo sandbox run --command 'rg auth src'".to_string(),
+            "trusted stateful binary",
+        ),
+        (
+            "duplicate command",
+            format!("{stateful} sandbox run --command 'rg auth src' --command pwd"),
+            "exactly one --command",
+        ),
+        (
+            "invalid fs",
+            format!("{stateful} sandbox run --fs read-write --command 'rg auth src'"),
+            "supports only read-only and write-targets profiles",
+        ),
+        (
+            "invalid network",
+            format!("{stateful} sandbox run --network inherited --command 'rg auth src'"),
+            "network must be disabled or enabled",
+        ),
+        (
+            "missing option value",
+            format!("{stateful} sandbox run --command 'rg auth src' --write-target"),
+            "argument `--write-target` requires a value",
+        ),
+    ];
+
+    for (name, command, expected) in cases {
+        let input = serde_json::json!({
+            "session_id": "s1",
+            "cwd": "/repo",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": command
+            }
+        })
+        .to_string();
+
+        let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+        let HookOutcome::Deny { reason } = outcome else {
+            panic!("{name}: expected Bash denial");
+        };
+        assert!(
+            reason.contains(expected),
+            "{name}: reason `{reason}` should contain `{expected}`"
+        );
+    }
 }
 
 #[test]
@@ -181,7 +270,7 @@ fn pre_tool_use_denies_wrapper_trusted_sandbox_env_without_top_level_sandbox() {
     let outcome = handle_pre_tool_use_with_trusted_sandbox(input, Some(trusted_sandbox))
         .expect("hook input should parse");
 
-    assert!(matches!(outcome, HookOutcome::Deny { .. }));
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
@@ -507,7 +596,7 @@ fn pre_tool_use_allows_bash_control_syntax_in_read_only_tmp_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
@@ -529,7 +618,7 @@ fn pre_tool_use_allows_sandbox_pipeline_with_quoted_regex_alternation() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
@@ -608,7 +697,7 @@ fn run_hook_pre_tool_use_denies_wrapper_trusted_sandbox_env_without_top_level_sa
         json["hookSpecificOutput"]["permissionDecisionReason"]
             .as_str()
             .expect("reason should be string")
-            .contains("structured read-only sandbox metadata")
+            .contains("stateful sandbox run")
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -633,16 +722,7 @@ fn pre_tool_use_denies_tool_input_spoofed_read_only_bash_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert!(matches!(outcome, HookOutcome::Deny { .. }));
-    let json = outcome
-        .to_stdout_json()
-        .expect("deny outcome should serialize");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("reason should be string")
-            .contains("structured read-only sandbox metadata")
-    );
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
@@ -664,16 +744,7 @@ fn pre_tool_use_denies_read_only_bash_sandbox_with_repo_writable_root() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert!(matches!(outcome, HookOutcome::Deny { .. }));
-    let json = outcome
-        .to_stdout_json()
-        .expect("deny outcome should serialize");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("reason should be string")
-            .contains("outside the trusted tmp writable roots")
-    );
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
@@ -695,16 +766,7 @@ fn pre_tool_use_denies_read_only_bash_sandbox_with_network_access() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert!(matches!(outcome, HookOutcome::Deny { .. }));
-    let json = outcome
-        .to_stdout_json()
-        .expect("deny outcome should serialize");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("reason should be string")
-            .contains("network access")
-    );
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
@@ -725,16 +787,7 @@ fn pre_tool_use_denies_read_only_bash_sandbox_without_explicit_network_disabled(
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert!(matches!(outcome, HookOutcome::Deny { .. }));
-    let json = outcome
-        .to_stdout_json()
-        .expect("deny outcome should serialize");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("reason should be string")
-            .contains("network access")
-    );
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
@@ -756,7 +809,7 @@ fn pre_tool_use_allows_known_mutating_command_in_read_only_bash_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
@@ -778,7 +831,7 @@ fn pre_tool_use_allows_stateful_control_command_in_read_only_bash_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
@@ -800,7 +853,7 @@ fn pre_tool_use_allows_arbitrary_bash_syntax_in_read_only_network_disabled_sandb
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
