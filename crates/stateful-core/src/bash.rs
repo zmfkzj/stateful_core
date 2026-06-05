@@ -91,6 +91,14 @@ pub fn classify_bash(command: &str) -> BashClassification {
         };
     }
 
+    if is_stateful_push_command(&command) {
+        return BashClassification {
+            kind: BashKind::ReadOnly,
+            reason: "stateful push is a structured git publish operation with target checks"
+                .to_string(),
+        };
+    }
+
     if is_stateful_command(&normalized) {
         return BashClassification {
             kind: BashKind::Mutating,
@@ -248,6 +256,32 @@ fn is_stateful_commit_command(command: &str) -> bool {
         && words.iter().any(|word| word == "-m" || word == "--message")
         && !paths.is_empty()
         && paths.iter().all(|path| !is_broad_commit_pathspec(path))
+}
+
+fn is_stateful_push_command(command: &str) -> bool {
+    if contains_shell_control_syntax(command) {
+        return false;
+    }
+
+    let words = shell_words(command);
+    if words.len() < 2 || !is_stateful_binary(&words[0]) || words[1] != "push" {
+        return false;
+    }
+
+    match &words[2..] {
+        [] => true,
+        [remote, branch] => is_safe_push_target(remote) && is_safe_push_target(branch),
+        _ => false,
+    }
+}
+
+fn is_safe_push_target(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && !value.contains(':')
+        && !value
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control())
 }
 
 fn is_broad_commit_pathspec(path: &str) -> bool {

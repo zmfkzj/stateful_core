@@ -7,6 +7,7 @@ fn codex_wrapper_builds_read_only_tmp_profile_and_attestation() {
     let invocation = build_codex_invocation(CodexWrapperOptions {
         codex_bin: "/opt/codex/bin/codex".to_string(),
         sandbox: CodexSandboxMode::ReadOnlyTmp,
+        no_stateful: false,
         args: vec!["exec".to_string(), "--json".to_string(), "-".to_string()],
     })
     .expect("read-only tmp invocation should build");
@@ -28,13 +29,37 @@ fn codex_wrapper_builds_read_only_tmp_profile_and_attestation() {
             .args
             .contains(&"permissions.stateful-read-only-tmp.network.enabled=false".to_string())
     );
+    assert!(
+        invocation
+            .args
+            .windows(2)
+            .any(|window| window == ["-c", "web_search=\"live\""]),
+        "stateful codex should leave Bash networking disabled while enabling Codex web search"
+    );
+    assert!(
+        invocation.args.windows(2).any(|window| {
+            window
+                == [
+                    "-c",
+                    "mcp_servers.stateful.default_tools_approval_mode=\"approve\"",
+                ]
+        }),
+        "stateful codex should approve stateful MCP tools by default"
+    );
     assert!(invocation.args.windows(2).any(|window| {
         window
             == [
                 "-c",
-                "permissions.stateful-read-only-tmp.filesystem.\"/tmp\"=\"write\"",
+                "permissions.stateful-read-only-tmp.filesystem./tmp=\"write\"",
             ]
     }));
+    assert!(
+        !invocation
+            .args
+            .iter()
+            .any(|arg| arg.contains("filesystem.\"")),
+        "filesystem override keys must not quote path segments because Codex treats those quotes as part of the path"
+    );
     assert!(!invocation.args.contains(&"--sandbox".to_string()));
     assert!(invocation.args.ends_with(&[
         "exec".to_string(),
@@ -61,10 +86,30 @@ fn codex_wrapper_builds_read_only_tmp_profile_and_attestation() {
 }
 
 #[test]
+fn codex_wrapper_no_stateful_disables_codex_hooks() {
+    let invocation = build_codex_invocation(CodexWrapperOptions {
+        codex_bin: "codex".to_string(),
+        sandbox: CodexSandboxMode::ReadOnlyTmp,
+        no_stateful: true,
+        args: vec!["exec".to_string(), "-".to_string()],
+    })
+    .expect("no-stateful invocation should build");
+
+    assert!(
+        invocation
+            .args
+            .windows(2)
+            .any(|window| window == ["-c", "features.hooks=false"]),
+        "stateful codex --no-stateful should disable Codex lifecycle hooks"
+    );
+}
+
+#[test]
 fn codex_wrapper_rejects_user_sandbox_overrides() {
     let error = build_codex_invocation(CodexWrapperOptions {
         codex_bin: "codex".to_string(),
         sandbox: CodexSandboxMode::ReadOnlyTmp,
+        no_stateful: false,
         args: vec![
             "exec".to_string(),
             "-c".to_string(),

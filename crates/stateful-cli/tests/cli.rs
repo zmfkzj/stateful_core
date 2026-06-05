@@ -27,6 +27,41 @@ fn parses_structured_commit_command() {
 }
 
 #[test]
+fn parses_structured_push_command_with_explicit_remote_and_branch() {
+    let cli = Cli::try_parse_from(["stateful", "push", "origin", "main"])
+        .expect("push command should parse");
+
+    match cli.command {
+        Command::Push { remote, branch } => {
+            assert_eq!(remote.as_deref(), Some("origin"));
+            assert_eq!(branch.as_deref(), Some("main"));
+        }
+        other => panic!("expected push command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_structured_push_command_without_explicit_target() {
+    let cli = Cli::try_parse_from(["stateful", "push"]).expect("push command should parse");
+
+    match cli.command {
+        Command::Push { remote, branch } => {
+            assert_eq!(remote, None);
+            assert_eq!(branch, None);
+        }
+        other => panic!("expected push command, got {other:?}"),
+    }
+}
+
+#[test]
+fn structured_push_rejects_partial_explicit_target() {
+    let error =
+        Cli::try_parse_from(["stateful", "push", "origin"]).expect_err("push target is a pair");
+
+    assert!(error.to_string().contains("<BRANCH>"));
+}
+
+#[test]
 fn structured_commit_command_requires_path_separator() {
     let error = Cli::try_parse_from(["stateful", "commit", "-m", "docs: add plan", "docs/plan.md"])
         .expect_err("commit paths should require -- separator");
@@ -85,9 +120,25 @@ fn parses_codex_wrapper_command() {
         Command::Codex {
             ref codex_bin,
             sandbox: CodexSandboxMode::ReadOnlyTmp,
+            no_stateful: false,
             ref args,
         } if codex_bin == "/opt/codex/bin/codex"
             && args == &vec!["exec".to_string(), "--json".to_string(), "-".to_string()]
+    ));
+}
+
+#[test]
+fn parses_codex_wrapper_no_stateful_command() {
+    let cli = Cli::try_parse_from(["stateful", "codex", "--no-stateful", "exec", "-"])
+        .expect("codex wrapper no-stateful command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Codex {
+            no_stateful: true,
+            ref args,
+            ..
+        } if args == &vec!["exec".to_string(), "-".to_string()]
     ));
 }
 

@@ -12,6 +12,7 @@ mod hook;
 mod install;
 mod mcp;
 mod outbox;
+mod push;
 mod repo_registry;
 mod runtime;
 mod server_lifecycle;
@@ -34,6 +35,7 @@ pub use install::{
 };
 pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio_in_repo};
 pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime};
+pub use push::{PushRequest, PushResult, run_structured_push};
 pub use repo_registry::{
     CodexMode, RepoEntry, RepoGate, RepoIdentity, RepoRegistry, detect_git_root, disable_repo,
     enable_repo, repo_gate, repo_identity_for_enabled_repo,
@@ -101,11 +103,18 @@ pub enum Command {
         #[arg(required = true, num_args = 1.., last = true)]
         paths: Vec<String>,
     },
+    Push {
+        #[arg(requires = "branch")]
+        remote: Option<String>,
+        branch: Option<String>,
+    },
     Codex {
         #[arg(long, default_value = "codex")]
         codex_bin: String,
         #[arg(long, value_enum, default_value = "read-only-tmp")]
         sandbox: CodexSandboxMode,
+        #[arg(long)]
+        no_stateful: bool,
         #[arg(num_args = 0.., allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
@@ -342,14 +351,33 @@ pub fn run() -> anyhow::Result<()> {
                 }))?
             );
         }
+        Command::Push { remote, branch } => {
+            let cwd = std::env::current_dir()?;
+            let repo_root = detect_git_root(&cwd)?;
+            let result = run_structured_push(PushRequest {
+                repo_root,
+                remote,
+                branch,
+            })?;
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "status": "ok",
+                    "remote": result.remote,
+                    "branch": result.branch
+                }))?
+            );
+        }
         Command::Codex {
             codex_bin,
             sandbox,
+            no_stateful,
             args,
         } => {
             let code = run_codex(CodexWrapperOptions {
                 codex_bin,
                 sandbox,
+                no_stateful,
                 args,
             })?;
             std::process::exit(code);

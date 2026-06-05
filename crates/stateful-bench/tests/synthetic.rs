@@ -185,6 +185,42 @@ fn chaos_agent_manifest_records_tiers_baselines_schedules_and_lease_conflicts() 
         .len();
     assert!(sample60_seed_count >= 50);
 
+    let expected_agents = ["agent-a", "agent-b", "agent-c", "agent-d", "agent-e"];
+    for metadata in full_metadata
+        .iter()
+        .chain(sample_metadata.iter())
+        .chain(sample60_metadata.iter())
+    {
+        let agents = metadata["agents"]
+            .as_array()
+            .expect("chaos metadata should declare manifest agents");
+        assert_eq!(agents.len(), 5);
+        assert_eq!(
+            agents
+                .iter()
+                .map(|agent| agent.as_str().expect("agent id"))
+                .collect::<Vec<_>>(),
+            expected_agents
+        );
+        let delivery_order = metadata["delivery_order"]
+            .as_array()
+            .expect("delivery order should be an array")
+            .iter()
+            .map(|agent| agent.as_str().expect("delivery agent"))
+            .collect::<std::collections::BTreeSet<_>>();
+        for agent_id in expected_agents {
+            let key = agent_id.replace('-', "_");
+            assert!(
+                metadata.get(&key).is_some(),
+                "metadata should include operation for {agent_id}"
+            );
+            assert!(
+                delivery_order.contains(agent_id),
+                "delivery order should include {agent_id}"
+            );
+        }
+    }
+
     for metadata in sample_metadata.into_iter().chain(sample60_metadata) {
         let expectations = metadata["baseline_expectations"]
             .as_object()

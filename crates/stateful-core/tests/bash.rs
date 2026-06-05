@@ -366,6 +366,42 @@ fn stateful_commit_is_allowed_as_structured_git_escape_hatch() {
 }
 
 #[test]
+fn stateful_push_is_allowed_as_structured_git_escape_hatch() {
+    let allowed = [
+        "stateful push",
+        "stateful push origin main",
+        "./target/debug/stateful push origin feature/topic",
+    ];
+
+    for command in allowed {
+        assert_eq!(
+            classify_bash(command).kind,
+            BashKind::ReadOnly,
+            "command `{command}` should be allowed as a structured git push"
+        );
+    }
+}
+
+#[test]
+fn stateful_push_rejects_flags_and_shell_control_syntax() {
+    let rejected = [
+        "stateful push --force origin main",
+        "stateful push origin --force",
+        "stateful push origin main extra",
+        "stateful push origin main; git push --force",
+        "stateful push origin main $(git branch --show-current)",
+    ];
+
+    for command in rejected {
+        assert_ne!(
+            classify_bash(command).kind,
+            BashKind::ReadOnly,
+            "command `{command}` should not be allowed"
+        );
+    }
+}
+
+#[test]
 fn stateful_commit_with_shell_control_syntax_is_denied() {
     let classification =
         classify_bash("stateful commit -m 'docs: add plan' -- docs/plan.md; git add .");

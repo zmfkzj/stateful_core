@@ -1065,6 +1065,8 @@ pub struct PairRunRecord {
     pub mode: RunMode,
     pub agent_a: AgentRunRecord,
     pub agent_b: AgentRunRecord,
+    #[serde(default)]
+    pub agents: Vec<AgentRunRecord>,
     pub wall_time_ms: u64,
     pub combined_patch_path: String,
     #[serde(default)]
@@ -1286,13 +1288,11 @@ fn run_pair_inner(
         Vec::new()
     };
     let stateful_workspace_id = format!("{}-{}", options.run_id, pair.pair_id);
+    let agent_ids = agent_ids_for_pair(pair);
     fs::create_dir_all(&workspace)?;
     let pair_json = pair_dir.join("pair.json");
-    let task_a_artifact_json = pair_dir.join("task-a.json");
-    let task_b_artifact_json = pair_dir.join("task-b.json");
     write_json_file(&pair_json, pair)?;
-    write_json_file(&task_a_artifact_json, &pair.task_a)?;
-    write_json_file(&task_b_artifact_json, &pair.task_b)?;
+    write_agent_task_artifacts(pair, &agent_ids, &pair_dir)?;
 
     if let Some(template) = &options.setup_cmd_template {
         run_shell_command(
@@ -1315,7 +1315,7 @@ fn run_pair_inner(
         )?;
     }
 
-    write_agent_task_inputs(pair, &workspace)?;
+    write_agent_task_inputs(pair, &agent_ids, &workspace)?;
 
     let mut stateful_server = None;
 
@@ -1333,68 +1333,54 @@ fn run_pair_inner(
         let observer_path = pair_dir.join("observer-events.jsonl");
         let mut observer_events = vec![
             serde_json::json!({"event_type":"pair_started","pair_id":pair.pair_id,"mode":options.mode}),
-            serde_json::json!({"event_type":"agent_started","agent_id":"agent-a"}),
-            serde_json::json!({"event_type":"agent_started","agent_id":"agent-b"}),
         ];
+        observer_events.extend(
+            agent_ids.iter().map(
+                |agent_id| serde_json::json!({"event_type":"agent_started","agent_id":agent_id}),
+            ),
+        );
 
         let timeout = Duration::from_secs(options.timeout_seconds);
         let started = Instant::now();
-        let agent_a_stdout = pair_dir.join("agent-a.stdout.log");
-        let agent_a_stderr = pair_dir.join("agent-a.stderr.log");
-        let agent_b_stdout = pair_dir.join("agent-b.stdout.log");
-        let agent_b_stderr = pair_dir.join("agent-b.stderr.log");
-        let mut child_a = spawn_agent(
-            &options.agent_cmd_template,
-            &TemplateValues::for_pair(
-                pair,
+        let mut agents = Vec::new();
+        for agent_id in &agent_ids {
+            let log_stem = sanitize_id(agent_id);
+            let stdout = pair_dir.join(format!("{log_stem}.stdout.log"));
+            let stderr = pair_dir.join(format!("{log_stem}.stderr.log"));
+            let child = spawn_agent(
+                &options.agent_cmd_template,
+                &TemplateValues::for_pair(
+                    pair,
+                    &workspace,
+                    &pair_json,
+                    &pair_dir,
+                    &stateful_workspace_id,
+                    agent_id,
+                    &agent_task_suffix(agent_id),
+                ),
                 &workspace,
-                &pair_json,
-                &pair_dir,
-                &stateful_workspace_id,
-                "agent-a",
-                "a",
-            ),
-            &workspace,
-            &agent_a_stdout,
-            &agent_a_stderr,
-            &stateful_env,
-        )?;
-        let mut child_b = spawn_agent(
-            &options.agent_cmd_template,
-            &TemplateValues::for_pair(
-                pair,
-                &workspace,
-                &pair_json,
-                &pair_dir,
-                &stateful_workspace_id,
-                "agent-b",
-                "b",
-            ),
-            &workspace,
-            &agent_b_stdout,
-            &agent_b_stderr,
-            &stateful_env,
-        )?;
+                &stdout,
+                &stderr,
+                &stateful_env,
+            )?;
+            agents.push(RunningAgent {
+                agent_id: agent_id.clone(),
+                child,
+                stdout,
+                stderr,
+            });
+        }
 
-        let agent_logs = [
-            AgentLogPaths {
-                agent_id: "agent-a",
-                stdout: &agent_a_stdout,
-                stderr: &agent_a_stderr,
-            },
-            AgentLogPaths {
-                agent_id: "agent-b",
-                stdout: &agent_b_stdout,
-                stderr: &agent_b_stderr,
-            },
-        ];
-        let (agent_a, agent_b) =
-            wait_for_agents(&mut child_a, &mut child_b, timeout, agent_logs, abort)?;
+        let agent_records = wait_for_agents(&mut agents, timeout, abort)?;
         let wall_time_ms = elapsed_ms(started.elapsed());
 
-        observer_events.push(serde_json::json!({"event_type":"agent_finished","agent_id":"agent-a","outcome":agent_a.outcome}));
-        observer_events.push(serde_json::json!({"event_type":"agent_finished","agent_id":"agent-b","outcome":agent_b.outcome}));
-        if agent_a.outcome == AgentOutcome::TimedOut || agent_b.outcome == AgentOutcome::TimedOut {
+        observer_events.extend(agent_records.iter().map(|agent| {
+            serde_json::json!({"event_type":"agent_finished","agent_id":agent.agent_id,"outcome":agent.outcome})
+        }));
+        if agent_records
+            .iter()
+            .any(|agent| agent.outcome == AgentOutcome::TimedOut)
+        {
             observer_events.push(serde_json::json!({"event_type":"timeout"}));
         }
         observer_events
@@ -1431,11 +1417,20 @@ fn run_pair_inner(
             None
         };
 
+        let agent_a = agent_records
+            .first()
+            .cloned()
+            .unwrap_or_else(|| AgentRunRecord::failed("agent-a", wall_time_ms));
+        let agent_b = agent_records
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| AgentRunRecord::failed("agent-b", wall_time_ms));
         let record = PairRunRecord {
             pair_id: pair.pair_id.clone(),
             mode: options.mode,
             agent_a,
             agent_b,
+            agents: agent_records,
             wall_time_ms,
             combined_patch_path: "combined.patch".to_string(),
             harness_result_path,
@@ -1462,11 +1457,11 @@ fn write_pair_error(
 ) -> Result<()> {
     let pair_dir = run_dir.join(sanitize_id(&pair.pair_id));
     let workspace = pair_dir.join("workspace");
+    let agent_ids = agent_ids_for_pair(pair);
     fs::create_dir_all(&workspace)?;
 
     write_json_file(pair_dir.join("pair.json"), pair)?;
-    write_json_file(pair_dir.join("task-a.json"), &pair.task_a)?;
-    write_json_file(pair_dir.join("task-b.json"), &pair.task_b)?;
+    write_agent_task_artifacts(pair, &agent_ids, &pair_dir)?;
     fs::write(pair_dir.join("run-error.txt"), error)?;
 
     let combined_patch_path = pair_dir.join("combined.patch");
@@ -1475,10 +1470,10 @@ fn write_pair_error(
     }
 
     let harness_result = serde_json::json!({
-        "task_results": [
-            {"status": "setup_error", "setup_error": true},
-            {"status": "setup_error", "setup_error": true}
-        ],
+        "task_results": agent_ids
+            .iter()
+            .map(|agent_id| serde_json::json!({"agent": agent_id, "status": "setup_error", "setup_error": true}))
+            .collect::<Vec<_>>(),
         "error": error
     });
     write_json_file(pair_dir.join("harness-result.json"), &harness_result)?;
@@ -1498,11 +1493,22 @@ fn write_pair_error(
         .push(serde_json::json!({"event_type":"pair_finished","wall_time_ms":wall_time_ms}));
     write_jsonl(&observer_path, &observer_events)?;
 
+    let agent_records = agent_ids
+        .iter()
+        .map(|agent_id| AgentRunRecord::failed(agent_id.as_str(), wall_time_ms))
+        .collect::<Vec<_>>();
     let record = PairRunRecord {
         pair_id: pair.pair_id.clone(),
         mode: options.mode,
-        agent_a: AgentRunRecord::failed("agent-a", wall_time_ms),
-        agent_b: AgentRunRecord::failed("agent-b", wall_time_ms),
+        agent_a: agent_records
+            .first()
+            .cloned()
+            .unwrap_or_else(|| AgentRunRecord::failed("agent-a", wall_time_ms)),
+        agent_b: agent_records
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| AgentRunRecord::failed("agent-b", wall_time_ms)),
+        agents: agent_records,
         wall_time_ms,
         combined_patch_path: "combined.patch".to_string(),
         harness_result_path: Some("harness-result.json".to_string()),
@@ -1521,18 +1527,77 @@ fn write_fatal_run_error(pair: &PairManifestEntry, run_dir: &Path, error: &str) 
     Ok(())
 }
 
-fn write_agent_task_inputs(pair: &PairManifestEntry, workspace: &Path) -> Result<()> {
+fn write_agent_task_artifacts(
+    pair: &PairManifestEntry,
+    agent_ids: &[String],
+    pair_dir: &Path,
+) -> Result<()> {
+    for agent_id in agent_ids {
+        let suffix = agent_task_suffix(agent_id);
+        write_json_file(
+            pair_dir.join(format!("task-{suffix}.json")),
+            instance_for_agent(pair, agent_id),
+        )?;
+    }
+    Ok(())
+}
+
+fn write_agent_task_inputs(
+    pair: &PairManifestEntry,
+    agent_ids: &[String],
+    workspace: &Path,
+) -> Result<()> {
     let task_dir = workspace.join(".stateful_bench");
     fs::create_dir_all(&task_dir)?;
-    write_json_file(
-        task_dir.join("task-a.json"),
-        &AgentTaskInput::from_instance(&pair.task_a),
-    )?;
-    write_json_file(
-        task_dir.join("task-b.json"),
-        &AgentTaskInput::from_instance(&pair.task_b),
-    )?;
+    for agent_id in agent_ids {
+        let suffix = agent_task_suffix(agent_id);
+        write_json_file(
+            task_dir.join(format!("task-{suffix}.json")),
+            &AgentTaskInput::from_instance(instance_for_agent(pair, agent_id)),
+        )?;
+    }
     Ok(())
+}
+
+fn instance_for_agent<'a>(pair: &'a PairManifestEntry, agent_id: &str) -> &'a SweBenchInstance {
+    if agent_id == "agent-b" {
+        &pair.task_b
+    } else {
+        &pair.task_a
+    }
+}
+
+fn agent_ids_for_pair(pair: &PairManifestEntry) -> Vec<String> {
+    let parsed = serde_json::from_str::<Value>(&pair.task_a.test_patch).ok();
+    let mut agents = parsed
+        .as_ref()
+        .and_then(|metadata| metadata.get("agents"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            let mut seen = BTreeSet::new();
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|agent_id| !agent_id.is_empty())
+                .filter(|agent_id| seen.insert((*agent_id).to_string()))
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if agents.len() < 2 {
+        agents = vec!["agent-a".to_string(), "agent-b".to_string()];
+    }
+
+    agents
+}
+
+fn agent_task_suffix(agent_id: &str) -> String {
+    agent_id
+        .strip_prefix("agent-")
+        .unwrap_or(agent_id)
+        .to_string()
 }
 
 #[derive(Debug, Serialize)]
@@ -1582,11 +1647,18 @@ fn spawn_agent(
     process.spawn().context("failed to spawn agent command")
 }
 
-#[derive(Debug, Clone, Copy)]
-struct AgentLogPaths<'a> {
-    agent_id: &'static str,
-    stdout: &'a Path,
-    stderr: &'a Path,
+struct RunningAgent {
+    agent_id: String,
+    child: Child,
+    stdout: PathBuf,
+    stderr: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct AgentLogPaths {
+    agent_id: String,
+    stdout: PathBuf,
+    stderr: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1598,7 +1670,7 @@ enum FatalAgentFailureKind {
 #[derive(Debug, Clone)]
 struct FatalAgentFailureError {
     kind: FatalAgentFailureKind,
-    agent_id: &'static str,
+    agent_id: String,
     log_path: PathBuf,
     excerpt: String,
 }
@@ -1653,71 +1725,63 @@ fn is_fatal_agent_abort_error(error: &anyhow::Error) -> bool {
 }
 
 fn wait_for_agents(
-    child_a: &mut Child,
-    child_b: &mut Child,
+    agents: &mut [RunningAgent],
     timeout: Duration,
-    logs: [AgentLogPaths<'_>; 2],
     abort: &AtomicBool,
-) -> Result<(AgentRunRecord, AgentRunRecord)> {
+) -> Result<Vec<AgentRunRecord>> {
     let started = Instant::now();
     let mut last_fatal_check = Instant::now();
-    let mut agent_a = None;
-    let mut agent_b = None;
+    let logs = agents
+        .iter()
+        .map(|agent| AgentLogPaths {
+            agent_id: agent.agent_id.clone(),
+            stdout: agent.stdout.clone(),
+            stderr: agent.stderr.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut records = vec![None; agents.len()];
 
-    while agent_a.is_none() || agent_b.is_none() {
+    while records.iter().any(Option::is_none) {
         if abort.load(Ordering::SeqCst) {
-            terminate_agent_children(child_a, child_b);
+            terminate_agent_children(agents);
             return Err(FatalAgentAbortError.into());
         }
 
         if last_fatal_check.elapsed() >= Duration::from_millis(250) {
             if let Some(error) = detect_fatal_agent_failure(&logs) {
                 abort.store(true, Ordering::SeqCst);
-                terminate_agent_children(child_a, child_b);
+                terminate_agent_children(agents);
                 return Err(error.into());
             }
             last_fatal_check = Instant::now();
         }
 
-        if agent_a.is_none()
-            && let Ok(Some(status)) = child_a.try_wait()
-        {
-            agent_a = Some(AgentRunRecord::finished(
-                "agent-a",
-                status.code().unwrap_or(1),
-                elapsed_ms(started.elapsed()),
-            ));
-        }
-        if agent_b.is_none()
-            && let Ok(Some(status)) = child_b.try_wait()
-        {
-            agent_b = Some(AgentRunRecord::finished(
-                "agent-b",
-                status.code().unwrap_or(1),
-                elapsed_ms(started.elapsed()),
-            ));
+        for (index, agent) in agents.iter_mut().enumerate() {
+            if records[index].is_none()
+                && let Ok(Some(status)) = agent.child.try_wait()
+            {
+                records[index] = Some(AgentRunRecord::finished(
+                    agent.agent_id.as_str(),
+                    status.code().unwrap_or(1),
+                    elapsed_ms(started.elapsed()),
+                ));
+            }
         }
 
         if started.elapsed() >= timeout {
-            if agent_a.is_none() {
-                let _ = child_a.kill();
-                let _ = child_a.wait();
-                agent_a = Some(AgentRunRecord::timed_out(
-                    "agent-a",
-                    elapsed_ms(started.elapsed()),
-                ));
-            }
-            if agent_b.is_none() {
-                let _ = child_b.kill();
-                let _ = child_b.wait();
-                agent_b = Some(AgentRunRecord::timed_out(
-                    "agent-b",
-                    elapsed_ms(started.elapsed()),
-                ));
+            for (index, agent) in agents.iter_mut().enumerate() {
+                if records[index].is_none() {
+                    let _ = agent.child.kill();
+                    let _ = agent.child.wait();
+                    records[index] = Some(AgentRunRecord::timed_out(
+                        agent.agent_id.as_str(),
+                        elapsed_ms(started.elapsed()),
+                    ));
+                }
             }
         }
 
-        if agent_a.is_none() || agent_b.is_none() {
+        if records.iter().any(Option::is_none) {
             thread::sleep(Duration::from_millis(25));
         }
     }
@@ -1727,26 +1791,32 @@ fn wait_for_agents(
         return Err(error.into());
     }
 
-    Ok(match (agent_a, agent_b) {
-        (Some(agent_a), Some(agent_b)) => (agent_a, agent_b),
-        _ => (
-            AgentRunRecord::timed_out("agent-a", elapsed_ms(started.elapsed())),
-            AgentRunRecord::timed_out("agent-b", elapsed_ms(started.elapsed())),
-        ),
-    })
+    Ok(records
+        .into_iter()
+        .enumerate()
+        .map(|(index, record)| {
+            record.unwrap_or_else(|| {
+                AgentRunRecord::timed_out(
+                    agents[index].agent_id.as_str(),
+                    elapsed_ms(started.elapsed()),
+                )
+            })
+        })
+        .collect())
 }
 
-fn terminate_agent_children(child_a: &mut Child, child_b: &mut Child) {
-    let _ = terminate_child(child_a);
-    let _ = terminate_child(child_b);
+fn terminate_agent_children(agents: &mut [RunningAgent]) {
+    for agent in agents {
+        let _ = terminate_child(&mut agent.child);
+    }
 }
 
-fn detect_fatal_agent_failure(logs: &[AgentLogPaths<'_>]) -> Option<FatalAgentFailureError> {
+fn detect_fatal_agent_failure(logs: &[AgentLogPaths]) -> Option<FatalAgentFailureError> {
     logs.iter().find_map(|log| {
-        [log.stdout, log.stderr].into_iter().find_map(|path| {
+        [&log.stdout, &log.stderr].into_iter().find_map(|path| {
             fatal_agent_failure_excerpt(path).map(|(kind, excerpt)| FatalAgentFailureError {
                 kind,
-                agent_id: log.agent_id,
+                agent_id: log.agent_id.clone(),
                 log_path: path.to_path_buf(),
                 excerpt,
             })
@@ -1966,10 +2036,10 @@ impl<'a> TemplateValues<'a> {
         agent_id: &'a str,
         task_suffix: &str,
     ) -> Self {
-        let task_json = match task_suffix {
-            "a" => workspace.join(".stateful_bench/task-a.json"),
-            "b" => workspace.join(".stateful_bench/task-b.json"),
-            _ => pair_json.to_path_buf(),
+        let task_json = if task_suffix.is_empty() {
+            pair_json.to_path_buf()
+        } else {
+            workspace.join(format!(".stateful_bench/task-{task_suffix}.json"))
         };
         Self {
             workspace,
@@ -2653,6 +2723,10 @@ fn write_synthetic_pair_run(
             mode,
             agent_a: AgentRunRecord::finished("agent-a", 0, outcome.wall_time_ms / 2),
             agent_b: AgentRunRecord::finished("agent-b", 0, outcome.wall_time_ms / 2),
+            agents: vec![
+                AgentRunRecord::finished("agent-a", 0, outcome.wall_time_ms / 2),
+                AgentRunRecord::finished("agent-b", 0, outcome.wall_time_ms / 2),
+            ],
             wall_time_ms: outcome.wall_time_ms,
             combined_patch_path: "combined.patch".to_string(),
             harness_result_path: Some("harness-result.json".to_string()),

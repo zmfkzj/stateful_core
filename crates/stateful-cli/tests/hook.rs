@@ -540,7 +540,7 @@ fn pre_tool_use_denies_read_only_bash_sandbox_without_explicit_network_disabled(
 }
 
 #[test]
-fn pre_tool_use_denies_known_mutating_command_in_read_only_bash_sandbox() {
+fn pre_tool_use_allows_known_mutating_command_in_read_only_bash_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -558,20 +558,11 @@ fn pre_tool_use_denies_known_mutating_command_in_read_only_bash_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert!(matches!(outcome, HookOutcome::Deny { .. }));
-    let json = outcome
-        .to_stdout_json()
-        .expect("deny outcome should serialize");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("reason should be string")
-            .contains("known mutating")
-    );
+    assert_eq!(outcome, HookOutcome::Allow);
 }
 
 #[test]
-fn pre_tool_use_denies_stateful_control_command_even_in_read_only_bash_sandbox() {
+fn pre_tool_use_allows_stateful_control_command_in_read_only_bash_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -589,16 +580,29 @@ fn pre_tool_use_denies_stateful_control_command_even_in_read_only_bash_sandbox()
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert!(matches!(outcome, HookOutcome::Deny { .. }));
-    let json = outcome
-        .to_stdout_json()
-        .expect("deny outcome should serialize");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("reason should be string")
-            .contains("known mutating")
-    );
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_allows_arbitrary_bash_syntax_in_read_only_network_disabled_sandbox() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "sandbox": {
+        "mode": "read-only",
+        "writable_roots": ["/tmp"],
+        "network_access": false
+      },
+      "tool_input": {
+        "command": "echo hi > src/auth.ts; stateful sync-outbox || true"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
 }
 
 #[test]

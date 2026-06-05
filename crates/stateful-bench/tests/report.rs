@@ -23,6 +23,10 @@ fn report_loads_pair_artifacts_and_renders_deterministic_summaries() {
             mode: RunMode::Stateful,
             agent_a: AgentRunRecord::finished("agent-a", 0, 1000),
             agent_b: AgentRunRecord::finished("agent-b", 1, 1200),
+            agents: vec![
+                AgentRunRecord::finished("agent-a", 0, 1000),
+                AgentRunRecord::finished("agent-b", 1, 1200),
+            ],
             wall_time_ms: 1250,
             combined_patch_path: "combined.patch".to_string(),
             harness_result_path: Some("harness-result.json".to_string()),

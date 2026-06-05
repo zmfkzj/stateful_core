@@ -69,6 +69,11 @@ const TOOLS: &[(&str, &str, &str)] = &[
         "Run a controlled validation profile.",
     ),
     (
+        "state_file_write",
+        "state.file.write",
+        "Write UTF-8 contents to a repo file after stateful authorization.",
+    ),
+    (
         "state_notifications_poll",
         "state.notifications.poll",
         "Poll pending coordination notifications for the active session.",
@@ -213,6 +218,15 @@ fn input_schema_for(protocol_name: &str) -> Value {
             ],
             ["profile"],
         ),
+        "state.file.write" => object_schema(
+            [
+                ("session_id", string_schema()),
+                ("workspace_id", string_schema()),
+                ("path", string_schema()),
+                ("contents", string_schema()),
+            ],
+            ["path", "contents"],
+        ),
         _ => empty_object_schema(),
     }
 }
@@ -280,6 +294,11 @@ pub fn map_tool_to_http(tool: ToolCall) -> Result<HttpToolRequest, String> {
         "state.context.render" => ("POST", "/v1/context/render"),
         "state.reconcile.ack" => ("POST", "/v1/reconcile/ack"),
         "state.validation.run" => ("POST", "/v1/validation/run"),
+        "state.file.write" => {
+            return Err(
+                "state.file.write is handled locally by the stateful CLI MCP bridge".to_string(),
+            );
+        }
         "state.notifications.poll" => ("POST", "/v1/notifications/poll"),
         "state.resume.next" => ("POST", "/v1/resume/next"),
         unknown => return Err(format!("unknown stateful MCP tool: {unknown}")),

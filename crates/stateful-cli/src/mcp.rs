@@ -1,4 +1,5 @@
 use std::{
+    fs,
     io::{Read, Write},
     path::Path,
 };
@@ -9,7 +10,7 @@ use stateful_mcp::{ToolCall, map_tool_to_http, protocol_tool_name, tool_descript
 use crate::{
     GlobalPaths, HttpResponse, IntentDeclareArgs, RepoGate, RepoIdentity, ServerRuntime,
     discover_runtime_with_global, ensure_server, get_json, intent_declare_protocol_body, post_json,
-    read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
+    protocol_envelope, read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
 };
 
 pub fn call_mcp_tool_in_repo(
@@ -48,6 +49,10 @@ fn call_mcp_tool(
 ) -> anyhow::Result<HttpResponse> {
     let tool_name = tool_name.into();
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;
+    if protocol_name == "state.file.write" {
+        return call_file_write_tool(runtime, repo_root, paths, arguments);
+    }
+
     let tool = ToolCall::new(
         protocol_name,
         enrich_arguments(protocol_name, arguments, runtime, repo_root, paths),
@@ -65,6 +70,203 @@ fn call_mcp_tool(
             post_json(runtime, request.path, &body)
         }
         method => anyhow::bail!("unsupported MCP HTTP method: {method}"),
+    }
+}
+
+fn call_file_write_tool(
+    runtime: &ServerRuntime,
+    repo_root: &Path,
+    paths: &GlobalPaths,
+    arguments: Value,
+) -> anyhow::Result<HttpResponse> {
+    let args = match serde_json::from_value::<FileWriteArguments>(arguments) {
+        Ok(args) => args,
+        Err(error) => {
+            return Ok(error_response(
+                400,
+                format!("invalid state.file.write arguments: {error}"),
+            ));
+        }
+    };
+    let path = match normalize_repo_file_path(&args.path) {
+        Ok(path) => path,
+        Err(error) => return Ok(error_response(400, error.to_string())),
+    };
+    let current_session = if args.session_id.is_none() || args.workspace_id.is_none() {
+        read_current_session_file(repo_root).ok()
+    } else {
+        None
+    };
+    let session_id = match args.session_id.or_else(|| {
+        current_session
+            .as_ref()
+            .map(|session| session.session_id.clone())
+    }) {
+        Some(session_id) => session_id,
+        None => {
+            return Ok(error_response(
+                400,
+                "state.file.write requires session_id or a current stateful session file",
+            ));
+        }
+    };
+    let workspace_id = args
+        .workspace_id
+        .or_else(|| current_session.map(|session| session.workspace_id))
+        .unwrap_or_else(|| runtime.workspace_id.clone());
+
+    let response =
+        authorize_file_write(runtime, repo_root, paths, &session_id, &workspace_id, &path)?;
+    if !(200..300).contains(&response.status_code) {
+        return Ok(response);
+    }
+
+    let decision = serde_json::from_str::<FileWriteAuthorizeDecision>(&response.body)?;
+    if decision.decision != "allow" {
+        return Ok(HttpResponse {
+            status_code: 403,
+            body: response.body,
+        });
+    }
+
+    if let Err(error) = write_repo_file(repo_root, &path, &args.contents) {
+        return Ok(error_response(500, error.to_string()));
+    }
+
+    Ok(HttpResponse {
+        status_code: 200,
+        body: serde_json::json!({
+            "status": "ok",
+            "path": path,
+            "bytes": args.contents.len(),
+        })
+        .to_string(),
+    })
+}
+
+fn authorize_file_write(
+    runtime: &ServerRuntime,
+    repo_root: &Path,
+    paths: &GlobalPaths,
+    session_id: &str,
+    workspace_id: &str,
+    path: &str,
+) -> anyhow::Result<HttpResponse> {
+    let body = protocol_envelope(
+        runtime,
+        uuid::Uuid::new_v4().to_string(),
+        session_id,
+        workspace_id,
+        repo_identity_for_enabled_repo(paths, repo_root).ok(),
+        "mcp",
+        "file_write",
+        "state.file.write",
+        serde_json::json!({
+            "action": "write_file",
+            "path": path,
+            "queue_on_conflict": true,
+        }),
+    );
+
+    post_json(runtime, "/v1/authorize", &body)
+}
+
+fn write_repo_file(repo_root: &Path, relative_path: &str, contents: &str) -> anyhow::Result<()> {
+    ensure_repo_file_target(repo_root, relative_path)?;
+    let target = repo_root.join(relative_path);
+    let Some(parent) = target.parent() else {
+        anyhow::bail!("state.file.write target has no parent directory");
+    };
+    fs::create_dir_all(parent)?;
+    fs::write(target, contents)?;
+    Ok(())
+}
+
+fn ensure_repo_file_target(repo_root: &Path, relative_path: &str) -> anyhow::Result<()> {
+    let canonical_repo = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let target = repo_root.join(relative_path);
+    let Some(parent) = Path::new(relative_path).parent() else {
+        anyhow::bail!("state.file.write target has no parent directory");
+    };
+
+    let mut cursor = repo_root.to_path_buf();
+    for component in parent.components() {
+        cursor.push(component);
+        if let Ok(metadata) = fs::symlink_metadata(&cursor) {
+            if metadata.file_type().is_symlink() {
+                anyhow::bail!("state.file.write refuses symlinked parent directories");
+            }
+            if !metadata.is_dir() {
+                anyhow::bail!("state.file.write parent path is not a directory");
+            }
+        }
+    }
+
+    if let Ok(metadata) = fs::symlink_metadata(&target) {
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!("state.file.write refuses symlink file targets");
+        }
+        if metadata.is_dir() {
+            anyhow::bail!("state.file.write target is a directory");
+        }
+    }
+
+    if let Some(parent) = target.parent()
+        && parent.exists()
+    {
+        let canonical_parent = parent.canonicalize()?;
+        if !canonical_parent.starts_with(canonical_repo) {
+            anyhow::bail!("state.file.write parent path escapes the repo");
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_repo_file_path(path: &str) -> anyhow::Result<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("state.file.write path is required");
+    }
+    if Path::new(trimmed).is_absolute() {
+        anyhow::bail!("state.file.write path must be repo-relative");
+    }
+
+    let normalized = trimmed.replace('\\', "/");
+    let mut segments = Vec::new();
+    for segment in normalized.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            anyhow::bail!("state.file.write path must stay inside the repo");
+        }
+        if segment == ".git" {
+            anyhow::bail!("state.file.write refuses to write Git internals");
+        }
+        if segment.chars().any(char::is_control) {
+            anyhow::bail!("state.file.write path must not contain control characters");
+        }
+        segments.push(segment);
+    }
+
+    if segments.is_empty() {
+        anyhow::bail!("state.file.write path is required");
+    }
+
+    Ok(segments.join("/"))
+}
+
+fn error_response(status_code: u16, message: impl Into<String>) -> HttpResponse {
+    HttpResponse {
+        status_code,
+        body: serde_json::json!({
+            "status": "error",
+            "message": message.into()
+        })
+        .to_string(),
     }
 }
 
@@ -168,6 +370,21 @@ fn add_repo_identity(
     object
         .entry("branch")
         .or_insert_with(|| Value::String(identity.branch));
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FileWriteArguments {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    path: String,
+    contents: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FileWriteAuthorizeDecision {
+    decision: String,
 }
 
 pub fn handle_mcp_jsonrpc_in_repo(

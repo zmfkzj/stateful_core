@@ -5,7 +5,7 @@ use std::{
 
 use serde::Deserialize;
 use serde_json::json;
-use stateful_core::{BashClassification, BashKind, classify_bash};
+use stateful_core::{BashKind, classify_bash};
 
 use crate::codex_wrapper::STATEFUL_TRUSTED_SANDBOX_ENV;
 use crate::outbox::queue_session_heartbeat_outbox;
@@ -351,9 +351,7 @@ fn authorize_bash(
             reason: "Raw test commands are blocked; run tests with state.validation.run or `stateful validate <profile>`.".to_string(),
         }),
         BashKind::Mutating | BashKind::Unknown => {
-            if let Some(outcome) =
-                authorize_read_only_sandbox_bash(input, trusted_sandbox, command, &classification)
-            {
+            if let Some(outcome) = authorize_read_only_sandbox_bash(input, trusted_sandbox) {
                 return Ok(outcome);
             }
             Ok(HookOutcome::Deny {
@@ -369,8 +367,6 @@ fn authorize_bash(
 fn authorize_read_only_sandbox_bash(
     input: &PreToolUseInput,
     trusted_sandbox: Option<&serde_json::Value>,
-    command: &str,
-    classification: &BashClassification,
 ) -> Option<HookOutcome> {
     let sandbox = effective_sandbox(&input.sandbox, trusted_sandbox)?;
 
@@ -386,23 +382,13 @@ fn authorize_read_only_sandbox_bash(
         });
     }
 
-    let writable_roots = sandbox_writable_roots(sandbox);
-    if let Some(root) = writable_roots
+    if let Some(root) = sandbox_writable_roots(sandbox)
         .iter()
         .find(|root| !is_trusted_tmp_writable_root(root))
     {
         return Some(HookOutcome::Deny {
             reason: format!(
                 "Bash read-only sandbox writable root `{root}` is outside the trusted tmp writable roots"
-            ),
-        });
-    }
-
-    if let Err(reason) = validate_read_only_sandbox_bash_command(command, &writable_roots) {
-        return Some(HookOutcome::Deny {
-            reason: format!(
-                "Bash command blocked by stateful read-only sandbox policy: {reason}. Original classification: {}.",
-                classification.reason,
             ),
         });
     }
@@ -846,228 +832,6 @@ fn is_trusted_tmp_writable_root(root: &str) -> bool {
 
     let temp_dir = normalize_path(std::env::temp_dir());
     path.starts_with(temp_dir)
-}
-
-fn validate_read_only_sandbox_bash_command(
-    command: &str,
-    writable_roots: &[String],
-) -> Result<(), String> {
-    if contains_disallowed_read_only_sandbox_control_syntax(command) {
-        return Err(
-            "command uses unsupported shell control syntax for the sandbox relaxation".to_string(),
-        );
-    }
-
-    for segment in split_unquoted_pipeline(command)? {
-        let segment = remove_tmp_redirections(segment, writable_roots)?;
-        if segment.is_empty() {
-            return Err("pipeline contains an empty command segment".to_string());
-        }
-
-        let classification = classify_bash(&segment);
-        if classification.kind != BashKind::ReadOnly {
-            return Err(format!(
-                "known mutating or unknown command segment `{segment}` is not allowed: {}",
-                classification.reason
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn contains_disallowed_read_only_sandbox_control_syntax(command: &str) -> bool {
-    let mut scanner = HookShellScanner::new(command);
-    while let Some((_, ch)) = scanner.next() {
-        if scanner.last_escaped() || scanner.in_single_quote() {
-            continue;
-        }
-        if scanner.in_double_quote() {
-            if ch == '`' {
-                return true;
-            }
-            continue;
-        }
-
-        if matches!(ch, '\n' | '\r' | ';' | '&' | '`' | '<') {
-            return true;
-        }
-        if ch == '|' && scanner.peek_char() == Some('|') {
-            return true;
-        }
-        if ch == '$' && scanner.peek_char() == Some('(') {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn split_unquoted_pipeline(command: &str) -> Result<Vec<&str>, String> {
-    let mut segments = Vec::new();
-    let mut start = 0;
-    let mut scanner = HookShellScanner::new(command);
-
-    while let Some((index, ch)) = scanner.next() {
-        if scanner.last_escaped() || scanner.in_single_quote() || scanner.in_double_quote() {
-            continue;
-        }
-        if ch == '|' {
-            segments.push(command[start..index].trim());
-            start = index + ch.len_utf8();
-        }
-    }
-
-    segments.push(command[start..].trim());
-    Ok(segments)
-}
-
-fn remove_tmp_redirections(segment: &str, writable_roots: &[String]) -> Result<String, String> {
-    let tokens = segment.split_whitespace().collect::<Vec<_>>();
-    let mut retained = Vec::new();
-    let mut index = 0;
-
-    while index < tokens.len() {
-        let token = tokens[index];
-        if is_redirection_operator(token) {
-            let Some(target) = tokens.get(index + 1) else {
-                return Err("redirection is missing a target".to_string());
-            };
-            validate_tmp_redirection_target(target, writable_roots)?;
-            index += 2;
-            continue;
-        }
-
-        if let Some(target) = attached_redirection_target(token) {
-            validate_tmp_redirection_target(target, writable_roots)?;
-            index += 1;
-            continue;
-        }
-
-        if token.contains('>') {
-            return Err(format!("unsupported redirection token `{token}`"));
-        }
-
-        retained.push(token);
-        index += 1;
-    }
-
-    Ok(retained.join(" "))
-}
-
-fn is_redirection_operator(token: &str) -> bool {
-    matches!(token, ">" | ">>" | "1>" | "1>>" | "2>" | "2>>")
-}
-
-fn attached_redirection_target(token: &str) -> Option<&str> {
-    for prefix in [">>", ">", "1>>", "1>", "2>>", "2>"] {
-        if let Some(target) = token.strip_prefix(prefix)
-            && !target.is_empty()
-        {
-            return Some(target);
-        }
-    }
-
-    None
-}
-
-fn validate_tmp_redirection_target(target: &str, writable_roots: &[String]) -> Result<(), String> {
-    let target = target.trim_matches(['"', '\'']);
-    if target == "/dev/null" {
-        return Ok(());
-    }
-    if !is_trusted_tmp_writable_root(target) {
-        return Err(format!(
-            "redirection target `{target}` is outside trusted tmp paths"
-        ));
-    }
-    if !writable_roots
-        .iter()
-        .any(|root| path_is_under_root(target, root))
-    {
-        return Err(format!(
-            "redirection target `{target}` is not covered by declared writable tmp roots"
-        ));
-    }
-
-    Ok(())
-}
-
-fn path_is_under_root(path: &str, root: &str) -> bool {
-    let path = normalize_path(PathBuf::from(path.trim_matches(['"', '\''])));
-    let root = root.trim();
-    if matches!(root, "$TMPDIR" | "${TMPDIR}") || root.starts_with("$TMPDIR/") {
-        return path.starts_with(normalize_path(std::env::temp_dir()));
-    }
-
-    let root = normalize_path(PathBuf::from(root));
-    path.starts_with(root)
-}
-
-struct HookShellScanner<'a> {
-    command: &'a str,
-    position: usize,
-    quote: Option<char>,
-    escaped: bool,
-    last_escaped: bool,
-}
-
-impl<'a> HookShellScanner<'a> {
-    fn new(command: &'a str) -> Self {
-        Self {
-            command,
-            position: 0,
-            quote: None,
-            escaped: false,
-            last_escaped: false,
-        }
-    }
-
-    fn next(&mut self) -> Option<(usize, char)> {
-        let (index, ch) = self.peek_indexed_char()?;
-        self.position = index + ch.len_utf8();
-        self.last_escaped = self.escaped;
-
-        if self.escaped {
-            self.escaped = false;
-            return Some((index, ch));
-        }
-
-        match self.quote {
-            Some('\'') if ch == '\'' => self.quote = None,
-            Some('"') if ch == '"' => self.quote = None,
-            Some('"') if ch == '\\' => self.escaped = true,
-            Some(_) => {}
-            None if ch == '\'' || ch == '"' => self.quote = Some(ch),
-            None if ch == '\\' => self.escaped = true,
-            None => {}
-        }
-
-        Some((index, ch))
-    }
-
-    fn peek_char(&self) -> Option<char> {
-        self.peek_indexed_char().map(|(_, ch)| ch)
-    }
-
-    fn peek_indexed_char(&self) -> Option<(usize, char)> {
-        self.command[self.position..]
-            .char_indices()
-            .next()
-            .map(|(offset, ch)| (self.position + offset, ch))
-    }
-
-    fn in_single_quote(&self) -> bool {
-        self.quote == Some('\'')
-    }
-
-    fn in_double_quote(&self) -> bool {
-        self.quote == Some('"')
-    }
-
-    fn last_escaped(&self) -> bool {
-        self.last_escaped
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

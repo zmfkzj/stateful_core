@@ -11,11 +11,11 @@ use stateful_bench::{
 };
 
 #[test]
-fn run_pairs_executes_two_agents_in_one_workspace_and_reports_harness_result() {
+fn run_pairs_executes_manifest_agents_in_one_workspace_and_reports_harness_result() {
     let root = temp_root("stateful-bench-run");
     let pairs_path = root.join("pairs.jsonl");
     let output_dir = root.join("runs");
-    let pair = pair();
+    let pair = pair_with_agent_ids(&["agent-a", "agent-b", "agent-c", "agent-d", "agent-e"]);
     write_jsonl(&pairs_path, &[pair]).expect("pair manifest should write");
 
     let metadata = run_pairs(RunOptions {
@@ -31,7 +31,7 @@ fn run_pairs_executes_two_agents_in_one_workspace_and_reports_harness_result() {
         auth_check_cmd_template: None,
         budget_check_cmd_template: None,
         setup_cmd_template: Some(
-            "git init {workspace} && git -C {workspace} config user.email test@example.invalid && git -C {workspace} config user.name test && printf initial > {workspace}/agent-a.txt && printf initial > {workspace}/agent-b.txt && git -C {workspace} add . && git -C {workspace} commit -m initial"
+            "git init {workspace} && git -C {workspace} config user.email test@example.invalid && git -C {workspace} config user.name test && for agent in agent-a agent-b agent-c agent-d agent-e; do printf initial > {workspace}/$agent.txt; done && git -C {workspace} add . && git -C {workspace} commit -m initial"
                 .to_string(),
         ),
         harness_cmd_template: Some(
@@ -53,11 +53,36 @@ fn run_pairs_executes_two_agents_in_one_workspace_and_reports_harness_result() {
     assert_eq!(task_input["problem_statement"], "Edit a file");
     assert!(task_input.get("patch").is_none());
     assert!(task_input.get("test_patch").is_none());
+    assert!(
+        run_dir
+            .join("pair-1-pair-2/workspace/.stateful_bench/task-c.json")
+            .is_file()
+    );
 
     let combined_patch = fs::read_to_string(run_dir.join("pair-1-pair-2/combined.patch"))
         .expect("combined diff should exist");
     assert!(combined_patch.contains("changed-agent-a"));
     assert!(combined_patch.contains("changed-agent-b"));
+    assert!(combined_patch.contains("changed-agent-c"));
+    assert!(combined_patch.contains("changed-agent-d"));
+    assert!(combined_patch.contains("changed-agent-e"));
+
+    let pair_run: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("pair-1-pair-2/pair-run.json"))
+            .expect("pair run should exist"),
+    )
+    .expect("pair run should parse");
+    let agents = pair_run["agents"]
+        .as_array()
+        .expect("pair run should record all manifest agents");
+    assert_eq!(agents.len(), 5);
+    assert_eq!(
+        agents
+            .iter()
+            .map(|agent| agent["agent_id"].as_str().expect("agent id"))
+            .collect::<Vec<_>>(),
+        ["agent-a", "agent-b", "agent-c", "agent-d", "agent-e"]
+    );
 
     let report = build_report(&run_dir).expect("report should build");
     assert_eq!(report.summary.pairs_scored, 1);
@@ -440,6 +465,14 @@ fn run_pairs_aborts_before_artifacts_when_budget_preflight_fails() {
 
 fn pair() -> PairManifestEntry {
     pair_with_id("pair-1/pair-2")
+}
+
+fn pair_with_agent_ids(agent_ids: &[&str]) -> PairManifestEntry {
+    let mut pair = pair();
+    let encoded = serde_json::json!({ "agents": agent_ids }).to_string();
+    pair.task_a.test_patch = encoded.clone();
+    pair.task_b.test_patch = encoded;
+    pair
 }
 
 fn pair_with_id(pair_id: &str) -> PairManifestEntry {

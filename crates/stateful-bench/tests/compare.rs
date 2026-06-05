@@ -340,6 +340,10 @@ fn write_pair_with_metrics(
             mode,
             agent_a: AgentRunRecord::finished("agent-a", 0, 100),
             agent_b: AgentRunRecord::finished("agent-b", 0, 100),
+            agents: vec![
+                AgentRunRecord::finished("agent-a", 0, 100),
+                AgentRunRecord::finished("agent-b", 0, 100),
+            ],
             wall_time_ms: 125,
             combined_patch_path: "combined.patch".to_string(),
             harness_result_path: Some("harness-result.json".to_string()),
@@ -372,6 +376,10 @@ fn write_pair_with_empty_harness(run_dir: &Path, mode: RunMode, pair_id: &str) {
             mode,
             agent_a: AgentRunRecord::finished("agent-a", 0, 100),
             agent_b: AgentRunRecord::finished("agent-b", 0, 100),
+            agents: vec![
+                AgentRunRecord::finished("agent-a", 0, 100),
+                AgentRunRecord::finished("agent-b", 0, 100),
+            ],
             wall_time_ms: 125,
             combined_patch_path: "combined.patch".to_string(),
             harness_result_path: Some("harness-result.json".to_string()),

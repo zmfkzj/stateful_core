@@ -391,6 +391,7 @@ stateful mcp serve
 stateful hook <event>
 stateful sync-outbox
 stateful commit -m <message> -- <paths...>
+stateful push [remote branch]
 ```
 
 `stateful install --yes` configures global Codex hooks and MCP. `stateful enable`
@@ -404,7 +405,11 @@ status, and global path or registry errors. Active server reachability, config
 schema validation, SQLite migration inspection, and validation profile
 parseability checks are future doctor extensions.
 `stateful commit -m <message> -- <paths...>` is the structured commit wrapper.
-Raw `git add` and `git commit` through Bash remain denied.
+`stateful push [remote branch]` is the structured push wrapper. It requires a
+clean working tree, an attached current branch, either the current branch's
+configured upstream or an explicit `<remote> <branch>` pair matching the current
+branch, and rejects force-like target values. Raw `git add`, `git commit`, and
+`git push` through Bash remain denied.
 
 ## Prototype Verification
 

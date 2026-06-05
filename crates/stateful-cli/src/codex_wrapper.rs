@@ -19,6 +19,7 @@ pub enum CodexSandboxMode {
 pub struct CodexWrapperOptions {
     pub codex_bin: String,
     pub sandbox: CodexSandboxMode,
+    pub no_stateful: bool,
     pub args: Vec<String>,
 }
 
@@ -76,13 +77,19 @@ fn build_read_only_tmp_invocation(options: CodexWrapperOptions) -> anyhow::Resul
         &format!("permissions.{READ_ONLY_TMP_PROFILE}.network.enabled"),
         "false",
     );
+    if options.no_stateful {
+        push_config(&mut args, "features.hooks", "false");
+    }
+    push_config(&mut args, "web_search", &toml_string("live")?);
+    push_config(
+        &mut args,
+        "mcp_servers.stateful.default_tools_approval_mode",
+        &toml_string("approve")?,
+    );
     for root in sandbox_writable_roots(&sandbox) {
         push_config(
             &mut args,
-            &format!(
-                "permissions.{READ_ONLY_TMP_PROFILE}.filesystem.{}",
-                toml_string(&root)?
-            ),
+            &format!("permissions.{READ_ONLY_TMP_PROFILE}.filesystem.{root}"),
             &toml_string("write")?,
         );
     }
