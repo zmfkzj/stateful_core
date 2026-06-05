@@ -46,13 +46,13 @@ POST /v1/validation/run
 ```
 
 Raw Bash commands are not a write-authorizing or validation execution path. This
-scope decision originally targeted a hook payload metadata gate for constrained
-read-only Bash and named validation profiles for tests. The current
-implementation supersedes that target: raw Bash is denied by stateful hooks, and
-hook-mediated Bash must be a single strict invocation of the trusted absolute
-`stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
-<cmd>`. Validation uses `state_validation_run` / `state.validation.run` in Codex
-sessions, or `stateful validate <profile>` outside hook-mediated Bash.
+scope decision originally targeted a constrained read-only hook path and named
+validation profiles for tests. The current implementation supersedes that
+target: raw Bash is denied by stateful hooks, and hook-mediated Bash must be a
+single strict invocation of the trusted absolute `stateful` binary running
+`<absolute-stateful-binary> sandbox run ... --command <cmd>`. Validation uses
+`state_validation_run` / `state.validation.run` in Codex sessions, or
+`stateful validate <profile>` outside hook-mediated Bash.
 
 Validation policy semantics:
 

@@ -247,7 +247,7 @@ stateful enable --repo-local-codex
 - `stateful codex [--codex-bin <path>] [--sandbox passthrough|read-only-tmp] [--no-stateful] -- <args...>`
   runs Codex with pass-through session configuration by default while setting a
   run-bound session id. `--sandbox read-only-tmp` remains available as a Codex
-  filesystem profile, not as Bash authorization metadata, and `--no-stateful`
+  filesystem profile, not as a Bash authorization signal, and `--no-stateful`
   disables Codex lifecycle hooks for that run.
 - `stateful mcp serve` exposes the MCP adapter over stdio.
 - `stateful mcp call <tool> [arguments_json]` calls an MCP tool. Most tools map

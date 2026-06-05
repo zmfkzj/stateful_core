@@ -180,8 +180,11 @@ valid intent scope. They still record activity and leases with their own
 `PreToolUse`:
 
 - deny supported write calls when the session has no active intent
-- deny Bash commands unless the top-level tool payload supplies read-only
-  sandbox metadata with network disabled
+- deny raw Bash and allow Bash only when the outer command is a single strict
+  invocation of the trusted absolute `stateful` binary running
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
+  command-shaped inspection uses `--fs read-only`; command-shaped writes use
+  `--fs write-targets` with explicit write/create targets.
 - check leases and planned edits for likely conflicts
 - return allow, warning context, or deny based on policy
 

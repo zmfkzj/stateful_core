@@ -46,11 +46,11 @@ a 60-minute maximum from declaration. Blocked or finalized work does not
 authorize writes.
 
 The original V1 hardening target denied Bash command text as an authorization
-source and explored hook payload metadata for constrained read-only Bash. The
-current implementation supersedes that target: raw Bash is denied by stateful
-hooks. Hook-mediated Bash must be a single strict invocation of the trusted
-absolute `stateful` binary running `<absolute-stateful-binary> sandbox run ...
---command <cmd>`. Repo write authorization starts with structured paths such as
+source and explored a constrained read-only hook path. The current
+implementation supersedes that target: raw Bash is denied by stateful hooks.
+Hook-mediated Bash must be a single strict invocation of the trusted absolute
+`stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
+<cmd>`. Repo write authorization starts with structured paths such as
 `state_file_write` / `state.file.write`, where target paths can be checked before
 writing, or with `--fs write-targets` wrapper calls that declare explicit
 targets. Raw Bash test commands are not allowlisted; validation uses
