@@ -145,8 +145,10 @@ override_instruction
 structured tool arguments before calling `/v1/authorize`. Native Codex edit
 tools such as `apply_patch`, `Edit`, and `Write` may expose targets to hooks,
 but the `stateful codex` read-only tmp profile does not rely on them as the
-normal repo write path. For Bash, the adapter sends the command string and any
-extracted paths; ambiguous mutation targets are denied by default.
+normal repo write path. For Bash, command text alone never authorizes tool use.
+The hook allows Bash only when the top-level tool payload supplies structured
+read-only sandbox metadata, network access is explicitly disabled, and writable
+roots are absent or limited to trusted tmp roots.
 
 ## Decision Output
 
@@ -457,7 +459,7 @@ V1 must have tests for:
 - policy decisions as table-driven unit tests
 - intent scope matching, including depth-2 directory behavior
 - exact file scope for delete, rename, and move
-- Bash allowlist and mutation-deny classification
+- Bash full-deny classification and sandbox-gated hook authorization
 - `state_file_write` authorization plus Bash and native Codex edit hook fixtures
 - prompt renderer golden output for brief and detailed modes
 - SQLite event append plus materialized-view transaction behavior

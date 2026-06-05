@@ -46,6 +46,18 @@ fn file_write_tool_is_handled_locally_not_mapped_to_http() {
 }
 
 #[test]
+fn bash_write_tool_is_handled_locally_not_mapped_to_http() {
+    let tool = ToolCall::new(
+        "state.bash.write",
+        serde_json::json!({"command": "true", "write_targets": ["src/auth.ts"]}),
+    );
+
+    let error = map_tool_to_http(tool).expect_err("bash write is CLI-local");
+
+    assert!(error.contains("handled locally"));
+}
+
+#[test]
 fn all_v1_mcp_tools_map_to_http_endpoints() {
     let cases = [
         ("state.session.register", "POST", "/v1/session/register"),
@@ -84,6 +96,10 @@ fn codex_tool_names_map_to_stateful_protocol_names() {
         protocol_tool_name("state_current_read").expect("tool should map"),
         "state.current.read"
     );
+    assert_eq!(
+        protocol_tool_name("state_bash_write").expect("tool should map"),
+        "state.bash.write"
+    );
 }
 
 #[test]
@@ -96,8 +112,40 @@ fn tool_descriptors_expose_codex_friendly_names() {
     assert!(names.contains(&"state_events_read"));
     assert!(names.contains(&"state_validation_run"));
     assert!(names.contains(&"state_file_write"));
+    assert!(names.contains(&"state_bash_write"));
     assert!(names.contains(&"state_notifications_poll"));
     assert!(names.contains(&"state_resume_next"));
+}
+
+#[test]
+fn bash_write_descriptor_exposes_required_input_schema() {
+    let tools = tool_descriptors();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == "state_bash_write")
+        .expect("bash write tool descriptor should exist");
+
+    assert_eq!(tool.protocol_name, "state.bash.write");
+    assert_eq!(tool.input_schema["type"], "object");
+    assert_eq!(tool.input_schema["properties"]["command"]["type"], "string");
+    assert_eq!(
+        tool.input_schema["properties"]["write_targets"]["type"],
+        "array"
+    );
+    assert_eq!(
+        tool.input_schema["properties"]["create_targets"]["type"],
+        "array"
+    );
+    assert_eq!(tool.input_schema["properties"]["cwd"]["type"], "string");
+    assert_eq!(
+        tool.input_schema["properties"]["timeout_seconds"]["type"],
+        "integer"
+    );
+    assert_eq!(
+        tool.input_schema["required"],
+        serde_json::json!(["command", "write_targets"])
+    );
+    assert_eq!(tool.input_schema["additionalProperties"], false);
 }
 
 #[test]

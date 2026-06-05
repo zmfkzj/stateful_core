@@ -522,7 +522,8 @@ When the state server is unavailable, coordination must fail closed for agent
 write authorization and fail open for human saves.
 
 - Supported writes are denied.
-- Bash writes and ambiguous mutation commands are denied.
+- Bash commands without structured top-level read-only sandbox metadata are
+  denied.
 - `state.validation.run` returns `error: state_unavailable` and does not execute
   the validation command.
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block.

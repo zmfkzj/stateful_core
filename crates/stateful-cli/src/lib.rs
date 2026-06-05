@@ -112,7 +112,7 @@ pub enum Command {
     Codex {
         #[arg(long, default_value = "codex")]
         codex_bin: String,
-        #[arg(long, value_enum, default_value = "read-only-tmp")]
+        #[arg(long, value_enum, default_value = "passthrough")]
         sandbox: CodexSandboxMode,
         #[arg(long)]
         no_stateful: bool,
@@ -867,34 +867,36 @@ Stateful hooks are authoritative. Pick commands that match the installed hooks b
 
 - Declare exact file intent first with `state_intent_declare` / `state.intent.declare`. Use Bash `stateful intent declare <paths...>` only when MCP tools are unavailable.
 - Keep declared paths narrow; prefer exact files for edits, deletes, renames, and moves.
-- In `stateful codex` read-only tmp mode, write repo files with `state_file_write` / `state.file.write` after intent. It authorizes and writes from structured arguments.
+- Write repo files with `state_file_write` / `state.file.write` after intent. It authorizes and writes from structured arguments.
+- Use `state_bash_write` / `state.bash.write` for write-capable Bash. Pass explicit repo-relative `write_targets`, and `create_targets` for new files; the bridge authorizes each file and then runs the command in the OS sandbox.
 - Re-read a file immediately before `state_file_write`; it writes full contents, so preserve unrelated user changes.
-- Do not use `apply_patch`, `Edit`, or `Write` as the first repo write path in read-only tmp mode. They are hook-authorized native edit tools, but still have to pass the Codex filesystem sandbox.
-- Use `apply_patch` only outside read-only tmp mode, and only when the patch includes file targets. If denied, switch to structured write instead of retrying patch variants.
+- `apply_patch`, `Edit`, `Write`, and `file_change` are hook-authorized only when targets are visible to stateful policy. If denied, switch to structured write instead of retrying patch variants.
 - If a hook denies an action, read the denial and choose the documented alternative instead of retrying variants.
 
 ## Prefer
 
-- Search and inspect: `rg`, `rg --files`, `sed -n`, `cat`, `ls`, read-only `find`, `wc`.
-- Git inspection: `git status`, `git diff`, `git show`, `git log`, `git branch`, `git rev-parse`.
+- MCP or native read tools for search and inspection when available.
+- `state_bash_write` for command-shaped writes that need a real shell but can be limited to exact file targets.
+- Structured Bash only when the tool call carries top-level read-only sandbox metadata with network disabled.
 - Validation: `state_validation_run` / `state.validation.run`, or `stateful validate <profile>`.
-- Stateful diagnostics: `stateful doctor`, `stateful status`, `stateful current`, `stateful events`.
+- Stateful diagnostics through MCP tools or a structured sandboxed Bash call.
 
 ## Avoid In Bash
 
+- Any Bash command without top-level read-only sandbox metadata and explicit network disabled metadata.
 - Shell write syntax: `>`, `>>`, heredocs, and `| tee`.
 - Direct file mutation: `rm`, `mv`, `cp`, `mkdir`, `touch`, `chmod`, `chown`.
 - Any generator, formatter, package manager, or script that creates, updates, deletes, or moves repo files.
 - Raw mutation git commands: `git checkout`, `git switch`, `git restore`, `git reset`, `git clean`, `git apply`, `git merge`, `git rebase`.
-- Raw test commands may be denied as validation bypasses; use validation profiles for commands that write build or test artifacts.
+- Raw test commands; use validation profiles for commands that write build or test artifacts.
 - Most `stateful` control commands through Bash; use MCP tools when available.
 
 ## If Blocked
 
 - Do not retry the same command with small variations.
 - If the denial asks for scope, declare or narrow intent, then use `state_file_write` for repo changes.
-- If Bash is blocked because it may mutate files, choose read-only inspection, structured MCP write, or a validation profile.
-- If a denial mentions `apply_patch or a structured tool`, prefer the structured tool in Codex sessions.
+- If Bash is blocked, choose MCP/native inspection, structured MCP write, `state_bash_write`, a validation profile, or a Bash tool call with top-level read-only sandbox metadata and network disabled.
+- If a denial mentions a structured tool, prefer the stateful MCP tool in Codex sessions.
 - If no policy-compliant path is available, report the exact command and denial reason.
 "#
 }

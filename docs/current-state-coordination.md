@@ -255,8 +255,8 @@ mismatch fails closed for write, validation, and reconciliation paths.
 
 - intercept supported tool calls before execution
 - deny supported write calls when the session has no active intent
-- deny Bash write commands by default when write targets cannot be safely
-  authorized
+- deny Bash unless the top-level tool payload supplies read-only sandbox
+  metadata with network disabled
 - check whether requested files or resources conflict with active leases
 - deny, warn, or add context based on policy
 
@@ -350,40 +350,19 @@ reliably:
 state_file_write / state.file.write -> enforce from structured file arguments
 native Codex edit tools -> inspectable by hook when exposed, but not the normal
   repo write path under the stateful read-only tmp profile
-Bash read/search -> allow when no mutation is detected
+Bash -> allow only with top-level read-only sandbox metadata, network disabled,
+  and no non-tmp writable roots
 test execution -> run through controlled validation action
-Bash write or ambiguous mutation -> deny by default
+raw Bash without structured sandbox metadata -> deny
 ```
 
-Bash write denial should tell the agent to declare file or directory intent and
-use `state_file_write` / `state.file.write` for repo file changes.
+Bash denial should tell the agent to use a structured Bash tool call with
+read-only sandbox metadata, or use stateful MCP tools for repo writes and
+validation.
 
-The Bash classifier is allowlist-based. Initial read/search commands include:
-
-```text
-pwd
-ls
-find
-rg
-cat
-sed -n
-head
-tail
-wc
-git status
-git diff
-git show
-git log
-git branch
-git rev-parse
-```
-
-Anything outside the allowlist that appears to mutate files, start long-running
-processes, run unrecognized tests, install packages, redirect output, pipe into
-mutation commands, or produce ambiguous side effects is denied by default.
-Common read-only test commands such as `cargo test`, `npm test`, `pnpm test`,
-`yarn test`, `pytest`, and `go test` are allowlisted by the prototype Bash
-classifier. Arbitrary or project-specific test commands should run through
+The Bash classifier is deny-by-default. Command text alone does not authorize
+`rg`, `git diff`, test runners, stateful operational commands, or any other
+Bash command. Arbitrary or project-specific test commands should run through
 `state.validation.run` or an equivalent controlled validation action backed by a
 profile. Validation profiles may allow cache or artifact writes, but source-tree
 writes must be denied unless a later policy explicitly permits them.
@@ -430,7 +409,7 @@ Initial policy should prefer advisory leases:
 - supported write while phase is `blocked`: deny
 - supported write after session finalization: deny
 - supported write outside matching file or directory scope: deny
-- Bash write or ambiguous mutation command: deny
+- Bash without structured top-level read-only sandbox metadata: deny
 - directory scope permits writes only up to depth 2 below that directory
 - delete without exact file scope: deny
 - rename or move without exact file scope for both source and destination: deny
@@ -580,19 +559,19 @@ agent write path: fail closed
 validation path: fail closed
 reconciliation path: fail closed
 human save path: fail open with warning
-read/search/diff path: allow
+non-Bash read/search/diff path: allow
 ```
 
 When the state server is unavailable:
 
 - supported writes are denied because active intent, lease conflict, and
   reconciliation state cannot be proven
-- Bash writes and ambiguous mutation commands remain denied
+- Bash without structured top-level read-only sandbox metadata remains denied
 - `state.validation.run` returns `error: state_unavailable` and does not run the
   validation command
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block
 - intent declaration, lease acquisition, and lease refresh fail
-- read, search, and diff actions are allowed
+- non-Bash read, search, and diff actions are allowed
 - the IDE save gate warns the user but allows the human save to proceed
 - hook and observer events that cannot be sent should be appended to a local
   outbox for later sync
@@ -672,7 +651,7 @@ supported write action + expired intent -> deny
 supported write action + blocked phase or finalized session -> deny
 supported write action + intent without file/directory scope -> deny
 supported write action + target outside intent scope -> deny
-Bash write or ambiguous mutation command -> deny
+Bash without structured top-level read-only sandbox metadata -> deny
 delete action + non-exact file scope -> deny
 rename/move action + non-exact source or destination scope -> deny
 active write lease in hard conflict domain -> deny unless explicit user override

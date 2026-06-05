@@ -17,8 +17,19 @@ use stateful_cli::{
     read_current_session_file_for_codex_run, write_global_runtime_file,
 };
 
+fn assert_bash_requires_structured_sandbox(outcome: HookOutcome) {
+    let HookOutcome::Deny { reason } = outcome else {
+        panic!("Bash without top-level sandbox metadata should be denied");
+    };
+
+    assert!(
+        reason.contains("structured read-only sandbox metadata"),
+        "reason `{reason}` should direct callers to structured sandbox metadata"
+    );
+}
+
 #[test]
-fn pre_tool_use_allows_read_only_bash() {
+fn pre_tool_use_denies_read_only_bash_without_top_level_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -31,11 +42,35 @@ fn pre_tool_use_allows_read_only_bash() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
-fn pre_tool_use_allows_quoted_rg_regex_alternation_without_sandbox() {
+fn pre_tool_use_denies_wrapper_trusted_sandbox_env_without_top_level_sandbox() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "rg auth src"
+      }
+    }"#;
+    let trusted_sandbox = serde_json::json!({
+        "mode": "read-only",
+        "writable_roots": ["/tmp"],
+        "network_access": false,
+        "source": "stateful-codex-wrapper"
+    });
+
+    let outcome = handle_pre_tool_use_with_trusted_sandbox(input, Some(trusted_sandbox))
+        .expect("hook input should parse");
+
+    assert!(matches!(outcome, HookOutcome::Deny { .. }));
+}
+
+#[test]
+fn pre_tool_use_denies_quoted_rg_regex_alternation_without_top_level_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -48,11 +83,11 @@ fn pre_tool_use_allows_quoted_rg_regex_alternation_without_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
-fn pre_tool_use_allows_read_only_bash_dev_null_redirection_without_sandbox() {
+fn pre_tool_use_denies_read_only_bash_dev_null_redirection_without_top_level_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -65,11 +100,11 @@ fn pre_tool_use_allows_read_only_bash_dev_null_redirection_without_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
-fn pre_tool_use_allows_raw_test_bash() {
+fn pre_tool_use_denies_raw_test_bash_without_top_level_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -82,11 +117,11 @@ fn pre_tool_use_allows_raw_test_bash() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
-fn pre_tool_use_allows_stateful_diagnostic_bash() {
+fn pre_tool_use_denies_stateful_diagnostic_bash_without_top_level_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -99,11 +134,11 @@ fn pre_tool_use_allows_stateful_diagnostic_bash() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
-fn pre_tool_use_allows_stateful_controlled_validation_bash() {
+fn pre_tool_use_denies_stateful_controlled_validation_bash_without_top_level_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -116,11 +151,11 @@ fn pre_tool_use_allows_stateful_controlled_validation_bash() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
-fn pre_tool_use_allows_stateful_bench_operational_bash() {
+fn pre_tool_use_denies_stateful_bench_operational_bash_without_top_level_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -133,7 +168,7 @@ fn pre_tool_use_allows_stateful_bench_operational_bash() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
@@ -305,7 +340,7 @@ fn pre_tool_use_in_disabled_repo_noops_without_runtime() {
 }
 
 #[test]
-fn pre_tool_use_allows_stateful_intent_declare_in_bash() {
+fn pre_tool_use_denies_stateful_intent_declare_without_top_level_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -318,11 +353,11 @@ fn pre_tool_use_allows_stateful_intent_declare_in_bash() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_other_stateful_control_commands_in_bash() {
+fn pre_tool_use_denies_other_stateful_control_commands_without_top_level_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -335,17 +370,7 @@ fn pre_tool_use_denies_other_stateful_control_commands_in_bash() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert!(matches!(outcome, HookOutcome::Deny { .. }));
-    let json = outcome
-        .to_stdout_json()
-        .expect("deny outcome should serialize");
-    assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("reason should be string")
-            .contains("MCP")
-    );
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
@@ -393,7 +418,7 @@ fn pre_tool_use_allows_sandbox_pipeline_with_quoted_regex_alternation() {
 }
 
 #[test]
-fn pre_tool_use_allows_bash_control_syntax_with_wrapper_trusted_sandbox() {
+fn pre_tool_use_denies_bash_control_syntax_with_wrapper_trusted_sandbox_only() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -413,11 +438,11 @@ fn pre_tool_use_allows_bash_control_syntax_with_wrapper_trusted_sandbox() {
     let outcome = handle_pre_tool_use_with_trusted_sandbox(input, Some(trusted_sandbox))
         .expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_requires_structured_sandbox(outcome);
 }
 
 #[test]
-fn run_hook_pre_tool_use_uses_wrapper_trusted_sandbox_env() {
+fn run_hook_pre_tool_use_denies_wrapper_trusted_sandbox_env_without_top_level_sandbox() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-sandbox-env-test-{}",
         std::process::id()
@@ -461,7 +486,15 @@ fn run_hook_pre_tool_use_uses_wrapper_trusted_sandbox_env() {
         "stateful hook failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
+    assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(
+        json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("reason should be string")
+            .contains("structured read-only sandbox metadata")
+    );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -493,7 +526,7 @@ fn pre_tool_use_denies_tool_input_spoofed_read_only_bash_sandbox() {
         json["hookSpecificOutput"]["permissionDecisionReason"]
             .as_str()
             .expect("reason should be string")
-            .contains("shell control syntax")
+            .contains("structured read-only sandbox metadata")
     );
 }
 

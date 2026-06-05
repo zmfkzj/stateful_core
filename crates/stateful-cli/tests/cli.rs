@@ -101,7 +101,7 @@ fn parses_disable_command() {
 }
 
 #[test]
-fn parses_codex_wrapper_command() {
+fn parses_codex_wrapper_command_with_explicit_read_only_tmp_sandbox() {
     let cli = Cli::try_parse_from([
         "stateful",
         "codex",
@@ -120,6 +120,31 @@ fn parses_codex_wrapper_command() {
         Command::Codex {
             ref codex_bin,
             sandbox: CodexSandboxMode::ReadOnlyTmp,
+            no_stateful: false,
+            ref args,
+        } if codex_bin == "/opt/codex/bin/codex"
+            && args == &vec!["exec".to_string(), "--json".to_string(), "-".to_string()]
+    ));
+}
+
+#[test]
+fn parses_codex_wrapper_command_with_passthrough_sandbox_by_default() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "codex",
+        "--codex-bin",
+        "/opt/codex/bin/codex",
+        "exec",
+        "--json",
+        "-",
+    ])
+    .expect("codex wrapper command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Codex {
+            ref codex_bin,
+            sandbox: CodexSandboxMode::Passthrough,
             no_stateful: false,
             ref args,
         } if codex_bin == "/opt/codex/bin/codex"

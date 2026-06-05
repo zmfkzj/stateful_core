@@ -5,6 +5,7 @@ use std::{
     process::{Command, Stdio},
     sync::mpsc,
     thread,
+    time::Duration,
 };
 
 use stateful_cli::{
@@ -352,6 +353,116 @@ fn mcp_file_write_refuses_when_authorization_denies() {
         "denied file should not be written"
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"decision\":\"deny\""));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_bash_write_reports_allowed_and_denied_targets_without_running_command() {
+    let temp_root = temp_root("stateful-mcp-bash-write-deny");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+    fs::write(repo_root.join("src/allowed.ts"), "old\n").expect("allowed file should seed");
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Target is outside active intent scope.","required_next_action":"Declare matching intent."}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "mcp",
+            "call",
+            "state_bash_write",
+            r#"{"command":"printf changed > src/allowed.ts","write_targets":["src/allowed.ts","src/denied.ts"]}"#,
+        ],
+    );
+
+    assert!(!output.status.success(), "denied target should fail");
+    let first = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first authorize request should arrive");
+    let second = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("second authorize request should arrive");
+    assert_eq!(
+        request_json_body(&first)["payload"]["path"],
+        "src/allowed.ts"
+    );
+    assert_eq!(
+        request_json_body(&second)["payload"]["path"],
+        "src/denied.ts"
+    );
+    assert_eq!(
+        fs::read_to_string(repo_root.join("src/allowed.ts")).expect("allowed file should read"),
+        "old\n",
+        "command should not run when any target is denied"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"allowed_write_targets\":[\"src/allowed.ts\"]"));
+    assert!(stdout.contains("\"path\":\"src/denied.ts\""));
+    assert!(stdout.contains("\"decision\":\"deny\""));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mcp_bash_write_macos_seatbelt_allows_only_authorized_targets() {
+    let temp_root = temp_root("stateful-mcp-bash-write-seatbelt");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+    fs::write(repo_root.join("src/allowed.ts"), "old\n").expect("allowed file should seed");
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "mcp",
+            "call",
+            "state_bash_write",
+            r#"{"command":"printf changed > src/allowed.ts; printf denied > src/denied.ts","write_targets":["src/allowed.ts"]}"#,
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "sandboxed command result should be returned even when command exits nonzero: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("authorize request should arrive");
+    assert_eq!(
+        request_json_body(&request)["payload"]["path"],
+        "src/allowed.ts"
+    );
+    assert_eq!(
+        fs::read_to_string(repo_root.join("src/allowed.ts")).expect("allowed file should read"),
+        "changed",
+    );
+    assert!(
+        !repo_root.join("src/denied.ts").exists(),
+        "unlisted file should not be created"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"status\":\"exited\""));
+    assert!(stdout.contains("\"exit_code\":1"));
+    assert!(stdout.contains("Operation not permitted"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -714,13 +825,20 @@ fn enable_test_repo(paths: &GlobalPaths, repo_root: &std::path::Path) {
 fn spawn_fake_stateful_server(
     actual_response: &'static str,
 ) -> (ServerRuntime, mpsc::Receiver<String>) {
+    spawn_fake_stateful_server_sequence(vec![actual_response])
+}
+
+fn spawn_fake_stateful_server_sequence(
+    responses: Vec<&'static str>,
+) -> (ServerRuntime, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut health_seen = false;
         let mut current_seen = false;
-        for _ in 0..3 {
+        let mut responses = responses.into_iter();
+        for _ in 0..16 {
             let (mut stream, _) = listener.accept().expect("connection should arrive");
             let request = read_http_request_maybe_body(&mut stream);
             if request.contains("GET /health HTTP/1.1") && !health_seen {
@@ -731,8 +849,11 @@ fn spawn_fake_stateful_server(
                 write_json_response(&mut stream, r#"{"status":"ok","current":{}}"#);
             } else {
                 tx.send(request).expect("request should send to test");
-                write_json_response(&mut stream, actual_response);
-                break;
+                let response = responses.next().unwrap_or(r#"{"status":"ok"}"#);
+                write_json_response(&mut stream, response);
+                if responses.as_slice().is_empty() {
+                    break;
+                }
             }
         }
     });

@@ -45,12 +45,13 @@ The default intent TTL is 15 minutes. Heartbeats may extend active intent up to
 a 60-minute maximum from declaration. Blocked or finalized work does not
 authorize writes.
 
-V1 denies Bash commands that appear to write or have ambiguous mutation targets.
-For the `stateful codex` read-only tmp profile, write authorization starts with
-the stateful structured write path, `state_file_write` / `state.file.write`,
-where target paths can be checked before writing.
-Raw Bash test commands are not allowlisted; tests run through controlled
-validation actions such as `state.validation.run`.
+V1 denies Bash command text as an authorization source. Bash is allowed only
+when the top-level tool payload supplies structured read-only sandbox metadata,
+network access is explicitly disabled, and writable roots are absent or limited
+to trusted tmp roots. Repo write authorization starts with structured paths such
+as `state_file_write` / `state.file.write`, where target paths can be checked
+before writing. Raw Bash test commands are not allowlisted; tests run through
+controlled validation actions such as `state.validation.run`.
 
 Overrides are never automatic. A blocked write can proceed only when the user
 explicitly instructs the current session to allow a specific resource override.

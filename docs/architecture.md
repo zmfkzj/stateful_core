@@ -179,8 +179,8 @@ valid intent scope. They still record activity and leases with their own
 `PreToolUse`:
 
 - deny supported write calls when the session has no active intent
-- deny Bash commands that appear to write or whose write targets cannot be
-  safely authorized
+- deny Bash commands unless the top-level tool payload supplies read-only
+  sandbox metadata with network disabled
 - check leases and planned edits for likely conflicts
 - return allow, warning context, or deny based on policy
 
@@ -231,41 +231,21 @@ V1 enforcement is strict about write target extraction:
   targets can be inspected when the runtime exposes them, but the
   `stateful codex` read-only tmp profile does not make them the normal repo
   write path.
-- Bash read and search commands: allow when they do not appear to write.
+- Bash commands: deny unless the top-level Bash tool payload includes
+  structured read-only sandbox metadata, network access is explicitly disabled,
+  and writable roots are absent or limited to trusted tmp roots.
 - Test execution: run only through controlled validation actions such as
   `state.validation.run`.
-- Bash commands that appear to write, mutate, generate files, or have ambiguous
-  write targets: deny by default.
+- Bash command text alone never authorizes tool use, even when it appears
+  read-only.
 
-Denied Bash writes should direct the agent to declare intent and use
-`state_file_write` / `state.file.write` for repo file changes.
+Denied Bash should direct the agent to use a structured Bash tool call with
+read-only sandbox metadata, or use stateful MCP tools for writes and
+validation.
 
-The Bash classifier is allowlist-based. Initial read/search commands include:
-
-```text
-pwd
-ls
-find
-rg
-cat
-sed -n
-head
-tail
-wc
-git status
-git diff
-git show
-git log
-git branch
-git rev-parse
-```
-
-Commands outside the allowlist are denied when they appear to mutate files,
-start long-running processes, run unrecognized tests, install packages, redirect
-output, pipe into mutation commands, or have ambiguous side effects. Common
-read-only test commands such as `cargo test`, `npm test`, `pnpm test`,
-`yarn test`, `pytest`, and `go test` are allowlisted by the prototype Bash
-classifier. Arbitrary or project-specific test commands should run through
+The Bash classifier is a deny-by-default diagnostic. It no longer has command
+allowlists for `rg`, `git diff`, test runners, or stateful operational
+commands. Arbitrary or project-specific test commands should run through
 validation profiles owned by the state server so source-tree writes can be
 denied while cache or artifact writes can be controlled.
 
@@ -524,12 +504,13 @@ The system should prefer explicit uncertainty:
 - hook failure -> warn and fail closed only for high-risk writes
 - state server unavailable -> deny supported writes that cannot prove active
   intent
-- state server unavailable -> deny Bash writes and ambiguous mutation commands
+- state server unavailable -> deny Bash without structured top-level read-only
+  sandbox metadata
 - state server unavailable -> return `error: state_unavailable` for controlled
   validation and do not run the validation command
 - state server unavailable -> fail closed for `state.reconcile.ack`, intent
   declaration, lease acquisition, and lease refresh
-- state server unavailable -> allow read, search, and diff actions
+- state server unavailable -> allow non-Bash read, search, and diff actions
 - state server unavailable during IDE human save gate -> warn the user and allow
   the save
 - heartbeat, finalization, and human observer events that cannot reach the state

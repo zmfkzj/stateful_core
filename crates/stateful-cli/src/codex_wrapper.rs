@@ -14,6 +14,7 @@ const READ_ONLY_TMP_PROFILE: &str = "stateful-read-only-tmp";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CodexSandboxMode {
+    Passthrough,
     ReadOnlyTmp,
 }
 
@@ -33,9 +34,8 @@ pub struct CodexInvocation {
 }
 
 pub fn build_codex_invocation(options: CodexWrapperOptions) -> anyhow::Result<CodexInvocation> {
-    reject_user_sandbox_overrides(&options.args)?;
-
     match options.sandbox {
+        CodexSandboxMode::Passthrough => build_passthrough_invocation(options),
         CodexSandboxMode::ReadOnlyTmp => build_read_only_tmp_invocation(options),
     }
 }
@@ -51,6 +51,23 @@ pub fn run_codex(options: CodexWrapperOptions) -> anyhow::Result<i32> {
         .status()?;
 
     Ok(status.code().unwrap_or(1))
+}
+
+fn build_passthrough_invocation(options: CodexWrapperOptions) -> anyhow::Result<CodexInvocation> {
+    let mut args = Vec::new();
+    if options.no_stateful {
+        push_config(&mut args, "features.hooks", "false");
+    }
+    args.extend(options.args);
+
+    Ok(CodexInvocation {
+        program: options.codex_bin,
+        args,
+        env: vec![(
+            STATEFUL_CODEX_RUN_ID_ENV.to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        )],
+    })
 }
 
 fn build_read_only_tmp_invocation(options: CodexWrapperOptions) -> anyhow::Result<CodexInvocation> {
@@ -100,16 +117,10 @@ fn build_read_only_tmp_invocation(options: CodexWrapperOptions) -> anyhow::Resul
     Ok(CodexInvocation {
         program: options.codex_bin,
         args,
-        env: vec![
-            (
-                STATEFUL_TRUSTED_SANDBOX_ENV.to_string(),
-                serde_json::to_string(&sandbox)?,
-            ),
-            (
-                STATEFUL_CODEX_RUN_ID_ENV.to_string(),
-                uuid::Uuid::new_v4().to_string(),
-            ),
-        ],
+        env: vec![(
+            STATEFUL_CODEX_RUN_ID_ENV.to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        )],
     })
 }
 
@@ -155,61 +166,4 @@ fn path_to_string(path: PathBuf) -> String {
 
 fn toml_string(value: &str) -> anyhow::Result<String> {
     Ok(serde_json::to_string(value)?)
-}
-
-fn reject_user_sandbox_overrides(args: &[String]) -> anyhow::Result<()> {
-    let mut index = 0;
-    while index < args.len() {
-        let arg = &args[index];
-        if arg == "--sandbox" || arg == "-s" || arg.starts_with("--sandbox=") {
-            anyhow::bail!("stateful codex controls Codex sandbox policy; remove `{arg}`");
-        }
-        if arg.starts_with("-s") && arg.len() > 2 {
-            anyhow::bail!("stateful codex controls Codex sandbox policy; remove `{arg}`");
-        }
-        if arg == "--dangerously-bypass-approvals-and-sandbox" {
-            anyhow::bail!("stateful codex cannot run with sandbox bypass enabled");
-        }
-
-        if arg == "-c" || arg == "--config" {
-            let Some(value) = args.get(index + 1) else {
-                anyhow::bail!("missing Codex config value after `{arg}`");
-            };
-            reject_conflicting_config(value)?;
-            index += 2;
-            continue;
-        }
-
-        if let Some(value) = arg.strip_prefix("--config=") {
-            reject_conflicting_config(value)?;
-        }
-        if let Some(value) = arg.strip_prefix("-c")
-            && !value.is_empty()
-        {
-            reject_conflicting_config(value)?;
-        }
-
-        index += 1;
-    }
-
-    Ok(())
-}
-
-fn reject_conflicting_config(value: &str) -> anyhow::Result<()> {
-    let key = value
-        .split_once('=')
-        .map(|(key, _)| key)
-        .unwrap_or(value)
-        .trim();
-    let normalized = key.replace(['"', '\''], "");
-    if normalized == "sandbox_mode"
-        || normalized == "default_permissions"
-        || normalized == "permission_profile"
-        || normalized.starts_with("permissions.")
-        || normalized.starts_with("sandbox_workspace_write.")
-    {
-        anyhow::bail!("stateful codex controls Codex sandbox config `{key}`");
-    }
-
-    Ok(())
 }

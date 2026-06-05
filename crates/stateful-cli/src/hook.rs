@@ -341,22 +341,21 @@ fn handle_pre_tool_use_with_runtime_and_sandbox(
 
 fn authorize_bash(
     input: &PreToolUseInput,
-    trusted_sandbox: Option<&serde_json::Value>,
+    _trusted_sandbox: Option<&serde_json::Value>,
 ) -> anyhow::Result<HookOutcome> {
     let command = input.command().unwrap_or_default();
     let classification = classify_bash(command);
     match classification.kind {
-        BashKind::ReadOnly => Ok(HookOutcome::Allow),
-        BashKind::ValidationBypass => Ok(HookOutcome::Deny {
-            reason: "Raw test commands are blocked; run tests with state.validation.run or `stateful validate <profile>`.".to_string(),
-        }),
-        BashKind::Mutating | BashKind::Unknown => {
-            if let Some(outcome) = authorize_read_only_sandbox_bash(input, trusted_sandbox) {
+        BashKind::ReadOnly
+        | BashKind::Mutating
+        | BashKind::ValidationBypass
+        | BashKind::Unknown => {
+            if let Some(outcome) = authorize_read_only_sandbox_bash(input) {
                 return Ok(outcome);
             }
             Ok(HookOutcome::Deny {
                 reason: format!(
-                    "Bash command blocked by stateful policy: {}. Use apply_patch or a structured tool after declaring intent.",
+                    "Bash command blocked by stateful policy: {}. Use a structured Bash tool call with read-only sandbox metadata and network disabled, or use stateful MCP tools for writes and validation.",
                     classification.reason
                 ),
             })
@@ -364,14 +363,16 @@ fn authorize_bash(
     }
 }
 
-fn authorize_read_only_sandbox_bash(
-    input: &PreToolUseInput,
-    trusted_sandbox: Option<&serde_json::Value>,
-) -> Option<HookOutcome> {
-    let sandbox = effective_sandbox(&input.sandbox, trusted_sandbox)?;
+fn authorize_read_only_sandbox_bash(input: &PreToolUseInput) -> Option<HookOutcome> {
+    if input.sandbox.is_null() {
+        return None;
+    }
+    let sandbox = &input.sandbox;
 
     if !declares_read_only_sandbox(sandbox) {
-        return None;
+        return Some(HookOutcome::Deny {
+            reason: "Bash requires top-level read-only sandbox metadata".to_string(),
+        });
     }
 
     if !declares_network_access_disabled(sandbox) {
@@ -394,17 +395,6 @@ fn authorize_read_only_sandbox_bash(
     }
 
     Some(HookOutcome::Allow)
-}
-
-fn effective_sandbox<'a>(
-    payload_sandbox: &'a serde_json::Value,
-    trusted_sandbox: Option<&'a serde_json::Value>,
-) -> Option<&'a serde_json::Value> {
-    if !payload_sandbox.is_null() {
-        return Some(payload_sandbox);
-    }
-
-    trusted_sandbox
 }
 
 fn trusted_sandbox_from_env() -> Option<serde_json::Value> {

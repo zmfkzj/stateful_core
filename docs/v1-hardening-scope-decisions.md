@@ -45,9 +45,10 @@ state.validation.run
 POST /v1/validation/run
 ```
 
-Raw Bash test commands should be phased out as a write-authorizing execution
-path. The hardening target is to deny raw validation-like Bash commands and tell
-the user to run the named validation profile instead.
+Raw Bash commands are not a write-authorizing or validation execution path. The
+hardening target is to deny Bash unless the tool payload carries structured
+read-only sandbox metadata with network disabled, and to tell the user to run
+named validation profiles for tests instead.
 
 Validation policy semantics:
 
@@ -239,4 +240,3 @@ distribution story for hook-capable agents:
 9. Harden runtime files and local trust checks.
 10. Expand doctor diagnostics.
 11. Add managed hook and plugin deployment UX.
-

@@ -26,7 +26,8 @@ This repository is an early Rust implementation and local-first prototype. The
 current implementation is Codex-first and includes a CLI, global user-level
 installation with repo allowlist gating, a repo-local compatibility mode, a
 local HTTP state server, MCP adapter, Codex hook adapter, SQLite-backed state
-store, validation runner, and benchmark tooling.
+store, validation runner, structured commit/push wrappers, outbox sync, and
+benchmark tooling.
 
 APIs, configuration files, and command behavior may change while the project is
 pre-release. The current security and support scope is documented in
@@ -106,14 +107,15 @@ Resume signals are available through:
 ## What It Provides
 
 - A `stateful` CLI for installation, repo enablement, status, current-state
-  inspection, intent declaration, validation, MCP, hooks, structured commits,
-  outbox sync, and server lifecycle management.
+  inspection, intent declaration, validation, MCP, hooks, structured commit and
+  push wrappers, outbox sync, and server lifecycle management.
 - A local HTTP state server with token-protected non-health endpoints.
 - A SQLite event store and materialized current-state summary.
 - Codex lifecycle hook integration for observing and gating important actions.
-- An MCP adapter exposing the current-state protocol to compatible tools.
+- An MCP adapter exposing the current-state protocol to compatible tools,
+  including a local structured file-write bridge.
 - A Codex integration path, including lifecycle hooks, MCP, and an optional
-  wrapper for running Codex with a conservative read-only tmp profile.
+  wrapper that binds Codex runs without forcing a session sandbox by default.
 - Repo-local validation profiles for controlled test and check execution.
 - Benchmark tooling for SWE-bench pair runs, reports, comparisons, and
   synthetic coordination experiments.
@@ -163,6 +165,10 @@ Opt the current git repository into stateful enforcement:
 stateful enable
 ```
 
+Global hooks are gated by the repo allowlist. Disabled repos are left alone:
+hooks do not start the server or append outbox records, and MCP calls report
+that the repo is not enabled.
+
 Run Codex through the stateful wrapper:
 
 ```bash
@@ -208,10 +214,6 @@ stateful init --binary target/debug/stateful
 stateful enable --repo-local-codex
 ```
 
-## What You See
-
-![Example stateful current output](docs/current-state-example.svg)
-
 ## CLI Overview
 
 - `stateful install [--yes] [--codex-config <path>] [--binary <path>]`
@@ -225,7 +227,8 @@ stateful enable --repo-local-codex
   default. Use `stateful server start --foreground`, `stateful server status`,
   and `stateful server stop` for lifecycle control. Bare `stateful server`
   remains a foreground compatibility form.
-- `stateful status` and `stateful doctor` report local setup health.
+- `stateful status` and `stateful doctor` report setup health, including global
+  install fields and repo-enabled status.
 - `stateful current` prints current-state summary counts.
 - `stateful events` prints recent stored state events.
 - `stateful intent declare <paths...>` declares planned file or directory
@@ -237,16 +240,48 @@ stateful enable --repo-local-codex
 - `stateful validate <profile>` runs a configured validation profile.
 - `stateful commit -m <message> -- <paths...>` creates a structured commit for
   explicit file paths. The `--` separator is required.
-- `stateful codex [--codex-bin <path>] [--sandbox read-only-tmp] [--no-stateful] -- <args...>`
-  runs Codex with the stateful read-only tmp profile and rejects sandbox
-  overrides. `--no-stateful` disables Codex lifecycle hooks for that run.
+- `stateful push [remote branch]` pushes the current branch through a structured
+  wrapper. With no arguments it uses the configured upstream; with arguments it
+  requires both remote and branch, requires the branch to match the current
+  branch, requires a clean worktree, and rejects force-like target values.
+- `stateful codex [--codex-bin <path>] [--sandbox passthrough|read-only-tmp] [--no-stateful] -- <args...>`
+  runs Codex with pass-through session configuration by default while setting a
+  run-bound session id. `--sandbox read-only-tmp` remains available as an
+  explicit wrapper profile, and `--no-stateful` disables Codex lifecycle hooks
+  for that run.
 - `stateful mcp serve` exposes the MCP adapter over stdio.
-- `stateful mcp call <tool> [arguments_json]` calls an MCP tool through the
-  local HTTP server.
+- `stateful mcp call <tool> [arguments_json]` calls an MCP tool. Most tools map
+  to the local HTTP server; `state.file.write` and `state.bash.write` are
+  handled by the CLI bridge because they write repo files after authorization.
 - `stateful sync-outbox` replays pending local outbox records to the server.
-- `stateful hook <event>` runs Codex hook integration entry points.
+- `stateful hook <event>` runs Codex hook integration entry points:
+  `session-start`, `user-prompt-submit`, `pre-tool-use`, `post-tool-use`, and
+  `stop`.
 
 Run `stateful <command> --help` for command-specific options.
+
+## Codex Hooks and Sessions
+
+Global installation merges stateful MCP and hook configuration into the Codex
+config. `stateful enable` opts a repo into enforcement, while disabled repos are
+no-ops for hooks and MCP.
+
+The generated hook configuration covers:
+
+- `SessionStart` for `startup`, `resume`, `clear`, and `compact`
+- `UserPromptSubmit`
+- `PreToolUse` and `PostToolUse` for `Bash`, `apply_patch`, `Edit`, `Write`,
+  `file_change`, and `mcp__filesystem__.*`
+- `Stop`
+
+`SessionStart` registers the active session and writes the current-session file
+used by CLI and MCP calls. `UserPromptSubmit` renders brief current-state
+context. `PreToolUse` authorizes supported tool actions. `PostToolUse` records
+activity or heartbeats. `Stop` finalizes activity and releases leases.
+
+The `stateful codex` wrapper sets a run-specific `STATEFUL_CODEX_RUN_ID`, so
+session files are bound to that Codex run instead of a stale legacy
+`.stateful_core/runtime/session.json` file.
 
 ## Write Authorization
 
@@ -260,15 +295,33 @@ The v1 authorization API currently supports `write_file`, `delete_file`,
 File intent authorizes writes only to the exact file. Directory intent
 authorizes writes one or two path segments below that directory. Delete,
 rename, and move operations require exact file intents for the affected paths;
-directory intent does not authorize them.
+directory intent does not authorize them. Writes without matching active intent
+are denied, and active leases held by another session block conflicting writes.
+A blocked writer can queue with `queue_on_conflict`; after promotion, the
+reserved session must reread and retry the write.
 
-The `stateful codex` wrapper runs Codex in a read-only tmp profile, so native
-Codex edit tools such as `apply_patch`, `Edit`, and `Write` are not the normal
-repo write path for that mode. Repo file writes should use the stateful
-structured write path, `state_file_write` / `state.file.write`, after declaring
-intent. Ambiguous or mutating Bash commands are denied by default unless they
-match the read-only allowlist or the trusted `stateful codex` read-only tmp
-sandbox profile.
+Repo file writes should use the stateful structured write path,
+`state_file_write` / `state.file.write`, after declaring intent. That MCP tool
+is handled locally by the stateful CLI bridge: it normalizes a repo-relative
+path, rejects paths outside the repo, Git internals, symlink file targets or
+parent directories, and current-session mismatches, then calls `/v1/authorize`
+with `write_file` and writes only after an allow decision. Bash commands are
+denied unless the top-level Bash tool payload includes structured read-only
+sandbox metadata with network access explicitly disabled and only trusted tmp
+writable roots.
+
+Write-capable Bash is exposed separately through
+`state_bash_write` / `state.bash.write`. The tool requires a command and an
+explicit repo-relative `write_targets` list, optionally plus `create_targets`
+for files that should be pre-created before sandboxing. The CLI bridge
+authorizes every listed target with `/v1/authorize` as `write_file`; if any
+target is denied, the command is not executed and the response includes both
+allowed and denied target lists. When all targets are allowed, the command runs
+through an OS sandbox with the repo readable and only the listed files writable.
+macOS uses Seatbelt via `/usr/bin/sandbox-exec`; Linux uses bubblewrap
+(`bwrap`) with a read-only root bind and writable exact-file binds. The Linux
+bubblewrap backend is implemented but has not been verified in this macOS
+development environment.
 
 ## HTTP And MCP Surface
 
@@ -278,11 +331,33 @@ heartbeats, intent declaration, leases, activity observation/finalization,
 authorization, conflict checks, context rendering, reconciliation ack,
 validation, notifications, resume, and outbox sync.
 
-The MCP adapter maps the same protocol to tools such as
-`state_session_register`, `state_intent_declare`, `state_conflicts_check`,
-`state_current_read`, `state_validation_run`, `state_notifications_poll`, and
-`state_resume_next`. The protocol names use dotted forms such as
-`state.intent.declare`.
+The MCP adapter exposes Codex-friendly tool names mapped to dotted protocol
+names:
+
+- `state_session_register` / `state.session.register`
+- `state_session_heartbeat` / `state.session.heartbeat`
+- `state_intent_declare` / `state.intent.declare`
+- `state_lease_acquire` / `state.lease.acquire`
+- `state_lease_release` / `state.lease.release`
+- `state_activity_observe` / `state.activity.observe`
+- `state_activity_finalize` / `state.activity.finalize`
+- `state_conflicts_check` / `state.conflicts.check`
+- `state_current_read` / `state.current.read`
+- `state_events_read` / `state.events.read`
+- `state_context_render` / `state.context.render`
+- `state_reconcile_ack` / `state.reconcile.ack`
+- `state_validation_run` / `state.validation.run`
+- `state_file_write` / `state.file.write`
+- `state_bash_write` / `state.bash.write`
+- `state_notifications_poll` / `state.notifications.poll`
+- `state_resume_next` / `state.resume.next`
+
+Most MCP tools map directly to HTTP routes. `state.file.write` and
+`state.bash.write` are intentionally CLI-local. `state.file.write` first posts
+a `write_file` authorization request to `/v1/authorize`, then writes UTF-8
+contents to the repo file only after the server returns `allow`.
+`state.bash.write` authorizes each requested write/create target before
+executing the command in the platform sandbox.
 
 Side-effecting write authorization and intent declaration endpoints require the
 `stateful.v1` request envelope with `payload`. Flat legacy bodies are rejected
@@ -298,9 +373,9 @@ dirty.
 
 `allowed_writes` and `exclusive` are parsed as profile fields, but the current
 runner does not yet enforce an exclusive validation lock or a full
-allowlist-only write policy. Common raw test commands are still allowlisted by
-the prototype Bash classifier; use validation profiles for project-specific
-commands that need controlled artifact writes.
+allowlist-only write policy. Raw Bash test commands are denied without
+structured read-only sandbox metadata; use validation profiles for
+project-specific commands that need controlled artifact writes.
 
 ## Core Loop
 
@@ -330,12 +405,30 @@ or bearer tokens and are ignored by default:
 - `.stateful_core/`
 - `.stateful_bench/`
 
-Global installation also writes under `$STATEFUL_HOME`, or
-`$HOME/.stateful_core` when `STATEFUL_HOME` is unset. That directory can contain
-`config.yml`, `state.db`, `runtime/server.json`, `runtime/server.lock`,
-`runtime/server.log`, and repo metadata under `repos/`.
+Global installation writes under `$STATEFUL_HOME`, or `$HOME/.stateful_core`
+when `STATEFUL_HOME` is unset. That directory can contain `config.yml`,
+`state.db`, `runtime/server.json`, `runtime/server.lock`, `runtime/server.log`,
+and repo metadata under `repos/`.
+
+Repo-local compatibility and hook runtime state live under `.stateful_core/`.
+That directory can contain `runtime/server.json`, `runtime/session.json`,
+run-bound `runtime/sessions/*.json` files, repo-local `state.db`, and outbox
+JSONL files under `outbox/`.
 
 Commit reusable documentation and source code, not local generated state.
+
+## Environment Variables
+
+- `STATEFUL_HOME` overrides the user-level state directory. When unset,
+  `$HOME/.stateful_core` is used.
+- `STATEFUL_SERVER_URL` and `STATEFUL_SERVER_TOKEN` override runtime discovery
+  when both are set.
+- `STATEFUL_CODEX_RUN_ID` selects the run-bound current-session file under
+  `.stateful_core/runtime/sessions/`. The `stateful codex` wrapper sets it
+  automatically.
+- `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
+  authorize Bash. Bash authorization requires top-level structured sandbox
+  metadata on the tool payload.
 
 ## Project Layout
 
@@ -344,14 +437,15 @@ Commit reusable documentation and source code, not local generated state.
 - `crates/stateful-store`: SQLite event store and current-state persistence.
 - `crates/stateful-server`: local HTTP API over the shared policy and store.
 - `crates/stateful-cli`: user-facing CLI, hook adapter, runtime discovery,
-  repo registry, structured commit, outbox sync, and validation commands.
+  repo registry, structured commit/push wrappers, outbox sync, and validation
+  commands.
 - `crates/stateful-mcp`: MCP tool surface.
 - `crates/stateful-validation`: validation profile parser and runner.
 - `crates/stateful-bench`: benchmark tooling for fetching datasets, preparing
   pairs, sampling, running paired agents, reporting, comparing, and synthetic
   experiments.
 - `docs/`: concept, state model, architecture, implementation contract,
-  coordination, hardening-scope, and ADR documents.
+  coordination, hardening-scope, ADR, and tracked implementation-plan documents.
 
 ## Benchmark Tooling
 
@@ -396,8 +490,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 - [V1 hardening scope decisions](docs/v1-hardening-scope-decisions.md)
 - [ADR 0001: State-first, not memory-first](docs/adr/0001-state-first-not-memory-first.md)
 
-Internal implementation plans and scratch specs are intentionally kept outside
-the public repository.
+Some historical implementation plans and specs are tracked under
+`docs/superpowers/` for traceability. New local scratch plans under that tree
+are ignored by default.
 
 ## License
 
