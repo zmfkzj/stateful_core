@@ -240,7 +240,7 @@ pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init { binary } => {
-            install_repo_local(std::env::current_dir()?, binary)?;
+            install_repo_local_avoiding_global_hook_duplicates(std::env::current_dir()?, binary)?;
             println!("installed stateful repo-local configuration");
         }
         Command::Install {
@@ -447,7 +447,17 @@ pub fn run() -> anyhow::Result<()> {
         } => {
             let paths = GlobalPaths::from_env()?;
             let repo = repo.unwrap_or(std::env::current_dir()?);
-            let entry = enable_repo(&paths, repo, repo_local_codex)?;
+            let global_codex_config = if repo_local_codex {
+                default_codex_config_path().ok()
+            } else {
+                None
+            };
+            let entry = repo_registry::enable_repo_with_global_codex_config(
+                &paths,
+                repo,
+                repo_local_codex,
+                global_codex_config.as_deref(),
+            )?;
             println!("{}", serde_json::to_string(&entry)?);
         }
         Command::Disable { repo } => {
@@ -735,6 +745,38 @@ pub fn install_repo_local(
     repo_root: impl AsRef<Path>,
     binary_path: impl AsRef<str>,
 ) -> anyhow::Result<()> {
+    install_repo_local_with_hooks(repo_root, binary_path, true)
+}
+
+pub fn install_repo_local_avoiding_global_hook_duplicates(
+    repo_root: impl AsRef<Path>,
+    binary_path: impl AsRef<str>,
+) -> anyhow::Result<()> {
+    let global_codex_config = default_codex_config_path().ok();
+    install_repo_local_with_global_codex_config(
+        repo_root,
+        binary_path,
+        global_codex_config.as_deref(),
+    )
+}
+
+pub fn install_repo_local_with_global_codex_config(
+    repo_root: impl AsRef<Path>,
+    binary_path: impl AsRef<str>,
+    global_codex_config: Option<&Path>,
+) -> anyhow::Result<()> {
+    let include_hooks = match global_codex_config {
+        Some(path) => !global_codex_config_has_stateful_hooks(path)?,
+        None => true,
+    };
+    install_repo_local_with_hooks(repo_root, binary_path, include_hooks)
+}
+
+fn install_repo_local_with_hooks(
+    repo_root: impl AsRef<Path>,
+    binary_path: impl AsRef<str>,
+    include_hooks: bool,
+) -> anyhow::Result<()> {
     let repo_root = repo_root.as_ref();
     let binary_path = binary_path.as_ref();
 
@@ -750,7 +792,7 @@ pub fn install_repo_local(
     }
     fs::write(
         repo_root.join(".codex/config.toml"),
-        mcp_config_toml(binary_path),
+        repo_local_codex_config_toml(binary_path, include_hooks),
     )?;
     fs::write(
         repo_root.join(".codex/skills/stateful-command-policy/SKILL.md"),
@@ -763,6 +805,30 @@ pub fn install_repo_local(
     )?;
 
     Ok(())
+}
+
+const STATEFUL_GLOBAL_CODEX_BLOCK_START: &str = "# stateful-core-global-install";
+const STATEFUL_GLOBAL_CODEX_BLOCK_END: &str = "# /stateful-core-global-install";
+
+fn global_codex_config_has_stateful_hooks(path: &Path) -> anyhow::Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let contents = fs::read_to_string(path)?;
+    let Some(start) = contents.find(STATEFUL_GLOBAL_CODEX_BLOCK_START) else {
+        return Ok(false);
+    };
+    let block = &contents[start..];
+    let block = match block.find(STATEFUL_GLOBAL_CODEX_BLOCK_END) {
+        Some(end) => &block[..end],
+        None => block,
+    };
+
+    Ok(block.contains("[[hooks.SessionStart]]")
+        || block.contains("[[hooks.UserPromptSubmit]]")
+        || block.contains("[[hooks.PreToolUse]]")
+        || block.contains("[[hooks.PostToolUse]]")
+        || block.contains("[[hooks.Stop]]"))
 }
 
 const STATEFUL_CODEX_JSON_MARKER: &str = "stateful_core_owned";
@@ -978,7 +1044,7 @@ fn simple_toml_string_assignment(line: &str, key: &str) -> Option<String> {
     serde_json::from_str(right.trim()).ok()
 }
 
-fn mcp_config_toml(binary_path: &str) -> String {
+fn repo_local_codex_config_toml(binary_path: &str, include_hooks: bool) -> String {
     let mcp_command = if Path::new(binary_path).is_absolute() {
         binary_path.to_string()
     } else if binary_path.contains('/') {
@@ -986,6 +1052,19 @@ fn mcp_config_toml(binary_path: &str) -> String {
     } else {
         binary_path.to_string()
     };
+    let mcp_config = format!(
+        r#"{STATEFUL_CODEX_TOML_MARKER}
+[mcp_servers.stateful]
+command = "{}"
+args = ["mcp", "serve"]
+startup_timeout_sec = 20
+"#,
+        escape_toml_string(&mcp_command),
+    );
+    if !include_hooks {
+        return mcp_config;
+    }
+
     let hook_binary = if Path::new(binary_path).is_absolute() {
         binary_path.to_string()
     } else {

@@ -2,6 +2,7 @@ use std::{fs, path::Path};
 
 use stateful_cli::{
     GlobalPaths, doctor_report, doctor_report_with_global, enable_repo, install_repo_local,
+    install_repo_local_with_global_codex_config,
 };
 
 #[test]
@@ -73,6 +74,64 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
         .expect("validation config should exist");
     assert!(validation.contains("profiles:"));
     assert!(validation.contains("profile_id: cargo-test"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn install_repo_local_omits_hooks_when_global_stateful_hooks_are_installed() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-init-global-hooks-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let global_config = temp_root.join("global-codex-config.toml");
+    fs::write(
+        &global_config,
+        r#"# stateful-core-global-install
+[features]
+hooks = true
+
+[mcp_servers.stateful]
+command = "/opt/stateful/bin/stateful"
+args = ["mcp", "serve"]
+
+[[hooks.UserPromptSubmit]]
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "'/opt/stateful/bin/stateful' hook user-prompt-submit"
+# /stateful-core-global-install
+"#,
+    )
+    .expect("global config should be writable");
+
+    install_repo_local_with_global_codex_config(
+        &temp_root,
+        "target/debug/stateful",
+        Some(global_config.as_path()),
+    )
+    .expect("repo install should succeed");
+
+    let codex_config = fs::read_to_string(temp_root.join(".codex/config.toml"))
+        .expect("codex config should exist");
+    assert!(codex_config.contains("# stateful-core-owned"));
+    assert!(codex_config.contains("[mcp_servers.stateful]"));
+    assert!(!codex_config.contains("hooks = true"));
+    assert!(!codex_config.contains("[[hooks.UserPromptSubmit]]"));
+    assert!(!codex_config.contains("[[hooks.PreToolUse]]"));
+    assert!(!codex_config.contains("hook user-prompt-submit"));
+    assert!(!codex_config.contains("hook pre-tool-use"));
+    assert!(
+        temp_root
+            .join(".codex/skills/stateful-command-policy/SKILL.md")
+            .is_file()
+    );
+    assert!(temp_root.join(".stateful/config.yml").is_file());
+    assert!(temp_root.join(".stateful/validation.yml").is_file());
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

@@ -7,7 +7,10 @@ use std::{
 
 use anyhow::Context;
 
-use crate::{GlobalPaths, default_config_yml, default_validation_yml, install_repo_local};
+use crate::{
+    GlobalPaths, default_config_yml, default_validation_yml,
+    install_repo_local_with_global_codex_config,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RepoRegistry {
@@ -150,6 +153,15 @@ pub fn enable_repo(
     repo: impl AsRef<Path>,
     repo_local_codex: bool,
 ) -> anyhow::Result<RepoEntry> {
+    enable_repo_with_global_codex_config(paths, repo, repo_local_codex, None)
+}
+
+pub(crate) fn enable_repo_with_global_codex_config(
+    paths: &GlobalPaths,
+    repo: impl AsRef<Path>,
+    repo_local_codex: bool,
+    global_codex_config: Option<&Path>,
+) -> anyhow::Result<RepoEntry> {
     let root = detect_git_root(repo)?;
     if repo_local_codex {
         crate::ensure_repo_local_install_can_write(&root)?;
@@ -165,7 +177,7 @@ pub fn enable_repo(
             .with_context(|| format!("failed to read {}", validation_config.display()))?;
         let binary_path = current_stateful_binary_path()?;
 
-        install_repo_local(&root, &binary_path)?;
+        install_repo_local_with_global_codex_config(&root, &binary_path, global_codex_config)?;
         fs::write(&policy_config, policy_contents)
             .with_context(|| format!("failed to restore {}", policy_config.display()))?;
         fs::write(&validation_config, validation_contents)
