@@ -147,9 +147,12 @@ fn start_detached_server(
         .append(true)
         .open(&paths.server_log)?;
     let log_err = log.try_clone()?;
-    let child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(std::env::current_exe()?);
+    configure_detached_command(&mut command);
+    let child = command
         .args(detached_server_args(options))
         .env("STATEFUL_HOME", &paths.home)
+        .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
         .spawn()?;
@@ -188,6 +191,16 @@ pub fn detached_server_args(options: &ServerStartOptions) -> Vec<String> {
     args.extend(["--workspace-id".to_string(), options.workspace_id.clone()]);
     args
 }
+
+#[cfg(unix)]
+fn configure_detached_command(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_detached_command(_command: &mut Command) {}
 
 fn ensure_runtime_matches_options(
     runtime: &ServerRuntime,
