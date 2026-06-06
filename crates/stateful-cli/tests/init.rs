@@ -12,7 +12,7 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     }
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
 
-    install_repo_local(&temp_root, "target/debug/stateful").expect("repo install should succeed");
+    install_repo_local(&temp_root, "stateful").expect("repo install should succeed");
 
     assert!(!temp_root.join(".codex/hooks.json").exists());
 
@@ -27,7 +27,9 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(codex_config.contains("hooks = true"));
     assert!(codex_config.contains("[mcp_servers.stateful]"));
     assert!(codex_config.contains("[[hooks.PreToolUse]]"));
-    assert!(codex_config.contains("$(git rev-parse --show-toplevel)/target/debug/stateful"));
+    assert!(codex_config.contains("command = \"stateful\""));
+    assert!(codex_config.contains("cwd = "));
+    assert!(codex_config.contains("\"\\\"stateful\\\" hook pre-tool-use\""));
     assert!(codex_config.contains("hook pre-tool-use"));
 
     let command_policy_skill =
@@ -37,15 +39,27 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(command_policy_skill.contains("Use when running shell commands"));
     assert!(command_policy_skill.contains("stateful intent declare"));
     assert!(command_policy_skill.contains("state_intent_declare"));
-    assert!(command_policy_skill.contains("top-level read-only sandbox metadata"));
-    assert!(command_policy_skill.contains("MCP or native read tools"));
-    assert!(command_policy_skill.contains("state_file_write"));
+    assert!(command_policy_skill.contains("Shell Command Usage"));
+    assert!(command_policy_skill.contains("Direct read-only Bash is only allowed"));
+    assert!(!command_policy_skill.contains("hook payload has no sandbox metadata"));
+    assert!(command_policy_skill.contains("write permission must go through stateful tools"));
+    assert!(command_policy_skill.contains("native read tools"));
+    assert!(command_policy_skill.contains("Shell expansion/control syntax"));
+    assert!(!command_policy_skill.contains("state_file_write"));
+    assert!(!command_policy_skill.contains("state_validation_run"));
+    assert!(command_policy_skill.contains("state_bash_write"));
+    assert!(command_policy_skill.contains("state.intent.declare"));
+    assert!(command_policy_skill.contains("active_lease_conflict"));
+    assert!(command_policy_skill.contains("reservation_conflict"));
+    assert!(command_policy_skill.contains("Do not redeclare intent"));
     assert!(command_policy_skill.contains("Raw test commands"));
 
     let validation = fs::read_to_string(temp_root.join(".stateful/validation.yml"))
         .expect("validation config should exist");
     assert!(validation.contains("profiles:"));
     assert!(validation.contains("profile_id: cargo-test"));
+    assert!(validation.contains("profile_id: cargo-fmt-check"));
+    assert!(validation.contains("profile_id: cargo-clippy"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -206,6 +220,48 @@ fn install_repo_local_preserves_absolute_binary_paths() {
         fs::read_to_string(temp_root.join(".codex/config.toml")).expect("config should exist");
     assert!(config.contains("command = \"/opt/stateful/bin/stateful\""));
     assert!(config.contains("hook pre-tool-use"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn install_repo_local_preserves_repo_relative_binary_paths() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-init-relative-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    install_repo_local(&temp_root, "target/debug/stateful").expect("repo install should succeed");
+
+    let config =
+        fs::read_to_string(temp_root.join(".codex/config.toml")).expect("config should exist");
+    assert!(config.contains("command = \"./target/debug/stateful\""));
+    assert!(config.contains("cwd = "));
+    assert!(config.contains("$(git rev-parse --show-toplevel)/target/debug/stateful"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn install_repo_local_refuses_shell_expanding_binary_paths() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-init-dangerous-binary-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    let error = install_repo_local(&temp_root, "target/debug/stateful$(touch /tmp/pwned)")
+        .expect_err("repo install should reject shell-expanding binary path");
+
+    assert!(error.to_string().contains("unsafe binary path"));
+    assert!(!temp_root.join(".codex/config.toml").exists());
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

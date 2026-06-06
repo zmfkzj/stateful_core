@@ -150,6 +150,95 @@ fn current_session_file_round_trips_for_mcp_enrichment() {
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
+#[cfg(unix)]
+#[test]
+fn current_session_file_refuses_symlink_before_reading() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-current-session-symlink-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(temp_root.join(".stateful_core/runtime"))
+        .expect("runtime dir should be creatable");
+    let victim = temp_root.join("victim-session.json");
+    fs::write(
+        &victim,
+        r#"{"session_id":"s1","workspace_id":"w1"}"#,
+    )
+    .expect("victim session should write");
+    std::os::unix::fs::symlink(
+        &victim,
+        temp_root.join(".stateful_core/runtime/session.json"),
+    )
+    .expect("current session symlink should create");
+
+    let error =
+        read_current_session_file(&temp_root).expect_err("symlinked session should fail");
+
+    assert!(error.to_string().contains("symlinked current session file"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[cfg(unix)]
+#[test]
+fn current_session_file_refuses_symlink_before_writing() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-current-session-write-symlink-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(temp_root.join(".stateful_core/runtime"))
+        .expect("runtime dir should be creatable");
+    let victim = temp_root.join("victim-session.json");
+    fs::write(&victim, "victim\n").expect("victim should write");
+    std::os::unix::fs::symlink(
+        &victim,
+        temp_root.join(".stateful_core/runtime/session.json"),
+    )
+    .expect("current session symlink should create");
+
+    let error = write_current_session_file(&temp_root, &CurrentSession::new("s1", "w1"))
+        .expect_err("symlinked session write should fail");
+
+    assert!(error.to_string().contains("symlinked current session file"));
+    assert_eq!(
+        fs::read_to_string(&victim).expect("victim should read"),
+        "victim\n"
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[cfg(unix)]
+#[test]
+fn current_session_file_refuses_non_regular_file_before_writing() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-current-session-write-socket-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(temp_root.join(".stateful_core/runtime"))
+        .expect("runtime dir should be creatable");
+    let session_path = temp_root.join(".stateful_core/runtime/session.json");
+    let listener = std::os::unix::net::UnixListener::bind(&session_path)
+        .expect("session socket should bind");
+
+    let error = write_current_session_file(&temp_root, &CurrentSession::new("s1", "w1"))
+        .expect_err("socket session write should fail");
+
+    drop(listener);
+    assert!(error.to_string().contains("current session file is not a regular file"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
 #[test]
 fn codex_run_session_file_is_isolated_from_legacy_current_session() {
     let temp_root = std::env::temp_dir().join(format!(

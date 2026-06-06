@@ -41,7 +41,6 @@ Official validation execution paths are:
 
 ```text
 stateful validate <profile>
-state.validation.run
 POST /v1/validation/run
 ```
 

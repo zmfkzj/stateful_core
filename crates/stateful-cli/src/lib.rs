@@ -41,11 +41,11 @@ pub use repo_registry::{
     enable_repo, repo_gate, repo_identity_for_enabled_repo,
 };
 pub use runtime::{
-    CurrentSession, HttpResponse, IntentDeclareArgs, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime,
-    declare_intent_via_http, discover_runtime, discover_runtime_with_global,
-    discover_runtime_with_optional_global, get_json, global_state_db_path,
-    intent_declare_protocol_body, post_json, protocol_envelope, read_current_session_file,
-    read_current_session_file_for_codex_run, write_current_session_file,
+    CurrentSession, HttpResponse, IntentDeclareArgs, ProtocolEnvelopeArgs,
+    STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime, declare_intent_via_http, discover_runtime,
+    discover_runtime_with_global, discover_runtime_with_optional_global, get_json,
+    global_state_db_path, intent_declare_protocol_body, post_json, protocol_envelope,
+    read_current_session_file, read_current_session_file_for_codex_run, write_current_session_file,
     write_current_session_file_for_codex_run, write_global_runtime_file, write_runtime_file,
 };
 pub use server_lifecycle::{
@@ -68,7 +68,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Init {
-        #[arg(long, default_value = "target/debug/stateful")]
+        #[arg(long, default_value = "stateful")]
         binary: String,
     },
     Install {
@@ -521,18 +521,34 @@ fn root_relative_paths(
     Ok(paths
         .into_iter()
         .map(|path| {
-            let path = path.trim();
-            if Path::new(path).is_absolute() {
+            if Path::new(&path).is_absolute() {
                 path.to_string()
             } else if let Some(prefix) =
                 cwd_relative.filter(|prefix| !prefix.as_os_str().is_empty())
             {
-                prefix.join(path).to_string_lossy().replace('\\', "/")
+                normalize_root_relative_path(&prefix.join(&path))
             } else {
                 path.to_string()
             }
         })
         .collect())
+}
+
+fn normalize_root_relative_path(path: &Path) -> String {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized.to_string_lossy().replace('\\', "/")
 }
 
 fn resolve_session_workspace(
@@ -680,6 +696,8 @@ pub fn install_repo_local(
     let repo_root = repo_root.as_ref();
     let binary_path = binary_path.as_ref();
 
+    validate_repo_local_binary_path(binary_path)?;
+    validate_repo_local_repo_root(repo_root)?;
     ensure_repo_local_install_can_write(repo_root)?;
 
     fs::create_dir_all(repo_root.join(".codex"))?;
@@ -692,7 +710,7 @@ pub fn install_repo_local(
     }
     fs::write(
         repo_root.join(".codex/config.toml"),
-        mcp_config_toml(binary_path),
+        mcp_config_toml(repo_root, binary_path),
     )?;
     fs::write(
         repo_root.join(".codex/skills/stateful-command-policy/SKILL.md"),
@@ -746,7 +764,7 @@ fn is_stateful_owned_codex_file(path: &Path) -> anyhow::Result<bool> {
     }
 }
 
-fn mcp_config_toml(binary_path: &str) -> String {
+fn mcp_config_toml(repo_root: &Path, binary_path: &str) -> String {
     let mcp_command = if Path::new(binary_path).is_absolute() {
         binary_path.to_string()
     } else if binary_path.contains('/') {
@@ -756,10 +774,13 @@ fn mcp_config_toml(binary_path: &str) -> String {
     };
     let hook_binary = if Path::new(binary_path).is_absolute() {
         binary_path.to_string()
-    } else {
+    } else if binary_path.contains('/') {
         format!("$(git rev-parse --show-toplevel)/{binary_path}")
+    } else {
+        binary_path.to_string()
     };
     let hook_prefix = format!("\"{hook_binary}\" hook");
+    let cwd = repo_root.to_str().expect("validated repo root path");
 
     format!(
         r#"{STATEFUL_CODEX_TOML_MARKER}
@@ -769,6 +790,7 @@ hooks = true
 [mcp_servers.stateful]
 command = "{}"
 args = ["mcp", "serve"]
+cwd = "{}"
 startup_timeout_sec = 20
 
 [[hooks.SessionStart]]
@@ -810,12 +832,37 @@ command = "{} stop"
 statusMessage = "Finalizing stateful activity"
 "#,
         escape_toml_string(&mcp_command),
+        escape_toml_string(&cwd),
         escape_toml_string(&hook_prefix),
         escape_toml_string(&hook_prefix),
         escape_toml_string(&hook_prefix),
         escape_toml_string(&hook_prefix),
         escape_toml_string(&hook_prefix)
     )
+}
+
+fn validate_repo_local_repo_root(repo_root: &Path) -> anyhow::Result<()> {
+    let Some(path) = repo_root.to_str() else {
+        anyhow::bail!("repo-local Codex config requires a UTF-8 repo path");
+    };
+    if path.chars().any(char::is_control) {
+        anyhow::bail!("repo-local Codex config repo path must not contain control characters");
+    }
+    Ok(())
+}
+
+fn validate_repo_local_binary_path(binary_path: &str) -> anyhow::Result<()> {
+    if binary_path.trim().is_empty()
+        || binary_path
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '$' | '`' | '"' | '\'' | '\\'))
+    {
+        anyhow::bail!(
+            "unsafe binary path for repo-local Codex install; use a literal path without shell expansion or quotes"
+        );
+    }
+
+    Ok(())
 }
 
 fn escape_toml_string(value: &str) -> String {
@@ -850,6 +897,32 @@ fn default_validation_yml() -> &'static str {
       - Cargo.lock
     exclusive: true
     result_parser: exit_code
+  - profile_id: cargo-fmt-check
+    description: Check Rust formatting
+    command: cargo fmt --all --check
+    cwd: .
+    timeout_seconds: 60
+    denied_writes:
+      - crates/**
+      - docs/**
+      - Cargo.toml
+      - Cargo.lock
+    exclusive: true
+    result_parser: exit_code
+  - profile_id: cargo-clippy
+    description: Run Clippy for the Rust workspace
+    command: cargo clippy --workspace --all-targets -- -D warnings
+    cwd: .
+    timeout_seconds: 300
+    allowed_writes:
+      - target/**
+    denied_writes:
+      - crates/**
+      - docs/**
+      - Cargo.toml
+      - Cargo.lock
+    exclusive: true
+    result_parser: exit_code
 "#
 }
 
@@ -867,25 +940,33 @@ Stateful hooks are authoritative. Pick commands that match the installed hooks b
 
 - Declare exact file intent first with `state_intent_declare` / `state.intent.declare`. Use Bash `stateful intent declare <paths...>` only when MCP tools are unavailable.
 - Keep declared paths narrow; prefer exact files for edits, deletes, renames, and moves.
-- Write repo files with `state_file_write` / `state.file.write` after intent. It authorizes and writes from structured arguments.
-- Use `state_bash_write` / `state.bash.write` for write-capable Bash. Pass explicit repo-relative `write_targets`, and `create_targets` for new files; the bridge authorizes each file and then runs the command in the OS sandbox.
-- Re-read a file immediately before `state_file_write`; it writes full contents, so preserve unrelated user changes.
+- Use `state_bash_write` / `state.bash.write` for repo writes and other write-capable Bash. Pass explicit repo-relative `write_targets`, and `create_targets` for new files; the bridge authorizes each file and then runs the command in the OS sandbox.
+- Re-read files immediately before writing; preserve unrelated user changes.
 - `apply_patch`, `Edit`, `Write`, and `file_change` are hook-authorized only when targets are visible to stateful policy. If denied, switch to structured write instead of retrying patch variants.
 - If a hook denies an action, read the denial and choose the documented alternative instead of retrying variants.
 
+## Shell Command Usage
+
+- Prefer native read tools for search, inspection, and diagnostics.
+- Direct read-only Bash is only allowed for known inspection commands when top-level sandbox metadata declares read-only mode, network access disabled, and only trusted tmp writable roots.
+- Shell commands that need write permission must go through stateful tools. Prefer `state_bash_write` / `state.bash.write` with explicit repo-relative `write_targets`, and `create_targets` for new files.
+- Treat generators, formatters, package managers, build commands, and tests that create artifacts as write-capable commands.
+
 ## Prefer
 
-- MCP or native read tools for search and inspection when available.
+- Native read tools for search and inspection when available.
+- Direct read-only Bash only under the hook metadata conditions above.
 - `state_bash_write` for command-shaped writes that need a real shell but can be limited to exact file targets.
-- Structured Bash only when the tool call carries top-level read-only sandbox metadata with network disabled.
-- Validation: `state_validation_run` / `state.validation.run`, or `stateful validate <profile>`.
-- Stateful diagnostics through MCP tools or a structured sandboxed Bash call.
+- Validation: use `state_bash_write` when the command can be constrained to explicit write targets, or `stateful validate <profile>` outside Codex hooks.
+- Stateful diagnostics through CLI/native read tools or eligible direct read-only Bash.
 
 ## Avoid In Bash
 
-- Any Bash command without top-level read-only sandbox metadata and explicit network disabled metadata.
+- Direct Bash for commands that need write permission; use stateful tools instead.
 - Shell write syntax: `>`, `>>`, heredocs, and `| tee`.
+- Shell expansion/control syntax: `$()`, backticks, process substitution, background jobs, and newline-separated commands.
 - Direct file mutation: `rm`, `mv`, `cp`, `mkdir`, `touch`, `chmod`, `chown`.
+- Arbitrary `awk` or `sed`; only narrow read-only `sed -n` print forms are classified as direct read-only.
 - Any generator, formatter, package manager, or script that creates, updates, deletes, or moves repo files.
 - Raw mutation git commands: `git checkout`, `git switch`, `git restore`, `git reset`, `git clean`, `git apply`, `git merge`, `git rebase`.
 - Raw test commands; use validation profiles for commands that write build or test artifacts.
@@ -894,8 +975,11 @@ Stateful hooks are authoritative. Pick commands that match the installed hooks b
 ## If Blocked
 
 - Do not retry the same command with small variations.
-- If the denial asks for scope, declare or narrow intent, then use `state_file_write` for repo changes.
-- If Bash is blocked, choose MCP/native inspection, structured MCP write, `state_bash_write`, a validation profile, or a Bash tool call with top-level read-only sandbox metadata and network disabled.
+- If the denial reason_code is `active_lease_conflict` or `reservation_conflict`, another session owns or has reserved the target. Wait, poll notifications, resume a granted reservation, or coordinate with the blocking session. Do not redeclare intent or change `session_id`; that does not release another session's lease or reservation.
+- If the denial asks for scope, declare or narrow intent, then use `state_bash_write` for repo changes.
+- If direct Bash is blocked for a read-only command, choose native inspection or report the exact denial.
+- If intent declaration is blocked in Bash, use `state_intent_declare` / `state.intent.declare` directly in Codex sessions.
+- If a command needs write permission, choose `state_bash_write` or a validation profile outside Codex hooks.
 - If a denial mentions a structured tool, prefer the stateful MCP tool in Codex sessions.
 - If no policy-compliant path is available, report the exact command and denial reason.
 "#

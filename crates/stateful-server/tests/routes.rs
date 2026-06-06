@@ -637,6 +637,9 @@ async fn active_lease_by_other_session_denies_authorize_even_with_matching_inten
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "active_lease_conflict");
+    let required_next_action = json["required_next_action"].as_str().unwrap_or_default();
+    assert!(required_next_action.contains("Do not redeclare intent"));
+    assert!(required_next_action.contains("session_id"));
 }
 
 #[tokio::test]
@@ -754,6 +757,9 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "reservation_conflict");
     assert_eq!(json["reservation"]["session_id"], "s2");
+    let required_next_action = json["required_next_action"].as_str().unwrap_or_default();
+    assert!(required_next_action.contains("Do not redeclare intent"));
+    assert!(required_next_action.contains("session_id"));
 
     let allowed_b = app
         .clone()

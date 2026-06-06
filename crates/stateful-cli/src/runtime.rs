@@ -6,6 +6,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 use crate::global_paths::GlobalPaths;
 use crate::repo_registry::RepoIdentity;
 use serde::{Deserialize, Serialize};
@@ -143,16 +146,26 @@ pub fn write_current_session_file(
     let repo_root = repo_root.as_ref();
     if let Some(codex_run_id) = current_codex_run_id()? {
         write_current_session_file_for_codex_run(repo_root, &codex_run_id, session)?;
+        if current_session_file_is_untrusted(&current_session_file_path(repo_root))? {
+            return Ok(());
+        }
     }
 
-    let path = current_session_file_path(repo_root);
-    let Some(parent) = path.parent() else {
-        anyhow::bail!("current session file path has no parent");
-    };
-
-    fs::create_dir_all(parent)?;
-    fs::write(path, serde_json::to_string_pretty(session)?)?;
+    write_legacy_current_session_file(repo_root, session)?;
     Ok(())
+}
+
+fn write_legacy_current_session_file(
+    repo_root: &Path,
+    session: &CurrentSession,
+) -> anyhow::Result<()> {
+    let runtime_dir = ensure_runtime_dir(repo_root)?;
+    let path = runtime_dir.join("session.json");
+    write_plain_file(
+        &path,
+        "current session file",
+        &serde_json::to_string_pretty(session)?,
+    )
 }
 
 pub fn read_current_session_file(repo_root: impl AsRef<Path>) -> anyhow::Result<CurrentSession> {
@@ -161,7 +174,9 @@ pub fn read_current_session_file(repo_root: impl AsRef<Path>) -> anyhow::Result<
         return read_current_session_file_for_codex_run(repo_root, &codex_run_id);
     }
 
-    let contents = fs::read_to_string(current_session_file_path(repo_root))?;
+    reject_untrusted_runtime_dirs(repo_root, false)?;
+    let contents =
+        read_plain_file_to_string(&current_session_file_path(repo_root), "current session file")?;
     Ok(serde_json::from_str(&contents)?)
 }
 
@@ -170,8 +185,11 @@ pub fn write_current_session_file_for_codex_run(
     codex_run_id: &str,
     session: &CurrentSession,
 ) -> anyhow::Result<()> {
+    let repo_root = repo_root.as_ref();
     let path = current_session_file_path_for_codex_run(repo_root, codex_run_id)?;
-    match fs::read_to_string(&path) {
+    let runtime_dir = ensure_runtime_dir(repo_root)?;
+    ensure_plain_directory(&runtime_dir.join("sessions"), "current session directory")?;
+    match read_plain_file_to_string(&path, "current session file") {
         Ok(contents) => {
             let existing: CurrentSession = serde_json::from_str(&contents)?;
             if existing != *session {
@@ -181,16 +199,11 @@ pub fn write_current_session_file_for_codex_run(
                 );
             }
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if is_not_found_error(&error) => {}
         Err(error) => return Err(error.into()),
     }
 
-    let Some(parent) = path.parent() else {
-        anyhow::bail!("current session file path has no parent");
-    };
-
-    fs::create_dir_all(parent)?;
-    fs::write(path, serde_json::to_string_pretty(session)?)?;
+    write_plain_file(&path, "current session file", &serde_json::to_string_pretty(session)?)?;
     Ok(())
 }
 
@@ -198,11 +211,121 @@ pub fn read_current_session_file_for_codex_run(
     repo_root: impl AsRef<Path>,
     codex_run_id: &str,
 ) -> anyhow::Result<CurrentSession> {
-    let contents = fs::read_to_string(current_session_file_path_for_codex_run(
-        repo_root,
-        codex_run_id,
-    )?)?;
+    let repo_root = repo_root.as_ref();
+    reject_untrusted_runtime_dirs(repo_root, true)?;
+    let contents = read_plain_file_to_string(
+        &current_session_file_path_for_codex_run(repo_root, codex_run_id)?,
+        "current session file",
+    )?;
     Ok(serde_json::from_str(&contents)?)
+}
+
+fn read_plain_file_to_string(path: &Path, label: &str) -> anyhow::Result<String> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("stateful refuses symlinked {label}");
+    }
+    if !metadata.is_file() {
+        anyhow::bail!("stateful {label} is not a regular file");
+    }
+    if is_hard_linked_file(&metadata) {
+        anyhow::bail!("stateful refuses hard-linked {label}");
+    }
+    Ok(fs::read_to_string(path)?)
+}
+
+fn is_not_found_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn write_plain_file(path: &Path, label: &str, contents: &str) -> anyhow::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("stateful refuses symlinked {label}");
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            anyhow::bail!("stateful {label} is not a regular file");
+        }
+        Ok(metadata) if is_hard_linked_file(&metadata) => {
+            anyhow::bail!("stateful refuses hard-linked {label}");
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    fs::write(path, contents)?;
+    Ok(())
+}
+
+fn current_session_file_is_untrusted(path: &Path) -> anyhow::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || is_hard_linked_file(&metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn ensure_runtime_dir(repo_root: &Path) -> anyhow::Result<std::path::PathBuf> {
+    let state_dir = repo_root.join(".stateful_core");
+    ensure_plain_directory(&state_dir, "stateful directory")?;
+    let runtime_dir = state_dir.join("runtime");
+    ensure_plain_directory(&runtime_dir, "runtime directory")?;
+    Ok(runtime_dir)
+}
+
+fn reject_untrusted_runtime_dirs(repo_root: &Path, include_sessions: bool) -> anyhow::Result<()> {
+    let state_dir = repo_root.join(".stateful_core");
+    reject_untrusted_directory_if_present(&state_dir, "stateful directory")?;
+    let runtime_dir = state_dir.join("runtime");
+    reject_untrusted_directory_if_present(&runtime_dir, "runtime directory")?;
+    if include_sessions {
+        reject_untrusted_directory_if_present(
+            &runtime_dir.join("sessions"),
+            "current session directory",
+        )?;
+    }
+    Ok(())
+}
+
+fn reject_untrusted_directory_if_present(path: &Path, label: &str) -> anyhow::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("stateful refuses symlinked {label}");
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => anyhow::bail!("stateful {label} is not a directory"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn ensure_plain_directory(path: &Path, label: &str) -> anyhow::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("stateful refuses symlinked {label}");
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => anyhow::bail!("stateful {label} is not a directory"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path)?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(unix)]
+fn is_hard_linked_file(metadata: &fs::Metadata) -> bool {
+    metadata.is_file() && metadata.nlink() > 1
+}
+
+#[cfg(not(unix))]
+fn is_hard_linked_file(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 pub fn post_json(
@@ -274,35 +397,45 @@ pub fn intent_declare_protocol_body(
         files_planned,
         identity,
     } = args;
-    protocol_envelope(
+    protocol_envelope(ProtocolEnvelopeArgs {
         runtime,
-        uuid::Uuid::new_v4().to_string(),
+        request_id: uuid::Uuid::new_v4().to_string(),
         session_id,
         workspace_id,
         identity,
         source_kind,
-        "intent_declare",
+        event: "intent_declare",
         source_ref,
-        serde_json::json!({
+        payload: serde_json::json!({
             "files_planned": files_planned
         }),
-    )
+    })
 }
 
-pub fn protocol_envelope(
-    runtime: &ServerRuntime,
-    request_id: impl Into<String>,
-    session_id: impl Into<String>,
-    workspace_id: impl Into<String>,
-    identity: Option<RepoIdentity>,
-    source_kind: &str,
-    event: &str,
-    source_ref: &str,
-    payload: serde_json::Value,
-) -> serde_json::Value {
-    let request_id = request_id.into();
-    let session_id = session_id.into();
-    let workspace_id = workspace_id.into();
+pub struct ProtocolEnvelopeArgs<'a> {
+    pub runtime: &'a ServerRuntime,
+    pub request_id: String,
+    pub session_id: String,
+    pub workspace_id: String,
+    pub identity: Option<RepoIdentity>,
+    pub source_kind: &'a str,
+    pub event: &'a str,
+    pub source_ref: &'a str,
+    pub payload: serde_json::Value,
+}
+
+pub fn protocol_envelope(args: ProtocolEnvelopeArgs<'_>) -> serde_json::Value {
+    let ProtocolEnvelopeArgs {
+        runtime,
+        request_id,
+        session_id,
+        workspace_id,
+        identity,
+        source_kind,
+        event,
+        source_ref,
+        payload,
+    } = args;
     let (repo_id, worktree_id, root, branch) = match identity {
         Some(identity) => (
             identity.repo_id,

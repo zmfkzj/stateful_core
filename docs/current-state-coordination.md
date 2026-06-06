@@ -289,14 +289,9 @@ state.session.heartbeat
 state.intent.declare
 state.lease.acquire
 state.lease.release
-state.activity.observe
-state.activity.finalize
 state.conflicts.check
-state.current.read
-state.events.read
-state.context.render
 state.reconcile.ack
-state.validation.run
+state.bash.write
 state.notifications.poll
 state.resume.next
 ```
@@ -347,25 +342,25 @@ V1 write enforcement is limited to tool paths where targets can be determined
 reliably:
 
 ```text
-state_file_write / state.file.write -> enforce from structured file arguments
+state_bash_write / state.bash.write -> enforce from explicit write targets
 native Codex edit tools -> inspectable by hook when exposed, but not the normal
   repo write path under the stateful read-only tmp profile
 Bash -> allow only with top-level read-only sandbox metadata, network disabled,
   and no non-tmp writable roots
-test execution -> run through controlled validation action
+test execution -> use state_bash_write when exact write targets are known, or a
+  configured validation profile outside Codex hooks
 raw Bash without structured sandbox metadata -> deny
 ```
 
 Bash denial should tell the agent to use a structured Bash tool call with
-read-only sandbox metadata, or use stateful MCP tools for repo writes and
-validation.
+read-only sandbox metadata, or use `state_bash_write` for repo writes.
 
 The Bash classifier is deny-by-default. Command text alone does not authorize
 `rg`, `git diff`, test runners, stateful operational commands, or any other
 Bash command. Arbitrary or project-specific test commands should run through
-`state.validation.run` or an equivalent controlled validation action backed by a
-profile. Validation profiles may allow cache or artifact writes, but source-tree
-writes must be denied unless a later policy explicitly permits them.
+a configured validation action backed by a profile. Validation profiles may
+allow cache or artifact writes, but source-tree writes must be denied unless a
+later policy explicitly permits them.
 
 Validation profiles are static repo-defined config at `.stateful/validation.yml`.
 Agents cannot provide arbitrary commands at runtime.
@@ -567,8 +562,8 @@ When the state server is unavailable:
 - supported writes are denied because active intent, lease conflict, and
   reconciliation state cannot be proven
 - Bash without structured top-level read-only sandbox metadata remains denied
-- `state.validation.run` returns `error: state_unavailable` and does not run the
-  validation command
+- configured validation actions return `error: state_unavailable` and do not run
+  validation commands
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block
 - intent declaration, lease acquisition, and lease refresh fail
 - non-Bash read, search, and diff actions are allowed
@@ -713,7 +708,7 @@ responsibility: user owns the judgment and risk
 Prompt context rendering:
 
 ```text
-state.context.render(workspace, session_id, resources?, mode)
+/v1/context/render(workspace, session_id, resources?, mode)
 mode: brief | detailed
 sections: Blocking, Required Next Action, Warnings, Nearby Activity, Stale/Expired
 ```

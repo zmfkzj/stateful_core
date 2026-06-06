@@ -76,7 +76,7 @@ impl<'a> PolicyService<'a> {
                         decision: Decision::deny(
                             "reservation_conflict",
                             "Write target is reserved for the next waiting session.",
-                            "Wait for the active reservation to be claimed or expire.",
+                            "Wait for the active reservation to be claimed or expire. Do not redeclare intent or change session_id; that does not release another session's reservation.",
                         ),
                         wait: None,
                         reservation: Some(reservation),
@@ -118,7 +118,7 @@ impl<'a> PolicyService<'a> {
                     decision: Decision::deny(
                         "active_lease_conflict",
                         "Write target is covered by another active session lease.",
-                        "Refresh current state, coordinate with the lease owner, or wait for the lease to release.",
+                        "Refresh current state, coordinate with the lease owner, or wait for the lease to release. Do not redeclare intent or change session_id; that does not release another session's lease.",
                     ),
                     wait,
                     reservation: None,

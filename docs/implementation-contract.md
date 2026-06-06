@@ -141,14 +141,14 @@ validation_profile
 override_instruction
 ```
 
-`state.file.write` maps to `write_file` and supplies the target path through
-structured tool arguments before calling `/v1/authorize`. Native Codex edit
-tools such as `apply_patch`, `Edit`, and `Write` may expose targets to hooks,
-but the `stateful codex` read-only tmp profile does not rely on them as the
-normal repo write path. For Bash, command text alone never authorizes tool use.
-The hook allows Bash only when the top-level tool payload supplies structured
-read-only sandbox metadata, network access is explicitly disabled, and writable
-roots are absent or limited to trusted tmp roots.
+`state.bash.write` maps explicit write targets to `write_file` authorization
+checks before running a sandboxed command. Native Codex edit tools such as
+`apply_patch`, `Edit`, and `Write` may expose targets to hooks, but the
+`stateful codex` read-only tmp profile does not rely on them as the normal repo
+write path. For Bash, command text alone never authorizes tool use. The hook
+allows Bash only when the top-level tool payload supplies structured read-only
+sandbox metadata, network access is explicitly disabled, and writable roots are
+absent or limited to trusted tmp roots.
 
 ## Decision Output
 
@@ -460,7 +460,7 @@ V1 must have tests for:
 - intent scope matching, including depth-2 directory behavior
 - exact file scope for delete, rename, and move
 - Bash full-deny classification and sandbox-gated hook authorization
-- `state_file_write` authorization plus Bash and native Codex edit hook fixtures
+- `state_bash_write` authorization plus Bash and native Codex edit hook fixtures
 - prompt renderer golden output for brief and detailed modes
 - SQLite event append plus materialized-view transaction behavior
 - validation profile execution in a temporary git worktree

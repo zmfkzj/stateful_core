@@ -58,7 +58,7 @@ fn structured_push_requires_clean_worktree() {
 
     assert!(
         result
-            .unwrap_err()
+            .expect_err("dirty worktree should reject push")
             .to_string()
             .contains("clean working tree")
     );
@@ -75,7 +75,7 @@ fn structured_push_rejects_force_like_targets() {
     });
     assert!(
         remote_result
-            .unwrap_err()
+            .expect_err("force-like remote should be rejected")
             .to_string()
             .contains("push remote must not start with '-'")
     );
@@ -87,7 +87,7 @@ fn structured_push_rejects_force_like_targets() {
     });
     assert!(
         branch_result
-            .unwrap_err()
+            .expect_err("force-like branch should be rejected")
             .to_string()
             .contains("push branch must not start with '-'")
     );

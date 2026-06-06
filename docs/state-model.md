@@ -145,8 +145,8 @@ resource types can warn, coordinate, or constrain controlled actions, but cannot
 authorize filesystem mutation.
 
 `test` resources are tied to controlled validation profiles. They may constrain
-`state.validation.run`, including denying concurrent execution when a profile is
-marked `exclusive`, but they do not authorize source writes.
+configured validation execution, including denying concurrent execution when a
+profile is marked `exclusive`, but they do not authorize source writes.
 
 `task`, `port`, and `migration` resources are context and warning signals in v1.
 They can appear in prompt context and conflict records, but cannot block general
@@ -524,8 +524,8 @@ write authorization and fail open for human saves.
 - Supported writes are denied.
 - Bash commands without structured top-level read-only sandbox metadata are
   denied.
-- `state.validation.run` returns `error: state_unavailable` and does not execute
-  the validation command.
+- Configured validation actions return `error: state_unavailable` and do not
+  execute validation commands.
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block.
 - Intent declaration, lease acquisition, and lease refresh fail.
 - Read, search, and diff actions are allowed.

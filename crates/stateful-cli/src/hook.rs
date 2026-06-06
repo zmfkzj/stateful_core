@@ -7,12 +7,11 @@ use serde::Deserialize;
 use serde_json::json;
 use stateful_core::{BashKind, classify_bash};
 
-use crate::codex_wrapper::STATEFUL_TRUSTED_SANDBOX_ENV;
 use crate::outbox::queue_session_heartbeat_outbox;
 use crate::{
-    CurrentSession, GlobalPaths, HookCommand, RepoGate, RepoIdentity, ServerRuntime,
-    discover_runtime_with_global, ensure_server, post_json, protocol_envelope, repo_gate,
-    repo_identity_for_enabled_repo, write_current_session_file,
+    CurrentSession, GlobalPaths, HookCommand, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
+    ServerRuntime, discover_runtime_with_global, ensure_server, post_json, protocol_envelope,
+    repo_gate, repo_identity_for_enabled_repo, write_current_session_file,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,66 +340,94 @@ fn handle_pre_tool_use_with_runtime_and_sandbox(
 
 fn authorize_bash(
     input: &PreToolUseInput,
-    _trusted_sandbox: Option<&serde_json::Value>,
+    trusted_sandbox: Option<&serde_json::Value>,
 ) -> anyhow::Result<HookOutcome> {
     let command = input.command().unwrap_or_default();
     let classification = classify_bash(command);
     match classification.kind {
-        BashKind::ReadOnly
-        | BashKind::Mutating
-        | BashKind::ValidationBypass
-        | BashKind::Unknown => {
-            if let Some(outcome) = authorize_read_only_sandbox_bash(input) {
-                return Ok(outcome);
-            }
+        BashKind::ReadOnly => Ok(authorize_read_only_sandbox_bash(input, trusted_sandbox)),
+        BashKind::Mutating if is_stateful_intent_declare_command(command) => {
             Ok(HookOutcome::Deny {
                 reason: format!(
-                    "Bash command blocked by stateful policy: {}. Use a structured Bash tool call with read-only sandbox metadata and network disabled, or use stateful MCP tools for writes and validation.",
+                    "Bash command blocked by stateful policy: {}. Use state_intent_declare / state.intent.declare directly in Codex sessions.",
                     classification.reason
                 ),
             })
         }
+        BashKind::Mutating => Ok(HookOutcome::Deny {
+            reason: format!(
+                "Bash command blocked by stateful policy: {}. Use state_bash_write / state.bash.write with explicit write_targets, or a structured stateful write tool.",
+                classification.reason
+            ),
+        }),
+        BashKind::ValidationBypass => Ok(HookOutcome::Deny {
+            reason: format!(
+                "Bash command blocked by stateful policy: {}. Use state_bash_write / state.bash.write with explicit write_targets, or run a configured validation profile outside Codex hooks.",
+                classification.reason
+            ),
+        }),
+        BashKind::Unknown => Ok(HookOutcome::Deny {
+            reason: format!(
+                "Bash command blocked by stateful policy: {}. Use direct Bash only for known read-only inspection commands; use stateful tools for writes.",
+                classification.reason
+            ),
+        }),
     }
 }
 
-fn authorize_read_only_sandbox_bash(input: &PreToolUseInput) -> Option<HookOutcome> {
-    if input.sandbox.is_null() {
-        return None;
-    }
-    let sandbox = &input.sandbox;
+fn is_stateful_intent_declare_command(command: &str) -> bool {
+    let words = command.split_whitespace().collect::<Vec<_>>();
+    words.windows(3).any(|window| {
+        window[0].rsplit('/').next().unwrap_or(window[0]) == "stateful"
+            && window[1] == "intent"
+            && window[2] == "declare"
+    })
+}
 
-    if !declares_read_only_sandbox(sandbox) {
-        return Some(HookOutcome::Deny {
-            reason: "Bash requires top-level read-only sandbox metadata".to_string(),
-        });
+fn authorize_read_only_sandbox_bash(
+    input: &PreToolUseInput,
+    trusted_sandbox: Option<&serde_json::Value>,
+) -> HookOutcome {
+    let sandbox = if input.sandbox.is_null() {
+        let _ = trusted_sandbox;
+        return HookOutcome::Deny {
+            reason: "Bash read-only commands require top-level read-only sandbox metadata"
+                .to_string(),
+        };
+    } else {
+        &input.sandbox
+    };
+
+    if has_writable_sandbox_mode(sandbox) || !declares_read_only_sandbox(sandbox) {
+        return HookOutcome::Deny {
+            reason: "Bash sandbox metadata must declare read-only mode when supplied".to_string(),
+        };
     }
 
     if !declares_network_access_disabled(sandbox) {
-        return Some(HookOutcome::Deny {
+        return HookOutcome::Deny {
             reason:
                 "Bash read-only sandbox relaxation requires explicit network access disabled metadata"
                     .to_string(),
-        });
+        };
     }
 
     if let Some(root) = sandbox_writable_roots(sandbox)
         .iter()
         .find(|root| !is_trusted_tmp_writable_root(root))
     {
-        return Some(HookOutcome::Deny {
+        return HookOutcome::Deny {
             reason: format!(
                 "Bash read-only sandbox writable root `{root}` is outside the trusted tmp writable roots"
             ),
-        });
+        };
     }
 
-    Some(HookOutcome::Allow)
+    HookOutcome::Allow
 }
 
 fn trusted_sandbox_from_env() -> Option<serde_json::Value> {
-    let value = std::env::var(STATEFUL_TRUSTED_SANDBOX_ENV).ok()?;
-    let parsed = serde_json::from_str::<serde_json::Value>(&value).ok()?;
-    parsed.is_object().then_some(parsed)
+    None
 }
 
 fn authorize_apply_patch(
@@ -494,7 +521,24 @@ fn normalize_targets(
         let Some(path) = normalize_file_tool_target(&target.path, repo_root, cwd)? else {
             return Ok(None);
         };
-        normalized.push(target.with_path(path));
+        let old_path = target
+            .old_path
+            .as_deref()
+            .map(|old_path| normalize_file_tool_target(old_path, repo_root, cwd))
+            .transpose()?
+            .flatten();
+        let new_path = target
+            .new_path
+            .as_deref()
+            .map(|new_path| normalize_file_tool_target(new_path, repo_root, cwd))
+            .transpose()?
+            .flatten();
+        if target.old_path.is_some() && old_path.is_none()
+            || target.new_path.is_some() && new_path.is_none()
+        {
+            return Ok(None);
+        }
+        normalized.push(target.with_paths(path, old_path, new_path));
     }
 
     Ok(Some(normalized))
@@ -519,21 +563,28 @@ fn authorize_targets(
     }
 
     for target in targets {
-        let body = protocol_envelope(
+        let mut payload = json!({
+            "action": target.action,
+            "path": target.path,
+            "queue_on_conflict": true,
+        });
+        if let Some(old_path) = target.old_path {
+            payload["old_path"] = json!(old_path);
+        }
+        if let Some(new_path) = target.new_path {
+            payload["new_path"] = json!(new_path);
+        }
+        let body = protocol_envelope(ProtocolEnvelopeArgs {
             runtime,
-            uuid::Uuid::new_v4().to_string(),
-            input.session_id.clone(),
-            runtime.workspace_id.clone(),
-            None,
-            "hook",
-            "pre_tool_use",
-            &input.tool_name,
-            json!({
-                "action": target.action,
-                "path": target.path,
-                "queue_on_conflict": true,
-            }),
-        );
+            request_id: uuid::Uuid::new_v4().to_string(),
+            session_id: input.session_id.clone(),
+            workspace_id: runtime.workspace_id.clone(),
+            identity: None,
+            source_kind: "hook",
+            event: "pre_tool_use",
+            source_ref: &input.tool_name,
+            payload,
+        });
         let response = post_json(runtime, "/v1/authorize", &body)?;
 
         if !(200..300).contains(&response.status_code) {
@@ -592,18 +643,40 @@ fn normalize_file_tool_target(
 }
 
 fn extract_apply_patch_write_targets(patch: &str) -> Vec<PatchTarget> {
-    patch
-        .lines()
-        .filter_map(|line| {
-            if let Some(path) = line.strip_prefix("*** Update File: ") {
-                Some(PatchTarget::write(path))
-            } else if let Some(path) = line.strip_prefix("*** Add File: ") {
-                Some(PatchTarget::write(path))
-            } else {
-                line.strip_prefix("*** Delete File: ")
-                    .map(PatchTarget::delete)
+    let mut targets = Vec::new();
+    let mut pending_update: Option<String> = None;
+
+    for line in patch.lines() {
+        if let Some(path) = line.strip_prefix("*** Update File: ") {
+            if let Some(path) = pending_update.take() {
+                targets.push(PatchTarget::write(&path));
             }
-        })
+            pending_update = Some(path.trim().to_string());
+        } else if let Some(path) = line.strip_prefix("*** Move to: ") {
+            if let Some(old_path) = pending_update.take() {
+                targets.push(PatchTarget::move_file(&old_path, path));
+            } else {
+                targets.push(PatchTarget::write(path));
+            }
+        } else if let Some(path) = line.strip_prefix("*** Add File: ") {
+            if let Some(path) = pending_update.take() {
+                targets.push(PatchTarget::write(&path));
+            }
+            targets.push(PatchTarget::write(path));
+        } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            if let Some(path) = pending_update.take() {
+                targets.push(PatchTarget::write(&path));
+            }
+            targets.push(PatchTarget::delete(path));
+        }
+    }
+
+    if let Some(path) = pending_update {
+        targets.push(PatchTarget::write(&path));
+    }
+
+    targets
+        .into_iter()
         .filter(|target| !target.path.is_empty())
         .collect()
 }
@@ -668,13 +741,48 @@ fn declares_read_only_sandbox(value: &serde_json::Value) -> bool {
         .any(|mode| is_read_only_sandbox_mode(mode))
 }
 
-fn sandbox_mode_strings(value: &serde_json::Value) -> Vec<String> {
-    let mut modes = Vec::new();
-    collect_sandbox_mode_strings(value, &mut modes);
+fn has_writable_sandbox_mode(value: &serde_json::Value) -> bool {
+    recursive_sandbox_mode_strings(value)
+        .iter()
+        .any(|mode| is_writable_sandbox_mode(mode))
+}
+
+fn recursive_sandbox_mode_strings(value: &serde_json::Value) -> Vec<String> {
+    let mut modes = sandbox_mode_strings(value);
+    for nested in nested_sandbox_objects(value) {
+        modes.extend(sandbox_mode_strings(nested));
+    }
     modes
 }
 
-fn collect_sandbox_mode_strings(value: &serde_json::Value, modes: &mut Vec<String>) {
+fn nested_sandbox_objects(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    let mut objects = Vec::new();
+    collect_nested_sandbox_objects(value, &mut objects);
+    objects
+}
+
+fn collect_nested_sandbox_objects<'a>(
+    value: &'a serde_json::Value,
+    objects: &mut Vec<&'a serde_json::Value>,
+) {
+    if let Some(nested) = value.get("sandbox").filter(|nested| nested.is_object()) {
+        objects.push(nested);
+        collect_nested_sandbox_objects(nested, objects);
+    }
+
+    for key in ["arguments", "args"] {
+        if let Some(container) = value.get(key).filter(|nested| nested.is_object()) {
+            objects.push(container);
+            collect_nested_sandbox_objects(container, objects);
+        }
+    }
+}
+
+fn sandbox_mode_strings(value: &serde_json::Value) -> Vec<String> {
+    let mut modes = Vec::new();
+    if let Some(mode) = value.as_str() {
+        modes.push(mode.to_string());
+    }
     collect_string_fields(
         value,
         &[
@@ -689,16 +797,9 @@ fn collect_sandbox_mode_strings(value: &serde_json::Value, modes: &mut Vec<Strin
             "filesystemMode",
             "mode",
         ],
-        modes,
+        &mut modes,
     );
-
-    for nested_key in ["sandbox", "arguments", "args"] {
-        if let Some(nested) = value.get(nested_key)
-            && nested.is_object()
-        {
-            collect_sandbox_mode_strings(nested, modes);
-        }
-    }
+    modes
 }
 
 fn is_read_only_sandbox_mode(value: &str) -> bool {
@@ -706,48 +807,68 @@ fn is_read_only_sandbox_mode(value: &str) -> bool {
     matches!(normalized.as_str(), "read-only" | "readonly")
 }
 
-fn declares_network_access_disabled(value: &serde_json::Value) -> bool {
+fn is_writable_sandbox_mode(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace(['_', ' '], "-");
     matches!(
-        bool_payload_field(
-            value,
-            &[
-                "network_access",
-                "networkAccess",
-                "network_enabled",
-                "networkEnabled",
-            ],
-        ),
-        Some(false)
+        normalized.as_str(),
+        "workspace-write"
+            | "danger-full-access"
+            | "read-write"
+            | "write"
+            | "writable"
+            | "full-access"
+            | "unrestricted"
+            | "require-escalated"
+            | "write-targets"
     )
 }
 
-fn bool_payload_field(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+fn declares_network_access_disabled(value: &serde_json::Value) -> bool {
+    let keys = &[
+        "network_access",
+        "networkAccess",
+        "network_enabled",
+        "networkEnabled",
+    ];
+    let top_level = bool_payload_fields(value, keys);
+    top_level.iter().any(|enabled| !enabled)
+        && !recursive_bool_payload_values(value, keys)
+            .into_iter()
+            .any(|enabled| enabled)
+}
+
+fn recursive_bool_payload_values(value: &serde_json::Value, keys: &[&str]) -> Vec<bool> {
+    let mut values = Vec::new();
+    values.extend(bool_payload_fields(value, keys));
+    for nested in nested_sandbox_objects(value) {
+        values.extend(bool_payload_fields(nested, keys));
+    }
+    values
+}
+
+fn bool_payload_fields(value: &serde_json::Value, keys: &[&str]) -> Vec<bool> {
+    let mut values = Vec::new();
     for key in keys {
         if let Some(value) = value.get(key) {
             if let Some(boolean) = value.as_bool() {
-                return Some(boolean);
+                values.push(boolean);
+                continue;
             }
             if let Some(text) = value.as_str() {
                 let normalized = text.trim().to_ascii_lowercase();
                 if matches!(normalized.as_str(), "true" | "enabled" | "yes" | "on") {
-                    return Some(true);
+                    values.push(true);
+                    continue;
                 }
                 if matches!(normalized.as_str(), "false" | "disabled" | "no" | "off") {
-                    return Some(false);
+                    values.push(false);
+                    continue;
                 }
             }
         }
     }
 
-    for nested_key in ["sandbox", "arguments", "args"] {
-        if let Some(nested) = value.get(nested_key)
-            && let Some(boolean) = bool_payload_field(nested, keys)
-        {
-            return Some(boolean);
-        }
-    }
-
-    None
+    values
 }
 
 fn sandbox_writable_roots(value: &serde_json::Value) -> Vec<String> {
@@ -764,13 +885,19 @@ fn sandbox_writable_roots(value: &serde_json::Value) -> Vec<String> {
         ],
         &mut roots,
     );
-
-    for nested_key in ["sandbox", "arguments", "args"] {
-        if let Some(nested) = value.get(nested_key)
-            && nested.is_object()
-        {
-            roots.extend(sandbox_writable_roots(nested));
-        }
+    for nested in nested_sandbox_objects(value) {
+        collect_string_array_fields(
+            nested,
+            &[
+                "writable_roots",
+                "writableRoots",
+                "writable_paths",
+                "writablePaths",
+                "writable_dirs",
+                "writableDirs",
+            ],
+            &mut roots,
+        );
     }
 
     roots
@@ -799,8 +926,14 @@ fn collect_string_array_fields(value: &serde_json::Value, keys: &[&str], output:
 
 fn is_trusted_tmp_writable_root(root: &str) -> bool {
     let root = root.trim();
-    if matches!(root, "$TMPDIR" | "${TMPDIR}") || root.starts_with("$TMPDIR/") {
+    if matches!(root, "$TMPDIR" | "${TMPDIR}") {
         return true;
+    }
+    if let Some(suffix) = root
+        .strip_prefix("$TMPDIR/")
+        .or_else(|| root.strip_prefix("${TMPDIR}/"))
+    {
+        return is_safe_tmpdir_suffix(suffix);
     }
 
     let path = normalize_path(PathBuf::from(root));
@@ -824,10 +957,19 @@ fn is_trusted_tmp_writable_root(root: &str) -> bool {
     path.starts_with(temp_dir)
 }
 
+fn is_safe_tmpdir_suffix(suffix: &str) -> bool {
+    suffix.is_empty()
+        || Path::new(suffix).components().all(|component| {
+            matches!(component, std::path::Component::Normal(part) if !part.is_empty())
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PatchTarget {
     action: &'static str,
     path: String,
+    old_path: Option<String>,
+    new_path: Option<String>,
 }
 
 impl PatchTarget {
@@ -835,6 +977,8 @@ impl PatchTarget {
         Self {
             action: "write_file",
             path: path.trim().to_string(),
+            old_path: None,
+            new_path: None,
         }
     }
 
@@ -842,11 +986,31 @@ impl PatchTarget {
         Self {
             action: "delete_file",
             path: path.trim().to_string(),
+            old_path: None,
+            new_path: None,
         }
     }
 
-    fn with_path(mut self, path: String) -> Self {
+    fn move_file(old_path: &str, new_path: &str) -> Self {
+        let old_path = old_path.trim().to_string();
+        let new_path = new_path.trim().to_string();
+        Self {
+            action: "move_file",
+            path: old_path.clone(),
+            old_path: Some(old_path),
+            new_path: Some(new_path),
+        }
+    }
+
+    fn with_paths(
+        mut self,
+        path: String,
+        old_path: Option<String>,
+        new_path: Option<String>,
+    ) -> Self {
         self.path = path;
+        self.old_path = old_path;
+        self.new_path = new_path;
         self
     }
 }
@@ -904,7 +1068,7 @@ struct HookCwdInput {
 
 impl PreToolUseInput {
     fn command(&self) -> Option<&str> {
-        self.tool_input.get("command")?.as_str()
+        string_payload_field(&self.tool_input, &["command", "cmd", "input"])
     }
 
     fn patch_text(&self) -> Option<&str> {

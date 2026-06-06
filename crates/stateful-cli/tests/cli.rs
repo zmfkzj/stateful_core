@@ -406,8 +406,8 @@ fn mcp_call_command_parses_tool_and_arguments() {
         "stateful",
         "mcp",
         "call",
-        "state.current.read",
-        r#"{"mode":"brief"}"#,
+        "state.session.heartbeat",
+        r#"{"session_id":"s1","workspace_id":"w1"}"#,
     ])
     .expect("mcp call command should parse");
 
@@ -416,7 +416,7 @@ fn mcp_call_command_parses_tool_and_arguments() {
         Command::Mcp(McpCommand::Call {
             ref tool_name,
             ref arguments_json
-        }) if tool_name == "state.current.read"
-            && arguments_json.as_deref() == Some(r#"{"mode":"brief"}"#)
+        }) if tool_name == "state.session.heartbeat"
+            && arguments_json.as_deref() == Some(r#"{"session_id":"s1","workspace_id":"w1"}"#)
     ));
 }

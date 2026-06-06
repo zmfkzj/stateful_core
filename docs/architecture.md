@@ -17,8 +17,8 @@ Codex hooks observe and gate important agent actions. MCP tools give agents a
 structured way to read and update coordination state. The state server owns
 policy, persistence, TTLs, and conflict checks.
 
-The v1 MVP includes controlled validation through `state.validation.run` and
-human-write reconciliation through `state.reconcile.ack`.
+The v1 MVP includes controlled validation profiles and human-write
+reconciliation through `state.reconcile.ack`.
 
 V1 is local-only. It coordinates sessions, agents, subagents, and local human
 activity inside one machine/workspace boundary. Team-shared, cross-machine, or
@@ -206,14 +206,9 @@ state.session.heartbeat
 state.intent.declare
 state.lease.acquire
 state.lease.release
-state.activity.observe
-state.activity.finalize
 state.conflicts.check
-state.current.read
-state.events.read
-state.context.render
 state.reconcile.ack
-state.validation.run
+state.bash.write
 state.notifications.poll
 state.resume.next
 ```
@@ -225,8 +220,8 @@ the state server, not in duplicated hook scripts.
 
 V1 enforcement is strict about write target extraction:
 
-- `state_file_write` / `state.file.write`: enforce using structured file
-  arguments before writing.
+- `state_bash_write` / `state.bash.write`: enforce explicit write targets
+  before running write-capable shell commands.
 - Native Codex edit tools such as `apply_patch`, `Edit`, and `Write`: hook
   targets can be inspected when the runtime exposes them, but the
   `stateful codex` read-only tmp profile does not make them the normal repo
@@ -234,14 +229,13 @@ V1 enforcement is strict about write target extraction:
 - Bash commands: deny unless the top-level Bash tool payload includes
   structured read-only sandbox metadata, network access is explicitly disabled,
   and writable roots are absent or limited to trusted tmp roots.
-- Test execution: run only through controlled validation actions such as
-  `state.validation.run`.
+- Test execution: use `state_bash_write` when outputs can be constrained to
+  explicit targets, or configured validation profiles outside Codex hooks.
 - Bash command text alone never authorizes tool use, even when it appears
   read-only.
 
 Denied Bash should direct the agent to use a structured Bash tool call with
-read-only sandbox metadata, or use stateful MCP tools for writes and
-validation.
+read-only sandbox metadata for inspection, or `state_bash_write` for writes.
 
 The Bash classifier is a deny-by-default diagnostic. It no longer has command
 allowlists for `rg`, `git diff`, test runners, or stateful operational
@@ -256,7 +250,7 @@ Validation profiles live at `.stateful/validation.yml`.
 Agents cannot supply arbitrary test commands. They call:
 
 ```text
-state.validation.run(profile)
+stateful validate <profile>
 ```
 
 The state server loads the named profile and executes its configured command.
@@ -460,8 +454,8 @@ Stale/Expired
 Raw event logs should not be dumped into prompts. The rendered view should help
 the agent decide what to avoid, wait for, or coordinate.
 
-`state.context.render` supports `brief` and `detailed` modes plus an optional
-resource filter. `brief` is for session start and prompt submit context.
+The `/v1/context/render` endpoint supports `brief` and `detailed` modes plus an
+optional resource filter. `brief` is for session start and prompt submit context.
 `detailed` is for denied actions or focused resource checks. Rendered output
 must include concrete next actions when a block or warning is present.
 
