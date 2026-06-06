@@ -71,8 +71,7 @@ fn sync_outbox_refuses_symlinked_outbox_directory() {
     let temp_root = temp_root("stateful-outbox-symlink-test");
     let repo_root = temp_root.join("repo");
     let victim_outbox = temp_root.join("victim-outbox");
-    fs::create_dir_all(repo_root.join(".stateful_core"))
-        .expect("stateful dir should be creatable");
+    fs::create_dir_all(repo_root.join(".stateful_core")).expect("stateful dir should be creatable");
     fs::create_dir_all(&victim_outbox).expect("victim outbox should be creatable");
     let victim_file = victim_outbox.join("s1.jsonl");
     fs::write(
@@ -613,11 +612,8 @@ fn sync_outbox_does_not_trust_symlinked_lock_directory() {
         "fresh\n",
     )
     .expect("fake heartbeat should write");
-    std::os::unix::fs::symlink(
-        "fake-lock",
-        temp_root.join(".stateful_core/outbox/.lock"),
-    )
-    .expect("lock symlink should create");
+    std::os::unix::fs::symlink("fake-lock", temp_root.join(".stateful_core/outbox/.lock"))
+        .expect("lock symlink should create");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");

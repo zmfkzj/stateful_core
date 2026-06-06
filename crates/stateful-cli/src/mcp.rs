@@ -428,11 +428,7 @@ fn is_bash_write_allowed_command(command: &str) -> bool {
 
 fn find_invokes_external_command(words: &[String]) -> bool {
     words.iter().any(|word| {
-        word.contains('$')
-            || matches!(
-                word.as_str(),
-                "-exec" | "-execdir" | "-ok" | "-okdir"
-            )
+        word.contains('$') || matches!(word.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir")
     })
 }
 

@@ -114,8 +114,7 @@ fn structured_commit_preserves_whitespace_in_explicit_file_paths() {
     let root = git_repo("stateful-commit-whitespace-path");
     fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
     fs::write(root.path().join("docs/report.md"), "normal\n").expect("normal report should write");
-    fs::write(root.path().join("docs/report.md "), "spaced\n")
-        .expect("spaced report should write");
+    fs::write(root.path().join("docs/report.md "), "spaced\n").expect("spaced report should write");
 
     let result = run_structured_commit(CommitRequest {
         repo_root: root.path().to_path_buf(),
@@ -218,7 +217,10 @@ fn structured_commit_command_ignores_ambient_git_index_file() {
         .env("GIT_INDEX_FILE", &alternate_index)
         .status()
         .expect("git with alternate index should run");
-    assert!(add_other.success(), "alternate index git add should succeed");
+    assert!(
+        add_other.success(),
+        "alternate index git add should succeed"
+    );
     write_current_session_file(root.path(), &CurrentSession::new("s-env", "w-session"))
         .expect("current session should write");
     let (runtime, rx) = spawn_fake_authorize_server();
@@ -414,10 +416,20 @@ fn structured_commit_rejects_write_to_delete_race_after_authorization() {
     });
 
     let error = result.expect_err("write-to-delete race should fail");
-    assert!(error.to_string().contains("changed from write_file to delete_file"));
+    assert!(
+        error
+            .to_string()
+            .contains("changed from write_file to delete_file")
+    );
     let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(staged.is_empty(), "failed race should not mutate repo index");
-    assert_eq!(git_output(root.path(), &["rev-list", "--count", "HEAD"]), "1\n");
+    assert!(
+        staged.is_empty(),
+        "failed race should not mutate repo index"
+    );
+    assert_eq!(
+        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
+        "1\n"
+    );
 }
 
 #[test]
@@ -446,10 +458,20 @@ fn structured_commit_rejects_delete_to_write_race_after_authorization() {
     });
 
     let error = result.expect_err("delete-to-write race should fail");
-    assert!(error.to_string().contains("changed from delete_file to write_file"));
+    assert!(
+        error
+            .to_string()
+            .contains("changed from delete_file to write_file")
+    );
     let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(staged.is_empty(), "failed race should not mutate repo index");
-    assert_eq!(git_output(root.path(), &["rev-list", "--count", "HEAD"]), "1\n");
+    assert!(
+        staged.is_empty(),
+        "failed race should not mutate repo index"
+    );
+    assert_eq!(
+        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
+        "1\n"
+    );
 }
 
 #[cfg(unix)]
@@ -487,10 +509,20 @@ fn structured_commit_rejects_pre_commit_hook_write_to_delete_action_change() {
     });
 
     let error = result.expect_err("hook write-to-delete action change should fail");
-    assert!(error.to_string().contains("changed from write_file to delete_file"));
+    assert!(
+        error
+            .to_string()
+            .contains("changed from write_file to delete_file")
+    );
     let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(staged.is_empty(), "failed hook race should not mutate repo index");
-    assert_eq!(git_output(root.path(), &["rev-list", "--count", "HEAD"]), "1\n");
+    assert!(
+        staged.is_empty(),
+        "failed hook race should not mutate repo index"
+    );
+    assert_eq!(
+        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
+        "1\n"
+    );
 }
 
 #[cfg(unix)]
@@ -528,10 +560,20 @@ fn structured_commit_rejects_pre_commit_hook_delete_to_write_action_change() {
     });
 
     let error = result.expect_err("hook delete-to-write action change should fail");
-    assert!(error.to_string().contains("changed from delete_file to write_file"));
+    assert!(
+        error
+            .to_string()
+            .contains("changed from delete_file to write_file")
+    );
     let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(staged.is_empty(), "failed hook race should not mutate repo index");
-    assert_eq!(git_output(root.path(), &["rev-list", "--count", "HEAD"]), "1\n");
+    assert!(
+        staged.is_empty(),
+        "failed hook race should not mutate repo index"
+    );
+    assert_eq!(
+        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
+        "1\n"
+    );
 }
 
 #[cfg(unix)]
@@ -641,10 +683,20 @@ fn structured_commit_rejects_prepare_commit_msg_hook_action_change() {
     });
 
     let error = result.expect_err("prepare hook action change should fail");
-    assert!(error.to_string().contains("changed from write_file to delete_file"));
+    assert!(
+        error
+            .to_string()
+            .contains("changed from write_file to delete_file")
+    );
     let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(staged.is_empty(), "failed prepare hook race should not mutate repo index");
-    assert_eq!(git_output(root.path(), &["rev-list", "--count", "HEAD"]), "1\n");
+    assert!(
+        staged.is_empty(),
+        "failed prepare hook race should not mutate repo index"
+    );
+    assert_eq!(
+        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
+        "1\n"
+    );
 }
 
 #[cfg(unix)]
@@ -657,11 +709,8 @@ fn structured_commit_runs_commit_msg_hook_before_committing() {
     git(root.path(), &["commit", "-m", "docs: seed"]);
     fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
     let hook_path = root.path().join(".git/hooks/commit-msg");
-    fs::write(
-        &hook_path,
-        "#!/bin/sh\ngrep -q '^JIRA-' \"$1\" || exit 1\n",
-    )
-    .expect("commit-msg hook should write");
+    fs::write(&hook_path, "#!/bin/sh\ngrep -q '^JIRA-' \"$1\" || exit 1\n")
+        .expect("commit-msg hook should write");
     let mut permissions = fs::metadata(&hook_path)
         .expect("commit-msg metadata should load")
         .permissions();
@@ -687,7 +736,10 @@ fn structured_commit_runs_commit_msg_hook_before_committing() {
             .to_string()
             .contains("commit-msg hook failed")
     );
-    assert_eq!(git_output(root.path(), &["rev-list", "--count", "HEAD"]), "1\n");
+    assert_eq!(
+        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
+        "1\n"
+    );
 }
 
 #[cfg(unix)]
@@ -912,8 +964,7 @@ fn structured_commit_command_from_subdir_preserves_whitespace_file_paths() {
     let paths = GlobalPaths::new(root.path().join("home"));
     fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
     fs::write(root.path().join("docs/report.md"), "normal\n").expect("normal report should write");
-    fs::write(root.path().join("docs/report.md "), "spaced\n")
-        .expect("spaced report should write");
+    fs::write(root.path().join("docs/report.md "), "spaced\n").expect("spaced report should write");
     write_current_session_file(root.path(), &CurrentSession::new("s-subdir", "w-session"))
         .expect("current session should write");
     let (runtime, rx) = spawn_fake_authorize_server();
@@ -1177,7 +1228,10 @@ fn structured_commit_rejects_unrelated_index_entries_added_by_successful_hook() 
             .to_string()
             .contains("unrelated staged changes")
     );
-    assert_eq!(git_output(root.path(), &["rev-list", "--count", "HEAD"]), "1\n");
+    assert_eq!(
+        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
+        "1\n"
+    );
 
     let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
     assert!(

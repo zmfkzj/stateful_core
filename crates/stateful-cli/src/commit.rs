@@ -77,7 +77,11 @@ pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitRes
             "-F",
             message_path.as_str(),
         ];
-        git_status_with_index(&request.repo_root, &commit_args, Some(&temporary_index.path))?;
+        git_status_with_index(
+            &request.repo_root,
+            &commit_args,
+            Some(&temporary_index.path),
+        )?;
         run_post_commit_hook_with_index(&request.repo_root, &temporary_index.path);
 
         let commit_sha = git_stdout(&request.repo_root, &["rev-parse", "HEAD"])?;
@@ -160,7 +164,8 @@ fn deny_unrelated_staged_changes_with_index(
     explicit: &BTreeSet<String>,
     index_path: Option<&Path>,
 ) -> anyhow::Result<()> {
-    let staged = git_stdout_with_index(repo_root, &["diff", "--cached", "--name-only"], index_path)?;
+    let staged =
+        git_stdout_with_index(repo_root, &["diff", "--cached", "--name-only"], index_path)?;
     let unrelated = staged
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -251,10 +256,14 @@ fn is_missing_tracked_file(repo_root: &Path, path: &str) -> anyhow::Result<bool>
         return Ok(false);
     }
 
-    Ok(git_command(repo_root, &["ls-files", "--error-unmatch", "--", path], None)
-        .output()?
-        .status
-        .success())
+    Ok(git_command(
+        repo_root,
+        &["ls-files", "--error-unmatch", "--", path],
+        None,
+    )
+    .output()?
+    .status
+    .success())
 }
 
 fn revalidate_staged_targets(
@@ -578,9 +587,9 @@ fn sanitize_git_environment(command: &mut Command) {
         command.env_remove(key);
     }
     for (key, _value) in std::env::vars_os() {
-        let key = key.to_string_lossy();
-        if key.starts_with("GIT_CONFIG_") || key.starts_with("GIT_TRACE") {
-            command.env_remove(key);
+        let key_name = key.to_string_lossy();
+        if key_name.starts_with("GIT_CONFIG_") || key_name.starts_with("GIT_TRACE") {
+            command.env_remove(&key);
         }
     }
 }

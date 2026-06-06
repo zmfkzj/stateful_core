@@ -400,7 +400,8 @@ fn authorize_read_only_sandbox_bash(
 
     if has_writable_sandbox_mode(sandbox) || !declares_read_only_sandbox(sandbox) {
         return HookOutcome::Deny {
-            reason: "Bash sandbox metadata must declare read-only mode when supplied".to_string(),
+            reason: "Bash read-only sandbox metadata must declare read-only mode when supplied"
+                .to_string(),
         };
     }
 
@@ -959,9 +960,9 @@ fn is_trusted_tmp_writable_root(root: &str) -> bool {
 
 fn is_safe_tmpdir_suffix(suffix: &str) -> bool {
     suffix.is_empty()
-        || Path::new(suffix).components().all(|component| {
-            matches!(component, std::path::Component::Normal(part) if !part.is_empty())
-        })
+        || Path::new(suffix).components().all(
+            |component| matches!(component, std::path::Component::Normal(part) if !part.is_empty()),
+        )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -181,8 +181,7 @@ fn mcp_bash_write_reports_allowed_and_denied_targets_without_running_command() {
     write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
         .expect("current session should write");
     fs::write(repo_root.join("src/allowed.ts"), "old\n").expect("allowed file should seed");
-    fs::write(repo_root.join("src/denied.ts"), "old denied\n")
-        .expect("denied file should seed");
+    fs::write(repo_root.join("src/denied.ts"), "old denied\n").expect("denied file should seed");
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
         r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Target is outside active intent scope.","required_next_action":"Declare matching intent."}"#,
@@ -380,7 +379,10 @@ fn mcp_bash_write_rejects_trap_detached_processes_before_authorization() {
         ],
     );
 
-    assert!(!output.status.success(), "trap detached construct should fail");
+    assert!(
+        !output.status.success(),
+        "trap detached construct should fail"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("detached process"));
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -420,7 +422,10 @@ fn mcp_bash_write_rejects_env_split_string_detached_processes_before_authorizati
         ],
     );
 
-    assert!(!output.status.success(), "env -S detached construct should fail");
+    assert!(
+        !output.status.success(),
+        "env -S detached construct should fail"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("detached process"));
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -444,8 +449,11 @@ fn mcp_bash_write_rejects_path_qualified_commands_before_authorization() {
     write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
         .expect("current session should write");
     fs::write(repo_root.join("src/allowed.ts"), "old\n").expect("allowed file should seed");
-    fs::write(repo_root.join("src/runner"), "#!/bin/sh\nprintf late > src/allowed.ts\n")
-        .expect("runner should seed");
+    fs::write(
+        repo_root.join("src/runner"),
+        "#!/bin/sh\nprintf late > src/allowed.ts\n",
+    )
+    .expect("runner should seed");
     let (runtime, rx) = spawn_fake_stateful_server(
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
     );
@@ -462,7 +470,10 @@ fn mcp_bash_write_rejects_path_qualified_commands_before_authorization() {
         ],
     );
 
-    assert!(!output.status.success(), "path-qualified command should fail");
+    assert!(
+        !output.status.success(),
+        "path-qualified command should fail"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("detached process"));
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -486,8 +497,11 @@ fn mcp_bash_write_rejects_path_env_assignment_before_authorization() {
     write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
         .expect("current session should write");
     fs::write(repo_root.join("src/allowed.ts"), "old\n").expect("allowed file should seed");
-    fs::write(repo_root.join("src/runner"), "#!/bin/sh\nprintf late > src/allowed.ts\n")
-        .expect("runner should seed");
+    fs::write(
+        repo_root.join("src/runner"),
+        "#!/bin/sh\nprintf late > src/allowed.ts\n",
+    )
+    .expect("runner should seed");
     let (runtime, rx) = spawn_fake_stateful_server(
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
     );
@@ -504,7 +518,10 @@ fn mcp_bash_write_rejects_path_env_assignment_before_authorization() {
         ],
     );
 
-    assert!(!output.status.success(), "PATH assignment command should fail");
+    assert!(
+        !output.status.success(),
+        "PATH assignment command should fail"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("detached process"));
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -655,7 +672,10 @@ fn mcp_bash_write_rejects_git_external_diff_before_authorization() {
         ],
     );
 
-    assert!(!output.status.success(), "GIT_EXTERNAL_DIFF command should fail");
+    assert!(
+        !output.status.success(),
+        "GIT_EXTERNAL_DIFF command should fail"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("detached process"));
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -695,7 +715,10 @@ fn mcp_bash_write_rejects_tar_external_program_before_authorization() {
         ],
     );
 
-    assert!(!output.status.success(), "tar external program command should fail");
+    assert!(
+        !output.status.success(),
+        "tar external program command should fail"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("detached process"));
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -735,7 +758,10 @@ fn mcp_bash_write_rejects_rsync_remote_shell_before_authorization() {
         ],
     );
 
-    assert!(!output.status.success(), "rsync remote shell command should fail");
+    assert!(
+        !output.status.success(),
+        "rsync remote shell command should fail"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("detached process"));
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -895,7 +921,10 @@ fn mcp_bash_write_rejects_command_prefix_wrappers_before_authorization() {
         ],
     );
 
-    assert!(!output.status.success(), "command prefix wrapper should fail");
+    assert!(
+        !output.status.success(),
+        "command prefix wrapper should fail"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("detached process"));
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -1018,7 +1047,10 @@ fn mcp_bash_write_rejects_ansi_c_quoted_find_exec_before_authorization() {
         ],
     );
 
-    assert!(!output.status.success(), "ANSI-C quoted find -exec should fail");
+    assert!(
+        !output.status.success(),
+        "ANSI-C quoted find -exec should fail"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("detached process"));
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -1058,7 +1090,10 @@ fn mcp_bash_write_rejects_escaped_newline_find_exec_before_authorization() {
         ],
     );
 
-    assert!(!output.status.success(), "escaped-newline find -exec should fail");
+    assert!(
+        !output.status.success(),
+        "escaped-newline find -exec should fail"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("detached process"));
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -1183,7 +1218,10 @@ fn mcp_bash_write_rejects_cp_hard_link_retarget_before_authorization() {
         ],
     );
 
-    assert!(!output.status.success(), "cp hard-link retarget should fail");
+    assert!(
+        !output.status.success(),
+        "cp hard-link retarget should fail"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("detached process"));
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -1380,8 +1418,7 @@ fn mcp_bash_write_preserves_whitespace_in_write_targets() {
     enable_test_repo(&paths, &repo_root);
     write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
         .expect("current session should write");
-    fs::write(repo_root.join("src/report.ts "), "old\n")
-        .expect("spaced file should seed");
+    fs::write(repo_root.join("src/report.ts "), "old\n").expect("spaced file should seed");
     let (runtime, rx) = spawn_fake_stateful_server(
         r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Target is outside active intent scope.","required_next_action":"Declare matching intent."}"#,
     );
@@ -1422,11 +1459,8 @@ fn mcp_bash_write_rejects_removed_wait_argument() {
     enable_test_repo(&paths, &repo_root);
     write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
         .expect("current session should write");
-    write_global_runtime_file(
-        &paths,
-        &ServerRuntime::new("http://127.0.0.1:9", "secret-token", "w1", 42),
-    )
-    .expect("global runtime file should write");
+    let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let output = run_stateful_in_repo(
         &repo_root,
@@ -1439,7 +1473,10 @@ fn mcp_bash_write_rejects_removed_wait_argument() {
         ],
     );
 
-    assert!(!output.status.success(), "removed wait argument should fail");
+    assert!(
+        !output.status.success(),
+        "removed wait argument should fail"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("invalid state.bash.write arguments"));
     assert!(stdout.contains("mcp_wait_ms"));
@@ -1456,11 +1493,8 @@ fn mcp_bash_write_rejects_case_insensitive_git_internals() {
     enable_test_repo(&paths, &repo_root);
     write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
         .expect("current session should write");
-    write_global_runtime_file(
-        &paths,
-        &ServerRuntime::new("http://127.0.0.1:9", "secret-token", "w1", 42),
-    )
-    .expect("global runtime file should write");
+    let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let output = run_stateful_in_repo(
         &repo_root,
@@ -1488,11 +1522,8 @@ fn mcp_bash_write_rejects_detached_process_constructs() {
     enable_test_repo(&paths, &repo_root);
     write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
         .expect("current session should write");
-    write_global_runtime_file(
-        &paths,
-        &ServerRuntime::new("http://127.0.0.1:9", "secret-token", "w1", 42),
-    )
-    .expect("global runtime file should write");
+    let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let output = run_stateful_in_repo(
         &repo_root,
@@ -1505,7 +1536,10 @@ fn mcp_bash_write_rejects_detached_process_constructs() {
         ],
     );
 
-    assert!(!output.status.success(), "detached process construct should fail");
+    assert!(
+        !output.status.success(),
+        "detached process construct should fail"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("detached process"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -1521,9 +1555,10 @@ fn mcp_bash_write_allows_daemon_in_authorized_filename() {
     enable_test_repo(&paths, &repo_root);
     write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
         .expect("current session should write");
-    let (runtime, _rx) = spawn_fake_stateful_server(
+    let (runtime, _rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-    );
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let output = run_stateful_in_repo(
@@ -1618,7 +1653,10 @@ fn mcp_bash_write_refuses_untrusted_current_session_file_before_authorization() 
         ],
     );
 
-    assert!(!output.status.success(), "untrusted current session should fail");
+    assert!(
+        !output.status.success(),
+        "untrusted current session should fail"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("symlinked current session file"));
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -1854,11 +1892,8 @@ fn mcp_bash_write_rejects_background_child_constructs() {
     write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
         .expect("current session should write");
     fs::write(repo_root.join("src/allowed.ts"), "old\n").expect("allowed file should seed");
-    write_global_runtime_file(
-        &paths,
-        &ServerRuntime::new("http://127.0.0.1:9", "secret-token", "w1", 42),
-    )
-    .expect("global runtime file should write");
+    let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let output = run_stateful_in_repo(
         &repo_root,

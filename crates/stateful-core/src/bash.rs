@@ -22,6 +22,18 @@ pub fn classify_bash(command: &str) -> BashClassification {
         return mutating("Shell write syntax requires stateful write tools");
     }
 
+    if has_escaped_quote_shell_separator(command) {
+        return unknown();
+    }
+
+    if has_mutating_find_primary(command) {
+        return mutating("Command requires stateful write tools");
+    }
+
+    if has_mutating_fd_exec(command) {
+        return mutating("Command requires stateful write tools");
+    }
+
     if has_unsupported_shell_syntax(command) {
         return unknown();
     }
@@ -304,7 +316,9 @@ fn git_subcommand_index(words: &[String]) -> Option<usize> {
             "--no-pager" => index += 1,
             "-C" => index += 2,
             "-c" | "--config-env" => return None,
-            word if word.starts_with("--git-dir") || word.starts_with("--work-tree") => return None,
+            word if word.starts_with("--git-dir") || word.starts_with("--work-tree") => {
+                return None;
+            }
             word if word.starts_with('-') => return None,
             _ => return Some(index),
         }
@@ -318,21 +332,24 @@ fn classify_git_remote(segment: &str) -> BashKind {
         return BashKind::Unknown;
     };
     let mut index = remote_index + 1;
+    let mut saw_verbose = false;
     while matches!(
         words.get(index).map(String::as_str),
         Some("-v" | "--verbose")
     ) {
+        saw_verbose = true;
         index += 1;
     }
     let Some(subcommand) = words.get(index) else {
         return BashKind::ReadOnly;
     };
+    if saw_verbose {
+        return BashKind::Unknown;
+    }
     match subcommand.as_str() {
         "get-url" => BashKind::ReadOnly,
         "-v" | "--verbose" => BashKind::ReadOnly,
-        "add" | "set-url" | "remove" | "rm" | "rename" | "prune" | "update" => {
-            BashKind::Mutating
-        }
+        "add" | "set-url" | "remove" | "rm" | "rename" | "prune" | "update" => BashKind::Mutating,
         _ => BashKind::Unknown,
     }
 }
@@ -733,6 +750,63 @@ fn contains_any_find_primary(segment: &str, tokens: &[&str]) -> bool {
     words(segment)
         .iter()
         .any(|word| tokens.contains(&word.as_str()))
+}
+
+fn has_mutating_find_primary(command: &str) -> bool {
+    command_segments(command).iter().any(|segment| {
+        command_name(segment).as_deref() == Some("find")
+            && contains_any_find_primary(
+                segment,
+                &[
+                    "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0",
+                    "-fprintf", "-fls",
+                ],
+            )
+    })
+}
+
+fn has_mutating_fd_exec(command: &str) -> bool {
+    command_segments(command).iter().any(|segment| {
+        command_name(segment).as_deref() == Some("fd")
+            && (has_option(segment, "-x")
+                || has_option(segment, "-X")
+                || has_option(segment, "--exec")
+                || has_option(segment, "--exec-batch"))
+    })
+}
+
+fn has_escaped_quote_shell_separator(command: &str) -> bool {
+    let mut chars = command.char_indices().peekable();
+    let mut quote = QuoteState::None;
+    let mut escaped = false;
+    let mut saw_escaped_quote = false;
+
+    while let Some((index, ch)) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote != QuoteState::Single {
+            if chars
+                .peek()
+                .map(|(_, next)| matches!(next, '"' | '\''))
+                .unwrap_or(false)
+            {
+                saw_escaped_quote = true;
+            }
+            escaped = true;
+            continue;
+        }
+        update_quote_state(ch, &mut quote);
+        if saw_escaped_quote
+            && quote == QuoteState::None
+            && (ch == ';' || ch == '|' || (ch == '&' && !command[index..].starts_with("&&")))
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn has_unsafe_env_assignment(segment: &str) -> bool {

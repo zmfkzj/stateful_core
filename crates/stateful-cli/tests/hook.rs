@@ -552,10 +552,7 @@ fn pre_tool_use_with_codex_run_skips_unsafe_legacy_current_session_file() {
 #[cfg(unix)]
 #[test]
 fn pre_tool_use_with_codex_run_skips_non_regular_legacy_current_session_file() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-codex-run-non-regular-legacy-session-test-{}",
-        std::process::id()
-    ));
+    let temp_root = std::path::PathBuf::from(format!("/tmp/scnr-{}", std::process::id()));
     if temp_root.exists() {
         fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
     }
@@ -625,8 +622,11 @@ fn pre_tool_use_with_codex_run_skips_hard_linked_legacy_current_session_file() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
     let victim = temp_root.join("victim-session.json");
     fs::write(&victim, "victim\n").expect("victim should write");
-    fs::hard_link(&victim, repo_root.join(".stateful_core/runtime/session.json"))
-        .expect("legacy current session hard link should create");
+    fs::hard_link(
+        &victim,
+        repo_root.join(".stateful_core/runtime/session.json"),
+    )
+    .expect("legacy current session hard link should create");
 
     let input = r#"{
       "session_id": "s-current",
@@ -915,9 +915,10 @@ fn run_hook_pre_tool_use_denies_stale_wrapper_trusted_sandbox_env_for_read_only_
         fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
     }
     let repo_root = temp_root.join("repo");
-    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     let paths = GlobalPaths::new(temp_root.join("home"));
-    enable_repo(&paths, &repo_root, false).expect("repo should enable");
+    enable_test_repo(&paths, &repo_root);
+    let runtime = spawn_fake_stateful_server_health_then_drop();
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -1873,10 +1874,7 @@ fn post_tool_use_queues_heartbeat_when_existing_outbox_has_malformed_line() {
     fs::create_dir_all(repo_root.join(".stateful_core/outbox"))
         .expect("outbox dir should be creatable");
     enable_test_repo(&paths, &repo_root);
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let addr = listener.local_addr().expect("listener addr should load");
-    drop(listener);
-    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
+    let runtime = spawn_fake_stateful_server_health_then_drop();
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
     let outbox_file = repo_root.join(".stateful_core/outbox/s1.jsonl");
     fs::write(&outbox_file, "not-json\n").expect("malformed outbox line should write");
@@ -2041,6 +2039,24 @@ fn spawn_fake_stateful_server(
     actual_response: &'static str,
 ) -> (ServerRuntime, mpsc::Receiver<String>) {
     spawn_fake_stateful_server_sequence(vec![actual_response])
+}
+
+fn spawn_fake_stateful_server_health_then_drop() -> ServerRuntime {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().expect("connection should arrive");
+            let request = read_http_request_maybe_body(&mut stream);
+            if request.contains("GET /health HTTP/1.1") {
+                write_json_response(&mut stream, r#"{"status":"ok"}"#);
+            } else if request.contains("GET /v1/current HTTP/1.1") {
+                write_json_response(&mut stream, r#"{"status":"ok","current":{}}"#);
+            }
+        }
+    });
+
+    ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42)
 }
 
 fn spawn_fake_stateful_server_sequence(

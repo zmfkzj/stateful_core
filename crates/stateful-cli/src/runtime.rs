@@ -175,8 +175,10 @@ pub fn read_current_session_file(repo_root: impl AsRef<Path>) -> anyhow::Result<
     }
 
     reject_untrusted_runtime_dirs(repo_root, false)?;
-    let contents =
-        read_plain_file_to_string(&current_session_file_path(repo_root), "current session file")?;
+    let contents = read_plain_file_to_string(
+        &current_session_file_path(repo_root),
+        "current session file",
+    )?;
     Ok(serde_json::from_str(&contents)?)
 }
 
@@ -203,7 +205,11 @@ pub fn write_current_session_file_for_codex_run(
         Err(error) => return Err(error.into()),
     }
 
-    write_plain_file(&path, "current session file", &serde_json::to_string_pretty(session)?)?;
+    write_plain_file(
+        &path,
+        "current session file",
+        &serde_json::to_string_pretty(session)?,
+    )?;
     Ok(())
 }
 

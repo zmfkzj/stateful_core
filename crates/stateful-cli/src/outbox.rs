@@ -59,9 +59,9 @@ pub fn sync_outbox_in_repo_with_runtime(
 
     let mut synced = 0_usize;
     for path in pending_paths {
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        if path.file_name().and_then(|name| name.to_str()).is_none() {
             continue;
-        };
+        }
         let (claimed_path, mut active_claim) = {
             let _lock = acquire_outbox_lock(&outbox_dir)?;
             recover_claimed_outbox_files(&outbox_dir)?;
@@ -287,9 +287,10 @@ fn open_plain_outbox_append(path: &Path, label: &str) -> anyhow::Result<fs::File
             ensure_existing_plain_file(path, label)?;
             OpenOptions::new().append(true).open(path)?
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            OpenOptions::new().create_new(true).append(true).open(path)?
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(path)?,
         Err(error) => return Err(error.into()),
     };
     ensure_existing_plain_file(path, label)?;
@@ -489,10 +490,7 @@ impl OutboxLock {
     fn new(path: PathBuf) -> anyhow::Result<Self> {
         let owner_path = path.join("owner");
         let heartbeat_path = path.join("heartbeat");
-        fs::write(
-            &owner_path,
-            format!("pid={}\n", std::process::id()),
-        )?;
+        fs::write(&owner_path, format!("pid={}\n", std::process::id()))?;
         fs::write(&heartbeat_path, "held\n")?;
 
         let stop_heartbeat = Arc::new(AtomicBool::new(false));
@@ -758,15 +756,12 @@ mod tests {
         let temp_root = temp_root("stateful-outbox-sequence-symlink");
         let victim = temp_root.join("victim.jsonl");
         let link = temp_root.join("s1.jsonl");
-        fs::write(
-            &victim,
-            "{\"sequence\":1,\"sync_status\":\"pending\"}\n",
-        )
-        .expect("victim should write");
+        fs::write(&victim, "{\"sequence\":1,\"sync_status\":\"pending\"}\n")
+            .expect("victim should write");
         std::os::unix::fs::symlink(&victim, &link).expect("symlink should create");
 
-        let error = max_pending_sequence_in_file(&link)
-            .expect_err("symlink sequence source should fail");
+        let error =
+            max_pending_sequence_in_file(&link).expect_err("symlink sequence source should fail");
 
         assert!(error.to_string().contains("symlinked outbox file"));
 
