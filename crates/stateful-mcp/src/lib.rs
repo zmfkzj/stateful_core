@@ -29,9 +29,34 @@ const TOOLS: &[(&str, &str, &str)] = &[
         "Release an advisory lease on a file or resource.",
     ),
     (
+        "state_activity_observe",
+        "state.activity.observe",
+        "Record observed session activity.",
+    ),
+    (
+        "state_activity_finalize",
+        "state.activity.finalize",
+        "Finalize observed session activity.",
+    ),
+    (
         "state_conflicts_check",
         "state.conflicts.check",
         "Dry-run an authorization or conflict check.",
+    ),
+    (
+        "state_current_read",
+        "state.current.read",
+        "Read the materialized current state summary.",
+    ),
+    (
+        "state_events_read",
+        "state.events.read",
+        "Read recent stateful audit events.",
+    ),
+    (
+        "state_context_render",
+        "state.context.render",
+        "Render current-state context for an agent prompt.",
     ),
     (
         "state_reconcile_ack",
@@ -39,9 +64,14 @@ const TOOLS: &[(&str, &str, &str)] = &[
         "Acknowledge reconciliation after a human write conflict.",
     ),
     (
-        "state_bash_write",
-        "state.bash.write",
-        "Run a write-capable Bash command in an OS sandbox after target authorization.",
+        "state_validation_run",
+        "state.validation.run",
+        "Run a controlled validation profile.",
+    ),
+    (
+        "state_file_write",
+        "state.file.write",
+        "Write UTF-8 contents to a repo file after stateful authorization.",
     ),
     (
         "state_notifications_poll",
@@ -101,6 +131,8 @@ fn input_schema_for(protocol_name: &str) -> Value {
     match protocol_name {
         "state.session.register"
         | "state.session.heartbeat"
+        | "state.activity.observe"
+        | "state.activity.finalize"
         | "state.notifications.poll"
         | "state.resume.next" => object_schema(
             [
@@ -142,6 +174,20 @@ fn input_schema_for(protocol_name: &str) -> Value {
             ],
             ["session_id", "action", "path"],
         ),
+        "state.current.read" | "state.events.read" => empty_object_schema(),
+        "state.context.render" => object_schema(
+            [
+                (
+                    "mode",
+                    serde_json::json!({
+                        "type": "string",
+                        "enum": ["brief", "detailed"]
+                    }),
+                ),
+                ("resource", string_schema()),
+            ],
+            [],
+        ),
         "state.reconcile.ack" => object_schema(
             [
                 ("session_id", string_schema()),
@@ -164,17 +210,22 @@ fn input_schema_for(protocol_name: &str) -> Value {
                 "human_change_summary",
             ],
         ),
-        "state.bash.write" => object_schema(
+        "state.validation.run" => object_schema(
+            [
+                ("workspace_id", string_schema()),
+                ("repo_root", string_schema()),
+                ("profile", string_schema()),
+            ],
+            ["profile"],
+        ),
+        "state.file.write" => object_schema(
             [
                 ("session_id", string_schema()),
                 ("workspace_id", string_schema()),
-                ("command", string_schema()),
-                ("write_targets", string_array_schema()),
-                ("create_targets", string_array_schema()),
-                ("cwd", string_schema()),
-                ("timeout_seconds", integer_schema()),
+                ("path", string_schema()),
+                ("contents", string_schema()),
             ],
-            ["command", "write_targets"],
+            ["path", "contents"],
         ),
         _ => empty_object_schema(),
     }
@@ -211,10 +262,6 @@ fn string_schema() -> Value {
     serde_json::json!({ "type": "string" })
 }
 
-fn integer_schema() -> Value {
-    serde_json::json!({ "type": "integer", "minimum": 1, "maximum": 600 })
-}
-
 fn string_array_schema() -> Value {
     serde_json::json!({
         "type": "array",
@@ -239,11 +286,17 @@ pub fn map_tool_to_http(tool: ToolCall) -> Result<HttpToolRequest, String> {
         "state.intent.declare" => ("POST", "/v1/intent/declare"),
         "state.lease.acquire" => ("POST", "/v1/lease/acquire"),
         "state.lease.release" => ("POST", "/v1/lease/release"),
+        "state.activity.observe" => ("POST", "/v1/activity/observe"),
+        "state.activity.finalize" => ("POST", "/v1/activity/finalize"),
         "state.conflicts.check" => ("POST", "/v1/conflicts/check"),
+        "state.current.read" => ("GET", "/v1/current"),
+        "state.events.read" => ("GET", "/v1/events"),
+        "state.context.render" => ("POST", "/v1/context/render"),
         "state.reconcile.ack" => ("POST", "/v1/reconcile/ack"),
-        "state.bash.write" => {
+        "state.validation.run" => ("POST", "/v1/validation/run"),
+        "state.file.write" => {
             return Err(
-                "state.bash.write is handled locally by the stateful CLI MCP bridge".to_string(),
+                "state.file.write is handled locally by the stateful CLI MCP bridge".to_string(),
             );
         }
         "state.notifications.poll" => ("POST", "/v1/notifications/poll"),

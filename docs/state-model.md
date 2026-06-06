@@ -144,9 +144,10 @@ Only `file` and `directory` resources can authorize filesystem writes. Other
 resource types can warn, coordinate, or constrain controlled actions, but cannot
 authorize filesystem mutation.
 
-`test` resources are tied to controlled validation profiles. They may constrain
-configured validation execution, including denying concurrent execution when a
-profile is marked `exclusive`, but they do not authorize source writes.
+`test` resources are tied to controlled validation profiles and may inform
+future validation concurrency policy. The current runner parses `exclusive`, but
+does not yet enforce concurrent-run denial, and test resources do not authorize
+source writes.
 
 `task`, `port`, and `migration` resources are context and warning signals in v1.
 They can appear in prompt context and conflict records, but cannot block general
@@ -404,9 +405,10 @@ V1 detects this by comparing `git status --porcelain` before and after
 validation. A denied path that is already dirty before validation produces
 `error`; a newly dirty denied path after validation produces `failed_policy`.
 
-If `exclusive` is true, only one run of that validation profile may be active in
-the workspace. A concurrent request for the same exclusive profile is denied. If
-`exclusive` is false or unset, concurrent runs produce warning context only.
+The current runner parses `exclusive`, but does not yet enforce a validation
+concurrency lock. Future policy should use `exclusive` to deny concurrent runs
+of the same profile in the workspace and warn for concurrent non-exclusive
+runs.
 
 ## Finalization Record
 
@@ -522,10 +524,12 @@ When the state server is unavailable, coordination must fail closed for agent
 write authorization and fail open for human saves.
 
 - Supported writes are denied.
-- Bash commands without structured top-level read-only sandbox metadata are
-  denied.
-- Configured validation actions return `error: state_unavailable` and do not
-  execute validation commands.
+- Raw Bash and Bash calls that are not a strict
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper are
+  denied. Command-shaped writes through `--fs write-targets` fail closed when
+  target authorization cannot be proven.
+- `state_validation_run` / `state.validation.run` returns
+  `error: state_unavailable` and does not execute the validation command.
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block.
 - Intent declaration, lease acquisition, and lease refresh fail.
 - Read, search, and diff actions are allowed.

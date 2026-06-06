@@ -255,8 +255,9 @@ mismatch fails closed for write, validation, and reconciliation paths.
 
 - intercept supported tool calls before execution
 - deny supported write calls when the session has no active intent
-- deny Bash unless the top-level tool payload supplies read-only sandbox
-  metadata with network disabled
+- deny raw Bash and allow Bash only when the outer command is a single strict
+  invocation of the trusted absolute `stateful` binary running
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>`
 - check whether requested files or resources conflict with active leases
 - deny, warn, or add context based on policy
 
@@ -289,9 +290,15 @@ state.session.heartbeat
 state.intent.declare
 state.lease.acquire
 state.lease.release
+state.activity.observe
+state.activity.finalize
 state.conflicts.check
+state.current.read
+state.events.read
+state.context.render
 state.reconcile.ack
-state.bash.write
+state_validation_run / state.validation.run
+state_file_write / state.file.write
 state.notifications.poll
 state.resume.next
 ```
@@ -301,7 +308,9 @@ and `state.intent.cancel` when the corresponding server endpoints are
 implemented.
 
 Hooks should call the same state server API as MCP tools so policy remains
-centralized.
+centralized. `state_file_write` / `state.file.write` is the structured repo file
+write path; sandbox-run remains the Bash wrapper for command-shaped shell
+writes.
 
 ### State Server Responsibilities
 
@@ -342,25 +351,32 @@ V1 write enforcement is limited to tool paths where targets can be determined
 reliably:
 
 ```text
-state_bash_write / state.bash.write -> enforce from explicit write targets
+state_file_write / state.file.write -> enforce from structured file arguments
 native Codex edit tools -> inspectable by hook when exposed, but not the normal
   repo write path under the stateful read-only tmp profile
-Bash -> allow only with top-level read-only sandbox metadata, network disabled,
-  and no non-tmp writable roots
-test execution -> use state_bash_write when exact write targets are known, or a
-  configured validation profile outside Codex hooks
-raw Bash without structured sandbox metadata -> deny
+Bash read-only inspection -> require a strict trusted wrapper:
+  <absolute-stateful-binary> sandbox run --fs read-only --network disabled
+  --command <cmd>
+Bash command-shaped writes -> require the trusted wrapper with
+  --fs write-targets plus explicit --write-target/--create-target values
+test execution -> run through controlled validation action
+raw Bash or non-wrapper Bash -> deny
 ```
 
-Bash denial should tell the agent to use a structured Bash tool call with
-read-only sandbox metadata, or use `state_bash_write` for repo writes.
+Bash denial should tell the agent to use
+`<absolute-stateful-binary> sandbox run --fs read-only --network disabled
+--command <cmd>` for read-only inspection,
+`<absolute-stateful-binary> sandbox run --fs write-targets ... --command <cmd>`
+for command-shaped writes, `state_file_write` / `state.file.write` for
+structured file writes, and validation profiles for tests.
 
-The Bash classifier is deny-by-default. Command text alone does not authorize
-`rg`, `git diff`, test runners, stateful operational commands, or any other
-Bash command. Arbitrary or project-specific test commands should run through
-a configured validation action backed by a profile. Validation profiles may
-allow cache or artifact writes, but source-tree writes must be denied unless a
-later policy explicitly permits them.
+There is no command-text authorization path. Command text alone does not
+authorize `rg`, `git diff`, test runners, stateful operational commands, or any
+other Bash command. Arbitrary or project-specific test commands should run
+through `state_validation_run` / `state.validation.run` in Codex sessions, or
+`stateful validate <profile>` outside hook-mediated Bash. Validation profiles
+may allow cache or artifact writes, but source-tree writes must be denied unless
+a later policy explicitly permits them.
 
 Validation profiles are static repo-defined config at `.stateful/validation.yml`.
 Agents cannot provide arbitrary commands at runtime.
@@ -390,9 +406,10 @@ the run, validation does not start and returns `error`. If the run creates a new
 dirty path matching `denied_writes`, validation returns `failed_policy`.
 `allowed_writes` paths are ignored for policy failure.
 
-If a validation profile is marked `exclusive`, concurrent runs of the same
-profile in the workspace are denied. Non-exclusive concurrent runs produce
-warning context only.
+The current runner parses `exclusive`, but does not yet enforce a validation
+concurrency lock. Future policy should use `exclusive` to deny concurrent runs
+of the same profile in the workspace and warn for concurrent non-exclusive
+runs.
 
 ## Conflict Policy
 
@@ -404,7 +421,8 @@ Initial policy should prefer advisory leases:
 - supported write while phase is `blocked`: deny
 - supported write after session finalization: deny
 - supported write outside matching file or directory scope: deny
-- Bash without structured top-level read-only sandbox metadata: deny
+- raw Bash or a Bash call that is not a strict trusted
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper: deny
 - directory scope permits writes only up to depth 2 below that directory
 - delete without exact file scope: deny
 - rename or move without exact file scope for both source and destination: deny
@@ -419,8 +437,9 @@ Initial policy should prefer advisory leases:
   repo-relative similarity is an unknown-confidence warning
 - expired lease: allow but surface stale-state context
 - test execution: allow only through controlled validation action
-- same non-exclusive validation profile active elsewhere: warn
-- same exclusive validation profile active elsewhere: deny
+- same validation profile active elsewhere: no current hard block; future
+  exclusive-profile locking should deny exclusive conflicts and warn for
+  non-exclusive conflicts
 - task, port, or migration resource conflict: warn or info only in v1
 - human local changes detected: warn before edits and require extra care
 - human save observed after an agent lease or write: deny further agent writes
@@ -561,9 +580,11 @@ When the state server is unavailable:
 
 - supported writes are denied because active intent, lease conflict, and
   reconciliation state cannot be proven
-- Bash without structured top-level read-only sandbox metadata remains denied
-- configured validation actions return `error: state_unavailable` and do not run
-  validation commands
+- raw Bash and Bash calls that are not strict trusted
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrappers remain
+  denied
+- `state_validation_run` / `state.validation.run` returns
+  `error: state_unavailable` and does not run the validation command
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block
 - intent declaration, lease acquisition, and lease refresh fail
 - non-Bash read, search, and diff actions are allowed
@@ -646,7 +667,7 @@ supported write action + expired intent -> deny
 supported write action + blocked phase or finalized session -> deny
 supported write action + intent without file/directory scope -> deny
 supported write action + target outside intent scope -> deny
-Bash without structured top-level read-only sandbox metadata -> deny
+raw Bash or non-wrapper Bash -> deny
 delete action + non-exact file scope -> deny
 rename/move action + non-exact source or destination scope -> deny
 active write lease in hard conflict domain -> deny unless explicit user override
@@ -708,7 +729,7 @@ responsibility: user owns the judgment and risk
 Prompt context rendering:
 
 ```text
-/v1/context/render(workspace, session_id, resources?, mode)
+state.context.render(workspace, session_id, resources?, mode)
 mode: brief | detailed
 sections: Blocking, Required Next Action, Warnings, Nearby Activity, Stale/Expired
 ```

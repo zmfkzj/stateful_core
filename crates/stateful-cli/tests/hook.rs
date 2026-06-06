@@ -13,243 +13,275 @@ use std::{
 use stateful_cli::{
     GlobalPaths, HookOutcome, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime, enable_repo,
     handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
-    handle_pre_tool_use_with_trusted_sandbox, read_current_session_file,
-    read_current_session_file_for_codex_run, write_global_runtime_file,
+    read_current_session_file, read_current_session_file_for_codex_run, write_global_runtime_file,
 };
 
-fn assert_bash_denial_mentions(outcome: HookOutcome, expected: &str) {
+fn assert_raw_bash_denied_with_sandbox_run_guidance(outcome: HookOutcome) {
     let HookOutcome::Deny { reason } = outcome else {
-        panic!("Bash should be denied");
+        panic!("raw Bash should be denied");
     };
 
     assert!(
-        reason.contains(expected),
-        "reason `{reason}` should mention `{expected}`"
+        reason.contains("stateful sandbox run"),
+        "reason `{reason}` should direct callers to stateful sandbox run"
     );
 }
 
-#[test]
-fn pre_tool_use_denies_read_only_bash_without_authoritative_sandbox() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "tool_input": {
-        "command": "rg --no-config auth src"
-      }
-    }"#;
-
-    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
-
-    assert_bash_denial_mentions(outcome, "read-only sandbox metadata");
-}
-
-#[test]
-fn pre_tool_use_denies_wrapper_trusted_sandbox_env_for_read_only_bash() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "tool_input": {
-        "command": "rg --no-config auth src"
-      }
-    }"#;
-    let trusted_sandbox = serde_json::json!({
-        "mode": "read-only",
-        "writable_roots": ["/tmp"],
-        "network_access": false,
-        "source": "stateful-codex-wrapper"
-    });
-
-    let outcome = handle_pre_tool_use_with_trusted_sandbox(input, Some(trusted_sandbox))
-        .expect("hook input should parse");
-
-    assert_bash_denial_mentions(outcome, "read-only sandbox metadata");
-}
-
-#[test]
-fn pre_tool_use_allows_quoted_rg_regex_alternation_with_top_level_sandbox() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "sandbox": {
-        "mode": "read-only",
-        "writable_roots": ["/tmp"],
-        "network_access": false
-      },
-      "tool_input": {
-        "command": "rg --no-config -n \"future work|Future work\" docs crates README.md .stateful"
-      }
-    }"#;
-
-    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
-
-    assert_eq!(outcome, HookOutcome::Allow);
-}
-
-#[test]
-fn pre_tool_use_allows_read_only_bash_dev_null_redirection_with_top_level_sandbox() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "sandbox": {
-        "mode": "read-only",
-        "writable_roots": ["/tmp"],
-        "network_access": false
-      },
-      "tool_input": {
-        "command": "rg --no-config -n \"future work\" docs 2>/dev/null"
-      }
-    }"#;
-
-    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
-
-    assert_eq!(outcome, HookOutcome::Allow);
-}
-
-#[test]
-fn pre_tool_use_denies_conflicting_nested_sandbox_metadata() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "sandbox": {
-        "mode": "workspace-write",
-        "network_access": true,
-        "arguments": {
-          "sandbox": {
-            "mode": "read-only",
-            "network_access": false,
-            "writable_roots": ["/tmp"]
-          }
-        }
-      },
-      "tool_input": {
-        "command": "rg --no-config auth src"
-      }
-    }"#;
-
-    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
-
-    assert_bash_denial_mentions(outcome, "read-only sandbox metadata");
-}
-
-#[test]
-fn pre_tool_use_denies_writable_nested_sandbox_metadata_under_read_only_top_level() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "sandbox": {
-        "mode": "read-only",
-        "network_access": false,
-        "writable_roots": ["/tmp"],
-        "arguments": {
-          "sandbox": {
-            "mode": "workspace-write",
-            "network_access": true,
-            "writable_roots": ["/repo"]
-          }
-        }
-      },
-      "tool_input": {
-        "command": "rg --no-config auth src"
-      }
-    }"#;
-
-    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
-
-    assert_bash_denial_mentions(outcome, "read-only sandbox metadata");
-}
-
-#[test]
-fn pre_tool_use_denies_nested_escalated_sandbox_permission_metadata() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "sandbox": {
-        "mode": "read-only",
-        "network_access": false,
-        "writable_roots": ["/tmp"],
-        "arguments": {
-          "sandbox_permissions": "require_escalated"
-        }
-      },
-      "tool_input": {
-        "command": "rg --no-config auth src"
-      }
-    }"#;
-
-    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
-
-    assert_bash_denial_mentions(outcome, "read-only sandbox metadata");
-}
-
-#[test]
-fn pre_tool_use_denies_conflicting_network_access_synonyms() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "sandbox": {
-        "mode": "read-only",
-        "network_access": false,
-        "networkEnabled": true,
-        "writable_roots": ["/tmp"]
-      },
-      "tool_input": {
-        "command": "rg --no-config auth src"
-      }
-    }"#;
-
-    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
-
+fn assert_bash_denial_mentions(outcome: HookOutcome, expected: &str) {
     let HookOutcome::Deny { reason } = outcome else {
-        panic!("conflicting network metadata should be denied");
+        panic!("expected Bash denial");
     };
-    assert!(reason.contains("network access disabled"));
+    assert!(
+        reason.contains(expected),
+        "reason `{reason}` should contain `{expected}`"
+    );
+}
+
+fn trusted_stateful_path() -> String {
+    std::env::current_exe()
+        .expect("test executable path should resolve")
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[test]
-fn pre_tool_use_denies_direct_nested_sandbox_metadata_under_arguments() {
+fn pre_tool_use_denies_raw_read_only_bash_after_sandbox_runner_migration() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
-      "sandbox": {
-        "mode": "read-only",
-        "network_access": false,
-        "writable_roots": ["/tmp"],
-        "arguments": {
-          "sandbox": "workspace-write",
-          "network_access": true,
-          "writable_roots": ["/repo"]
-        }
-      },
       "tool_input": {
-        "command": "rg --no-config auth src"
+        "command": "rg auth src"
       }
     }"#;
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "read-only sandbox metadata");
+    assert_bash_denial_mentions(outcome, "stateful sandbox run");
 }
 
 #[test]
-fn pre_tool_use_extracts_bash_command_from_nested_arguments() {
+fn pre_tool_use_raw_bash_denial_mentions_command_policy_skill_and_example() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "git status"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+    let HookOutcome::Deny { reason } = outcome else {
+        panic!("raw Bash should be denied");
+    };
+
+    assert!(reason.contains("stateful-command-policy"));
+    assert!(reason.contains("--fs read-only --network disabled"));
+    assert!(reason.contains("--command"));
+}
+
+#[test]
+fn pre_tool_use_allows_canonical_sandbox_run_read_only() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs read-only --network disabled --timeout-seconds 30 --command 'rg auth src'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_allows_canonical_sandbox_run_write_targets() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs write-targets --network enabled --write-target README.md --command 'printf x > README.md'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_run_with_outer_command_separator() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs read-only --command 'rg auth src'; rm README.md")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(outcome, "single stateful sandbox run command");
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_run_write_targets_without_target() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs write-targets --network enabled --command 'printf x > README.md'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(outcome, "requires at least one write target");
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_run_with_shell_escape_quote_mismatch() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --command \\\"rg; rm README.md #\\\"")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(outcome, "shell escapes");
+}
+
+#[test]
+fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
+    let stateful = trusted_stateful_path();
+    let cases = [
+        (
+            "outer env assignment",
+            format!("FOO=bar {stateful} sandbox run --command 'rg auth src'"),
+            "environment assignments",
+        ),
+        (
+            "command substitution",
+            format!("{stateful} sandbox run --command \"$(pwd)\""),
+            "command substitution",
+        ),
+        (
+            "outer redirect",
+            format!("{stateful} sandbox run --command 'rg auth src' > /tmp/out"),
+            "single stateful sandbox run command",
+        ),
+        (
+            "outer pipeline",
+            format!("{stateful} sandbox run --command 'rg auth src' | cat"),
+            "single stateful sandbox run command",
+        ),
+        (
+            "untrusted executable",
+            "/bin/echo sandbox run --command 'rg auth src'".to_string(),
+            "trusted absolute stateful binary",
+        ),
+        (
+            "duplicate command",
+            format!("{stateful} sandbox run --command 'rg auth src' --command pwd"),
+            "exactly one --command",
+        ),
+        (
+            "invalid fs",
+            format!("{stateful} sandbox run --fs read-write --command 'rg auth src'"),
+            "supports only read-only and write-targets profiles",
+        ),
+        (
+            "invalid network",
+            format!("{stateful} sandbox run --network inherited --command 'rg auth src'"),
+            "network must be disabled or enabled",
+        ),
+        (
+            "missing option value",
+            format!("{stateful} sandbox run --command 'rg auth src' --write-target"),
+            "argument `--write-target` requires a value",
+        ),
+        (
+            "missing timeout value",
+            format!("{stateful} sandbox run --command 'rg auth src' --timeout-seconds"),
+            "argument `--timeout-seconds` requires a value",
+        ),
+        (
+            "non-integer timeout value",
+            format!("{stateful} sandbox run --timeout-seconds nope --command 'rg auth src'"),
+            "--timeout-seconds requires an integer value",
+        ),
+    ];
+
+    for (name, command, expected) in cases {
+        let input = serde_json::json!({
+            "session_id": "s1",
+            "cwd": "/repo",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": command
+            }
+        })
+        .to_string();
+
+        let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+        let HookOutcome::Deny { reason } = outcome else {
+            panic!("{name}: expected Bash denial");
+        };
+        assert!(
+            reason.contains(expected),
+            "{name}: reason `{reason}` should contain `{expected}`"
+        );
+    }
+}
+
+#[test]
+fn pre_tool_use_denies_raw_read_only_bash_with_sandbox_run_guidance() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "rg auth src"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
+}
+
+#[test]
+fn pre_tool_use_denies_raw_bash_even_when_legacy_sandbox_metadata_exists() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -261,36 +293,51 @@ fn pre_tool_use_extracts_bash_command_from_nested_arguments() {
         "network_access": false
       },
       "tool_input": {
-        "arguments": {
-          "cmd": "rg --no-config auth src"
-        }
+        "command": "rg auth src"
       }
     }"#;
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_direct_bash_write_syntax_with_write_tool_guidance() {
+fn pre_tool_use_denies_raw_quoted_rg_regex_alternation() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
       "tool_input": {
-        "command": "echo hi > src/auth.ts"
+        "command": "rg -n \"future work|Future work\" docs crates README.md .stateful"
       }
     }"#;
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "state_bash_write");
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_raw_test_bash_with_validation_guidance() {
+fn pre_tool_use_denies_raw_read_only_bash_dev_null_redirection() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "rg -n \"future work\" docs 2>/dev/null"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
+}
+
+#[test]
+fn pre_tool_use_denies_raw_test_bash_with_sandbox_run_guidance() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -303,46 +350,16 @@ fn pre_tool_use_denies_raw_test_bash_with_validation_guidance() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    let HookOutcome::Deny { reason } = outcome else {
-        panic!("raw test Bash should be denied");
-    };
-    assert!(reason.contains("state_bash_write"));
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_allows_stateful_diagnostic_bash_with_top_level_sandbox() {
+fn pre_tool_use_denies_raw_stateful_diagnostic_bash() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
-      "sandbox": {
-        "mode": "read-only",
-        "writable_roots": ["/tmp"],
-        "network_access": false
-      },
-      "tool_input": {
-        "command": "stateful doctor"
-      }
-    }"#;
-
-    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
-
-    assert_eq!(outcome, HookOutcome::Allow);
-}
-
-#[test]
-fn pre_tool_use_denies_path_qualified_stateful_diagnostic_bash() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "sandbox": {
-        "mode": "read-only",
-        "writable_roots": ["/tmp"],
-        "network_access": false
-      },
       "tool_input": {
         "command": "./target/debug/stateful doctor"
       }
@@ -350,50 +367,41 @@ fn pre_tool_use_denies_path_qualified_stateful_diagnostic_bash() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    let HookOutcome::Deny { reason } = outcome else {
-        panic!("path-qualified stateful diagnostic Bash should be denied");
-    };
-    assert!(reason.contains("known read-only inspection commands"));
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_stateful_controlled_validation_bash_with_validation_guidance() {
+fn pre_tool_use_denies_raw_stateful_controlled_validation_bash() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
       "tool_input": {
-        "command": "stateful validate cargo-test"
+        "command": "./target/debug/stateful validate cargo-test"
       }
     }"#;
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    let HookOutcome::Deny { reason } = outcome else {
-        panic!("raw stateful validation Bash should be denied");
-    };
-    assert!(reason.contains("state_bash_write"));
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_stateful_bench_operational_bash_with_write_tool_guidance() {
+fn pre_tool_use_denies_raw_stateful_bench_operational_bash() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
       "tool_input": {
-        "command": "stateful-bench run --pairs .stateful_bench/pairs/all.jsonl --mode no-state --agent-cmd-template codex"
+        "command": "target/debug/stateful-bench run --pairs .stateful_bench/pairs/all.jsonl --mode no-state --agent-cmd-template codex"
       }
     }"#;
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    let HookOutcome::Deny { reason } = outcome else {
-        panic!("stateful-bench operational Bash should be denied");
-    };
-    assert!(reason.contains("state_bash_write"));
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
@@ -420,7 +428,7 @@ fn pre_tool_use_in_repo_records_current_session_for_mcp() {
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
       "tool_input": {
-        "command": "rg --no-config auth src"
+        "command": "rg auth src"
       }
     }"#;
 
@@ -462,7 +470,7 @@ fn pre_tool_use_records_current_session_for_codex_run() {
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
       "tool_input": {
-        "command": "rg --no-config auth src"
+        "command": "rg auth src"
       }
     }"#;
 
@@ -483,182 +491,6 @@ fn pre_tool_use_records_current_session_for_codex_run() {
         .expect("run-bound current session should read");
     assert_eq!(session.session_id, "s-current");
     assert_eq!(session.workspace_id, "w1");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[cfg(unix)]
-#[test]
-fn pre_tool_use_with_codex_run_skips_unsafe_legacy_current_session_file() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-codex-run-unsafe-legacy-session-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    let paths = GlobalPaths::new(temp_root.join("home"));
-    let repo_root = temp_root.join("repo");
-    fs::create_dir_all(repo_root.join(".stateful_core/runtime"))
-        .expect("runtime dir should be creatable");
-    enable_test_repo(&paths, &repo_root);
-    let (runtime, _rx) = spawn_fake_stateful_server(
-        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-    );
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    let victim = temp_root.join("victim-session.json");
-    fs::write(&victim, "victim\n").expect("victim should write");
-    std::os::unix::fs::symlink(
-        &victim,
-        repo_root.join(".stateful_core/runtime/session.json"),
-    )
-    .expect("legacy current session symlink should create");
-
-    let input = r#"{
-      "session_id": "s-current",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "tool_input": {
-        "command": "rg --no-config auth src"
-      }
-    }"#;
-
-    let output = run_hook_subprocess_with_extra_env(
-        &repo_root,
-        &paths,
-        &["hook", "pre-tool-use"],
-        input,
-        &[(STATEFUL_CODEX_RUN_ID_ENV, "run-a")],
-    );
-
-    assert!(
-        output.status.success(),
-        "stateful hook failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let session = read_current_session_file_for_codex_run(&repo_root, "run-a")
-        .expect("run-bound current session should read");
-    assert_eq!(session.session_id, "s-current");
-    assert_eq!(session.workspace_id, "w1");
-    assert_eq!(
-        fs::read_to_string(&victim).expect("victim should read"),
-        "victim\n"
-    );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[cfg(unix)]
-#[test]
-fn pre_tool_use_with_codex_run_skips_non_regular_legacy_current_session_file() {
-    let temp_root = std::path::PathBuf::from(format!("/tmp/scnr-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    let paths = GlobalPaths::new(temp_root.join("home"));
-    let repo_root = temp_root.join("repo");
-    fs::create_dir_all(repo_root.join(".stateful_core/runtime"))
-        .expect("runtime dir should be creatable");
-    enable_test_repo(&paths, &repo_root);
-    let (runtime, _rx) = spawn_fake_stateful_server(
-        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-    );
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    let legacy_session_path = repo_root.join(".stateful_core/runtime/session.json");
-    let listener = std::os::unix::net::UnixListener::bind(&legacy_session_path)
-        .expect("legacy current session socket should bind");
-
-    let input = r#"{
-      "session_id": "s-current",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "tool_input": {
-        "command": "rg --no-config auth src"
-      }
-    }"#;
-
-    let output = run_hook_subprocess_with_extra_env(
-        &repo_root,
-        &paths,
-        &["hook", "pre-tool-use"],
-        input,
-        &[(STATEFUL_CODEX_RUN_ID_ENV, "run-a")],
-    );
-
-    assert!(
-        output.status.success(),
-        "stateful hook failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let session = read_current_session_file_for_codex_run(&repo_root, "run-a")
-        .expect("run-bound current session should read");
-    assert_eq!(session.session_id, "s-current");
-    assert_eq!(session.workspace_id, "w1");
-    drop(listener);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[cfg(unix)]
-#[test]
-fn pre_tool_use_with_codex_run_skips_hard_linked_legacy_current_session_file() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-codex-run-hardlink-legacy-session-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    let paths = GlobalPaths::new(temp_root.join("home"));
-    let repo_root = temp_root.join("repo");
-    fs::create_dir_all(repo_root.join(".stateful_core/runtime"))
-        .expect("runtime dir should be creatable");
-    enable_test_repo(&paths, &repo_root);
-    let (runtime, _rx) = spawn_fake_stateful_server(
-        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-    );
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    let victim = temp_root.join("victim-session.json");
-    fs::write(&victim, "victim\n").expect("victim should write");
-    fs::hard_link(
-        &victim,
-        repo_root.join(".stateful_core/runtime/session.json"),
-    )
-    .expect("legacy current session hard link should create");
-
-    let input = r#"{
-      "session_id": "s-current",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "tool_input": {
-        "command": "rg --no-config auth src"
-      }
-    }"#;
-
-    let output = run_hook_subprocess_with_extra_env(
-        &repo_root,
-        &paths,
-        &["hook", "pre-tool-use"],
-        input,
-        &[(STATEFUL_CODEX_RUN_ID_ENV, "run-a")],
-    );
-
-    assert!(
-        output.status.success(),
-        "stateful hook failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let session = read_current_session_file_for_codex_run(&repo_root, "run-a")
-        .expect("run-bound current session should read");
-    assert_eq!(session.session_id, "s-current");
-    assert_eq!(session.workspace_id, "w1");
-    assert_eq!(
-        fs::read_to_string(&victim).expect("victim should read"),
-        "victim\n"
-    );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -741,7 +573,7 @@ fn pre_tool_use_in_disabled_repo_noops_without_runtime() {
 }
 
 #[test]
-fn pre_tool_use_denies_stateful_intent_declare_with_intent_tool_guidance() {
+fn pre_tool_use_denies_raw_stateful_intent_declare() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -754,11 +586,11 @@ fn pre_tool_use_denies_stateful_intent_declare_with_intent_tool_guidance() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "state_intent_declare");
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_other_stateful_control_commands_with_write_tool_guidance() {
+fn pre_tool_use_denies_raw_other_stateful_control_commands() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -771,11 +603,11 @@ fn pre_tool_use_denies_other_stateful_control_commands_with_write_tool_guidance(
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "state_bash_write");
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_bash_write_syntax_in_read_only_tmp_sandbox() {
+fn pre_tool_use_denies_raw_bash_control_syntax_even_with_legacy_read_only_tmp_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -787,17 +619,17 @@ fn pre_tool_use_denies_bash_write_syntax_in_read_only_tmp_sandbox() {
         "network_access": false
       },
       "tool_input": {
-        "command": "rg --no-config auth src | head > /tmp/stateful-rg.out"
+        "command": "rg auth src | head > /tmp/stateful-rg.out"
       }
     }"#;
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "state_bash_write");
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_sandbox_pipeline_with_write_redirection() {
+fn pre_tool_use_denies_raw_pipeline_even_with_legacy_read_only_tmp_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -815,35 +647,28 @@ fn pre_tool_use_denies_sandbox_pipeline_with_write_redirection() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "state_bash_write");
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_bash_write_syntax_with_wrapper_trusted_sandbox_only() {
+fn pre_tool_use_denies_bash_control_syntax_without_sandbox_run_wrapper() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
       "tool_input": {
-        "command": "rg --no-config auth src | head > /tmp/stateful-rg.out"
+        "command": "rg auth src | head > /tmp/stateful-rg.out"
       }
     }"#;
-    let trusted_sandbox = serde_json::json!({
-        "mode": "read-only",
-        "writable_roots": ["/tmp"],
-        "network_access": false,
-        "source": "stateful-codex-wrapper"
-    });
 
-    let outcome = handle_pre_tool_use_with_trusted_sandbox(input, Some(trusted_sandbox))
-        .expect("hook input should parse");
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "state_bash_write");
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn run_hook_pre_tool_use_denies_wrapper_trusted_sandbox_env_for_write_syntax() {
+fn run_hook_pre_tool_use_denies_raw_bash_with_legacy_trusted_sandbox_env() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-sandbox-env-test-{}",
         std::process::id()
@@ -863,16 +688,14 @@ fn run_hook_pre_tool_use_denies_wrapper_trusted_sandbox_env_for_write_syntax() {
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
       "tool_input": {
-        "command": "rg --no-config auth src | head > /tmp/stateful-rg.out"
+        "command": "rg auth src | head > /tmp/stateful-rg.out"
       }
     }"#;
     let trusted_sandbox = serde_json::json!({
         "mode": "read-only",
         "writable_roots": ["/tmp"],
         "network_access": false,
-        "source": "stateful-codex-wrapper",
-        "profile": "stateful-read-only-tmp",
-        "run_id": "run-a"
+        "source": "stateful-codex-wrapper"
     })
     .to_string();
 
@@ -881,10 +704,7 @@ fn run_hook_pre_tool_use_denies_wrapper_trusted_sandbox_env_for_write_syntax() {
         &paths,
         &["hook", "pre-tool-use"],
         input,
-        &[
-            (STATEFUL_CODEX_RUN_ID_ENV, "run-a"),
-            ("STATEFUL_HOOK_TRUSTED_SANDBOX", trusted_sandbox.as_str()),
-        ],
+        &[("STATEFUL_HOOK_TRUSTED_SANDBOX", trusted_sandbox.as_str())],
     );
 
     assert!(
@@ -899,83 +719,21 @@ fn run_hook_pre_tool_use_denies_wrapper_trusted_sandbox_env_for_write_syntax() {
         json["hookSpecificOutput"]["permissionDecisionReason"]
             .as_str()
             .expect("reason should be string")
-            .contains("state_bash_write")
+            .contains("stateful sandbox run")
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn run_hook_pre_tool_use_denies_stale_wrapper_trusted_sandbox_env_for_read_only_bash() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-stale-trusted-sandbox-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    let repo_root = temp_root.join("repo");
-    let paths = GlobalPaths::new(temp_root.join("home"));
-    enable_test_repo(&paths, &repo_root);
-    let runtime = spawn_fake_stateful_server_health_then_drop();
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+fn pre_tool_use_denies_tool_input_spoofed_read_only_bash_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
       "tool_input": {
-        "command": "rg --no-config auth src"
-      }
-    }"#;
-    let trusted_sandbox = serde_json::json!({
-        "mode": "read-only",
-        "writable_roots": ["/tmp"],
-        "network_access": false,
-        "source": "stateful-codex-wrapper",
-        "profile": "stateful-read-only-tmp",
-        "run_id": "old-run"
-    })
-    .to_string();
-
-    let output = run_hook_subprocess_with_extra_env(
-        &repo_root,
-        &paths,
-        &["hook", "pre-tool-use"],
-        input,
-        &[
-            (STATEFUL_CODEX_RUN_ID_ENV, "new-run"),
-            ("STATEFUL_HOOK_TRUSTED_SANDBOX", trusted_sandbox.as_str()),
-        ],
-    );
-
-    assert!(
-        output.status.success(),
-        "stateful hook failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
-    assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("reason should be string")
-            .contains("read-only sandbox metadata")
-    );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[test]
-fn pre_tool_use_denies_tool_input_spoofed_read_only_bash_sandbox_for_read_only_command() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "tool_input": {
-        "command": "rg --no-config auth src | head",
+        "command": "rg auth src | head",
         "sandbox": {
           "mode": "read-only",
           "writable_roots": ["/tmp"],
@@ -986,33 +744,11 @@ fn pre_tool_use_denies_tool_input_spoofed_read_only_bash_sandbox_for_read_only_c
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "read-only sandbox metadata");
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_tool_input_spoofed_read_only_bash_sandbox_for_write_syntax() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "tool_input": {
-        "command": "echo hi > src/auth.ts",
-        "sandbox": {
-          "mode": "read-only",
-          "writable_roots": ["/tmp"],
-          "network_access": false
-        }
-      }
-    }"#;
-
-    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
-
-    assert_bash_denial_mentions(outcome, "state_bash_write");
-}
-
-#[test]
-fn pre_tool_use_denies_read_only_bash_sandbox_with_repo_writable_root() {
+fn pre_tool_use_denies_raw_bash_even_with_legacy_repo_writable_root_metadata() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -1024,57 +760,17 @@ fn pre_tool_use_denies_read_only_bash_sandbox_with_repo_writable_root() {
         "network_access": false
       },
       "tool_input": {
-        "command": "rg --no-config auth src | head"
+        "command": "rg auth src | head"
       }
     }"#;
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert!(matches!(outcome, HookOutcome::Deny { .. }));
-    let json = outcome
-        .to_stdout_json()
-        .expect("deny outcome should serialize");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("reason should be string")
-            .contains("outside the trusted tmp writable roots")
-    );
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_read_only_bash_sandbox_with_tmpdir_parent_escape() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
-      "sandbox": {
-        "mode": "read-only",
-        "writable_roots": ["$TMPDIR/../../../../Users/arthur/Code/stateful_core"],
-        "network_access": false
-      },
-      "tool_input": {
-        "command": "rg --no-config auth src | head"
-      }
-    }"#;
-
-    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
-
-    assert!(matches!(outcome, HookOutcome::Deny { .. }));
-    let json = outcome
-        .to_stdout_json()
-        .expect("deny outcome should serialize");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("reason should be string")
-            .contains("outside the trusted tmp writable roots")
-    );
-}
-
-#[test]
-fn pre_tool_use_denies_read_only_bash_sandbox_with_network_access() {
+fn pre_tool_use_denies_raw_bash_even_with_legacy_network_access_metadata() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -1086,26 +782,17 @@ fn pre_tool_use_denies_read_only_bash_sandbox_with_network_access() {
         "network_access": true
       },
       "tool_input": {
-        "command": "rg --no-config auth src | head"
+        "command": "rg auth src | head"
       }
     }"#;
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert!(matches!(outcome, HookOutcome::Deny { .. }));
-    let json = outcome
-        .to_stdout_json()
-        .expect("deny outcome should serialize");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("reason should be string")
-            .contains("network access")
-    );
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_read_only_bash_sandbox_without_explicit_network_disabled() {
+fn pre_tool_use_denies_raw_bash_even_with_incomplete_legacy_network_metadata() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -1116,26 +803,17 @@ fn pre_tool_use_denies_read_only_bash_sandbox_without_explicit_network_disabled(
         "writable_roots": ["/tmp"]
       },
       "tool_input": {
-        "command": "rg --no-config auth src | head"
+        "command": "rg auth src | head"
       }
     }"#;
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert!(matches!(outcome, HookOutcome::Deny { .. }));
-    let json = outcome
-        .to_stdout_json()
-        .expect("deny outcome should serialize");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("reason should be string")
-            .contains("network access")
-    );
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_known_mutating_command_in_read_only_bash_sandbox() {
+fn pre_tool_use_denies_raw_mutating_command_even_with_legacy_read_only_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -1153,11 +831,11 @@ fn pre_tool_use_denies_known_mutating_command_in_read_only_bash_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "state_bash_write");
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_stateful_control_command_in_read_only_bash_sandbox() {
+fn pre_tool_use_denies_raw_stateful_control_command_even_with_legacy_read_only_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -1175,11 +853,11 @@ fn pre_tool_use_denies_stateful_control_command_in_read_only_bash_sandbox() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "state_bash_write");
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
-fn pre_tool_use_denies_arbitrary_write_syntax_in_read_only_network_disabled_sandbox() {
+fn pre_tool_use_denies_arbitrary_raw_bash_even_with_legacy_read_only_sandbox() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -1197,7 +875,7 @@ fn pre_tool_use_denies_arbitrary_write_syntax_in_read_only_network_disabled_sand
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "state_bash_write");
+    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
 }
 
 #[test]
@@ -1502,60 +1180,6 @@ fn pre_tool_use_apply_patch_patch_field_authorizes_every_file_target() {
 }
 
 #[test]
-fn pre_tool_use_apply_patch_move_to_posts_move_file_with_destination() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-move-target-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    let paths = GlobalPaths::new(temp_root.join("home"));
-    let repo_root = temp_root.join("repo");
-    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
-    enable_test_repo(&paths, &repo_root);
-    let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Move destination is outside active intent scope.","required_next_action":"Declare destination intent."}"#,
-    );
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let input = serde_json::json!({
-        "session_id": "s1",
-        "cwd": repo_root,
-        "hook_event_name": "PreToolUse",
-        "tool_name": "apply_patch",
-        "tool_input": {
-            "patch": "*** Begin Patch\n*** Update File: src/old.rs\n*** Move to: dest/new.rs\n@@\n base\n*** End Patch\n"
-        }
-    })
-    .to_string();
-
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
-
-    assert!(
-        output.status.success(),
-        "stateful hook failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("authorize request should arrive");
-    let body = request_json_body(&request);
-    assert_eq!(body["payload"]["action"], "move_file");
-    assert_eq!(body["payload"]["old_path"], "src/old.rs");
-    assert_eq!(body["payload"]["new_path"], "dest/new.rs");
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
-    assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
-    assert_eq!(
-        json["hookSpecificOutput"]["permissionDecisionReason"],
-        "Declare destination intent."
-    );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[test]
 fn pre_tool_use_apply_patch_raw_string_payload_posts_authorize() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-raw-patch-test-{}",
@@ -1842,7 +1466,7 @@ fn post_tool_use_posts_session_heartbeat() {
       "session_id": "s1",
       "hook_event_name": "PostToolUse",
       "tool_name": "Bash",
-      "tool_input": {"command": "rg --no-config auth src"}
+      "tool_input": {"command": "rg auth src"}
     }"#;
 
     let output = run_hook_subprocess(&repo_root, &paths, &["hook", "post-tool-use"], input);
@@ -1861,47 +1485,6 @@ fn post_tool_use_posts_session_heartbeat() {
 }
 
 #[test]
-fn post_tool_use_queues_heartbeat_when_existing_outbox_has_malformed_line() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-malformed-outbox-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    let paths = GlobalPaths::new(temp_root.join("home"));
-    let repo_root = temp_root.join("repo");
-    fs::create_dir_all(repo_root.join(".stateful_core/outbox"))
-        .expect("outbox dir should be creatable");
-    enable_test_repo(&paths, &repo_root);
-    let runtime = spawn_fake_stateful_server_health_then_drop();
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    let outbox_file = repo_root.join(".stateful_core/outbox/s1.jsonl");
-    fs::write(&outbox_file, "not-json\n").expect("malformed outbox line should write");
-
-    let input = r#"{
-      "session_id": "s1",
-      "hook_event_name": "PostToolUse",
-      "tool_name": "Bash",
-      "tool_input": {"command": "rg --no-config auth src"}
-    }"#;
-
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "post-tool-use"], input);
-    assert!(
-        output.status.success(),
-        "stateful hook failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let queued = fs::read_to_string(&outbox_file).expect("outbox file should read");
-    assert!(queued.contains("not-json"));
-    assert!(queued.contains(r#""event_type":"SessionHeartbeatQueued""#));
-    assert!(queued.contains(r#""sequence":1"#));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[test]
 fn post_tool_use_in_disabled_repo_noops_without_outbox() {
     let temp_root =
         std::env::temp_dir().join(format!("stateful-hook-outbox-test-{}", std::process::id()));
@@ -1914,7 +1497,7 @@ fn post_tool_use_in_disabled_repo_noops_without_outbox() {
       "session_id": "s1",
       "hook_event_name": "PostToolUse",
       "tool_name": "Bash",
-      "tool_input": {"command": "rg --no-config auth src"}
+      "tool_input": {"command": "rg auth src"}
     }"#;
 
     handle_post_tool_use_in_repo(input, &temp_root).expect("disabled repo should no-op");
@@ -1954,6 +1537,9 @@ fn user_prompt_submit_posts_context_render() {
     );
     let rendered = String::from_utf8(output.stdout).expect("prompt output should be utf8");
     assert!(rendered.contains("Nearby Activity"));
+    assert!(rendered.contains("Before using Bash"));
+    assert!(rendered.contains("stateful-command-policy"));
+    assert!(rendered.contains("--fs read-only --network disabled"));
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/context/render HTTP/1.1"));
     assert!(request.contains("\"mode\":\"brief\""));
@@ -2039,24 +1625,6 @@ fn spawn_fake_stateful_server(
     actual_response: &'static str,
 ) -> (ServerRuntime, mpsc::Receiver<String>) {
     spawn_fake_stateful_server_sequence(vec![actual_response])
-}
-
-fn spawn_fake_stateful_server_health_then_drop() -> ServerRuntime {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let addr = listener.local_addr().expect("listener addr should load");
-    thread::spawn(move || {
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().expect("connection should arrive");
-            let request = read_http_request_maybe_body(&mut stream);
-            if request.contains("GET /health HTTP/1.1") {
-                write_json_response(&mut stream, r#"{"status":"ok"}"#);
-            } else if request.contains("GET /v1/current HTTP/1.1") {
-                write_json_response(&mut stream, r#"{"status":"ok","current":{}}"#);
-            }
-        }
-    });
-
-    ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42)
 }
 
 fn spawn_fake_stateful_server_sequence(

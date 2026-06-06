@@ -17,8 +17,9 @@ Codex hooks observe and gate important agent actions. MCP tools give agents a
 structured way to read and update coordination state. The state server owns
 policy, persistence, TTLs, and conflict checks.
 
-The v1 MVP includes controlled validation profiles and human-write
-reconciliation through `state.reconcile.ack`.
+The v1 MVP includes controlled validation through
+`state_validation_run` / `state.validation.run` and human-write reconciliation
+through `state.reconcile.ack`.
 
 V1 is local-only. It coordinates sessions, agents, subagents, and local human
 activity inside one machine/workspace boundary. Team-shared, cross-machine, or
@@ -179,8 +180,12 @@ valid intent scope. They still record activity and leases with their own
 `PreToolUse`:
 
 - deny supported write calls when the session has no active intent
-- deny Bash commands unless the top-level tool payload supplies read-only
-  sandbox metadata with network disabled
+- deny raw Bash and allow Bash only when the outer command is a single strict
+  invocation of the trusted absolute `stateful` binary running
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
+  command-shaped inspection uses `--fs read-only --network disabled`;
+  command-shaped writes use `--fs write-targets` with explicit write/create
+  targets.
 - check leases and planned edits for likely conflicts
 - return allow, warning context, or deny based on policy
 
@@ -206,42 +211,58 @@ state.session.heartbeat
 state.intent.declare
 state.lease.acquire
 state.lease.release
+state.activity.observe
+state.activity.finalize
 state.conflicts.check
+state.current.read
+state.events.read
+state.context.render
 state.reconcile.ack
-state.bash.write
+state_validation_run / state.validation.run
+state_file_write / state.file.write
 state.notifications.poll
 state.resume.next
 ```
 
 Hooks and MCP tools should call the same state server API. Policy must live in
-the state server, not in duplicated hook scripts.
+the state server, not in duplicated hook scripts. `state_file_write` /
+`state.file.write` is the structured repo file write path; command-shaped shell
+writes remain outside MCP and go through the sandbox-run wrapper.
 
 ## Tool Classification
 
 V1 enforcement is strict about write target extraction:
 
-- `state_bash_write` / `state.bash.write`: enforce explicit write targets
-  before running write-capable shell commands.
+- `state_file_write` / `state.file.write`: enforce using structured file
+  arguments before writing.
 - Native Codex edit tools such as `apply_patch`, `Edit`, and `Write`: hook
   targets can be inspected when the runtime exposes them, but the
   `stateful codex` read-only tmp profile does not make them the normal repo
   write path.
-- Bash commands: deny unless the top-level Bash tool payload includes
-  structured read-only sandbox metadata, network access is explicitly disabled,
-  and writable roots are absent or limited to trusted tmp roots.
-- Test execution: use `state_bash_write` when outputs can be constrained to
-  explicit targets, or configured validation profiles outside Codex hooks.
+- Bash commands: deny raw Bash. Hook-mediated Bash is allowed only when the
+  outer command is a single strict invocation of the trusted absolute `stateful`
+  binary running `<absolute-stateful-binary> sandbox run ... --command <cmd>`.
+  Read-only command-shaped inspection uses `--fs read-only --network disabled`;
+  command-shaped writes use `--fs write-targets` with explicit
+  `--write-target` / `--create-target` values and target authorization.
+- Test execution: run only through controlled validation actions such as
+  `state_validation_run` / `state.validation.run` in Codex sessions, or
+  `stateful validate <profile>` outside hook-mediated Bash.
 - Bash command text alone never authorizes tool use, even when it appears
   read-only.
 
-Denied Bash should direct the agent to use a structured Bash tool call with
-read-only sandbox metadata for inspection, or `state_bash_write` for writes.
+Denied Bash should direct the agent to the wrapper for command-shaped shell
+execution, `state_file_write` / `state.file.write` for structured repo file
+writes, and validation profiles for tests.
 
-The Bash classifier is a deny-by-default diagnostic. It no longer has command
-allowlists for `rg`, `git diff`, test runners, or stateful operational
-commands. Arbitrary or project-specific test commands should run through
-validation profiles owned by the state server so source-tree writes can be
-denied while cache or artifact writes can be controlled.
+MCP does not perform local command-shaped file writes. Hook-mediated shell
+execution uses `<absolute-stateful-binary> sandbox run ... --command <cmd>`;
+plain CLI-context usage outside hooks can use `stateful sandbox run`. The MVP
+ships `read-only` and `write-targets` profiles; `git-metadata` and `workspace`
+profiles are deferred and fail closed. `/dev/null` is writable in every sandbox
+profile so common shell and Git behavior works. Command text alone does not
+authorize `rg`, `git diff`, test runners, stateful operational commands, or any
+other Bash command.
 
 ## Validation Profiles
 
@@ -250,7 +271,7 @@ Validation profiles live at `.stateful/validation.yml`.
 Agents cannot supply arbitrary test commands. They call:
 
 ```text
-stateful validate <profile>
+state_validation_run(profile) / state.validation.run(profile)
 ```
 
 The state server loads the named profile and executes its configured command.
@@ -280,9 +301,9 @@ validation command starts, every path matching `denied_writes` must be clean in
 command, any newly dirty path matching `denied_writes` returns `failed_policy`.
 Paths matching `allowed_writes` are ignored for policy failure.
 
-Validation profile concurrency is controlled by `exclusive`. Concurrent runs of
-the same exclusive profile are denied. Concurrent runs of non-exclusive profiles
-warn only.
+The current runner parses `exclusive`, but does not yet enforce a validation
+concurrency lock. Future policy should use `exclusive` to deny concurrent runs
+of the same profile and warn for concurrent non-exclusive runs.
 
 ## State Server
 
@@ -420,8 +441,9 @@ Initial policy:
 - unrelated reads and searches: allow
 - reads, searches, diffs, and controlled validation after human writes: allow
 - tests: allow only through controlled validation actions
-- same non-exclusive validation profile active elsewhere: warn
-- same exclusive validation profile active elsewhere: deny
+- same validation profile active elsewhere: no current hard block; future
+  exclusive-profile locking should deny exclusive conflicts and warn for
+  non-exclusive conflicts
 - task, port, or migration resource conflict: warn or info only in v1
 
 Conflict decisions must be auditable. Overrides are never automatic. They are
@@ -454,8 +476,8 @@ Stale/Expired
 Raw event logs should not be dumped into prompts. The rendered view should help
 the agent decide what to avoid, wait for, or coordinate.
 
-The `/v1/context/render` endpoint supports `brief` and `detailed` modes plus an
-optional resource filter. `brief` is for session start and prompt submit context.
+`state.context.render` supports `brief` and `detailed` modes plus an optional
+resource filter. `brief` is for session start and prompt submit context.
 `detailed` is for denied actions or focused resource checks. Rendered output
 must include concrete next actions when a block or warning is present.
 
@@ -498,8 +520,10 @@ The system should prefer explicit uncertainty:
 - hook failure -> warn and fail closed only for high-risk writes
 - state server unavailable -> deny supported writes that cannot prove active
   intent
-- state server unavailable -> deny Bash without structured top-level read-only
-  sandbox metadata
+- state server unavailable -> deny raw Bash and any Bash call that is not a
+  strict `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper;
+  command-shaped writes through `--fs write-targets` fail closed when target
+  authorization cannot be proven
 - state server unavailable -> return `error: state_unavailable` for controlled
   validation and do not run the validation command
 - state server unavailable -> fail closed for `state.reconcile.ack`, intent

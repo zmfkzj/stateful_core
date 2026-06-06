@@ -41,13 +41,18 @@ Official validation execution paths are:
 
 ```text
 stateful validate <profile>
+state_validation_run / state.validation.run
 POST /v1/validation/run
 ```
 
-Raw Bash commands are not a write-authorizing or validation execution path. The
-hardening target is to deny Bash unless the tool payload carries structured
-read-only sandbox metadata with network disabled, and to tell the user to run
-named validation profiles for tests instead.
+Raw Bash commands are not a write-authorizing or validation execution path. This
+scope decision originally targeted a constrained read-only hook path and named
+validation profiles for tests. The current implementation supersedes that
+target: raw Bash is denied by stateful hooks, and hook-mediated Bash must be a
+single strict invocation of the trusted absolute `stateful` binary running
+`<absolute-stateful-binary> sandbox run ... --command <cmd>`. Validation uses
+`state_validation_run` / `state.validation.run` in Codex sessions, or
+`stateful validate <profile>` outside hook-mediated Bash.
 
 Validation policy semantics:
 

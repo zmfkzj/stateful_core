@@ -141,14 +141,19 @@ validation_profile
 override_instruction
 ```
 
-`state.bash.write` maps explicit write targets to `write_file` authorization
-checks before running a sandboxed command. Native Codex edit tools such as
-`apply_patch`, `Edit`, and `Write` may expose targets to hooks, but the
-`stateful codex` read-only tmp profile does not rely on them as the normal repo
-write path. For Bash, command text alone never authorizes tool use. The hook
-allows Bash only when the top-level tool payload supplies structured read-only
-sandbox metadata, network access is explicitly disabled, and writable roots are
-absent or limited to trusted tmp roots.
+`state.file.write` maps to `write_file` and supplies the target path through
+structured tool arguments before calling `/v1/authorize`. Native Codex edit
+tools such as `apply_patch`, `Edit`, and `Write` may expose targets to hooks,
+but the `stateful codex` read-only tmp profile does not rely on them as the
+normal repo write path. For Bash, command text alone never authorizes tool use.
+Raw Bash is denied by stateful hooks. Bash hook calls are allowed only when the
+outer command is a single strict invocation of the trusted absolute `stateful`
+binary running `<absolute-stateful-binary> sandbox run ... --command <cmd>`.
+Read-only command-shaped inspection uses `<absolute-stateful-binary> sandbox run
+--fs read-only --network disabled --command <cmd>`. Command-shaped writes use
+`--fs write-targets` with explicit `--write-target` / `--create-target` values
+and target authorization. Structured repo file writes use
+`state_file_write` / `state.file.write` after intent.
 
 ## Decision Output
 
@@ -460,7 +465,7 @@ V1 must have tests for:
 - intent scope matching, including depth-2 directory behavior
 - exact file scope for delete, rename, and move
 - Bash full-deny classification and sandbox-gated hook authorization
-- `state_bash_write` authorization plus Bash and native Codex edit hook fixtures
+- `state_file_write` authorization plus Bash and native Codex edit hook fixtures
 - prompt renderer golden output for brief and detailed modes
 - SQLite event append plus materialized-view transaction behavior
 - validation profile execution in a temporary git worktree
