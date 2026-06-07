@@ -15,7 +15,7 @@ use policy_service::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stateful_core::{ContextPackage, ReconciliationDecision, RenderMode, render_prompt_text};
-use stateful_store::{Event, OutboxEntry, Store, WaitRecord};
+use stateful_store::{Event, OutboxEntry, Store, StoreError, WaitRecord};
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
@@ -312,6 +312,10 @@ async fn intent_declare(
         Ok(purpose) => purpose,
         Err(response) => return response,
     };
+    let files_planned = match require_files_planned(payload.files_planned) {
+        Ok(files_planned) => files_planned,
+        Err(response) => return response,
+    };
     let identity = WorkspaceIdentityRequest {
         repo_id: non_empty_identity(envelope.request.workspace.repo_id),
         worktree_id: non_empty_identity(envelope.request.workspace.worktree_id),
@@ -326,7 +330,7 @@ async fn intent_declare(
                 envelope.request.session.session_id,
                 envelope.request.workspace.workspace_id,
                 purpose,
-                payload.files_planned,
+                files_planned,
             ),
             identity,
         ),
@@ -354,13 +358,17 @@ async fn intent_request(
         Ok(purpose) => purpose,
         Err(response) => return response,
     };
+    let path = match require_scope_path(payload.path) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
 
     let input = RequestIntentInput {
         session_id: envelope.request.session.session_id,
         workspace_id: envelope.request.workspace.workspace_id,
         request_id: payload.request_id,
         action: payload.action,
-        path: payload.path,
+        path,
         purpose,
     };
 
@@ -466,6 +474,75 @@ fn missing_purpose_response() -> (StatusCode, Json<Value>) {
     )
 }
 
+fn missing_intent_response() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "status": "error",
+            "reason_code": "missing_intent",
+            "message": "Lease acquisition requires an active intent covering the requested path."
+        })),
+    )
+}
+
+fn lease_conflict_response() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "status": "error",
+            "reason_code": "lease_conflict",
+            "message": "Requested lease conflicts with an active lease or reserved request."
+        })),
+    )
+}
+
+fn missing_scope_response() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "status": "error",
+            "reason_code": "missing_scope",
+            "message": "Intent scope paths must be non-empty after normalization."
+        })),
+    )
+}
+
+fn require_files_planned(
+    files_planned: Vec<String>,
+) -> Result<Vec<String>, (StatusCode, Json<Value>)> {
+    if files_planned.is_empty()
+        || files_planned
+            .iter()
+            .any(|path| normalized_scope_is_empty(path))
+    {
+        return Err(missing_scope_response());
+    }
+    Ok(files_planned)
+}
+
+fn normalized_scope_is_empty(path: &str) -> bool {
+    let normalized = path.trim().replace(char::from(92), "/");
+    let mut segments = Vec::new();
+    for segment in normalized.split(char::from(47)) {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            segments.pop();
+        } else {
+            segments.push(segment);
+        }
+    }
+    segments.is_empty()
+}
+
+fn require_scope_path(path: String) -> Result<String, (StatusCode, Json<Value>)> {
+    if normalized_scope_is_empty(&path) {
+        return Err(missing_scope_response());
+    }
+    Ok(path)
+}
+
 fn require_purpose(purpose: String) -> Result<String, (StatusCode, Json<Value>)> {
     let purpose = purpose.trim().to_string();
     if purpose.is_empty() {
@@ -483,17 +560,18 @@ async fn lease_acquire(
         return unauthorized();
     }
 
-    let result = config
-        .store
-        .lock()
-        .map_err(|_| "store lock poisoned".to_string())
-        .and_then(|store| {
-            store
-                .acquire_lease(input.session_id, input.workspace_id, input.path)
-                .map_err(|error| error.to_string())
-        });
+    let result = match config.store.lock() {
+        Ok(store) => store.acquire_lease(input.session_id, input.workspace_id, input.path),
+        Err(_) => return status_response(Err("store lock poisoned".to_string())),
+    };
 
-    status_response(result)
+    match result {
+        Ok(()) => status_response(Ok(())),
+        Err(StoreError::MissingPurpose) => missing_purpose_response(),
+        Err(StoreError::MissingIntent) => missing_intent_response(),
+        Err(StoreError::LeaseConflict) => lease_conflict_response(),
+        Err(error) => status_response(Err(error.to_string())),
+    }
 }
 
 async fn lease_release(

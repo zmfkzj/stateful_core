@@ -1,5 +1,7 @@
 # V1 Hardening Prototype Design
 
+> Public documentation note: this is a historical implementation record kept for traceability, not current user-facing guidance. See `README.md` and the top-level `docs/` contract documents for current behavior.
+
 > Historical note: validation profile references in this design are obsolete. Current test/build execution uses `stateful sandbox run --fs write-targets` with explicit write targets or `--write-dir target`.
 
 ## Summary

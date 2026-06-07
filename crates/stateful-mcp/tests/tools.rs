@@ -166,10 +166,41 @@ fn intent_declare_descriptor_exposes_required_input_schema() {
         "string"
     );
     assert_eq!(
+        tool.input_schema["properties"]["files_planned"]["items"]["minLength"],
+        1
+    );
+    assert_eq!(
+        tool.input_schema["properties"]["files_planned"]["minItems"],
+        1
+    );
+    assert_eq!(
         tool.input_schema["required"],
         serde_json::json!(["purpose", "files_planned"])
     );
     assert_eq!(tool.input_schema["additionalProperties"], false);
+}
+
+#[test]
+fn reconcile_ack_descriptor_does_not_require_non_empty_files_reread() {
+    let tools = tool_descriptors();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == "state_reconcile_ack")
+        .expect("reconcile tool descriptor should exist");
+
+    assert_eq!(
+        tool.input_schema["properties"]["files_reread"]["type"],
+        "array"
+    );
+    assert_eq!(
+        tool.input_schema["properties"]["files_reread"]["items"]["type"],
+        "string"
+    );
+    assert!(
+        tool.input_schema["properties"]["files_reread"]
+            .get("minItems")
+            .is_none()
+    );
 }
 
 #[test]
@@ -215,6 +246,7 @@ fn intent_request_descriptor_exposes_required_input_schema() {
         serde_json::json!(["write_file", "write_directory"])
     );
     assert_eq!(tool.input_schema["properties"]["path"]["type"], "string");
+    assert_eq!(tool.input_schema["properties"]["path"]["minLength"], 1);
     assert_eq!(tool.input_schema["properties"]["purpose"]["type"], "string");
     assert_eq!(tool.input_schema["properties"]["purpose"]["minLength"], 1);
     assert_eq!(

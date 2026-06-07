@@ -490,6 +490,23 @@ fn mcp_tools_list_returns_stateful_tool_descriptors() {
         intent_tool["inputSchema"]["properties"]["files_planned"]["items"]["type"],
         "string"
     );
+    assert_eq!(
+        intent_tool["inputSchema"]["properties"]["files_planned"]["minItems"],
+        1
+    );
+    let reconcile_tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "state_reconcile_ack")
+        .expect("reconcile tool should be listed");
+    assert_eq!(
+        reconcile_tool["inputSchema"]["properties"]["files_reread"]["items"]["type"],
+        "string"
+    );
+    assert!(
+        reconcile_tool["inputSchema"]["properties"]["files_reread"]
+            .get("minItems")
+            .is_none()
+    );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

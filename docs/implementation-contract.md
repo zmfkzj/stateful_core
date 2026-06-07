@@ -132,7 +132,10 @@ server result.
 
 Current envelope enforcement is limited to `/v1/authorize` and
 `/v1/intent/declare`, `/v1/intent/request`, `/v1/intent/claim`, and
-`/v1/intent/cancel`.
+`/v1/intent/cancel`. Intent declare requires non-empty `purpose` and non-empty
+`files_planned`; empty arrays and empty or normalized-empty paths fail with
+`missing_scope`. Intent request requires non-empty `purpose` and a non-empty
+`path`; empty or normalized-empty request paths fail with `missing_scope`.
 
 ## Authorization Input
 
@@ -169,7 +172,9 @@ and target authorization.
 
 ## Decision Output
 
-All policy decisions use the same shape:
+Policy decisions use a common core shape. Endpoints may add scheduling fields
+such as `wait`, `reservation`, `current`, `items`, or `prompt_text`, and shipped
+responses may omit arrays that do not apply instead of returning empty arrays:
 
 ```text
 decision: allow | warn | deny | error
@@ -187,14 +192,14 @@ runtime allows it. `error` is used for state-server, protocol, or sandbox
 execution failures; write and reconciliation paths treat `error` as fail-closed.
 
 For scheduling APIs, a hard conflict decision may produce a queued intent
-request instead of an immediate write-authorizing grant. V1 queues only hard
+request instead of an immediate reservation. V1 queues only hard
 conflicts in the same `workspace_id` and normalized `absolute_path`. Soft
 repo-relative conflicts remain warning context because they signal future
 integration risk rather than immediate physical file overwrite.
 
-Queued requests are promoted FIFO. A request is grantable only when all requested
-resources are available. The server must not partially grant a multi-resource
-request. Promotion is triggered by explicit lease release, session or activity
+Queued requests are promoted FIFO. A request is reservable only when all
+requested resources are available. The server must not partially reserve a
+multi-resource request. Promotion is triggered by explicit lease release, session or activity
 finalization, or lease expiry. Promotion creates a short reservation and a
 pending notification for the waiting session.
 
@@ -205,7 +210,7 @@ Only that claim creates write-authorizing intent and active same-session leases.
 The default reservation TTL is 120 seconds; the default lease TTL is 300 seconds
 and is refreshed by heartbeat.
 
-For multi-resource requests, the request is grantable only when it is the head
+For multi-resource requests, the request is reservable only when it is the head
 entry for every requested resource queue and none of those resources has an
 active lease. `request_id` is the idempotency key: repeating a request with the
 same id returns the existing state and must not enqueue a duplicate.
@@ -272,6 +277,10 @@ conflicts(session_id, checked_at)
 reconciliations(session_id, created_at)
 outbox(session_id, sequence, sync_status)
 ```
+
+`SessionHeartbeat` materialization refreshes the session timestamp, active lease
+expiry, active activity expiry, and active intent expiry. Intent refresh is
+capped at 60 minutes from `declared_at`.
 
 Expiration may run in a background loop and may also be triggered lazily by
 reads. Lazy expiration must be transactionally equivalent to background
@@ -480,6 +489,8 @@ Implemented v1 behavior must have tests for:
 - Bash full-deny classification and sandbox-gated hook authorization
 - native Codex edit hook authorization plus Bash sandbox fixtures
 - prompt renderer golden output for shipped store-backed rendering
+- heartbeat refresh of active leases, activities, and capped active intent TTL
+- missing purpose and empty `files_planned` rejection
 - SQLite event append plus materialized-view transaction behavior
 - sandbox-run execution with artifact writes limited to an authorized directory
 - state-server unavailable behavior

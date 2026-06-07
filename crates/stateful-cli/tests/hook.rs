@@ -185,6 +185,57 @@ fn pre_tool_use_allows_external_run_approve_and_run() {
 }
 
 #[test]
+fn pre_tool_use_allows_trusted_stateful_commit_and_push_wrappers() {
+    let stateful = trusted_stateful_path();
+    let cases = [
+        format!("{stateful} commit -m docs-update -- README.md"),
+        format!("{stateful} push origin dev"),
+    ];
+
+    for command in cases {
+        let input = serde_json::json!({
+            "session_id": "s1",
+            "cwd": "/repo",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": command
+            }
+        })
+        .to_string();
+
+        let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+        assert_eq!(outcome, HookOutcome::Allow);
+    }
+}
+
+#[test]
+fn pre_tool_use_allows_trusted_stateful_server_control() {
+    let stateful = trusted_stateful_path();
+    let cases = [
+        format!("{stateful} server stop"),
+        format!("{stateful} server start"),
+    ];
+
+    for command in cases {
+        let input = serde_json::json!({
+            "session_id": "s1",
+            "cwd": "/repo",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": command
+            }
+        })
+        .to_string();
+
+        let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+        assert_eq!(outcome, HookOutcome::Allow);
+    }
+}
+#[test]
 fn pre_tool_use_denies_external_run_with_outer_command_separator() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
@@ -1143,6 +1194,54 @@ fn run_hook_uses_payload_cwd_for_repo_gate() {
 }
 
 #[test]
+fn pre_tool_use_apply_patch_omits_queue_without_matching_current_intent_purpose() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-no-purpose-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence_with_current(
+        vec![
+            r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        ],
+        Some(r#"{"status":"ok","current":{},"items":[]}"#),
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "apply_patch",
+      "tool_input": {
+        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
+      }
+    }"#;
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx.recv().expect("captured request should arrive");
+    let body = request_json_body(&request);
+    assert_eq!(body["payload"]["action"], "write_file");
+    assert_eq!(body["payload"]["path"], "src/auth.ts");
+    assert!(body["payload"].get("purpose").is_none());
+    assert!(body["payload"].get("queue_on_conflict").is_none());
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     let temp_root = std::env::temp_dir().join(format!("stateful-hook-test-{}", std::process::id()));
     if temp_root.exists() {
@@ -1186,6 +1285,7 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     assert_eq!(body["payload"]["action"], "write_file");
     assert_eq!(body["payload"]["path"], "src/auth.ts");
     assert_eq!(body["payload"]["queue_on_conflict"], true);
+    assert_eq!(body["payload"]["purpose"], "Fix auth validation behavior.");
     assert!(body.get("action").is_none());
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -1290,6 +1390,8 @@ fn pre_tool_use_apply_patch_move_authorizes_source_and_destination() {
     assert!(request.contains("\"path\":\"old.txt\""));
     assert!(request.contains("\"old_path\":\"old.txt\""));
     assert!(request.contains("\"new_path\":\"new.txt\""));
+    let body = request_json_body(&request);
+    assert_eq!(body["payload"]["purpose"], "Fix auth validation behavior.");
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
     assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
@@ -1744,6 +1846,26 @@ fn enable_test_repo(paths: &GlobalPaths, repo_root: &std::path::Path) {
     enable_repo(paths, repo_root, false).expect("repo should enable");
 }
 
+fn fake_current_response(request: &str) -> String {
+    let resource = request
+        .strip_prefix("GET /v1/current?resource=")
+        .and_then(|rest| rest.split_once(" HTTP/1.1").map(|(resource, _)| resource))
+        .unwrap_or("src/auth.ts");
+    serde_json::json!({
+        "status": "ok",
+        "current": {},
+        "items": [{
+            "kind": "intent",
+            "freshness": "live",
+            "resource": resource,
+            "purpose": "Fix auth validation behavior.",
+            "session_id": "s1",
+            "workspace_id": "w1"
+        }]
+    })
+    .to_string()
+}
+
 fn spawn_fake_stateful_server(
     actual_response: &'static str,
 ) -> (ServerRuntime, mpsc::Receiver<String>) {
@@ -1752,6 +1874,13 @@ fn spawn_fake_stateful_server(
 
 fn spawn_fake_stateful_server_sequence(
     actual_responses: Vec<&'static str>,
+) -> (ServerRuntime, mpsc::Receiver<String>) {
+    spawn_fake_stateful_server_sequence_with_current(actual_responses, None)
+}
+
+fn spawn_fake_stateful_server_sequence_with_current(
+    actual_responses: Vec<&'static str>,
+    current_response: Option<&'static str>,
 ) -> (ServerRuntime, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -1763,8 +1892,11 @@ fn spawn_fake_stateful_server_sequence(
             let request = read_http_request_maybe_body(&mut stream);
             if request.contains("GET /health HTTP/1.1") {
                 write_json_response(&mut stream, r#"{"status":"ok"}"#);
-            } else if request.contains("GET /v1/current HTTP/1.1") {
-                write_json_response(&mut stream, r#"{"status":"ok","current":{}}"#);
+            } else if request.starts_with("GET /v1/current") {
+                let response = current_response
+                    .map(str::to_string)
+                    .unwrap_or_else(|| fake_current_response(&request));
+                write_json_response(&mut stream, &response);
             } else if request.contains("GET /v1/runtime/identity HTTP/1.1") {
                 write_json_response(
                     &mut stream,

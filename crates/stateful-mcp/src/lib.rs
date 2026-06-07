@@ -156,7 +156,7 @@ fn input_schema_for(protocol_name: &str) -> Value {
                         "Required purpose inferred from the user or agent instruction when it is not explicit.",
                     ),
                 ),
-                ("files_planned", string_array_schema()),
+                ("files_planned", non_empty_string_array_schema()),
             ],
             ["purpose", "files_planned"],
         ),
@@ -172,7 +172,7 @@ fn input_schema_for(protocol_name: &str) -> Value {
                         "enum": ["write_file", "write_directory"]
                     }),
                 ),
-                ("path", string_schema()),
+                ("path", non_empty_string_schema()),
                 (
                     "purpose",
                     string_schema_with_description(
@@ -308,10 +308,22 @@ fn string_schema_with_description(description: &str) -> Value {
     })
 }
 
+fn non_empty_string_schema() -> Value {
+    serde_json::json!({ "type": "string", "minLength": 1 })
+}
+
 fn string_array_schema() -> Value {
     serde_json::json!({
         "type": "array",
         "items": { "type": "string" }
+    })
+}
+
+fn non_empty_string_array_schema() -> Value {
+    serde_json::json!({
+        "type": "array",
+        "minItems": 1,
+        "items": { "type": "string", "minLength": 1 }
     })
 }
 

@@ -1,5 +1,7 @@
 # Stateful Sandbox Run Design
 
+> Public documentation note: this is a historical implementation record kept for traceability, not current user-facing guidance. See `README.md` and the top-level `docs/` contract documents for current behavior.
+
 ## Context
 
 `stateful_core` is moving toward a centralized state server for intent,

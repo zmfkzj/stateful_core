@@ -85,7 +85,8 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(!command_policy_skill.contains("stateful validate cargo-test"));
     assert!(!command_policy_skill.contains("state_validation_run"));
     assert!(command_policy_skill.contains("`/dev/null` is writable inside the sandbox"));
-    assert!(command_policy_skill.contains("macOS and Linux"));
+    assert!(command_policy_skill.contains("macOS-first"));
+    assert!(command_policy_skill.contains("Linux bubblewrap support"));
 
     assert!(!temp_root.join(".stateful/validation.yml").exists());
 

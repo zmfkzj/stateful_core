@@ -224,6 +224,7 @@ pub enum IntentCommand {
         workspace_id: Option<String>,
         #[arg(long)]
         purpose: String,
+        #[arg(required = true, num_args = 1..)]
         files_planned: Vec<String>,
     },
     Request {

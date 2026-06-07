@@ -9,9 +9,9 @@ use serde_json::json;
 use crate::outbox::queue_session_heartbeat_outbox;
 use crate::{
     CurrentSession, GlobalPaths, HookCommand, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
-    ServerRuntime, discover_runtime_with_global, ensure_server, post_json, protocol_envelope,
-    repo_gate, repo_identity_for_enabled_repo, runtime_env_override_is_configured,
-    write_current_session_file,
+    ServerRuntime, discover_runtime_with_global, ensure_server, get_json, post_json,
+    protocol_envelope, repo_gate, repo_identity_for_enabled_repo,
+    runtime_env_override_is_configured, write_current_session_file,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +33,11 @@ struct SandboxRunInvocation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StatefulExternalRunInvocation {
+    executable: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatefulControlInvocation {
     executable: String,
 }
 
@@ -375,6 +380,11 @@ fn authorize_bash(input: &PreToolUseInput) -> anyhow::Result<HookOutcome> {
         return Ok(external);
     }
 
+    let control = authorize_stateful_control_bash(command);
+    if control == HookOutcome::Allow || command_mentions_stateful_control(command) {
+        return Ok(control);
+    }
+
     Ok(sandbox)
 }
 
@@ -431,6 +441,21 @@ fn authorize_external_run_bash(command: &str) -> HookOutcome {
     if !is_trusted_stateful_executable(&invocation.executable) {
         return bash_policy_deny(
             "stateful external-run requires the trusted absolute stateful binary",
+        );
+    }
+
+    HookOutcome::Allow
+}
+
+fn authorize_stateful_control_bash(command: &str) -> HookOutcome {
+    let invocation = match parse_stateful_control_invocation(command) {
+        Ok(invocation) => invocation,
+        Err(reason) => return bash_policy_deny(reason),
+    };
+
+    if !is_trusted_stateful_executable(&invocation.executable) {
+        return bash_policy_deny(
+            "stateful control commands require the trusted absolute stateful binary",
         );
     }
 
@@ -577,6 +602,38 @@ fn parse_external_run_invocation(command: &str) -> Result<StatefulExternalRunInv
     Ok(StatefulExternalRunInvocation {
         executable: words[0].clone(),
     })
+}
+
+fn parse_stateful_control_invocation(command: &str) -> Result<StatefulControlInvocation, String> {
+    reject_outer_shell_syntax(command, "Bash wrapper must be a single stateful command")?;
+    let words = split_simple_command_words(command)?;
+    if words.is_empty() {
+        return Err("Bash commands must use a supported stateful command".to_string());
+    }
+    if first_word_is_env_assignment(&words[0]) {
+        return Err("Bash wrapper must not use outer environment assignments".to_string());
+    }
+    if words.len() < 2 || !is_stateful_control_command(&words[1]) {
+        return Err(
+            "Bash commands must use stateful sandbox run, stateful external-run, or a trusted stateful commit, push, or server command"
+                .to_string(),
+        );
+    }
+
+    Ok(StatefulControlInvocation {
+        executable: words[0].clone(),
+    })
+}
+
+fn command_mentions_stateful_control(command: &str) -> bool {
+    split_simple_command_words(command)
+        .ok()
+        .and_then(|words| words.get(1).cloned())
+        .is_some_and(|command| is_stateful_control_command(&command))
+}
+
+fn is_stateful_control_command(command: &str) -> bool {
+    matches!(command, "commit" | "push" | "server")
 }
 
 fn parse_sandbox_run_arg_value(
@@ -821,6 +878,56 @@ fn normalize_targets(
     Ok(Some(normalized))
 }
 
+fn percent_encode_current_resource(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            65..=90 | 97..=122 | 48..=57 | 45 | 46 | 47 | 95 | 126 => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push(37 as char);
+                encoded.push(HEX[(byte >> 4) as usize] as char);
+                encoded.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+        }
+    }
+    encoded
+}
+
+fn hook_authorize_purpose(
+    input: &PreToolUseInput,
+    runtime: &ServerRuntime,
+    target: &PatchTarget,
+) -> Option<String> {
+    let resource = percent_encode_current_resource(&target.path);
+    let response = get_json(runtime, &format!("/v1/current?resource={resource}")).ok()?;
+    if !(200..300).contains(&response.status_code) {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_str(&response.body).ok()?;
+    let items = body.get("items")?.as_array()?;
+    items.iter().find_map(|item| {
+        let matches_intent = item.get("kind").and_then(serde_json::Value::as_str) == Some("intent")
+            && item.get("freshness").and_then(serde_json::Value::as_str) == Some("live")
+            && item.get("resource").and_then(serde_json::Value::as_str)
+                == Some(target.path.as_str())
+            && item.get("session_id").and_then(serde_json::Value::as_str)
+                == Some(input.session_id.as_str())
+            && item.get("workspace_id").and_then(serde_json::Value::as_str)
+                == Some(runtime.workspace_id.as_str());
+        if !matches_intent {
+            return None;
+        }
+        item.get("purpose")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|purpose| !purpose.is_empty())
+            .map(str::to_string)
+    })
+}
+
 fn authorize_targets(
     input: &PreToolUseInput,
     runtime: Option<&ServerRuntime>,
@@ -840,11 +947,15 @@ fn authorize_targets(
     }
 
     for target in targets {
+        let purpose = hook_authorize_purpose(input, runtime, &target);
         let mut payload = json!({
             "action": target.action,
             "path": target.path,
-            "queue_on_conflict": true,
         });
+        if let Some(purpose) = purpose {
+            payload["queue_on_conflict"] = json!(true);
+            payload["purpose"] = json!(purpose);
+        }
         if let Some(new_path) = &target.new_path {
             payload["old_path"] = json!(target.path);
             payload["new_path"] = json!(new_path);

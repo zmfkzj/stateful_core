@@ -505,6 +505,9 @@ impl<'a> PolicyService<'a> {
         {
             return Err("reservation owner mismatch".to_string());
         }
+        if normalized_path_is_empty(&reservation.relative_path) {
+            return Err("intent scope is required".to_string());
+        }
 
         self.store
             .claim_reservation(&input.wait_id, &input.session_id)
@@ -515,6 +518,7 @@ impl<'a> PolicyService<'a> {
         } else {
             reservation.relative_path.clone()
         };
+        let lease_path = scope.clone();
         self.store
             .append(Event::intent_declared(
                 &input.session_id,
@@ -524,11 +528,7 @@ impl<'a> PolicyService<'a> {
             ))
             .map_err(|error| error.to_string())?;
         self.store
-            .acquire_lease(
-                &input.session_id,
-                &input.workspace_id,
-                &reservation.relative_path,
-            )
+            .acquire_lease(&input.session_id, &input.workspace_id, &lease_path)
             .map_err(|error| error.to_string())?;
 
         let mut claimed = reservation;
@@ -544,6 +544,9 @@ impl<'a> PolicyService<'a> {
     ) -> Result<RequestIntentOutcome, String> {
         if !matches!(input.action.as_str(), "write_file" | "write_directory") {
             return Err("unsupported intent request action".to_string());
+        }
+        if normalized_path_is_empty(&input.path) {
+            return Err("intent scope is required".to_string());
         }
 
         if let Some(existing) = self
@@ -676,4 +679,20 @@ impl<'a> PolicyService<'a> {
             reservation,
         })
     }
+}
+
+fn normalized_path_is_empty(path: &str) -> bool {
+    let normalized = path.trim().replace(char::from(92), "/");
+    let mut segments = Vec::new();
+    for segment in normalized.split(char::from(47)) {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            segments.pop();
+        } else {
+            segments.push(segment);
+        }
+    }
+    segments.is_empty()
 }

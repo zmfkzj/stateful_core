@@ -143,7 +143,7 @@ workspace_id + relative_path + action
 ```
 
 The wait queue is FIFO. A queued hard-conflict request is promoted only when all
-requested resources are available. V1 grant is atomic all-or-nothing: if one
+requested resources are available. V1 reservation is atomic all-or-nothing: if one
 file or directory in a multi-resource request is still blocked, the whole
 request stays queued. For a multi-resource request, "available" means the
 request is at the head of every resource queue it participates in and every
@@ -166,15 +166,15 @@ default reservation TTL is 120 seconds. If the reservation expires without being
 claimed, the server may promote the next eligible FIFO waiter.
 
 Resume is notification-driven rather than process-driven. The state server
-records a pending notification when it grants a reservation. Agents and
+records a pending notification when it promotes a reservation. Agents and
 orchestrators discover that signal by polling notifications, asking for the
 next resumable reservation, or receiving that context from a lifecycle hook.
 The state server does not wake a sleeping Codex process by itself; external
 orchestration can build on the notification and resume APIs.
 
 Full scheduling works through immediate request/response plus polling. Intent
-request APIs return `queued`, `reserved`, `canceled`, or `expired` state without
-blocking indefinitely. Immediate availability creates a `reserved` request state;
+request APIs return `queued`, `reserved`, `claimed`, `canceled`, or `expired`
+state without blocking indefinitely. Immediate availability creates a `reserved` request state;
 the session must still reread the target, claim the reservation with
 `state.intent.claim` / `stateful intent claim --wait-id <id>`, and retry only
 after the claim creates write-authorizing intent and the same-session lease.
@@ -183,10 +183,16 @@ Waiting is handled by polling `stateful notifications poll` or
 `stateful intent wait --timeout` is not part of the v1 hardening implementation.
 
 `request_id` and non-empty `purpose` are required for idempotency and live state
-explanation. Repeating the same request id returns the existing request state and
-must not create duplicate queue entries or replace the original purpose. A queued
-or reserved request can be canceled explicitly. Session or activity finalization
-cancels that session's queued and reserved requests.
+explanation. Intent declaration also requires non-empty `files_planned`; empty
+arrays and empty or normalized-empty paths are rejected with `missing_scope`.
+Intent request also requires a non-empty `path`; empty or normalized-empty
+request paths are rejected with `missing_scope`. Repeating the same request id
+returns the existing request state and must not create duplicate queue entries or
+replace the original purpose. A queued
+or reserved request can be canceled explicitly with `state.intent.cancel` /
+`stateful intent cancel --request-id <id>`. Session or activity finalization
+currently releases that session's active leases; queued and reserved request
+cleanup remains explicit through cancellation.
 
 ## Enforcement Direction
 
@@ -315,6 +321,10 @@ state.resume.next
 `state.intent.declare` and `state.intent.request` require a non-empty `purpose`.
 The caller must infer that purpose from the user or agent instruction when it is
 not explicit; the server must not synthesize a fallback purpose.
+`state.intent.declare` also requires non-empty `files_planned`; empty arrays
+and empty or normalized-empty entries are rejected with `missing_scope`.
+`state.intent.request` also requires a non-empty `path`; empty or
+normalized-empty request paths are rejected with `missing_scope`.
 `state.intent.request` and `state.intent.cancel` expose the explicit scheduling
 queue. `state.intent.claim` is the explicit reservation claim path.
 
@@ -734,8 +744,9 @@ sections: Blocking, Required Next Action, Warnings, Nearby Activity, Stale/Expir
 after denied actions or for focused resource checks. Rendering should be
 actionable, not a raw event dump.
 
-The current server route accepts the render request but returns an empty context
-package. Store-backed prompt context rendering is future hardening work.
+The current server route renders store-backed live context from active intents,
+active leases, and queued or reserved wait records. The response includes
+summary counts, structured `items`, and prompt-ready `prompt_text`.
 
 The renderer returns structured data plus prompt-ready markdown:
 

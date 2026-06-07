@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use stateful_core::{
     CurrentFreshness, CurrentItem, CurrentItemKind, CurrentSeverity, IntentScope, PolicyState,
 };
-use std::{collections::HashMap, path::Path};
+use std::path::Path;
 use thiserror::Error;
 use time::{Date, Duration, Month, OffsetDateTime, Time};
 use uuid::Uuid;
@@ -11,6 +11,7 @@ use uuid::Uuid;
 pub const CRATE_NAME: &str = "stateful-store";
 
 const INTENT_TTL_SECONDS: i64 = 900;
+const INTENT_MAX_SECONDS: i64 = 3600;
 const LEASE_TTL_SECONDS: i64 = 300;
 const RESERVATION_TTL_SECONDS: i64 = 120;
 const ACTIVITY_TTL_SECONDS: i64 = 900;
@@ -29,8 +30,14 @@ pub enum StoreError {
     IntentRequestOwnerMismatch,
     #[error("intent request is not cancelable")]
     IntentRequestNotCancelable,
+    #[error("active lease conflict")]
+    LeaseConflict,
+    #[error("matching active intent is required")]
+    MissingIntent,
     #[error("purpose is required")]
     MissingPurpose,
+    #[error("intent scope is required")]
+    MissingScope,
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -159,33 +166,14 @@ impl Store {
         self.expire_stale()?;
         let summary = self.current_summary()?;
         let resource_filter = resource_filter.map(normalize_relative_path);
-        let purpose_by_session = self.active_intent_purpose_by_session()?;
         let mut items = Vec::new();
 
         items.extend(self.live_intent_items(resource_filter.as_deref())?);
-        items.extend(self.live_lease_items(resource_filter.as_deref(), &purpose_by_session)?);
+        items.extend(self.live_lease_items(resource_filter.as_deref())?);
         items.extend(self.live_wait_queue_items(resource_filter.as_deref())?);
 
         Ok(LiveCurrentState { summary, items })
     }
-
-    fn active_intent_purpose_by_session(&self) -> StoreResult<HashMap<(String, String), String>> {
-        let mut statement = self.conn.prepare(
-            "SELECT session_id, workspace_id, purpose
-             FROM intents
-             WHERE status = 'active'",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-
-        rows.collect::<Result<HashMap<_, _>, _>>()
-            .map_err(StoreError::from)
-    }
-
     fn live_intent_items(&self, resource_filter: Option<&str>) -> StoreResult<Vec<CurrentItem>> {
         let mut statement = self.conn.prepare(
             "SELECT session_id, workspace_id, scopes_json, purpose, declared_at, expires_at
@@ -243,13 +231,50 @@ impl Store {
         Ok(items)
     }
 
-    fn live_lease_items(
+    fn active_intent_purpose_for_lease(
         &self,
-        resource_filter: Option<&str>,
-        purpose_by_session: &HashMap<(String, String), String>,
-    ) -> StoreResult<Vec<CurrentItem>> {
+        session_id: &str,
+        workspace_id: &str,
+        relative_path: &str,
+        lease_is_directory: bool,
+    ) -> StoreResult<Option<String>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT scopes_json, purpose
+                 FROM intents
+                 WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'
+                 ORDER BY declared_at DESC
+                 LIMIT 1",
+                params![session_id, workspace_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((scopes_json, purpose)) = row else {
+            return Ok(None);
+        };
+        let scopes: Vec<IntentScope> = serde_json::from_str(&scopes_json).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?;
+
+        let covers_lease = scopes.iter().any(|scope| {
+            if lease_is_directory {
+                scope.allows_write_directory(relative_path)
+            } else {
+                scope.allows_write(relative_path)
+            }
+        });
+
+        if covers_lease {
+            Ok(Some(purpose))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn live_lease_items(&self, resource_filter: Option<&str>) -> StoreResult<Vec<CurrentItem>> {
         let mut statement = self.conn.prepare(
-            "SELECT session_id, workspace_id, relative_path, expires_at
+            "SELECT session_id, workspace_id, relative_path, action, purpose, expires_at
              FROM leases
              WHERE status = 'active' AND relative_path IS NOT NULL
              ORDER BY rowid ASC",
@@ -259,35 +284,34 @@ impl Store {
                 row.get::<_, Option<String>>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })?;
         let rows = rows.collect::<Result<Vec<_>, _>>()?;
         let mut items = Vec::new();
 
-        for (session_id, workspace_id, relative_path, expires_at) in rows {
+        for (session_id, workspace_id, relative_path, action, purpose, expires_at) in rows {
             if !resource_matches_filter(&relative_path, resource_filter) {
                 continue;
             }
-            let Some(purpose) = session_id
-                .as_ref()
-                .and_then(|session_id| {
-                    purpose_by_session
-                        .get(&(session_id.clone(), workspace_id.clone()))
-                        .cloned()
-                })
-                .filter(|purpose| !purpose.trim().is_empty())
-            else {
+            let Some(purpose) = purpose.filter(|purpose| !purpose.trim().is_empty()) else {
                 continue;
             };
             let session_summary = session_id.as_deref().unwrap_or("unknown session");
+            let resource = if action == "write_directory" {
+                format!("{relative_path}/")
+            } else {
+                relative_path.clone()
+            };
             let mut item = CurrentItem::new(
                 CurrentItemKind::Lease,
                 CurrentSeverity::Block,
                 CurrentFreshness::Live,
-                relative_path.clone(),
+                resource.clone(),
                 purpose,
-                format!("{session_summary} has an active write lease on {relative_path}."),
+                format!("{session_summary} has an active write lease on {resource}."),
             )
             .with_next_action(format!(
                 "Wait for the lease to release, or coordinate with {session_summary}."
@@ -497,8 +521,37 @@ impl Store {
         relative_path: impl AsRef<str>,
     ) -> StoreResult<()> {
         self.expire_stale()?;
-        let relative_path = normalize_relative_path(relative_path.as_ref());
+        let requested_relative_path = relative_path.as_ref();
+        let lease_is_directory = requested_relative_path.ends_with("/");
+        let lease_action = if lease_is_directory {
+            "write_directory"
+        } else {
+            "write_file"
+        };
+        let relative_path = normalize_relative_path(requested_relative_path);
+        let session_id = session_id.as_ref().to_string();
+        let workspace_id = workspace_id.as_ref().to_string();
+        let Some(purpose) = self.active_intent_purpose_for_lease(
+            &session_id,
+            &workspace_id,
+            &relative_path,
+            lease_is_directory,
+        )?
+        else {
+            return Err(StoreError::MissingIntent);
+        };
+        let purpose = required_purpose(&purpose)?;
+        if self.active_lease_conflicts_for_acquire(
+            &session_id,
+            &workspace_id,
+            &relative_path,
+            lease_action,
+            lease_is_directory,
+        )? {
+            return Err(StoreError::LeaseConflict);
+        }
         let now = now_timestamp();
+        let expires_at = timestamp_after(&now, LEASE_TTL_SECONDS);
         self.conn.execute(
             "INSERT INTO leases (
                 lease_id,
@@ -507,19 +560,99 @@ impl Store {
                 repo_id,
                 relative_path,
                 absolute_path,
+                purpose,
+                action,
                 status,
                 expires_at
-            ) VALUES (?1, ?2, ?3, NULL, ?4, NULL, 'active', ?5)",
+            ) VALUES (?1, ?2, ?3, NULL, ?4, NULL, ?5, ?6, 'active', ?7)",
             params![
                 Uuid::new_v4().to_string(),
-                session_id.as_ref(),
-                workspace_id.as_ref(),
+                session_id,
+                workspace_id,
                 relative_path,
-                timestamp_after(&now, LEASE_TTL_SECONDS),
+                purpose,
+                lease_action,
+                expires_at,
             ],
         )?;
 
         Ok(())
+    }
+
+    fn active_lease_conflicts_for_acquire(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        relative_path: &str,
+        lease_action: &str,
+        lease_is_directory: bool,
+    ) -> StoreResult<bool> {
+        if lease_is_directory {
+            let directory_prefix = format!("{relative_path}/");
+            return self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM leases
+                        WHERE workspace_id = ?1
+                           AND status = 'active'
+                           AND (session_id != ?5 OR (session_id = ?5 AND action = ?6 AND relative_path = ?2))
+                           AND (
+                               (action = 'write_directory' AND relative_path = ?2)
+                               OR substr(relative_path, 1, ?3) = ?4
+                               OR (action = 'write_directory'
+                                  AND substr(?2, 1, length(relative_path) + 1) = relative_path || '/')
+                           )
+                    ) OR EXISTS(
+                        SELECT 1 FROM wait_queue
+                        WHERE workspace_id = ?1
+                           AND status = 'reserved'
+                           AND (
+                               (action = 'write_directory' AND relative_path = ?2)
+                               OR substr(relative_path, 1, ?3) = ?4
+                               OR (action = 'write_directory'
+                                  AND substr(?2, 1, length(relative_path) + 1) = relative_path || '/')
+                           )
+                    )",
+                    params![
+                        workspace_id,
+                        relative_path,
+                        directory_prefix.len() as i64,
+                        directory_prefix,
+                        session_id,
+                        lease_action,
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(StoreError::from);
+        }
+
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM leases
+                    WHERE workspace_id = ?1
+                       AND status = 'active'
+                       AND (session_id != ?3 OR (session_id = ?3 AND action = ?4 AND relative_path = ?2))
+                       AND (
+                           (action = 'write_file' AND relative_path = ?2)
+                           OR (action = 'write_directory'
+                              AND substr(?2, 1, length(relative_path) + 1) = relative_path || '/')
+                       )
+                ) OR EXISTS(
+                    SELECT 1 FROM wait_queue
+                    WHERE workspace_id = ?1
+                       AND status = 'reserved'
+                       AND (
+                           (action = 'write_file' AND relative_path = ?2)
+                           OR (action = 'write_directory'
+                              AND substr(?2, 1, length(relative_path) + 1) = relative_path || '/')
+                       )
+                )",
+                params![workspace_id, relative_path, session_id, lease_action],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StoreError::from)
     }
 
     pub fn release_lease(
@@ -529,13 +662,19 @@ impl Store {
         relative_path: impl AsRef<str>,
     ) -> StoreResult<()> {
         self.expire_stale()?;
-        let relative_path = normalize_relative_path(relative_path.as_ref());
+        let requested_relative_path = relative_path.as_ref();
+        let lease_action = if requested_relative_path.ends_with("/") {
+            "write_directory"
+        } else {
+            "write_file"
+        };
+        let relative_path = normalize_relative_path(requested_relative_path);
         let workspace_id = workspace_id.as_ref().to_string();
         self.conn.execute(
             "UPDATE leases
              SET status = 'released'
-             WHERE session_id = ?1 AND workspace_id = ?2 AND relative_path = ?3 AND status = 'active'",
-            params![session_id.as_ref(), workspace_id, relative_path],
+             WHERE session_id = ?1 AND workspace_id = ?2 AND relative_path = ?3 AND action = ?4 AND status = 'active'",
+            params![session_id.as_ref(), workspace_id, relative_path, lease_action],
         )?;
         self.promote_waiters_after_lease_release(&workspace_id, &relative_path)?;
 
@@ -559,8 +698,15 @@ impl Store {
         let paths = paths.collect::<Result<Vec<_>, _>>()?;
         let released = paths.len() as u64;
 
+        self.conn.execute(
+            "UPDATE leases
+             SET status = 'released'
+             WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'",
+            params![session_id.as_ref(), workspace_id.as_ref()],
+        )?;
+
         for path in paths {
-            self.release_lease(session_id.as_ref(), workspace_id.as_ref(), path)?;
+            self.promote_waiters_after_lease_release(workspace_id.as_ref(), &path)?;
         }
 
         Ok(released)
@@ -610,9 +756,10 @@ impl Store {
                     AND session_id != ?2
                     AND status = 'active'
                     AND (
-                        relative_path = ?3
+                        (action = 'write_directory' AND relative_path = ?3)
                         OR substr(relative_path, 1, ?4) = ?5
-                        OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                        OR (action = 'write_directory'
+                           AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
                     )
                  ORDER BY rowid DESC
                  LIMIT 1",
@@ -644,6 +791,7 @@ impl Store {
                     WHERE workspace_id = ?1
                        AND session_id = ?2
                        AND status = 'active'
+                       AND action = 'write_directory'
                        AND (
                            relative_path = ?3
                            OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
@@ -670,8 +818,9 @@ impl Store {
                     AND session_id != ?2
                     AND status = 'active'
                     AND (
-                        relative_path = ?3
-                        OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                        (action = 'write_file' AND relative_path = ?3)
+                        OR (action = 'write_directory'
+                           AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
                     )
                  ORDER BY rowid DESC
                  LIMIT 1",
@@ -698,8 +847,9 @@ impl Store {
                        AND session_id = ?2
                        AND status = 'active'
                        AND (
-                           relative_path = ?3
-                           OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                           (action = 'write_file' AND relative_path = ?3)
+                           OR (action = 'write_directory'
+                           AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
                        )
                 )",
                 params![workspace_id.as_ref(), session_id.as_ref(), relative_path],
@@ -723,6 +873,7 @@ impl Store {
                     WHERE workspace_id = ?1
                        AND session_id = ?2
                        AND status = 'active'
+                       AND action = 'write_file'
                        AND relative_path = ?3
                 )",
                 params![workspace_id.as_ref(), session_id.as_ref(), relative_path],
@@ -742,6 +893,9 @@ impl Store {
     ) -> StoreResult<WaitRecord> {
         self.expire_stale()?;
         let relative_path = normalize_relative_path(relative_path.as_ref());
+        if relative_path.is_empty() {
+            return Err(StoreError::MissingScope);
+        }
         let purpose = required_purpose(purpose.as_ref())?;
         let existing = self
             .conn
@@ -808,6 +962,9 @@ impl Store {
 
         let wait_id = Uuid::new_v4().to_string();
         let relative_path = normalize_relative_path(input.relative_path);
+        if relative_path.is_empty() {
+            return Err(StoreError::MissingScope);
+        }
         self.conn.execute(
             "INSERT INTO wait_queue (
                 wait_id,
@@ -1026,9 +1183,10 @@ impl Store {
                     AND session_id != ?2
                     AND status = 'reserved'
                     AND (
-                        relative_path = ?3
+                        (action = 'write_directory' AND relative_path = ?3)
                         OR substr(relative_path, 1, ?4) = ?5
-                        OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                        OR (action = 'write_directory'
+                           AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
                     )
                  ORDER BY rowid ASC
                  LIMIT 1",
@@ -1072,9 +1230,10 @@ impl Store {
                     AND session_id = ?2
                     AND status = 'reserved'
                     AND (
-                        relative_path = ?3
+                        (action = 'write_directory' AND relative_path = ?3)
                         OR substr(relative_path, 1, ?4) = ?5
-                        OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                        OR (action = 'write_directory'
+                           AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
                     )
                  ORDER BY rowid ASC
                  LIMIT 1",
@@ -1117,8 +1276,9 @@ impl Store {
                     AND session_id != ?2
                     AND status = 'reserved'
                     AND (
-                        relative_path = ?3
-                        OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                        (action = 'write_file' AND relative_path = ?3)
+                        OR (action = 'write_directory'
+                           AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
                     )
                  ORDER BY rowid ASC
                  LIMIT 1",
@@ -1155,8 +1315,9 @@ impl Store {
                     AND session_id = ?2
                     AND status = 'reserved'
                     AND (
-                        relative_path = ?3
-                        OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                        (action = 'write_file' AND relative_path = ?3)
+                        OR (action = 'write_directory'
+                           AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
                     )
                  ORDER BY rowid ASC
                  LIMIT 1",
@@ -1443,27 +1604,6 @@ impl Store {
         )?;
 
         let mut statement = self.conn.prepare(
-            "SELECT DISTINCT workspace_id, relative_path FROM leases
-             WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?1",
-        )?;
-        let expired_leases = statement
-            .query_map([now], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(statement);
-
-        self.conn.execute(
-            "UPDATE leases
-             SET status = 'expired'
-             WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?1",
-            [now],
-        )?;
-        for (workspace_id, relative_path) in expired_leases {
-            self.promote_waiters_after_lease_release(&workspace_id, &relative_path)?;
-        }
-
-        let mut statement = self.conn.prepare(
             "SELECT DISTINCT workspace_id, relative_path FROM wait_queue
              WHERE status = 'reserved'
                 AND reservation_expires_at IS NOT NULL
@@ -1486,6 +1626,27 @@ impl Store {
         )?;
         for (workspace_id, relative_path) in expired_reservations {
             self.promote_next_waiter_after_path_release(&workspace_id, &relative_path)?;
+        }
+
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT workspace_id, relative_path FROM leases
+             WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?1",
+        )?;
+        let expired_leases = statement
+            .query_map([now], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        self.conn.execute(
+            "UPDATE leases
+             SET status = 'expired'
+             WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?1",
+            [now],
+        )?;
+        for (workspace_id, relative_path) in expired_leases {
+            self.promote_waiters_after_lease_release(&workspace_id, &relative_path)?;
         }
 
         self.conn.execute(
@@ -1572,6 +1733,8 @@ impl Store {
                 repo_id TEXT,
                 relative_path TEXT,
                 absolute_path TEXT,
+                purpose TEXT,
+                action TEXT NOT NULL DEFAULT 'write_file',
                 status TEXT NOT NULL,
                 expires_at TEXT
             );
@@ -1693,6 +1856,16 @@ impl Store {
             "purpose",
             "ALTER TABLE wait_queue ADD COLUMN purpose TEXT;",
         )?;
+        self.add_column_if_missing(
+            "leases",
+            "purpose",
+            "ALTER TABLE leases ADD COLUMN purpose TEXT;",
+        )?;
+        self.add_column_if_missing(
+            "leases",
+            "action",
+            "ALTER TABLE leases ADD COLUMN action TEXT NOT NULL DEFAULT 'write_file';",
+        )?;
         self.remove_legacy_rows_without_required_purpose()?;
         self.conn.execute_batch(
             "
@@ -1714,6 +1887,29 @@ impl Store {
             "DELETE FROM wait_queue WHERE purpose IS NULL OR trim(purpose) = ''",
             [],
         )?;
+        let legacy_lease_paths = {
+            let mut statement = self.conn.prepare(
+                "SELECT DISTINCT workspace_id, relative_path
+                 FROM leases
+                 WHERE status = 'active'
+                    AND relative_path IS NOT NULL
+                    AND (purpose IS NULL OR trim(purpose) = '')",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        self.conn.execute(
+            "UPDATE leases
+             SET status = 'released'
+             WHERE status = 'active' AND (purpose IS NULL OR trim(purpose) = '')",
+            [],
+        )?;
+        for (workspace_id, relative_path) in legacy_lease_paths {
+            self.promote_waiters_after_lease_release(&workspace_id, &relative_path)?;
+        }
         Ok(())
     }
 
@@ -1721,6 +1917,7 @@ impl Store {
         let supported = (table == "events"
             && matches!(column, "repo_id" | "worktree_id" | "root" | "branch"))
             || (table == "intents" && column == "purpose")
+            || (table == "leases" && matches!(column, "purpose" | "action"))
             || (table == "wait_queue" && matches!(column, "request_id" | "purpose"));
         if !supported {
             return Ok(());
@@ -1736,9 +1933,77 @@ impl Store {
         Ok(())
     }
 
+    fn refresh_session_state(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        heartbeat_at: &str,
+    ) -> StoreResult<()> {
+        self.expire_stale_at(heartbeat_at)?;
+
+        let lease_expires_at = timestamp_after(heartbeat_at, LEASE_TTL_SECONDS);
+        self.conn.execute(
+            "UPDATE leases
+             SET expires_at = ?1
+             WHERE session_id = ?2
+                AND workspace_id = ?3
+                AND status = ?4
+                AND (expires_at IS NULL OR expires_at < ?1)",
+            params![lease_expires_at, session_id, workspace_id, "active"],
+        )?;
+
+        let activity_expires_at = timestamp_after(heartbeat_at, ACTIVITY_TTL_SECONDS);
+        self.conn.execute(
+            "UPDATE activities
+             SET expires_at = ?1
+             WHERE session_id = ?2
+                AND workspace_id = ?3
+                AND (expires_at IS NULL OR expires_at < ?1)",
+            params![activity_expires_at, session_id, workspace_id],
+        )?;
+
+        let mut statement = self.conn.prepare(
+            "SELECT intent_id, declared_at, expires_at
+             FROM intents
+             WHERE session_id = ?1 AND workspace_id = ?2 AND status = ?3",
+        )?;
+        let intents = statement
+            .query_map(params![session_id, workspace_id, "active"], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        for (intent_id, declared_at, current_expires_at) in intents {
+            let refreshed = timestamp_after(heartbeat_at, INTENT_TTL_SECONDS);
+            let max_expires_at = timestamp_after(&declared_at, INTENT_MAX_SECONDS);
+            let next_expires_at = if refreshed.as_str() < max_expires_at.as_str() {
+                refreshed
+            } else {
+                max_expires_at
+            };
+            if current_expires_at
+                .as_deref()
+                .is_some_and(|current| current >= next_expires_at.as_str())
+            {
+                continue;
+            }
+            self.conn.execute(
+                "UPDATE intents SET expires_at = ?1 WHERE intent_id = ?2",
+                params![next_expires_at, intent_id],
+            )?;
+        }
+
+        Ok(())
+    }
+
     fn materialize(&self, event: &Event) -> StoreResult<()> {
         match event.event_type {
-            EventType::SessionRegistered | EventType::SessionHeartbeat => {
+            EventType::SessionRegistered => {
                 self.conn.execute(
                     "INSERT INTO sessions (session_id, workspace_id, updated_at)
                      VALUES (?1, ?2, ?3)
@@ -1748,8 +2013,25 @@ impl Store {
                     params![event.session_id, event.workspace_id, event.created_at],
                 )?;
             }
+            EventType::SessionHeartbeat => {
+                self.conn.execute(
+                    "INSERT INTO sessions (session_id, workspace_id, updated_at)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(session_id) DO UPDATE SET
+                        workspace_id = excluded.workspace_id,
+                        updated_at = excluded.updated_at",
+                    params![event.session_id, event.workspace_id, event.created_at],
+                )?;
+                self.refresh_session_state(
+                    &event.session_id,
+                    &event.workspace_id,
+                    &event.created_at,
+                )?;
+            }
             EventType::IntentDeclared => {
-                let scopes_json = event.payload["scopes"].to_string();
+                let scopes = required_intent_scopes(&event.payload["scopes"])?;
+                let scopes_json = serde_json::to_string(&scopes)
+                    .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
                 let purpose = required_purpose(
                     event.payload["purpose"]
                         .as_str()
@@ -1943,6 +2225,33 @@ fn normalize_relative_path(path: &str) -> String {
             segments
         })
         .join("/")
+}
+
+fn required_intent_scopes(scopes: &serde_json::Value) -> StoreResult<Vec<IntentScope>> {
+    let scopes: Vec<IntentScope> = serde_json::from_value(scopes.clone()).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    let scopes = scopes
+        .into_iter()
+        .map(normalize_intent_scope)
+        .collect::<Vec<_>>();
+    if scopes.is_empty() || scopes.iter().any(intent_scope_is_empty) {
+        return Err(StoreError::MissingScope);
+    }
+    Ok(scopes)
+}
+
+fn normalize_intent_scope(scope: IntentScope) -> IntentScope {
+    match scope {
+        IntentScope::File(path) => IntentScope::file(path),
+        IntentScope::Directory(path) => IntentScope::directory(path),
+    }
+}
+
+fn intent_scope_is_empty(scope: &IntentScope) -> bool {
+    match scope {
+        IntentScope::File(path) | IntentScope::Directory(path) => path.trim().is_empty(),
+    }
 }
 
 fn required_purpose(purpose: &str) -> StoreResult<String> {

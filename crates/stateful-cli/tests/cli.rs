@@ -461,6 +461,23 @@ fn intent_declare_command_can_default_session_and_workspace() {
 }
 
 #[test]
+fn intent_declare_command_requires_at_least_one_file() {
+    let error = Cli::try_parse_from([
+        "stateful",
+        "intent",
+        "declare",
+        "--purpose",
+        "Fix auth validation behavior.",
+    ])
+    .expect_err("intent declare without files should fail");
+
+    assert!(
+        error.to_string().contains("files_planned") || error.to_string().contains("FILES_PLANNED"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn intent_claim_command_parses_wait_id() {
     let cli = Cli::try_parse_from([
         "stateful",

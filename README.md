@@ -22,10 +22,10 @@ avoidable conflicts before the write occurs.
 
 ## Status
 
-This repository is an early Rust implementation and local-first prototype. The
-current implementation is Codex-first and includes a CLI, global user-level
-installation with repo allowlist gating, a repo-local compatibility mode, a
-local HTTP state server, MCP adapter, Codex hook adapter, SQLite-backed state
+This repository is an early Rust implementation and local-first, macOS-first
+prototype. The current implementation is Codex-first and includes a CLI,
+global user-level installation with repo allowlist gating, a repo-local
+compatibility mode, a local HTTP state server, MCP adapter, Codex hook adapter, SQLite-backed state
 store, sandboxed test execution, structured commit/push wrappers, outbox sync,
 and benchmark tooling.
 
@@ -136,8 +136,9 @@ Prerequisites:
 - Rust 1.85 or newer
 - Git
 - Codex CLI, when using the bundled lifecycle hooks or `stateful codex`
-- A supported OS sandbox backend for `stateful sandbox run`: macOS uses
-  `/usr/bin/sandbox-exec`; Linux uses `bwrap`
+- A supported OS sandbox backend for `stateful sandbox run`: macOS Seatbelt via
+  `/usr/bin/sandbox-exec` is the verified first-class backend. Linux bubblewrap
+  support is implemented but experimental and not yet release-verified.
 
 Build the workspace:
 
@@ -181,6 +182,11 @@ stateful codex
 
 ## Useful Next Steps
 
+The commands in this section are optional diagnostics and manual coordination
+examples. In normal `stateful codex` use, lifecycle hooks and MCP bind the
+current session; stateful hook messages tell the agent when an explicit
+coordination step is needed.
+
 Start the local server explicitly. Codex hooks also start it lazily for enabled
 repos when needed.
 
@@ -189,10 +195,10 @@ stateful server start
 stateful server status
 ```
 
-Declare what you plan to edit and inspect the active current state. In
-`stateful codex`, lifecycle hooks bind the current Codex session to the wrapper
-run and use that run-bound session by default. Outside hooks, pass session and
-workspace IDs explicitly.
+For manual CLI use outside the default Codex workflow, declare what you plan to
+edit and inspect the active current state. In `stateful codex`, lifecycle hooks
+bind the current Codex session to the wrapper run and use that run-bound session
+by default. Outside hooks, pass session and workspace IDs explicitly.
 
 ```bash
 stateful intent declare --purpose "Update README content requested by the user." README.md
@@ -247,16 +253,17 @@ stateful enable --repo-local-codex
 - `stateful current` prints current-state summary counts.
 - `stateful events` prints recent stored state events.
 - `stateful intent declare --purpose <purpose> <paths...>` declares planned file
-  or directory scope. The purpose is required and must be supplied by the caller,
+  or directory scope. At least one non-empty path is required. The purpose is
+  required and must be supplied by the caller,
   inferred from the user or agent instruction when it is not explicit. Session
   and workspace may be explicit or inferred from the current hook session file.
   Each declaration replaces that session's active scope in that workspace; it
   does not append, so callers must redeclare the complete intended file set.
 - `stateful intent request --request-id <id> --action write_file|write_directory
   --path <path> --purpose <purpose>` creates or returns an idempotent
-  queued/reserved write
-  request.
-- `stateful intent claim --wait-id <id>` claims a granted reservation after the
+  queued/reserved write request. The path must be non-empty after
+  normalization.
+- `stateful intent claim --wait-id <id>` claims a reserved request after the
   session rereads the target; the claim creates write-authorizing intent and an
   active lease for the reservation owner.
 - `stateful intent cancel --request-id <id>` cancels a queued or reserved
@@ -366,10 +373,10 @@ write-targets ... --command <cmd>`. The wrapper authorizes `--write-target` and
 is not executed and the response includes both allowed and denied target lists.
 When all targets are allowed, the command runs through an OS sandbox with the
 repo readable and only the listed files or directory subtrees writable. macOS
-uses Seatbelt via `/usr/bin/sandbox-exec`; Linux uses bubblewrap (`bwrap`) with
-a read-only root bind plus writable file and directory binds. The Linux
-bubblewrap backend is implemented but has not been verified in this macOS
-development environment.
+uses Seatbelt via `/usr/bin/sandbox-exec`; this is the verified first-class
+backend. Linux bubblewrap (`bwrap`) support is implemented with a read-only root
+bind plus writable file and directory binds, but it is experimental until it is
+verified in a Linux release environment.
 
 Repo-external command-shaped writes use `stateful external-run`, not
 `sandbox run`. `external-run` classifies targets by normalized path: targets
@@ -433,7 +440,10 @@ endpoints require the `stateful.v1` request envelope with `payload`. Flat
 legacy bodies are rejected with `protocol_mismatch` for those paths. Other POST
 routes still accept their current flat request bodies.
 Intent declare and request payloads require a non-empty `purpose`; clients must
-infer it from the user or agent instruction and send it explicitly.
+infer it from the user or agent instruction and send it explicitly. Intent
+declare payloads also require non-empty `files_planned`; empty arrays and empty
+or normalized-empty paths are rejected with `missing_scope`. Intent request
+payloads also reject empty or normalized-empty `path` with `missing_scope`.
 
 ## Sandboxed Tests
 

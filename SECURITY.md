@@ -7,7 +7,9 @@ sandbox, access-control system, or hard file-locking boundary.
 ## Supported Scope
 
 Security fixes are handled for the current `main` branch until a stable release
-policy exists.
+policy exists. The current platform support posture is macOS first. Linux
+bubblewrap support is implemented but experimental until release verification is
+in place.
 
 ## Reporting a Vulnerability
 
@@ -45,7 +47,9 @@ artifacts, absolute paths, or bearer tokens and should not be committed:
 - `.stateful_core/`
 - `.stateful_bench/`
 
-The repository `.gitignore` excludes those paths by default.
+The repository `.gitignore` excludes those paths by default. Public release
+archives should be created from Git, for example with `git archive` or a clean
+clone, rather than from a working-tree tarball.
 
 ## Out of Scope
 

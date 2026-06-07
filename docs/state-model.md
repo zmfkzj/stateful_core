@@ -229,9 +229,11 @@ status: active | superseded | finalized | expired
 
 Hooks must require an active intent before allowing supported write tool paths.
 For v1, a write-authorizing intent must include a non-empty `purpose` plus at
-least one file or directory scope in `files_planned`. Callers must infer purpose
-from the user or agent instruction when it is not explicit; the server does not
-generate a fallback purpose. Abstract resources in `resources_planned`, such as
+least one file or directory scope in `files_planned`. The server rejects an empty
+`files_planned` array or empty or normalized-empty path with `missing_scope`.
+Callers must infer purpose from the user or agent instruction when it is not
+explicit; the server does not generate a fallback purpose. Abstract resources in
+`resources_planned`, such as
 `task`, `test`, `port`, or `migration`, can provide context but cannot authorize
 writes.
 
@@ -291,7 +293,7 @@ checks with `conflict_type: missing_intent`.
 ## Wait Queue Record
 
 A wait queue record captures a hard-conflict intent request that cannot be
-granted immediately.
+reserved immediately.
 
 ```text
 queue_id
@@ -302,7 +304,7 @@ purpose
 resources
 queue_sequence
 queued_at
-status: queued | reserved | granted | canceled | expired
+status: queued | reserved | claimed | canceled | expired
 blocked_by_session_id
 blocked_by_lease_id
 reservation_expires_at
@@ -312,7 +314,7 @@ grant_trigger: explicit_release | session_finalization | lease_expiry
 The queue is FIFO by `queue_sequence`. A queued request can be promoted only
 when every requested resource is available. `purpose` is required and remains the
 caller-supplied purpose from the original request. V1 uses atomic all-or-nothing
-grant: multi-resource requests are never partially granted.
+reservation: multi-resource requests are never partially reserved.
 
 The current implementation handles one requested path per wait request.
 Multi-resource all-or-nothing scheduling is the target model for future
@@ -336,8 +338,8 @@ active lease. A request that is first for one resource but blocked behind anothe
 request on a second resource stays queued.
 
 `request_id` is the idempotency key. Repeating an intent request with the same
-`request_id` must return the existing queue, reservation, grant, cancellation, or
-expiry state instead of creating a duplicate queue item.
+`request_id` must return the existing queue, reservation, claim, cancellation,
+or expiry state instead of creating a duplicate queue item.
 
 Queued or reserved requests can be canceled explicitly. Session or activity
 finalization cleanup for queued and reserved requests is target behavior; the
@@ -504,7 +506,9 @@ Freshness is required for all active coordination records.
 - Delete operations require exact file scope.
 - Rename and move operations require exact file scope for both source and
   destination.
-- Heartbeats extend active leases and activity records.
+- Heartbeats extend active leases and activity records. The current
+  implementation also refreshes active intent expiry during `SessionHeartbeat`
+  materialization, capped at 60 minutes from `declared_at`.
 - Missing heartbeats do not imply success.
 - Finalization as `done`, `failed`, or `blocked` finalizes active intents.
 - Turn end expires unused overrides.
@@ -598,8 +602,10 @@ Expected materialized views:
 - finalization summaries by session
 - prompt context package for Codex hooks and MCP tools
 
-The current server exposes context rendering but returns an empty package.
-Store-backed prompt context packages are future hardening work.
+The current server exposes `/v1/context/render` and `state.context.render` as a
+store-backed live view over active intents, active leases, and queued or reserved
+wait records. Responses include current summary counts, structured `items`, and
+prompt-ready `prompt_text`; an empty live state produces an empty prompt.
 
 Prompt context packages should support:
 

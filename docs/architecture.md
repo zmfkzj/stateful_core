@@ -237,7 +237,10 @@ lease; command-shaped shell writes remain outside MCP and go through the
 sandbox-run wrapper.
 
 Intent declare and request payloads require a non-empty `purpose`; clients infer
-it from the user or agent instruction and send it explicitly.
+it from the user or agent instruction and send it explicitly. Intent declare
+also requires non-empty `files_planned`; empty arrays and empty or normalized-empty
+paths fail with `missing_scope`. Intent request also requires a non-empty
+`path`; empty or normalized-empty request paths fail with `missing_scope`.
 
 ## Tool Classification
 
@@ -288,6 +291,10 @@ The wrapper authorizes the `target/` artifact directory before execution and the
 OS sandbox limits writes to declared file targets, create targets, and the
 target artifact tree. Source-tree writes remain outside the allowed surface
 unless exact targets are declared and authorized.
+
+The macOS Seatbelt backend is the release-verified first-class backend. Linux
+bubblewrap support is implemented but experimental until it is verified in a
+Linux release environment.
 
 ## State Server
 
@@ -465,9 +472,9 @@ resource filter. `brief` is for session start and prompt submit context.
 `detailed` is for denied actions or focused resource checks. Rendered output
 must include concrete next actions when a block or warning is present.
 
-The current server route accepts these inputs but returns an empty context
-package. Store-backed rendering of active conflicts, warnings, and stale state
-is future hardening work.
+The current server route renders store-backed live context from active intents,
+active leases, and queued or reserved wait records. The response includes
+summary counts, structured `items`, and prompt-ready `prompt_text`.
 
 The renderer should return both structured data and prompt-ready markdown:
 

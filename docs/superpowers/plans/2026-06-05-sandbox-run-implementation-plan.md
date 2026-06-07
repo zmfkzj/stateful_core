@@ -1,5 +1,7 @@
 # Sandbox Run Implementation Plan
 
+> Public documentation note: this is a historical implementation record kept for traceability, not current user-facing guidance. See `README.md` and the top-level `docs/` contract documents for current behavior.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the local file-writing MCP Bash tool with a generic `stateful sandbox run` CLI wrapper that enforces read-only and declared-target filesystem profiles.
