@@ -1,7 +1,8 @@
 use clap::Parser;
 use stateful_cli::{
-    Cli, CodexSandboxMode, Command, HookCommand, McpCommand, NotificationsCommand, ReposCommand,
-    ResumeCommand, SandboxCommand, SandboxFsProfile, SandboxNetworkPolicy, ServerCommand,
+    Cli, CodexSandboxMode, Command, ExternalRunCommand, HookCommand, McpCommand,
+    NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand, SandboxFsProfile,
+    SandboxNetworkPolicy, ServerCommand,
 };
 use std::path::PathBuf;
 
@@ -16,6 +17,7 @@ fn parses_sandbox_run_read_only_defaults() {
             network,
             write_targets,
             create_targets,
+            write_dirs,
             command,
             timeout_seconds,
         }) => {
@@ -23,6 +25,7 @@ fn parses_sandbox_run_read_only_defaults() {
             assert_eq!(network, SandboxNetworkPolicy::Disabled);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
+            assert!(write_dirs.is_empty());
             assert_eq!(command, "rg auth src");
             assert_eq!(timeout_seconds, None);
         }
@@ -44,6 +47,8 @@ fn parses_sandbox_run_write_targets_network_enabled() {
         "README.md",
         "--create-target",
         "docs/new.md",
+        "--write-dir",
+        "target",
         "--timeout-seconds",
         "12",
         "--command",
@@ -57,6 +62,7 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             network,
             write_targets,
             create_targets,
+            write_dirs,
             command,
             timeout_seconds,
         }) => {
@@ -64,6 +70,7 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(write_targets, vec!["README.md"]);
             assert_eq!(create_targets, vec!["docs/new.md"]);
+            assert_eq!(write_dirs, vec!["target"]);
             assert_eq!(command, "printf x > README.md");
             assert_eq!(timeout_seconds, Some(12));
         }
@@ -77,6 +84,74 @@ fn sandbox_run_rejects_missing_command() {
         .expect_err("sandbox run requires --command");
 
     assert!(error.to_string().contains("--command"));
+}
+
+#[test]
+fn parses_external_run_request_command() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "external-run",
+        "request",
+        "--purpose",
+        "install rebuilt binaries",
+        "--write-target",
+        "/Users/me/.cargo/bin/stateful",
+        "--create-target",
+        "/Users/me/.cargo/bin/stateful-bench",
+        "--write-dir",
+        "/Users/me/.cargo/bin",
+        "--network",
+        "disabled",
+        "--timeout-seconds",
+        "10",
+        "--command",
+        "install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful",
+    ])
+    .expect("external-run request should parse");
+
+    match cli.command {
+        Command::ExternalRun(ExternalRunCommand::Request {
+            purpose,
+            write_targets,
+            create_targets,
+            write_dirs,
+            network,
+            timeout_seconds,
+            command,
+        }) => {
+            assert_eq!(purpose, "install rebuilt binaries");
+            assert_eq!(write_targets, vec!["/Users/me/.cargo/bin/stateful"]);
+            assert_eq!(create_targets, vec!["/Users/me/.cargo/bin/stateful-bench"]);
+            assert_eq!(write_dirs, vec!["/Users/me/.cargo/bin"]);
+            assert_eq!(network, SandboxNetworkPolicy::Disabled);
+            assert_eq!(timeout_seconds, Some(10));
+            assert_eq!(
+                command,
+                "install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful"
+            );
+        }
+        other => panic!("expected external-run request command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_external_run_approve_and_run_command() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "external-run",
+        "approve",
+        "request-123",
+        "--run",
+    ])
+    .expect("external-run approve should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::ExternalRun(ExternalRunCommand::Approve {
+            ref request_id,
+            run: true
+        }) if request_id == "request-123"
+    ));
 }
 
 #[test]
@@ -331,14 +406,6 @@ fn hook_pre_tool_use_command_parses() {
 }
 
 #[test]
-fn validate_profile_command_parses() {
-    let cli = Cli::try_parse_from(["stateful", "validate", "unit"])
-        .expect("validate command should parse");
-
-    assert!(matches!(cli.command, Command::Validate { profile } if profile == "unit"));
-}
-
-#[test]
 fn intent_declare_command_parses_file_scopes() {
     let cli = Cli::try_parse_from([
         "stateful",
@@ -377,6 +444,95 @@ fn intent_declare_command_can_default_session_and_workspace() {
             workspace_id: None,
             ref files_planned,
         }) if files_planned == &vec!["src/auth.ts".to_string()]
+    ));
+}
+
+#[test]
+fn intent_claim_command_parses_wait_id() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "intent",
+        "claim",
+        "--session-id",
+        "s1",
+        "--workspace-id",
+        "w1",
+        "--wait-id",
+        "wait-1",
+    ])
+    .expect("intent claim command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Intent(stateful_cli::IntentCommand::Claim {
+            ref session_id,
+            ref workspace_id,
+            ref wait_id,
+        }) if session_id.as_deref() == Some("s1")
+            && workspace_id.as_deref() == Some("w1")
+            && wait_id == "wait-1"
+    ));
+}
+
+#[test]
+fn intent_request_command_parses_request_id_action_and_path() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "intent",
+        "request",
+        "--session-id",
+        "s1",
+        "--workspace-id",
+        "w1",
+        "--request-id",
+        "request-1",
+        "--action",
+        "write_file",
+        "--path",
+        "src/auth.ts",
+    ])
+    .expect("intent request command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Intent(stateful_cli::IntentCommand::Request {
+            ref session_id,
+            ref workspace_id,
+            ref request_id,
+            ref action,
+            ref path,
+        }) if session_id.as_deref() == Some("s1")
+            && workspace_id.as_deref() == Some("w1")
+            && request_id == "request-1"
+            && action == "write_file"
+            && path == "src/auth.ts"
+    ));
+}
+
+#[test]
+fn intent_cancel_command_parses_request_id() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "intent",
+        "cancel",
+        "--session-id",
+        "s1",
+        "--workspace-id",
+        "w1",
+        "--request-id",
+        "request-1",
+    ])
+    .expect("intent cancel command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Intent(stateful_cli::IntentCommand::Cancel {
+            ref session_id,
+            ref workspace_id,
+            ref request_id,
+        }) if session_id.as_deref() == Some("s1")
+            && workspace_id.as_deref() == Some("w1")
+            && request_id == "request-1"
     ));
 }
 

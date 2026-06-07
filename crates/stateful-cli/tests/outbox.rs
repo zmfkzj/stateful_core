@@ -19,6 +19,7 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
     if temp_root.exists() {
         fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
     }
+    fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
     fs::create_dir_all(temp_root.join(".stateful_core/outbox"))
         .expect("outbox dir should be creatable");
 
@@ -268,6 +269,7 @@ fn sync_outbox_command_discovers_global_runtime_file() {
     if temp_root.exists() {
         fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
     }
+    fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
     fs::create_dir_all(temp_root.join(".stateful_core/outbox"))
         .expect("outbox dir should be creatable");
     let paths = GlobalPaths::new(temp_root.join("home"));

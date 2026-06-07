@@ -7,12 +7,14 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use crate::{GlobalPaths, ServerRuntime, get_json, write_global_runtime_file};
+use crate::{
+    GlobalPaths, ServerRuntime, get_json, runtime_has_required_identity,
+    runtime_identity_matches_pid, write_global_runtime_file,
+};
 
 const START_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const START_LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
 const START_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerStartOptions {
     pub host: String,
@@ -60,19 +62,8 @@ where
 }
 
 pub fn ensure_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
-    let options = ServerStartOptions::default();
-    ensure_server_with(paths, runtime_is_healthy, || {
-        start_detached_server(paths, &options)
-    })
-}
-
-pub fn ensure_server_with_options(
-    paths: &GlobalPaths,
-    options: ServerStartOptions,
-) -> anyhow::Result<ServerRuntime> {
     if let Some(runtime) = read_runtime_file(paths)? {
         if runtime_is_healthy(&runtime) {
-            ensure_runtime_matches_options(&runtime, &options)?;
             return Ok(runtime);
         }
     }
@@ -80,17 +71,54 @@ pub fn ensure_server_with_options(
     let _lock = acquire_start_lock(paths)?;
     if let Some(runtime) = read_runtime_file(paths)? {
         if runtime_is_healthy(&runtime) {
-            ensure_runtime_matches_options(&runtime, &options)?;
             return Ok(runtime);
         }
+        retire_incompatible_runtime(paths, &runtime)?;
     }
 
+    let options = ServerStartOptions::default();
     let runtime = start_detached_server(paths, &options)?;
     write_global_runtime_file(paths, &runtime)?;
     Ok(runtime)
 }
 
+pub fn ensure_server_with_options(
+    paths: &GlobalPaths,
+    options: ServerStartOptions,
+) -> anyhow::Result<ServerRuntime> {
+    ensure_current_server_with_options(paths, &options)
+}
+
+fn ensure_current_server_with_options(
+    paths: &GlobalPaths,
+    options: &ServerStartOptions,
+) -> anyhow::Result<ServerRuntime> {
+    if let Some(runtime) = read_runtime_file(paths)? {
+        if runtime_is_healthy(&runtime) {
+            ensure_runtime_matches_options(&runtime, options)?;
+            return Ok(runtime);
+        }
+    }
+
+    let _lock = acquire_start_lock(paths)?;
+    if let Some(runtime) = read_runtime_file(paths)? {
+        if runtime_is_healthy(&runtime) {
+            ensure_runtime_matches_options(&runtime, options)?;
+            return Ok(runtime);
+        }
+        retire_incompatible_runtime(paths, &runtime)?;
+    }
+
+    let runtime = start_detached_server(paths, options)?;
+    write_global_runtime_file(paths, &runtime)?;
+    Ok(runtime)
+}
+
 pub fn runtime_is_healthy(runtime: &ServerRuntime) -> bool {
+    runtime_is_basic_healthy(runtime) && runtime_has_required_identity(runtime)
+}
+
+fn runtime_is_basic_healthy(runtime: &ServerRuntime) -> bool {
     let Ok(health) = get_json(runtime, "/health") else {
         return false;
     };
@@ -119,7 +147,7 @@ pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
     let contents = fs::read_to_string(&paths.server_json)?;
     let runtime: ServerRuntime = serde_json::from_str(&contents)?;
     if runtime.pid == 0
-        || !runtime_is_healthy(&runtime)
+        || !runtime_is_basic_healthy(&runtime)
         || !runtime_identity_matches_pid(&runtime)?
         || !pid_matches_current_exe(runtime.pid)?
     {
@@ -129,9 +157,40 @@ pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
         );
     }
 
+    terminate_runtime(paths, &runtime)
+}
+
+fn retire_incompatible_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> anyhow::Result<()> {
+    if !runtime_is_basic_healthy(runtime) {
+        let _ = fs::remove_file(&paths.server_json);
+        return Ok(());
+    }
+    if runtime.pid != 0
+        && runtime_identity_matches_pid(runtime)?
+        && pid_matches_current_exe(runtime.pid)?
+    {
+        return terminate_runtime(paths, runtime);
+    }
+
+    anyhow::bail!(
+        "existing stateful server pid {} is reachable but does not support required runtime capabilities; stop it with the matching stateful binary and retry",
+        runtime.pid
+    )
+}
+
+fn terminate_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> anyhow::Result<()> {
     let status = Command::new("kill").arg(runtime.pid.to_string()).status()?;
     if !status.success() {
         anyhow::bail!("failed to stop stateful server pid {}", runtime.pid);
+    }
+    for _ in 0..20 {
+        if !runtime_is_basic_healthy(runtime) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if runtime_is_basic_healthy(runtime) {
+        anyhow::bail!("stateful server pid {} did not stop", runtime.pid);
     }
     let _ = fs::remove_file(&paths.server_json);
     Ok(())
@@ -228,18 +287,6 @@ fn ensure_runtime_matches_options(
     )
 }
 
-fn runtime_identity_matches_pid(runtime: &ServerRuntime) -> anyhow::Result<bool> {
-    let response = get_json(runtime, "/v1/runtime/identity")?;
-    if response.status_code != 200 {
-        return Ok(false);
-    }
-
-    let identity: RuntimeIdentity = serde_json::from_str(&response.body)?;
-    Ok(identity.status == "ok"
-        && identity.protocol_version == runtime.protocol_version
-        && identity.pid == runtime.pid)
-}
-
 fn acquire_start_lock(paths: &GlobalPaths) -> anyhow::Result<StartLock> {
     fs::create_dir_all(&paths.runtime_dir)?;
     let started_at = SystemTime::now();
@@ -323,13 +370,6 @@ fn pid_matches_current_exe(pid: u32) -> anyhow::Result<bool> {
                 .and_then(|name| name.to_str())
                 == Some(current_exe_name)
         }))
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct RuntimeIdentity {
-    status: String,
-    pid: u32,
-    protocol_version: String,
 }
 
 struct StartLock {

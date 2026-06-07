@@ -21,6 +21,12 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("reservation owner mismatch")]
     ReservationOwnerMismatch,
+    #[error("intent request not found")]
+    IntentRequestNotFound,
+    #[error("intent request owner mismatch")]
+    IntentRequestOwnerMismatch,
+    #[error("intent request is not cancelable")]
+    IntentRequestNotCancelable,
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -228,38 +234,6 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    pub fn append_validation_result(
-        &self,
-        workspace_id: impl AsRef<str>,
-        profile_id: impl AsRef<str>,
-        status: impl AsRef<str>,
-    ) -> StoreResult<()> {
-        self.conn.execute(
-            "INSERT INTO validations (
-                validation_id,
-                workspace_id,
-                profile_id,
-                status
-            ) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                Uuid::new_v4().to_string(),
-                workspace_id.as_ref(),
-                profile_id.as_ref(),
-                status.as_ref(),
-            ],
-        )?;
-
-        Ok(())
-    }
-
-    pub fn validation_count(&self) -> StoreResult<u64> {
-        self.conn
-            .query_row("SELECT COUNT(*) FROM validations", [], |row| {
-                row.get::<_, u64>(0)
-            })
-            .map_err(StoreError::from)
-    }
-
     pub fn acquire_lease(
         &self,
         session_id: impl AsRef<str>,
@@ -307,7 +281,7 @@ impl Store {
              WHERE session_id = ?1 AND workspace_id = ?2 AND relative_path = ?3 AND status = 'active'",
             params![session_id.as_ref(), workspace_id, relative_path],
         )?;
-        self.promote_next_waiter(&workspace_id, &relative_path)?;
+        self.promote_waiters_after_lease_release(&workspace_id, &relative_path)?;
 
         Ok(())
     }
@@ -361,6 +335,143 @@ impl Store {
                 |row| row.get::<_, String>(0),
             )
             .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn active_lease_conflict_owner_for_directory(
+        &self,
+        workspace_id: impl AsRef<str>,
+        directory_path: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<Option<String>> {
+        self.expire_stale()?;
+        let directory_path = normalize_relative_path(directory_path.as_ref());
+        let directory_prefix = format!("{directory_path}/");
+        self.conn
+            .query_row(
+                "SELECT session_id FROM leases
+                 WHERE workspace_id = ?1
+                    AND session_id != ?2
+                    AND status = 'active'
+                    AND (
+                        relative_path = ?3
+                        OR substr(relative_path, 1, ?4) = ?5
+                        OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                    )
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                params![
+                    workspace_id.as_ref(),
+                    session_id.as_ref(),
+                    directory_path,
+                    directory_prefix.len() as i64,
+                    directory_prefix,
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn active_lease_covers_directory_by_session(
+        &self,
+        workspace_id: impl AsRef<str>,
+        directory_path: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<bool> {
+        self.expire_stale()?;
+        let directory_path = normalize_relative_path(directory_path.as_ref());
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM leases
+                    WHERE workspace_id = ?1
+                       AND session_id = ?2
+                       AND status = 'active'
+                       AND (
+                           relative_path = ?3
+                           OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                       )
+                )",
+                params![workspace_id.as_ref(), session_id.as_ref(), directory_path],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub fn active_lease_conflict_owner_for_path(
+        &self,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<Option<String>> {
+        self.expire_stale()?;
+        let relative_path = normalize_relative_path(relative_path.as_ref());
+        self.conn
+            .query_row(
+                "SELECT session_id FROM leases
+                 WHERE workspace_id = ?1
+                    AND session_id != ?2
+                    AND status = 'active'
+                    AND (
+                        relative_path = ?3
+                        OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                    )
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                params![workspace_id.as_ref(), session_id.as_ref(), relative_path],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn active_lease_covers_path_by_session(
+        &self,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<bool> {
+        self.expire_stale()?;
+        let relative_path = normalize_relative_path(relative_path.as_ref());
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM leases
+                    WHERE workspace_id = ?1
+                       AND session_id = ?2
+                       AND status = 'active'
+                       AND (
+                           relative_path = ?3
+                           OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                       )
+                )",
+                params![workspace_id.as_ref(), session_id.as_ref(), relative_path],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub fn active_exact_file_lease_by_session(
+        &self,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<bool> {
+        self.expire_stale()?;
+        let relative_path = normalize_relative_path(relative_path.as_ref());
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM leases
+                    WHERE workspace_id = ?1
+                       AND session_id = ?2
+                       AND status = 'active'
+                       AND relative_path = ?3
+                )",
+                params![workspace_id.as_ref(), session_id.as_ref(), relative_path],
+                |row| row.get::<_, bool>(0),
+            )
             .map_err(StoreError::from)
     }
 
@@ -428,6 +539,109 @@ impl Store {
             .map(|waiter| waiter.expect("inserted waiter should load"))
     }
 
+    pub fn enqueue_intent_request(
+        &self,
+        request_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        action: impl AsRef<str>,
+        blocking_session_id: Option<&str>,
+    ) -> StoreResult<WaitRecord> {
+        self.expire_stale()?;
+        if let Some(waiter) = self.waiter_by_request_id(request_id.as_ref())? {
+            return Ok(waiter);
+        }
+
+        let wait_id = Uuid::new_v4().to_string();
+        let relative_path = normalize_relative_path(relative_path.as_ref());
+        self.conn.execute(
+            "INSERT INTO wait_queue (
+                wait_id,
+                request_id,
+                session_id,
+                workspace_id,
+                relative_path,
+                action,
+                status,
+                requested_at,
+                reservation_expires_at,
+                blocking_session_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, NULL, ?8)",
+            params![
+                wait_id,
+                request_id.as_ref(),
+                session_id.as_ref(),
+                workspace_id.as_ref(),
+                relative_path,
+                action.as_ref(),
+                now_timestamp(),
+                blocking_session_id,
+            ],
+        )?;
+
+        self.waiter(&wait_id)
+            .map(|waiter| waiter.expect("inserted waiter should load"))
+    }
+
+    pub fn waiter_by_request_id(
+        &self,
+        request_id: impl AsRef<str>,
+    ) -> StoreResult<Option<WaitRecord>> {
+        self.expire_stale()?;
+        let wait_id = self
+            .conn
+            .query_row(
+                "SELECT wait_id FROM wait_queue
+                 WHERE request_id = ?1
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                params![request_id.as_ref()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match wait_id {
+            Some(wait_id) => self.waiter(&wait_id),
+            None => Ok(None),
+        }
+    }
+
+    pub fn cancel_intent_request(
+        &self,
+        request_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+    ) -> StoreResult<WaitRecord> {
+        self.expire_stale()?;
+        let waiter = self
+            .waiter_by_request_id(request_id.as_ref())?
+            .ok_or(StoreError::IntentRequestNotFound)?;
+        if waiter.session_id != session_id.as_ref() || waiter.workspace_id != workspace_id.as_ref()
+        {
+            return Err(StoreError::IntentRequestOwnerMismatch);
+        }
+        if waiter.status == "canceled" {
+            return Ok(waiter);
+        }
+        if !matches!(waiter.status.as_str(), "queued" | "reserved") {
+            return Err(StoreError::IntentRequestNotCancelable);
+        }
+
+        self.conn.execute(
+            "UPDATE wait_queue
+             SET status = 'canceled', reservation_expires_at = NULL
+             WHERE wait_id = ?1 AND status IN ('queued', 'reserved')",
+            params![waiter.wait_id],
+        )?;
+
+        self.promote_next_waiter_after_path_release(&waiter.workspace_id, &waiter.relative_path)?;
+
+        let mut canceled = waiter;
+        canceled.status = "canceled".to_string();
+        canceled.reservation_expires_at = None;
+        Ok(canceled)
+    }
+
     pub fn queue_position(&self, wait_id: impl AsRef<str>) -> StoreResult<Option<u64>> {
         let waiter = self.waiter(wait_id.as_ref())?;
         let Some(waiter) = waiter else {
@@ -487,30 +701,16 @@ impl Store {
             return Ok(None);
         };
 
-        let now = now_timestamp();
-        self.conn.execute(
-            "UPDATE wait_queue
-             SET status = 'reserved', reservation_expires_at = ?1
-             WHERE wait_id = ?2 AND status = 'queued'",
-            params![timestamp_after(&now, RESERVATION_TTL_SECONDS), wait_id],
-        )?;
+        self.promote_waiter_by_id(&wait_id)
+    }
 
-        let waiter = self.waiter(&wait_id)?;
-        if let Some(waiter) = &waiter {
-            self.append_notification(
-                &waiter.session_id,
-                &waiter.workspace_id,
-                "reservation_granted",
-                serde_json::json!({
-                    "wait_id": waiter.wait_id,
-                    "relative_path": waiter.relative_path,
-                    "action": waiter.action,
-                    "reservation_expires_at": waiter.reservation_expires_at,
-                }),
-            )?;
-        }
-
-        Ok(waiter)
+    pub fn promote_next_waiter_for_path(
+        &self,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+    ) -> StoreResult<Option<WaitRecord>> {
+        self.expire_stale()?;
+        self.promote_next_waiter_after_path_release(workspace_id.as_ref(), relative_path.as_ref())
     }
 
     pub fn active_reservation(
@@ -537,6 +737,170 @@ impl Store {
                  ORDER BY rowid ASC
                  LIMIT 1",
                 params![workspace_id.as_ref(), relative_path],
+                wait_record_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn active_reservation_conflict_for_directory(
+        &self,
+        workspace_id: impl AsRef<str>,
+        directory_path: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<Option<WaitRecord>> {
+        self.expire_stale()?;
+        let directory_path = normalize_relative_path(directory_path.as_ref());
+        let directory_prefix = format!("{directory_path}/");
+        self.conn
+            .query_row(
+                "SELECT
+                    wait_id,
+                    session_id,
+                    workspace_id,
+                    relative_path,
+                    action,
+                    status,
+                    requested_at,
+                    reservation_expires_at,
+                    blocking_session_id
+                 FROM wait_queue
+                 WHERE workspace_id = ?1
+                    AND session_id != ?2
+                    AND status = 'reserved'
+                    AND (
+                        relative_path = ?3
+                        OR substr(relative_path, 1, ?4) = ?5
+                        OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                    )
+                 ORDER BY rowid ASC
+                 LIMIT 1",
+                params![
+                    workspace_id.as_ref(),
+                    session_id.as_ref(),
+                    directory_path,
+                    directory_prefix.len() as i64,
+                    directory_prefix,
+                ],
+                wait_record_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn active_reservation_for_directory_by_session(
+        &self,
+        workspace_id: impl AsRef<str>,
+        directory_path: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<Option<WaitRecord>> {
+        self.expire_stale()?;
+        let directory_path = normalize_relative_path(directory_path.as_ref());
+        let directory_prefix = format!("{directory_path}/");
+        self.conn
+            .query_row(
+                "SELECT
+                    wait_id,
+                    session_id,
+                    workspace_id,
+                    relative_path,
+                    action,
+                    status,
+                    requested_at,
+                    reservation_expires_at,
+                    blocking_session_id
+                 FROM wait_queue
+                 WHERE workspace_id = ?1
+                    AND session_id = ?2
+                    AND status = 'reserved'
+                    AND (
+                        relative_path = ?3
+                        OR substr(relative_path, 1, ?4) = ?5
+                        OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                    )
+                 ORDER BY rowid ASC
+                 LIMIT 1",
+                params![
+                    workspace_id.as_ref(),
+                    session_id.as_ref(),
+                    directory_path,
+                    directory_prefix.len() as i64,
+                    directory_prefix,
+                ],
+                wait_record_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn active_reservation_conflict_for_path(
+        &self,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<Option<WaitRecord>> {
+        self.expire_stale()?;
+        let relative_path = normalize_relative_path(relative_path.as_ref());
+        self.conn
+            .query_row(
+                "SELECT
+                    wait_id,
+                    session_id,
+                    workspace_id,
+                    relative_path,
+                    action,
+                    status,
+                    requested_at,
+                    reservation_expires_at,
+                    blocking_session_id
+                 FROM wait_queue
+                 WHERE workspace_id = ?1
+                    AND session_id != ?2
+                    AND status = 'reserved'
+                    AND (
+                        relative_path = ?3
+                        OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                    )
+                 ORDER BY rowid ASC
+                 LIMIT 1",
+                params![workspace_id.as_ref(), session_id.as_ref(), relative_path],
+                wait_record_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn active_reservation_for_path_by_session(
+        &self,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<Option<WaitRecord>> {
+        self.expire_stale()?;
+        let relative_path = normalize_relative_path(relative_path.as_ref());
+        self.conn
+            .query_row(
+                "SELECT
+                    wait_id,
+                    session_id,
+                    workspace_id,
+                    relative_path,
+                    action,
+                    status,
+                    requested_at,
+                    reservation_expires_at,
+                    blocking_session_id
+                 FROM wait_queue
+                 WHERE workspace_id = ?1
+                    AND session_id = ?2
+                    AND status = 'reserved'
+                    AND (
+                        relative_path = ?3
+                        OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                    )
+                 ORDER BY rowid ASC
+                 LIMIT 1",
+                params![workspace_id.as_ref(), session_id.as_ref(), relative_path],
                 wait_record_from_row,
             )
             .optional()
@@ -580,6 +944,12 @@ impl Store {
             )
             .optional()
             .map_err(StoreError::from)
+    }
+
+    pub fn reservation_by_id(&self, wait_id: impl AsRef<str>) -> StoreResult<Option<WaitRecord>> {
+        self.expire_stale()?;
+        self.waiter(wait_id.as_ref())
+            .map(|waiter| waiter.filter(|waiter| waiter.status == "reserved"))
     }
 
     pub fn claim_reservation(
@@ -738,16 +1108,20 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    pub fn policy_state_for_session(&self, session_id: &str) -> StoreResult<PolicyState> {
+    pub fn policy_state_for_session(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+    ) -> StoreResult<PolicyState> {
         self.expire_stale()?;
         let scopes = self
             .conn
             .query_row(
                 "SELECT scopes_json FROM intents
-                 WHERE session_id = ?1 AND status = 'active'
+                 WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'
                  ORDER BY declared_at DESC
                  LIMIT 1",
-                [session_id],
+                params![session_id, workspace_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
@@ -761,6 +1135,38 @@ impl Store {
         })?;
 
         Ok(PolicyState::default().with_active_intent_scopes(scopes))
+    }
+
+    pub fn active_exact_file_intent_by_session(
+        &self,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<bool> {
+        self.expire_stale()?;
+        let relative_path = normalize_relative_path(relative_path.as_ref());
+        let scopes = self
+            .conn
+            .query_row(
+                "SELECT scopes_json FROM intents
+                 WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'
+                 ORDER BY declared_at DESC
+                 LIMIT 1",
+                params![session_id.as_ref(), workspace_id.as_ref()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        let Some(scopes_json) = scopes else {
+            return Ok(false);
+        };
+        let scopes: Vec<IntentScope> = serde_json::from_str(&scopes_json).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?;
+
+        Ok(scopes
+            .iter()
+            .any(|scope| matches!(scope, IntentScope::File(path) if path == &relative_path)))
     }
 
     pub fn expire_stale(&self) -> StoreResult<()> {
@@ -793,8 +1199,21 @@ impl Store {
             [now],
         )?;
         for (workspace_id, relative_path) in expired_leases {
-            self.promote_next_waiter(workspace_id, relative_path)?;
+            self.promote_waiters_after_lease_release(&workspace_id, &relative_path)?;
         }
+
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT workspace_id, relative_path FROM wait_queue
+             WHERE status = 'reserved'
+                AND reservation_expires_at IS NOT NULL
+                AND reservation_expires_at <= ?1",
+        )?;
+        let expired_reservations = statement
+            .query_map([now], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
 
         self.conn.execute(
             "UPDATE wait_queue
@@ -804,6 +1223,10 @@ impl Store {
                 AND reservation_expires_at <= ?1",
             [now],
         )?;
+        for (workspace_id, relative_path) in expired_reservations {
+            self.promote_next_waiter_after_path_release(&workspace_id, &relative_path)?;
+        }
+
         self.conn.execute(
             "UPDATE notifications
              SET status = 'expired'
@@ -902,6 +1325,7 @@ impl Store {
 
             CREATE TABLE IF NOT EXISTS wait_queue (
                 wait_id TEXT PRIMARY KEY,
+                request_id TEXT,
                 session_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
                 relative_path TEXT NOT NULL,
@@ -948,16 +1372,6 @@ impl Store {
                 expires_at TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS validations (
-                validation_id TEXT PRIMARY KEY,
-                workspace_id TEXT NOT NULL,
-                profile_id TEXT NOT NULL,
-                status TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_validations_workspace_profile_status
-                ON validations(workspace_id, profile_id, status);
-
             CREATE TABLE IF NOT EXISTS reconciliations (
                 reconciliation_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -1001,12 +1415,27 @@ impl Store {
             "branch",
             "ALTER TABLE events ADD COLUMN branch TEXT;",
         )?;
+        self.add_column_if_missing(
+            "wait_queue",
+            "request_id",
+            "ALTER TABLE wait_queue ADD COLUMN request_id TEXT;",
+        )?;
+        self.conn.execute_batch(
+            "
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_wait_queue_request_id
+                ON wait_queue(request_id)
+                WHERE request_id IS NOT NULL;
+            ",
+        )?;
 
         Ok(())
     }
 
     fn add_column_if_missing(&self, table: &str, column: &str, ddl: &str) -> StoreResult<()> {
-        if table != "events" || !matches!(column, "repo_id" | "worktree_id" | "root" | "branch") {
+        let supported = (table == "events"
+            && matches!(column, "repo_id" | "worktree_id" | "root" | "branch"))
+            || (table == "wait_queue" && column == "request_id");
+        if !supported {
             return Ok(());
         }
 
@@ -1036,8 +1465,8 @@ impl Store {
                 let scopes_json = event.payload["scopes"].to_string();
                 self.conn.execute(
                     "UPDATE intents SET status = 'superseded'
-                     WHERE session_id = ?1 AND status = 'active'",
-                    params![event.session_id],
+                     WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'",
+                    params![event.session_id, event.workspace_id],
                 )?;
                 self.conn.execute(
                     "INSERT INTO intents (
@@ -1084,6 +1513,124 @@ impl Store {
             )
             .optional()
             .map_err(StoreError::from)
+    }
+
+    fn promote_waiters_after_lease_release(
+        &self,
+        workspace_id: &str,
+        relative_path: &str,
+    ) -> StoreResult<()> {
+        self.promote_next_waiter_after_path_release(workspace_id, relative_path)?;
+
+        Ok(())
+    }
+
+    fn promote_next_waiter_after_path_release(
+        &self,
+        workspace_id: &str,
+        relative_path: &str,
+    ) -> StoreResult<Option<WaitRecord>> {
+        let relative_path = normalize_relative_path(relative_path);
+        let mut statement = self.conn.prepare(
+            "SELECT
+                wait_id,
+                session_id,
+                workspace_id,
+                relative_path,
+                action,
+                status,
+                requested_at,
+                reservation_expires_at,
+                blocking_session_id
+             FROM wait_queue
+             WHERE workspace_id = ?1
+                AND status = 'queued'
+                AND (
+                    relative_path = ?2
+                    OR (
+                        action = 'write_directory'
+                        AND relative_path != ?2
+                        AND substr(?2, 1, length(relative_path) + 1) = relative_path || '/'
+                    )
+                    OR substr(relative_path, 1, length(?2) + 1) = ?2 || '/'
+                )
+             ORDER BY rowid ASC",
+        )?;
+        let waiters = statement
+            .query_map(params![workspace_id, relative_path], wait_record_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        for waiter in waiters {
+            if self.waiter_has_active_conflict(&waiter)? {
+                continue;
+            }
+
+            return self.promote_waiter_by_id(&waiter.wait_id);
+        }
+
+        Ok(None)
+    }
+
+    fn waiter_has_active_conflict(&self, waiter: &WaitRecord) -> StoreResult<bool> {
+        if waiter.action == "write_directory" {
+            return Ok(self
+                .active_lease_conflict_owner_for_directory(
+                    &waiter.workspace_id,
+                    &waiter.relative_path,
+                    &waiter.session_id,
+                )?
+                .is_some()
+                || self
+                    .active_reservation_conflict_for_directory(
+                        &waiter.workspace_id,
+                        &waiter.relative_path,
+                        &waiter.session_id,
+                    )?
+                    .is_some());
+        }
+
+        Ok(self
+            .active_lease_conflict_owner_for_path(
+                &waiter.workspace_id,
+                &waiter.relative_path,
+                &waiter.session_id,
+            )?
+            .is_some()
+            || self
+                .active_reservation_conflict_for_path(
+                    &waiter.workspace_id,
+                    &waiter.relative_path,
+                    &waiter.session_id,
+                )?
+                .is_some())
+    }
+
+    fn promote_waiter_by_id(&self, wait_id: &str) -> StoreResult<Option<WaitRecord>> {
+        let now = now_timestamp();
+        self.conn.execute(
+            "UPDATE wait_queue
+             SET status = 'reserved', reservation_expires_at = ?1
+             WHERE wait_id = ?2 AND status = 'queued'",
+            params![timestamp_after(&now, RESERVATION_TTL_SECONDS), wait_id],
+        )?;
+
+        let waiter = self.waiter(wait_id)?;
+        if let Some(waiter) = &waiter {
+            self.append_notification(
+                &waiter.session_id,
+                &waiter.workspace_id,
+                "reservation_granted",
+                serde_json::json!({
+                    "wait_id": waiter.wait_id,
+                    "relative_path": waiter.relative_path,
+                    "action": waiter.action,
+                    "reservation_expires_at": waiter.reservation_expires_at,
+                }),
+            )?;
+        }
+
+        Ok(waiter)
     }
 }
 

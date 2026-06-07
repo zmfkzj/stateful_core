@@ -50,12 +50,13 @@ source and explored a constrained read-only hook path. The current
 implementation supersedes that target: raw Bash is denied by stateful hooks.
 Hook-mediated Bash must be a single strict invocation of the trusted absolute
 `stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
-<cmd>`. Repo write authorization starts with structured paths such as
-`state_file_write` / `state.file.write`, where target paths can be checked before
-writing, or with `--fs write-targets` wrapper calls that declare explicit
-targets. Raw Bash test commands are not allowlisted; validation uses
-`state_validation_run` / `state.validation.run` in Codex sessions, or
-`stateful validate <profile>` outside hook-mediated Bash.
+<cmd>`. Repo file edit authorization starts with native Codex edit tools such as
+`apply_patch` or Edit after exact intent and a successful same-session file lease, where
+target paths can be checked before writing, or with `--fs write-targets` wrapper
+calls that declare explicit targets. Raw Bash test commands are not allowlisted;
+use `stateful sandbox run --fs write-targets --write-dir target --command <cmd>`
+after exact `target/` directory intent and a successful same-session directory
+lease.
 
 Overrides are never automatic. A blocked write can proceed only when the user
 explicitly instructs the current session to allow a specific resource override.

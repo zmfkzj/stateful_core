@@ -13,7 +13,6 @@ The model is intentionally narrow:
 - `conflict`
 - `finalization`
 - `override`
-- `validation`
 
 These state kinds describe active coordination, not general-purpose memory or
 all durable agent facts.
@@ -144,10 +143,9 @@ Only `file` and `directory` resources can authorize filesystem writes. Other
 resource types can warn, coordinate, or constrain controlled actions, but cannot
 authorize filesystem mutation.
 
-`test` resources are tied to controlled validation profiles and may inform
-future validation concurrency policy. The current runner parses `exclusive`, but
-does not yet enforce concurrent-run denial, and test resources do not authorize
-source writes.
+`test` resources may inform future test coordination policy, but they do not
+authorize filesystem mutation. Test commands write artifacts through explicit
+sandbox-run write directories.
 
 `task`, `port`, and `migration` resources are context and warning signals in v1.
 They can appear in prompt context and conflict records, but cannot block general
@@ -234,6 +232,10 @@ scope in `files_planned`. Abstract resources in `resources_planned`, such as
 `task`, `test`, `port`, or `migration`, can provide context but cannot authorize
 writes.
 
+Intent declarations replace the session's active scope in that workspace; they
+do not append. When a caller adds or changes targets, it must redeclare the
+complete intended file set for that session and workspace.
+
 ## Intent Scope Matching
 
 All paths are normalized relative to the workspace root before matching.
@@ -268,7 +270,7 @@ conflict_id
 session_id
 target_resource
 conflicting_session_id
-conflict_type: missing_intent | active_lease | planned_edit | stale_state | human_change | unreconciled_human_write | soft_repo_conflict | unknown_repo_identity | validation_profile_active | coordination_resource_overlap
+conflict_type: missing_intent | active_lease | planned_edit | stale_state | human_change | unreconciled_human_write | soft_repo_conflict | unknown_repo_identity | coordination_resource_overlap
 severity: warn | block
 decision: allow | warn | deny
 reason
@@ -312,10 +314,12 @@ finalization, or lease expiry. Soft repo-relative conflicts do not create wait
 queue records in v1.
 
 Promotion creates a reservation, not active write authority. The waiting session
-must claim the reservation before the server creates active intent and active
-leases. The default reservation TTL is 120 seconds. If the reservation is not
-claimed before `reservation_expires_at`, the reservation expires and the server
-may promote the next eligible FIFO waiter.
+must reread the target, then explicitly claim the reservation with
+`state.intent.claim` or `stateful intent claim --wait-id <id>`. Only that claim
+creates write-authorizing intent and active same-session leases. The default
+reservation TTL is 120 seconds. If the reservation is not claimed before
+`reservation_expires_at`, the reservation expires and the server may promote the
+next eligible FIFO waiter.
 
 For multi-resource requests, a request is eligible only when it is at the head of
 every resource queue it participates in and every requested resource has no
@@ -375,40 +379,22 @@ Subagents may write only inside the parent session's active valid intent scope.
 Their activity and leases are still recorded under the subagent `actor_id`.
 Same-owner sessions do not receive automatic override authority.
 
-## Validation Profile
+## Sandboxed Test Execution
 
-Validation profiles are static repo-defined configuration loaded from
-`.stateful/validation.yml`. Agents run validation by profile name and cannot
-provide arbitrary commands at runtime.
-
-```text
-profile_id
-description
-command
-cwd
-timeout_seconds
-allowed_writes
-denied_writes
-exclusive
-env
-result_parser: exit_code
-```
-
-Validation results should distinguish command failure from policy failure:
+Raw Bash test commands are denied by hooks. Agents run tests through the trusted
+wrapper after exact `target/` directory intent and a successful same-session
+directory lease, for example:
 
 ```text
-status: passed | failed | failed_policy | timeout | error
+stateful intent declare --session-id <session> --workspace-id <workspace> target/
+stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
+stateful sandbox run --fs write-targets --network enabled --write-dir target --command 'cargo test --workspace'
 ```
 
-`failed_policy` means the validation command wrote to a denied source-tree path.
-V1 detects this by comparing `git status --porcelain` before and after
-validation. A denied path that is already dirty before validation produces
-`error`; a newly dirty denied path after validation produces `failed_policy`.
-
-The current runner parses `exclusive`, but does not yet enforce a validation
-concurrency lock. Future policy should use `exclusive` to deny concurrent runs
-of the same profile in the workspace and warn for concurrent non-exclusive
-runs.
+Source-tree edits should use native Codex edit tools such as `apply_patch` or
+Edit after exact intent declaration and a successful same-session file lease.
+Command-shaped source writes must use exact `--write-target` or `--create-target`
+entries, not the `target/` artifact directory scope.
 
 ## Finalization Record
 
@@ -528,8 +514,8 @@ write authorization and fail open for human saves.
   `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper are
   denied. Command-shaped writes through `--fs write-targets` fail closed when
   target authorization cannot be proven.
-- `state_validation_run` / `state.validation.run` returns
-  `error: state_unavailable` and does not execute the validation command.
+- write-target sandbox authorization fails closed and does not execute the
+  command.
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block.
 - Intent declaration, lease acquisition, and lease refresh fail.
 - Read, search, and diff actions are allowed.
@@ -574,7 +560,7 @@ Human save-gate events are advisory coordination evidence.
 - After `HumanWriteObserved` on a file with active agent work, later agent writes
   should be denied or warned until the agent refreshes state and reconciles the
   file.
-- Read, search, diff, and controlled validation actions remain allowed while a
+- Read, search, diff, and sandboxed test actions remain allowed while a
   human write is unreconciled.
 - `state.reconcile.ack` records reconciliation after the agent rereads the file
   and chooses `adopt`, `reapply`, `ask_user`, or `abandon`.

@@ -51,6 +51,7 @@ stateful sandbox run
   --network disabled|enabled
   --write-target <repo-relative-path>...
   --create-target <repo-relative-path>...
+  --write-dir <repo-relative-dir>...
   --command <single string>
   [--timeout-seconds <seconds>]
 ```
@@ -66,20 +67,38 @@ opaque string executed inside the selected sandbox with `/bin/sh -c`.
 
 `read-only` profile:
 
-- Rejects `--write-target` and `--create-target`.
+- Rejects `--write-target`, `--create-target`, and `--write-dir`.
 - Does not call `/v1/authorize`.
 - Denies repo/source-tree writes at the sandbox layer.
 - Allows `/dev/null` writes.
 
 `write-targets` profile:
 
-- Requires at least one `--write-target` or `--create-target`.
-- Requires every target to be repo-relative.
+- Requires at least one `--write-target`, `--create-target`, or `--write-dir`.
+- Requires every file or directory target to be repo-relative.
 - Rejects empty paths, absolute paths, `..`, `.git`, control characters,
   symlink file targets, symlinked parent directories, and directory targets.
-- Calls `/v1/authorize` for each write/create target before execution.
-- Runs the command with only authorized targets writable.
+  Directory targets are accepted only through `--write-dir`.
+- Rejects `--write-dir` values that are empty, absolute, outside the repo, under
+  `.git`, contain control characters, resolve through symlinked parents, or are
+  not under `target/`. `--write-dir` is for the `target/` artifact tree, not
+  source-tree editing.
+- Calls `/v1/authorize` for each write/create file target and each write
+  directory before execution.
+- Runs the command with only authorized file targets and directory subtrees
+  writable.
 - Allows `/dev/null` writes.
+
+`--write-dir` authorization:
+
+- The session must first declare exact `target/` directory intent with a
+  trailing slash.
+- The session must acquire the matching same-session directory lease before
+  invoking the wrapper.
+- The wrapper authorizes the normalized directory target with
+  `payload.action: write_directory`.
+- Source-tree edits do not use `--write-dir`; use native Codex edit tools after
+  exact file intent and a successful same-session file lease.
 
 `create-target` pre-creation:
 
@@ -112,15 +131,17 @@ Network policy:
 
 ## Authorization Flow
 
-For `write-targets`, the wrapper builds one `/v1/authorize` request per target.
+For `write-targets`, the wrapper builds one `/v1/authorize` request per file or
+directory target.
 
 Request properties:
 
 - `source.kind`: `cli`
 - `source.event`: `sandbox_run`
-- `source.tool_name`: `stateful.sandbox.run`
-- `payload.action`: `write_file`
-- `payload.path`: normalized repo-relative target
+- `source.source_ref`: `stateful.sandbox.run`
+- `payload.action`: `write_file` for `--write-target` / `--create-target`, or
+  `write_directory` for `--write-dir`
+- `payload.path`: normalized repo-relative file or directory target
 - `payload.queue_on_conflict`: `true`
 - `payload.fs_profile`: `write-targets`
 - `payload.network_policy`: `disabled` or `enabled`
@@ -177,7 +198,8 @@ Allowed examples:
 
 ```text
 /trusted/path/stateful sandbox run --fs read-only --network disabled --command "rg auth src"
-/trusted/path/stateful sandbox run --fs write-targets --network enabled --write-target README.md --command "printf x > README.md"
+/trusted/path/stateful sandbox run --fs write-targets --network enabled --write-target target/report.txt --command "printf x > target/report.txt"
+/trusted/path/stateful sandbox run --fs write-targets --network enabled --write-dir target --command "cargo test --workspace"
 ```
 
 ## Sandbox Backends
@@ -190,6 +212,7 @@ Backend requirements:
 - `/dev/null` is writable in every profile.
 - `read-only` blocks repo/source writes.
 - `write-targets` allows exact authorized target file writes.
+- `write-targets` allows authorized artifact directory subtree writes.
 - `write-targets` blocks unlisted repo writes.
 - `--network disabled` disables network where supported.
 - `--network enabled` omits the no-network restriction where supported.
@@ -246,8 +269,8 @@ paths until the generic profile model is precise enough.
 CLI parsing tests:
 
 - `sandbox run` requires exactly one `--command`.
-- `read-only` rejects write/create targets.
-- `write-targets` requires at least one write/create target.
+- `read-only` rejects write/create/directory targets.
+- `write-targets` requires at least one write/create/directory target.
 - `--network disabled|enabled` parses and defaults to disabled.
 - `git-metadata` and `workspace` fail closed.
 - `-- <argv...>` and command-string metadata markers are rejected.
@@ -258,6 +281,8 @@ Hook tests:
 - Valid canonical `stateful sandbox run --fs read-only ...` is allowed.
 - Valid canonical `stateful sandbox run --fs write-targets --write-target ...`
   is allowed.
+- Valid canonical `stateful sandbox run --fs write-targets --write-dir ...` is
+  allowed only for the authorized `target/` artifact tree.
 - Bare `stateful` is rejected unless canonical resolution proves it is the
   trusted binary.
 - Outer redirects, pipelines, command separators, env assignments, command
@@ -269,6 +294,7 @@ Sandbox execution tests:
 
 - Read-only profile blocks repo writes.
 - Write-targets profile allows declared file writes.
+- Write-targets profile allows declared artifact directory writes.
 - Write-targets profile blocks undeclared file writes.
 - Create-target creates only declared safe repo-local files.
 - `/dev/null` writes work in every profile.
@@ -281,4 +307,3 @@ Migration tests:
 - Stale `state_bash_write` calls produce the removal guidance.
 - README, architecture docs, implementation contract, and generated skill text
   no longer recommend `state_bash_write`.
-

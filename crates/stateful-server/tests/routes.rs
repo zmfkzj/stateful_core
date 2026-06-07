@@ -4,7 +4,6 @@ use axum::{
 };
 use stateful_server::{ServerConfig, build_router};
 use stateful_store::{Event, Store};
-use std::{fs, process::Command};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -74,6 +73,10 @@ async fn runtime_identity_requires_token_and_returns_process_identity() {
     assert_eq!(json["status"], "ok");
     assert_eq!(json["pid"], std::process::id());
     assert_eq!(json["protocol_version"], "stateful.v1");
+    assert_eq!(
+        json["capabilities"],
+        serde_json::json!(["authorize.write_directory"])
+    );
 }
 
 #[tokio::test]
@@ -175,6 +178,20 @@ async fn side_effecting_routes_intent_declare_accepts_protocol_envelope() {
     assert_eq!(json["events"][0]["session_id"], "s1");
     assert_eq!(json["events"][0]["workspace_id"], "w1");
     assert_eq!(json["events"][0]["repo_id"], "repo-1");
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
 
     let authorize = app
         .oneshot(protocol_request(
@@ -506,7 +523,7 @@ async fn lease_activity_and_conflict_routes_are_available() {
 }
 
 #[tokio::test]
-async fn declared_intent_allows_matching_authorize_request() {
+async fn declared_intent_without_same_session_lease_denies_matching_authorize_request() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     let declare = app
@@ -541,8 +558,8 @@ async fn declared_intent_allows_matching_authorize_request() {
         .await
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-    assert_eq!(json["decision"], "allow");
-    assert_eq!(json["reason_code"], "authorized");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_lease");
 }
 
 #[tokio::test]
@@ -583,6 +600,402 @@ async fn declared_intent_denies_out_of_scope_authorize_request() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "scope_mismatch");
+}
+
+#[tokio::test]
+async fn hook_native_write_requires_exact_file_intent_even_when_directory_scope_allows_write_file()
+{
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["src/"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/"
+            }),
+        ))
+        .await
+        .expect("directory lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts"
+        }),
+    );
+    body["source"]["kind"] = serde_json::json!("hook");
+    body["source"]["event"] = serde_json::json!("pre_tool_use");
+    body["source"]["source_ref"] = serde_json::json!("hook:req-1");
+    body["source"]["tool_name"] = serde_json::json!("apply_patch");
+
+    let response = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "scope_mismatch");
+    assert!(
+        json["required_next_action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("exact file intent")
+    );
+}
+
+#[tokio::test]
+async fn hook_write_requires_tool_name_even_when_source_ref_names_native_tool() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["src/"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/"
+            }),
+        ))
+        .await
+        .expect("directory lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts"
+        }),
+    );
+    body["source"]["kind"] = serde_json::json!("hook");
+    body["source"]["event"] = serde_json::json!("pre_tool_use");
+    body["source"]["source_ref"] = serde_json::json!("apply_patch");
+
+    let response = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_tool_name");
+}
+
+#[tokio::test]
+async fn hook_native_write_requires_exact_file_lease_even_when_directory_lease_covers_path() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/"
+            }),
+        ))
+        .await
+        .expect("directory lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts"
+        }),
+    );
+    body["source"]["kind"] = serde_json::json!("hook");
+    body["source"]["event"] = serde_json::json!("pre_tool_use");
+    body["source"]["source_ref"] = serde_json::json!("hook:req-1");
+    body["source"]["tool_name"] = serde_json::json!("Edit");
+
+    let response = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_lease");
+    assert!(
+        json["required_next_action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("same-session file leases")
+    );
+}
+
+#[tokio::test]
+async fn hook_native_write_allows_exact_file_intent_and_exact_file_lease() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("file lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts"
+        }),
+    );
+    body["source"]["kind"] = serde_json::json!("hook");
+    body["source"]["event"] = serde_json::json!("pre_tool_use");
+    body["source"]["source_ref"] = serde_json::json!("hook:req-1");
+    body["source"]["tool_name"] = serde_json::json!("file_change");
+
+    let response = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "allow");
+    assert_eq!(json["reason_code"], "authorized");
+}
+
+#[tokio::test]
+async fn cli_sandbox_write_file_keeps_directory_intent_and_lease_semantics() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["src/"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/"
+            }),
+        ))
+        .await
+        .expect("directory lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts"
+        }),
+    );
+    body["source"]["kind"] = serde_json::json!("cli");
+    body["source"]["event"] = serde_json::json!("sandbox_run");
+    body["source"]["source_ref"] = serde_json::json!("stateful.sandbox.run");
+
+    let response = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "allow");
+    assert_eq!(json["reason_code"], "authorized");
+}
+
+#[tokio::test]
+async fn authorize_requires_intent_in_same_workspace_as_lease() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare_other_workspace = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w2",
+            serde_json::json!({
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare_other_workspace.status(), StatusCode::OK);
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_intent");
+
+    let declare_same_workspace = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare_same_workspace.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "allow");
+    assert_eq!(json["reason_code"], "authorized");
 }
 
 #[tokio::test]
@@ -640,6 +1053,174 @@ async fn active_lease_by_other_session_denies_authorize_even_with_matching_inten
     let required_next_action = json["required_next_action"].as_str().unwrap_or_default();
     assert!(required_next_action.contains("Do not redeclare intent"));
     assert!(required_next_action.contains("session_id"));
+}
+
+#[tokio::test]
+async fn queue_on_conflict_without_intent_denies_without_wait_record() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "queue_on_conflict": true
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_intent");
+    assert!(json.get("wait").is_none());
+
+    let release = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/release",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    let resume = app
+        .oneshot(json_request(
+            "/v1/resume/next",
+            serde_json::json!({
+                "session_id": "s2",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("resume next should complete");
+    assert_eq!(resume.status(), StatusCode::OK);
+
+    let body = to_bytes(resume.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["resume_available"], false);
+    assert!(json["reservation"].is_null());
+}
+
+#[tokio::test]
+async fn queue_on_conflict_out_of_scope_denies_without_wait_record() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/session.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/session.ts",
+                "queue_on_conflict": true
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "scope_mismatch");
+    assert!(json.get("wait").is_none());
+
+    let release = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/release",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/session.ts"
+            }),
+        ))
+        .await
+        .expect("lease release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    let resume = app
+        .oneshot(json_request(
+            "/v1/resume/next",
+            serde_json::json!({
+                "session_id": "s2",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("resume next should complete");
+    assert_eq!(resume.status(), StatusCode::OK);
+
+    let body = to_bytes(resume.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["resume_available"], false);
+    assert!(json["reservation"].is_null());
 }
 
 #[tokio::test]
@@ -701,6 +1282,10 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
     assert_eq!(json["wait"]["status"], "queued");
     assert_eq!(json["wait"]["queue_position"], 1);
     assert_eq!(json["wait"]["blocking_session_id"], "s1");
+    let s2_wait_id = json["wait"]["wait_id"]
+        .as_str()
+        .expect("wait id should be present")
+        .to_string();
 
     let queued_c = app
         .clone()
@@ -761,6 +1346,49 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
     assert!(required_next_action.contains("Do not redeclare intent"));
     assert!(required_next_action.contains("session_id"));
 
+    let unclaimed_b = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    let body = to_bytes(unclaimed_b.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "reservation_claim_required");
+    assert_eq!(json["reservation"]["status"], "reserved");
+    let required_next_action = json["required_next_action"].as_str().unwrap_or_default();
+    assert!(required_next_action.contains("state.intent.claim"));
+
+    let claim = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/claim",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "wait_id": s2_wait_id
+            }),
+        ))
+        .await
+        .expect("intent claim should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+    let body = to_bytes(claim.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["reservation"]["status"], "claimed");
+
     let allowed_b = app
         .clone()
         .oneshot(protocol_request(
@@ -780,7 +1408,291 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "allow");
     assert_eq!(json["reason_code"], "authorized");
-    assert_eq!(json["reservation"]["status"], "claimed");
+    assert!(json.get("reservation").is_none());
+}
+
+#[tokio::test]
+async fn intent_request_reserves_available_target_but_still_requires_claim() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let requested = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-1",
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(requested.status(), StatusCode::OK);
+    let body = to_bytes(requested.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["request_state"], "reserved");
+    assert_eq!(json["request_id"], "request-1");
+    assert_eq!(json["reservation"]["session_id"], "s1");
+    assert_eq!(json["reservation"]["relative_path"], "src/auth.ts");
+    assert_eq!(json["reservation"]["status"], "reserved");
+    let wait_id = json["reservation"]["wait_id"]
+        .as_str()
+        .expect("wait id should be present")
+        .to_string();
+
+    let unclaimed = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(unclaimed.status(), StatusCode::OK);
+    let body = to_bytes(unclaimed.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "reservation_claim_required");
+    assert_eq!(json["reservation"]["wait_id"], wait_id);
+}
+
+#[tokio::test]
+async fn intent_request_queues_conflict_and_reuses_request_id() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let first = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-2",
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(first.status(), StatusCode::OK);
+    let body = to_bytes(first.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["request_state"], "queued");
+    assert_eq!(json["request_id"], "request-2");
+    assert_eq!(json["wait"]["status"], "queued");
+    assert_eq!(json["wait"]["queue_position"], 1);
+    assert_eq!(json["wait"]["blocking_session_id"], "s1");
+    let first_wait_id = json["wait"]["wait_id"]
+        .as_str()
+        .expect("wait id should be present")
+        .to_string();
+
+    let repeated = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-2",
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("intent request retry should complete");
+    assert_eq!(repeated.status(), StatusCode::OK);
+    let body = to_bytes(repeated.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["request_state"], "queued");
+    assert_eq!(json["wait"]["wait_id"], first_wait_id);
+    assert_eq!(json["wait"]["queue_position"], 1);
+
+    let second = app
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s3",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-3",
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("second intent request should complete");
+    assert_eq!(second.status(), StatusCode::OK);
+    let body = to_bytes(second.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["request_state"], "queued");
+    assert_eq!(json["wait"]["queue_position"], 2);
+}
+
+#[tokio::test]
+async fn intent_cancel_cancels_reserved_request_and_promotes_next_waiter() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    for (session_id, request_id) in [("s2", "request-2"), ("s3", "request-3")] {
+        let queued = app
+            .clone()
+            .oneshot(protocol_request(
+                "/v1/intent/request",
+                session_id,
+                "w1",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "action": "write_file",
+                    "path": "src/auth.ts"
+                }),
+            ))
+            .await
+            .expect("intent request should complete");
+        assert_eq!(queued.status(), StatusCode::OK);
+    }
+
+    let release = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/release",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    let canceled = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/cancel",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-2"
+            }),
+        ))
+        .await
+        .expect("intent cancel should complete");
+    assert_eq!(canceled.status(), StatusCode::OK);
+    let body = to_bytes(canceled.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["request_state"], "canceled");
+    assert_eq!(json["request_id"], "request-2");
+    assert_eq!(json["wait"]["status"], "canceled");
+
+    let resume = app
+        .oneshot(json_request(
+            "/v1/resume/next",
+            serde_json::json!({
+                "session_id": "s3",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("resume next should complete");
+    assert_eq!(resume.status(), StatusCode::OK);
+    let body = to_bytes(resume.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["resume_available"], true);
+    assert_eq!(json["reservation"]["session_id"], "s3");
+    assert_eq!(json["reservation"]["relative_path"], "src/auth.ts");
+}
+
+#[tokio::test]
+async fn intent_cancel_rejects_other_session_request() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let requested = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-2",
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(requested.status(), StatusCode::OK);
+
+    let rejected = app
+        .oneshot(protocol_request(
+            "/v1/intent/cancel",
+            "s3",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-2"
+            }),
+        ))
+        .await
+        .expect("intent cancel should complete");
+    assert_eq!(rejected.status(), StatusCode::CONFLICT);
+    let body = to_bytes(rejected.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["reason_code"], "cancel_failed");
 }
 
 #[tokio::test]
@@ -888,6 +1800,20 @@ async fn resume_next_returns_active_reservation_for_session() {
         .expect("lease acquire should complete");
     assert_eq!(lease.status(), StatusCode::OK);
 
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
     let queued = app
         .clone()
         .oneshot(protocol_request(
@@ -940,7 +1866,7 @@ async fn resume_next_returns_active_reservation_for_session() {
     assert_eq!(json["reservation"]["relative_path"], "src/auth.ts");
     assert_eq!(
         json["required_next_action"],
-        "Claim the reservation by retrying the write after rereading the file."
+        "Reread the target, then call state.intent.claim for the reservation before writing."
     );
 }
 
@@ -999,6 +1925,211 @@ async fn active_lease_by_same_session_allows_matching_authorize() {
 }
 
 #[tokio::test]
+async fn rename_file_denies_when_other_session_leases_destination() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            ["src/old.ts", "src/new.ts"],
+        ))
+        .expect("intent should append");
+    store
+        .acquire_lease("s1", "w1", "src/old.ts")
+        .expect("source lease should acquire");
+    store
+        .acquire_lease("s2", "w1", "src/new.ts")
+        .expect("destination lease should acquire");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "rename_file",
+                "path": "src/old.ts",
+                "old_path": "src/old.ts",
+                "new_path": "src/new.ts",
+                "queue_on_conflict": true
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "active_lease_conflict");
+    assert!(json.get("wait").is_none());
+}
+
+#[tokio::test]
+async fn rename_file_denies_when_other_session_leases_source() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            ["src/old.ts", "src/new.ts"],
+        ))
+        .expect("intent should append");
+    store
+        .acquire_lease("s2", "w1", "src/old.ts")
+        .expect("source lease should acquire");
+    store
+        .acquire_lease("s1", "w1", "src/new.ts")
+        .expect("destination lease should acquire");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "rename_file",
+                "path": "src/old.ts",
+                "old_path": "src/old.ts",
+                "new_path": "src/new.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "active_lease_conflict");
+}
+
+#[tokio::test]
+async fn rename_file_denies_when_other_session_reserves_destination() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            ["src/old.ts", "src/new.ts"],
+        ))
+        .expect("intent should append");
+    store
+        .enqueue_waiter("s2", "w1", "src/new.ts", "write_file", Some("s3"))
+        .expect("destination waiter should enqueue");
+    store
+        .promote_next_waiter("w1", "src/new.ts")
+        .expect("destination waiter should promote");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "rename_file",
+                "path": "src/old.ts",
+                "old_path": "src/old.ts",
+                "new_path": "src/new.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "reservation_conflict");
+    assert_eq!(json["reservation"]["relative_path"], "src/new.ts");
+}
+
+#[tokio::test]
+async fn rename_file_denies_when_other_session_reserves_source() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            ["src/old.ts", "src/new.ts"],
+        ))
+        .expect("intent should append");
+    store
+        .enqueue_waiter("s2", "w1", "src/old.ts", "write_file", Some("s3"))
+        .expect("source waiter should enqueue");
+    store
+        .promote_next_waiter("w1", "src/old.ts")
+        .expect("source waiter should promote");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "rename_file",
+                "path": "src/old.ts",
+                "old_path": "src/old.ts",
+                "new_path": "src/new.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "reservation_conflict");
+    assert_eq!(json["reservation"]["relative_path"], "src/old.ts");
+}
+
+#[tokio::test]
+async fn rename_file_requires_old_and_new_paths() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    for payload in [
+        serde_json::json!({
+            "action": "rename_file",
+            "path": "src/old.ts",
+            "old_path": "src/old.ts"
+        }),
+        serde_json::json!({
+            "action": "rename_file",
+            "path": "src/old.ts",
+            "new_path": "src/new.ts"
+        }),
+        serde_json::json!({
+            "action": "move_file",
+            "path": "src/old.ts",
+            "old_path": "",
+            "new_path": "src/new.ts"
+        }),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(protocol_request("/v1/authorize", "s1", "w1", payload))
+            .await
+            .expect("authorize should complete");
+
+        let body = to_bytes(response.into_body(), 1024)
+            .await
+            .expect("body should read");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(json["decision"], "deny");
+        assert_eq!(json["reason_code"], "missing_rename_paths");
+    }
+}
+
+#[tokio::test]
 async fn delete_file_action_requires_exact_file_intent_over_http() {
     let app = build_router(ServerConfig::new("secret-token"));
 
@@ -1036,6 +2167,468 @@ async fn delete_file_action_requires_exact_file_intent_over_http() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "scope_mismatch");
+}
+
+#[tokio::test]
+async fn write_directory_action_requires_exact_directory_intent_over_http() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["target/"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "target/"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let allowed = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_directory",
+                "path": "target/"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let body = to_bytes(allowed.into_body(), 1024)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "allow");
+
+    let denied = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_directory",
+                "path": "target/debug/"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(denied.status(), StatusCode::OK);
+    let body = to_bytes(denied.into_body(), 1024)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "scope_mismatch");
+}
+
+#[tokio::test]
+async fn write_directory_action_denies_when_subtree_has_other_session_lease() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s2",
+                "workspace_id": "w1",
+                "path": "target/out.txt"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["target/"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_directory",
+                "path": "target/"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "active_lease_conflict");
+}
+
+#[tokio::test]
+async fn write_file_action_denies_when_ancestor_directory_has_other_session_lease() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s2",
+                "workspace_id": "w1",
+                "path": "target/"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["target/out.txt"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "target/out.txt"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "active_lease_conflict");
+}
+
+#[tokio::test]
+async fn write_file_action_denies_when_ancestor_directory_has_other_session_reservation() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .enqueue_waiter("s2", "w1", "target", "write_directory", Some("s3"))
+        .expect("directory waiter should enqueue");
+    store
+        .promote_next_waiter("w1", "target")
+        .expect("directory waiter should promote");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["target/out.txt"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "target/out.txt"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "reservation_conflict");
+    assert_eq!(json["reservation"]["session_id"], "s2");
+    assert_eq!(json["reservation"]["relative_path"], "target");
+}
+
+#[tokio::test]
+async fn write_file_action_requires_claim_when_same_session_has_ancestor_directory_reservation() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .enqueue_waiter("s2", "w1", "target", "write_directory", Some("s3"))
+        .expect("directory waiter should enqueue");
+    let wait = store
+        .promote_next_waiter("w1", "target")
+        .expect("directory waiter should promote")
+        .expect("reservation should be created");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["target/out.txt"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "target/out.txt"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "reservation_claim_required");
+    assert_eq!(json["reservation"]["wait_id"], wait.wait_id);
+    assert_eq!(json["reservation"]["relative_path"], "target");
+}
+
+#[tokio::test]
+async fn queued_write_directory_conflict_reserves_waiter_after_child_lease_release() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s2",
+                "workspace_id": "w1",
+                "path": "target/out.txt"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["target/"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let queued = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_directory",
+                "path": "target/",
+                "queue_on_conflict": true
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(queued.status(), StatusCode::OK);
+    let body = to_bytes(queued.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "active_lease_conflict");
+    assert_eq!(json["wait"]["status"], "queued");
+
+    let release = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/release",
+            serde_json::json!({
+                "session_id": "s2",
+                "workspace_id": "w1",
+                "path": "target/out.txt"
+            }),
+        ))
+        .await
+        .expect("lease release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    let resume = app
+        .oneshot(json_request(
+            "/v1/resume/next",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("resume next should complete");
+    assert_eq!(resume.status(), StatusCode::OK);
+    let body = to_bytes(resume.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["resume_available"], true);
+    assert_eq!(json["reservation"]["session_id"], "s1");
+    assert_eq!(json["reservation"]["relative_path"], "target");
+    assert_eq!(json["reservation"]["action"], "write_directory");
+}
+
+#[tokio::test]
+async fn queued_child_file_conflict_reserves_waiter_after_directory_lease_release() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s2",
+                "workspace_id": "w1",
+                "path": "target/"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["target/out.txt"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let queued = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "target/out.txt",
+                "queue_on_conflict": true
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(queued.status(), StatusCode::OK);
+    let body = to_bytes(queued.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "active_lease_conflict");
+    assert_eq!(json["wait"]["status"], "queued");
+
+    let release = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/release",
+            serde_json::json!({
+                "session_id": "s2",
+                "workspace_id": "w1",
+                "path": "target/"
+            }),
+        ))
+        .await
+        .expect("lease release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    let resume = app
+        .oneshot(json_request(
+            "/v1/resume/next",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("resume next should complete");
+    assert_eq!(resume.status(), StatusCode::OK);
+    let body = to_bytes(resume.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["resume_available"], true);
+    assert_eq!(json["reservation"]["session_id"], "s1");
+    assert_eq!(json["reservation"]["relative_path"], "target/out.txt");
+    assert_eq!(json["reservation"]["action"], "write_file");
 }
 
 #[tokio::test]
@@ -1115,6 +2708,9 @@ async fn authorize_uses_supplied_sqlite_store() {
     store
         .append(Event::intent_declared("s1", "w1", ["src/auth.ts"]))
         .expect("intent should append");
+    store
+        .acquire_lease("s1", "w1", "src/auth.ts")
+        .expect("lease should acquire");
     let app = build_router(ServerConfig::with_store("secret-token", store));
 
     let response = app
@@ -1251,92 +2847,6 @@ async fn outbox_sync_accepts_idempotent_events() {
     }
 }
 
-#[tokio::test]
-async fn validation_run_executes_controlled_profile() {
-    let repo = TestRepo::new("server-validation-pass");
-    repo.write_validation(
-        r#"
-profiles:
-  - profile_id: pass
-    description: Pass
-    command: true
-    cwd: .
-    timeout_seconds: 10
-    denied_writes:
-      - src/**
-"#,
-    );
-    let app = build_router(ServerConfig::new("secret-token"));
-
-    let response = app
-        .oneshot(json_request(
-            "/v1/validation/run",
-            serde_json::json!({
-                "workspace_id": "w1",
-                "repo_root": repo.path(),
-                "profile": "pass"
-            }),
-        ))
-        .await
-        .expect("validation run should complete");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = to_bytes(response.into_body(), 2048)
-        .await
-        .expect("body should read");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-    assert_eq!(json["profile_id"], "pass");
-    assert_eq!(json["status"], "passed");
-}
-
-#[tokio::test]
-async fn validation_run_persists_result() {
-    let repo = TestRepo::new("server-validation-store");
-    repo.write_validation(
-        r#"
-profiles:
-  - profile_id: pass
-    description: Pass
-    command: true
-    cwd: .
-    timeout_seconds: 10
-    denied_writes:
-      - src/**
-"#,
-    );
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-validation-store-{}", std::process::id()));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    let db_path = temp_root.join(".stateful_core").join("state.db");
-    let store = Store::open(&db_path).expect("file store should open");
-    let app = build_router(ServerConfig::with_store("secret-token", store));
-
-    let response = app
-        .oneshot(json_request(
-            "/v1/validation/run",
-            serde_json::json!({
-                "workspace_id": "w1",
-                "repo_root": repo.path(),
-                "profile": "pass"
-            }),
-        ))
-        .await
-        .expect("validation run should complete");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let reopened = Store::open(&db_path).expect("file store should reopen");
-    assert_eq!(
-        reopened
-            .validation_count()
-            .expect("validation count should load"),
-        1
-    );
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
 fn json_request(path: &str, body: serde_json::Value) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -1393,53 +2903,4 @@ fn authorized_get(path: &str) -> Request<Body> {
         .header("authorization", "Bearer secret-token")
         .body(Body::empty())
         .expect("get request should build")
-}
-
-struct TestRepo {
-    root: std::path::PathBuf,
-}
-
-impl TestRepo {
-    fn new(name: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
-        if root.exists() {
-            fs::remove_dir_all(&root).expect("old temp repo should be removable");
-        }
-        fs::create_dir_all(root.join("src")).expect("src dir should be creatable");
-        fs::create_dir_all(root.join(".stateful")).expect("stateful dir should be creatable");
-        fs::write(root.join("src/auth.ts"), "initial\n").expect("source file should write");
-        run_git(&root, ["init"]);
-        run_git(&root, ["add", "."]);
-        run_git(&root, ["commit", "-m", "initial"]);
-
-        Self { root }
-    }
-
-    fn path(&self) -> &std::path::Path {
-        &self.root
-    }
-
-    fn write_validation(&self, contents: &str) {
-        fs::write(self.root.join(".stateful/validation.yml"), contents)
-            .expect("validation config should write");
-    }
-}
-
-impl Drop for TestRepo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
-    }
-}
-
-fn run_git<const N: usize>(root: &std::path::Path, args: [&str; N]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "stateful test")
-        .env("GIT_AUTHOR_EMAIL", "stateful@example.invalid")
-        .env("GIT_COMMITTER_NAME", "stateful test")
-        .env("GIT_COMMITTER_EMAIL", "stateful@example.invalid")
-        .status()
-        .expect("git command should run");
-    assert!(status.success(), "git command should succeed");
 }

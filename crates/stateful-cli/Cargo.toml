@@ -24,7 +24,6 @@ stateful-core = { path = "../stateful-core" }
 stateful-mcp = { path = "../stateful-mcp" }
 stateful-server = { path = "../stateful-server" }
 stateful-store = { path = "../stateful-store" }
-stateful-validation = { path = "../stateful-validation" }
 tokio.workspace = true
 uuid.workspace = true
 

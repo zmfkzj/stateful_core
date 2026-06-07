@@ -14,12 +14,39 @@ use crate::repo_registry::RepoIdentity;
 use serde::{Deserialize, Serialize};
 
 pub const STATEFUL_CODEX_RUN_ID_ENV: &str = "STATEFUL_CODEX_RUN_ID";
+const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntentDeclareArgs {
     pub session_id: String,
     pub workspace_id: String,
     pub files_planned: Vec<String>,
+    pub identity: Option<RepoIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntentClaimArgs {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub wait_id: String,
+    pub identity: Option<RepoIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntentRequestArgs {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub request_id: String,
+    pub action: String,
+    pub path: String,
+    pub identity: Option<RepoIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntentCancelArgs {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub request_id: String,
     pub identity: Option<RepoIdentity>,
 }
 
@@ -104,7 +131,7 @@ pub fn global_state_db_path(paths: &GlobalPaths) -> std::path::PathBuf {
 }
 
 pub fn discover_runtime(repo_root: impl AsRef<Path>) -> anyhow::Result<ServerRuntime> {
-    if let Some(runtime) = runtime_from_env() {
+    if let Some(runtime) = runtime_from_env()? {
         return Ok(runtime);
     }
 
@@ -116,7 +143,7 @@ pub fn discover_runtime_with_global(
     repo_root: impl AsRef<Path>,
     paths: &GlobalPaths,
 ) -> anyhow::Result<ServerRuntime> {
-    if let Some(runtime) = runtime_from_env() {
+    if let Some(runtime) = runtime_from_env()? {
         return Ok(runtime);
     }
 
@@ -202,7 +229,7 @@ pub fn write_current_session_file_for_codex_run(
             }
         }
         Err(error) if is_not_found_error(&error) => {}
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(error),
     }
 
     write_plain_file(
@@ -391,6 +418,60 @@ pub fn declare_intent_via_http(
     Ok(())
 }
 
+pub fn claim_intent_via_http(runtime: &ServerRuntime, args: IntentClaimArgs) -> anyhow::Result<()> {
+    let body = intent_claim_protocol_body(runtime, args, "cli", "stateful-cli");
+
+    let response = post_json(runtime, "/v1/intent/claim", &body)?;
+
+    if !(200..300).contains(&response.status_code) {
+        anyhow::bail!(
+            "intent claim failed with HTTP {}: {}",
+            response.status_code,
+            response.body
+        );
+    }
+
+    Ok(())
+}
+
+pub fn request_intent_via_http(
+    runtime: &ServerRuntime,
+    args: IntentRequestArgs,
+) -> anyhow::Result<()> {
+    let body = intent_request_protocol_body(runtime, args, "cli", "stateful-cli");
+
+    let response = post_json(runtime, "/v1/intent/request", &body)?;
+
+    if !(200..300).contains(&response.status_code) {
+        anyhow::bail!(
+            "intent request failed with HTTP {}: {}",
+            response.status_code,
+            response.body
+        );
+    }
+
+    Ok(())
+}
+
+pub fn cancel_intent_via_http(
+    runtime: &ServerRuntime,
+    args: IntentCancelArgs,
+) -> anyhow::Result<()> {
+    let body = intent_cancel_protocol_body(runtime, args, "cli", "stateful-cli");
+
+    let response = post_json(runtime, "/v1/intent/cancel", &body)?;
+
+    if !(200..300).contains(&response.status_code) {
+        anyhow::bail!(
+            "intent cancel failed with HTTP {}: {}",
+            response.status_code,
+            response.body
+        );
+    }
+
+    Ok(())
+}
+
 pub fn intent_declare_protocol_body(
     runtime: &ServerRuntime,
     args: IntentDeclareArgs,
@@ -412,8 +493,97 @@ pub fn intent_declare_protocol_body(
         source_kind,
         event: "intent_declare",
         source_ref,
+        source_tool_name: None,
         payload: serde_json::json!({
             "files_planned": files_planned
+        }),
+    })
+}
+
+pub fn intent_claim_protocol_body(
+    runtime: &ServerRuntime,
+    args: IntentClaimArgs,
+    source_kind: &str,
+    source_ref: &str,
+) -> serde_json::Value {
+    let IntentClaimArgs {
+        session_id,
+        workspace_id,
+        wait_id,
+        identity,
+    } = args;
+    protocol_envelope(ProtocolEnvelopeArgs {
+        runtime,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        session_id,
+        workspace_id,
+        identity,
+        source_kind,
+        event: "intent_claim",
+        source_ref,
+        source_tool_name: None,
+        payload: serde_json::json!({
+            "wait_id": wait_id
+        }),
+    })
+}
+
+pub fn intent_request_protocol_body(
+    runtime: &ServerRuntime,
+    args: IntentRequestArgs,
+    source_kind: &str,
+    source_ref: &str,
+) -> serde_json::Value {
+    let IntentRequestArgs {
+        session_id,
+        workspace_id,
+        request_id,
+        action,
+        path,
+        identity,
+    } = args;
+    protocol_envelope(ProtocolEnvelopeArgs {
+        runtime,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        session_id,
+        workspace_id,
+        identity,
+        source_kind,
+        event: "intent_request",
+        source_ref,
+        source_tool_name: None,
+        payload: serde_json::json!({
+            "request_id": request_id,
+            "action": action,
+            "path": path
+        }),
+    })
+}
+
+pub fn intent_cancel_protocol_body(
+    runtime: &ServerRuntime,
+    args: IntentCancelArgs,
+    source_kind: &str,
+    source_ref: &str,
+) -> serde_json::Value {
+    let IntentCancelArgs {
+        session_id,
+        workspace_id,
+        request_id,
+        identity,
+    } = args;
+    protocol_envelope(ProtocolEnvelopeArgs {
+        runtime,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        session_id,
+        workspace_id,
+        identity,
+        source_kind,
+        event: "intent_cancel",
+        source_ref,
+        source_tool_name: None,
+        payload: serde_json::json!({
+            "request_id": request_id
         }),
     })
 }
@@ -427,6 +597,7 @@ pub struct ProtocolEnvelopeArgs<'a> {
     pub source_kind: &'a str,
     pub event: &'a str,
     pub source_ref: &'a str,
+    pub source_tool_name: Option<&'a str>,
     pub payload: serde_json::Value,
 }
 
@@ -440,6 +611,7 @@ pub fn protocol_envelope(args: ProtocolEnvelopeArgs<'_>) -> serde_json::Value {
         source_kind,
         event,
         source_ref,
+        source_tool_name,
         payload,
     } = args;
     let (repo_id, worktree_id, root, branch) = match identity {
@@ -451,6 +623,15 @@ pub fn protocol_envelope(args: ProtocolEnvelopeArgs<'_>) -> serde_json::Value {
         ),
         None => (String::new(), String::new(), String::new(), String::new()),
     };
+
+    let mut source = serde_json::json!({
+        "kind": source_kind,
+        "event": event,
+        "source_ref": source_ref
+    });
+    if let Some(tool_name) = source_tool_name {
+        source["tool_name"] = serde_json::json!(tool_name);
+    }
 
     serde_json::json!({
         "protocol_version": runtime.protocol_version.as_str(),
@@ -468,11 +649,7 @@ pub fn protocol_envelope(args: ProtocolEnvelopeArgs<'_>) -> serde_json::Value {
             "worktree_id": worktree_id,
             "branch": branch
         },
-        "source": {
-            "kind": source_kind,
-            "event": event,
-            "source_ref": source_ref
-        },
+        "source": source,
         "payload": payload
     })
 }
@@ -528,14 +705,87 @@ fn validate_codex_run_id(codex_run_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn runtime_from_env() -> Option<ServerRuntime> {
-    let env_url = std::env::var("STATEFUL_SERVER_URL").ok();
-    let env_token = std::env::var("STATEFUL_SERVER_TOKEN").ok();
-    if let (Some(base_url), Some(token)) = (env_url, env_token) {
-        return Some(ServerRuntime::new(base_url, token, "unknown", 0));
+pub fn runtime_has_required_identity(runtime: &ServerRuntime) -> bool {
+    let Ok(Some(identity)) = fetch_runtime_identity(runtime) else {
+        return false;
+    };
+
+    runtime_identity_matches_runtime(runtime, &identity)
+        && runtime_identity_has_required_capabilities(runtime, &identity)
+}
+
+pub fn runtime_identity_matches_pid(runtime: &ServerRuntime) -> anyhow::Result<bool> {
+    let Some(identity) = fetch_runtime_identity(runtime)? else {
+        return Ok(false);
+    };
+    Ok(runtime_identity_matches_runtime(runtime, &identity))
+}
+
+fn runtime_from_env() -> anyhow::Result<Option<ServerRuntime>> {
+    let (Some(base_url), Some(token)) = (
+        std::env::var("STATEFUL_SERVER_URL").ok(),
+        std::env::var("STATEFUL_SERVER_TOKEN").ok(),
+    ) else {
+        return Ok(None);
+    };
+
+    let mut runtime = ServerRuntime::new(base_url, token, "unknown", 0);
+    let Some(identity) = fetch_runtime_identity(&runtime)? else {
+        anyhow::bail!(
+            "STATEFUL_SERVER_URL points to a server that did not return a valid stateful runtime identity"
+        );
+    };
+    if !runtime_identity_has_required_capabilities(&runtime, &identity) {
+        anyhow::bail!(
+            "STATEFUL_SERVER_URL points to a stateful server that does not support required runtime capabilities: {}",
+            REQUIRED_RUNTIME_CAPABILITIES.join(", ")
+        );
+    }
+    runtime.pid = identity.pid;
+    Ok(Some(runtime))
+}
+
+pub fn runtime_env_override_is_configured() -> bool {
+    std::env::var_os("STATEFUL_SERVER_URL").is_some()
+        && std::env::var_os("STATEFUL_SERVER_TOKEN").is_some()
+}
+
+fn fetch_runtime_identity(runtime: &ServerRuntime) -> anyhow::Result<Option<RuntimeIdentity>> {
+    let response = get_json(runtime, "/v1/runtime/identity")?;
+    if response.status_code != 200 {
+        return Ok(None);
     }
 
-    None
+    Ok(Some(serde_json::from_str(&response.body)?))
+}
+
+fn runtime_identity_matches_runtime(runtime: &ServerRuntime, identity: &RuntimeIdentity) -> bool {
+    identity.status == "ok"
+        && identity.protocol_version == runtime.protocol_version
+        && identity.pid == runtime.pid
+}
+
+fn runtime_identity_has_required_capabilities(
+    runtime: &ServerRuntime,
+    identity: &RuntimeIdentity,
+) -> bool {
+    identity.status == "ok"
+        && identity.protocol_version == runtime.protocol_version
+        && REQUIRED_RUNTIME_CAPABILITIES.iter().all(|required| {
+            identity
+                .capabilities
+                .iter()
+                .any(|capability| capability.as_str() == *required)
+        })
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RuntimeIdentity {
+    status: String,
+    pid: u32,
+    protocol_version: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

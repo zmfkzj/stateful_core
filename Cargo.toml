@@ -3,7 +3,6 @@ resolver = "3"
 members = [
   "crates/stateful-core",
   "crates/stateful-store",
-  "crates/stateful-validation",
   "crates/stateful-server",
   "crates/stateful-cli",
   "crates/stateful-mcp",

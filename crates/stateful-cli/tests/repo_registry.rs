@@ -19,10 +19,6 @@ fn enable_repo_registers_git_root_and_writes_repo_configs() {
 
     assert_eq!(entry.root, canonical_repo);
     assert_eq!(
-        entry.validation_config_path,
-        canonical_repo.join(".stateful/validation.yml")
-    );
-    assert_eq!(
         entry.policy_config_path,
         canonical_repo.join(".stateful/config.yml")
     );
@@ -37,7 +33,7 @@ fn enable_repo_registers_git_root_and_writes_repo_configs() {
     );
 
     assert!(repo.join(".stateful/config.yml").is_file());
-    assert!(repo.join(".stateful/validation.yml").is_file());
+    assert!(!repo.join(".stateful/validation.yml").exists());
     assert!(
         fixture
             .paths
@@ -250,7 +246,7 @@ approval_mode = "approve"
     assert!(config.contains("# stateful-core-owned"));
     assert!(config.contains("[[hooks.PreToolUse]]"));
     assert!(repo.join(".stateful/config.yml").exists());
-    assert!(repo.join(".stateful/validation.yml").exists());
+    assert!(!repo.join(".stateful/validation.yml").exists());
 }
 
 #[test]

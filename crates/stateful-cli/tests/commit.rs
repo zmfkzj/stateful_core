@@ -141,6 +141,56 @@ fn structured_commit_preserves_whitespace_in_explicit_file_paths() {
 }
 
 #[test]
+fn structured_commit_allows_explicit_tracked_file_under_ignored_directory() {
+    let root = git_repo("stateful-commit-tracked-ignored-file");
+    fs::create_dir_all(root.path().join("docs/superpowers/plans"))
+        .expect("ignored docs dir should write");
+    fs::write(
+        root.path().join("docs/superpowers/plans/implementation.md"),
+        "base\n",
+    )
+    .expect("tracked ignored file should write");
+    git(
+        root.path(),
+        &["add", "docs/superpowers/plans/implementation.md"],
+    );
+    git(root.path(), &["commit", "-m", "docs: seed ignored plan"]);
+    fs::write(root.path().join(".gitignore"), "docs/superpowers/\n")
+        .expect("gitignore should write");
+    fs::write(
+        root.path().join("docs/superpowers/plans/implementation.md"),
+        "updated\n",
+    )
+    .expect("tracked ignored file should update");
+
+    let result = run_structured_commit(CommitRequest {
+        repo_root: root.path().to_path_buf(),
+        message: "docs: update ignored plan".to_string(),
+        paths: vec!["docs/superpowers/plans/implementation.md".to_string()],
+        session_id: Some("s1".to_string()),
+        workspace_id: Some("w1".to_string()),
+        authorize: Some(Box::new(|action, path| {
+            assert_eq!(action, "write_file");
+            assert_eq!(path, "docs/superpowers/plans/implementation.md");
+            Ok(())
+        })),
+    })
+    .expect("explicit tracked file under ignored directory should commit");
+
+    assert_eq!(
+        result.committed_paths,
+        vec!["docs/superpowers/plans/implementation.md"]
+    );
+    assert_eq!(
+        git_output(
+            root.path(),
+            &["show", "HEAD:docs/superpowers/plans/implementation.md"]
+        ),
+        "updated\n"
+    );
+}
+
+#[test]
 fn structured_commit_rejects_deleted_tracked_directory_before_staging() {
     let root = git_repo("stateful-commit-deleted-directory");
     fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
@@ -226,15 +276,14 @@ fn structured_commit_command_ignores_ambient_git_index_file() {
     let (runtime, rx) = spawn_fake_authorize_server();
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
-        .args(["commit", "-m", "docs: update plan", "--", "docs/plan.md"])
-        .current_dir(root.path())
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("STATEFUL_HOME", &paths.home)
-        .env("GIT_INDEX_FILE", &alternate_index)
-        .output()
-        .expect("stateful commit should run");
+    let output = stateful_command(
+        root.path(),
+        &paths,
+        &["commit", "-m", "docs: update plan", "--", "docs/plan.md"],
+    )
+    .env("GIT_INDEX_FILE", &alternate_index)
+    .output()
+    .expect("stateful commit should run");
 
     assert!(
         output.status.success(),
@@ -262,15 +311,14 @@ fn structured_commit_command_ignores_ambient_git_namespace() {
     let (runtime, rx) = spawn_fake_authorize_server();
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
-        .args(["commit", "-m", "docs: update plan", "--", "docs/plan.md"])
-        .current_dir(root.path())
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("STATEFUL_HOME", &paths.home)
-        .env("GIT_NAMESPACE", "shadow")
-        .output()
-        .expect("stateful commit should run");
+    let output = stateful_command(
+        root.path(),
+        &paths,
+        &["commit", "-m", "docs: update plan", "--", "docs/plan.md"],
+    )
+    .env("GIT_NAMESPACE", "shadow")
+    .output()
+    .expect("stateful commit should run");
 
     assert!(
         output.status.success(),
@@ -298,15 +346,14 @@ fn structured_commit_command_ignores_ambient_git_trace_file() {
     let (runtime, rx) = spawn_fake_authorize_server();
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
-        .args(["commit", "-m", "docs: update plan", "--", "docs/plan.md"])
-        .current_dir(root.path())
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("STATEFUL_HOME", &paths.home)
-        .env("GIT_TRACE", root.path().join("docs/other.md"))
-        .output()
-        .expect("stateful commit should run");
+    let output = stateful_command(
+        root.path(),
+        &paths,
+        &["commit", "-m", "docs: update plan", "--", "docs/plan.md"],
+    )
+    .env("GIT_TRACE", root.path().join("docs/other.md"))
+    .output()
+    .expect("stateful commit should run");
 
     assert!(
         output.status.success(),
@@ -936,14 +983,13 @@ fn structured_commit_command_from_subdir_uses_git_root_session_and_paths() {
     let (runtime, rx) = spawn_fake_authorize_server();
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
-        .args(["commit", "-m", "docs: add plan", "--", "./plan.md"])
-        .current_dir(root.path().join("docs"))
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("STATEFUL_HOME", &paths.home)
-        .output()
-        .expect("stateful commit should run");
+    let output = stateful_command(
+        &root.path().join("docs"),
+        &paths,
+        &["commit", "-m", "docs: add plan", "--", "./plan.md"],
+    )
+    .output()
+    .expect("stateful commit should run");
 
     assert!(
         output.status.success(),
@@ -970,20 +1016,19 @@ fn structured_commit_command_from_subdir_preserves_whitespace_file_paths() {
     let (runtime, rx) = spawn_fake_authorize_server();
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
-        .args([
+    let output = stateful_command(
+        &root.path().join("docs"),
+        &paths,
+        &[
             "commit",
             "-m",
             "docs: add spaced report",
             "--",
             "./report.md ",
-        ])
-        .current_dir(root.path().join("docs"))
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("STATEFUL_HOME", &paths.home)
-        .output()
-        .expect("stateful commit should run");
+        ],
+    )
+    .output()
+    .expect("stateful commit should run");
 
     assert!(
         output.status.success(),
@@ -1012,14 +1057,13 @@ fn structured_commit_command_from_subdir_normalizes_parent_file_paths() {
     let (runtime, rx) = spawn_fake_authorize_server();
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
-        .args(["commit", "-m", "docs: add readme", "--", "../README.md"])
-        .current_dir(root.path().join("docs"))
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("STATEFUL_HOME", &paths.home)
-        .output()
-        .expect("stateful commit should run");
+    let output = stateful_command(
+        &root.path().join("docs"),
+        &paths,
+        &["commit", "-m", "docs: add readme", "--", "../README.md"],
+    )
+    .output()
+    .expect("stateful commit should run");
 
     assert!(
         output.status.success(),
@@ -1049,15 +1093,14 @@ fn structured_commit_command_uses_codex_run_session_when_legacy_current_session_
     let (runtime, rx) = spawn_fake_authorize_server();
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
-        .args(["commit", "-m", "docs: add plan", "--", "docs/plan.md"])
-        .current_dir(root.path())
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("STATEFUL_HOME", &paths.home)
-        .env(STATEFUL_CODEX_RUN_ID_ENV, "run-a")
-        .output()
-        .expect("stateful commit should run");
+    let output = stateful_command(
+        root.path(),
+        &paths,
+        &["commit", "-m", "docs: add plan", "--", "docs/plan.md"],
+    )
+    .env(STATEFUL_CODEX_RUN_ID_ENV, "run-a")
+    .output()
+    .expect("stateful commit should run");
 
     assert!(
         output.status.success(),
@@ -1317,14 +1360,13 @@ fn structured_commit_command_discovers_global_runtime_for_authorization() {
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "global-w", 42);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
-        .args(["commit", "-m", "docs: add plan", "--", "docs/plan.md"])
-        .current_dir(root.path())
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("STATEFUL_HOME", &paths.home)
-        .output()
-        .expect("stateful commit should run");
+    let output = stateful_command(
+        root.path(),
+        &paths,
+        &["commit", "-m", "docs: add plan", "--", "docs/plan.md"],
+    )
+    .output()
+    .expect("stateful commit should run");
 
     assert!(
         output.status.success(),
@@ -1372,6 +1414,22 @@ fn git_repo(name: &str) -> tempfile_root::TempRoot {
         &["config", "user.email", "stateful@example.invalid"],
     );
     root
+}
+
+fn stateful_command(cwd: &std::path::Path, paths: &GlobalPaths, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_stateful"));
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("STATEFUL_HOME", &paths.home);
+    for key in ["TMPDIR", "TEMP", "TMP", "STATEFUL_SANDBOX_RUN_ACTIVE"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    command
 }
 
 fn git(root: &std::path::Path, args: &[&str]) {

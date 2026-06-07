@@ -1,5 +1,7 @@
 # V1 Hardening Prototype Design
 
+> Historical note: validation profile references in this design are obsolete. Current test/build execution uses `stateful sandbox run --fs write-targets` with explicit write targets or `--write-dir target`.
+
 ## Summary
 
 The prototype moves from MVP behavior to a harder v1 coordination contract. The

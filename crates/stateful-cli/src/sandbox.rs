@@ -7,24 +7,34 @@ use std::{
     fmt, fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use crate::{
     CurrentSession, GlobalPaths, HttpResponse, ProtocolEnvelopeArgs, RepoGate, ServerRuntime,
     discover_runtime_with_global, ensure_server, post_json, protocol_envelope,
     read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
+    runtime_env_override_is_configured,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
+#[cfg(unix)]
+const SIGTERM: i32 = 15;
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, ValueEnum)]
 pub enum SandboxFsProfile {
     ReadOnly,
     WriteTargets,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, ValueEnum)]
 pub enum SandboxNetworkPolicy {
     Disabled,
     Enabled,
@@ -36,6 +46,7 @@ pub struct SandboxRunRequest {
     pub network: SandboxNetworkPolicy,
     pub write_targets: Vec<String>,
     pub create_targets: Vec<String>,
+    pub write_dirs: Vec<String>,
     pub command: String,
     pub timeout_seconds: Option<u64>,
 }
@@ -81,6 +92,34 @@ pub struct SandboxCommandResult {
     pub stderr: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SandboxWritablePath {
+    path: PathBuf,
+    kind: SandboxWritablePathKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxWritablePathKind {
+    File,
+    Directory,
+}
+
+impl SandboxWritablePath {
+    fn file(path: PathBuf) -> Self {
+        Self {
+            path,
+            kind: SandboxWritablePathKind::File,
+        }
+    }
+
+    fn directory(path: PathBuf) -> Self {
+        Self {
+            path,
+            kind: SandboxWritablePathKind::Directory,
+        }
+    }
+}
+
 pub(crate) fn sandbox_run_cli_exit_code(output: &SandboxRunOutput) -> Option<i32> {
     match (output.status, output.exit_code) {
         ("exited", Some(0)) => None,
@@ -101,7 +140,9 @@ pub fn run_sandbox_in_repo(
 
     let repo_root = match repo_gate(paths, repo_root)? {
         RepoGate::Enabled { repo_root } => {
-            ensure_server(paths)?;
+            if !runtime_env_override_is_configured() {
+                ensure_server(paths)?;
+            }
             repo_root
         }
         RepoGate::Disabled => anyhow::bail!("stateful sandbox run requires an enabled repo"),
@@ -110,33 +151,54 @@ pub fn run_sandbox_in_repo(
     let runtime = discover_runtime_with_global(&repo_root, paths)?;
     let write_targets = normalize_sandbox_target_paths("write_targets", &request.write_targets)?;
     let create_targets = normalize_sandbox_target_paths("create_targets", &request.create_targets)?;
-    validate_profile_targets(request.fs, &write_targets, &create_targets)?;
+    let write_dirs = normalize_sandbox_target_paths("write_dirs", &request.write_dirs)?;
+    validate_profile_targets(request.fs, &write_targets, &create_targets, &write_dirs)?;
 
     let mut allowed_write_targets = Vec::new();
     let mut denied_write_targets = Vec::new();
-    let writable_files = match request.fs {
+    let writable_paths = match request.fs {
         SandboxFsProfile::ReadOnly => Vec::new(),
         SandboxFsProfile::WriteTargets => {
             let current_session: CurrentSession =
                 read_current_session_file(&repo_root).map_err(|_| {
                     anyhow::anyhow!("sandbox write-targets requires a current stateful session")
                 })?;
+            let authorize_context = SandboxAuthorizeContext {
+                runtime: &runtime,
+                repo_root: &repo_root,
+                paths,
+                session_id: &current_session.session_id,
+                workspace_id: &current_session.workspace_id,
+                network: request.network,
+            };
 
             for path in write_targets.iter().chain(create_targets.iter()) {
-                let response = authorize_sandbox_write(
-                    &runtime,
-                    &repo_root,
-                    paths,
-                    &current_session.session_id,
-                    &current_session.workspace_id,
-                    request.network,
-                    path,
-                )?;
+                let response = authorize_sandbox_write(&authorize_context, "write_file", path)?;
                 match classify_sandbox_authorize_response(path, response)? {
                     SandboxAuthorizeDecision::Allow => allowed_write_targets.push(path.clone()),
                     SandboxAuthorizeDecision::Deny(body) => {
                         denied_write_targets.push(serde_json::json!({
                             "path": path,
+                            "authorization": body,
+                        }));
+                    }
+                }
+            }
+            for path in &write_dirs {
+                let authorization_path = sandbox_write_dir_display_path(path);
+                let response = authorize_sandbox_write(
+                    &authorize_context,
+                    "write_directory",
+                    &authorization_path,
+                )?;
+                match classify_sandbox_authorize_response(path, response)? {
+                    SandboxAuthorizeDecision::Allow => {
+                        allowed_write_targets.push(sandbox_write_dir_display_path(path));
+                    }
+                    SandboxAuthorizeDecision::Deny(body) => {
+                        let body = enrich_sandbox_write_dir_denial(body);
+                        denied_write_targets.push(serde_json::json!({
+                            "path": sandbox_write_dir_display_path(path),
                             "authorization": body,
                         }));
                     }
@@ -154,7 +216,12 @@ pub fn run_sandbox_in_repo(
                 return Err(SandboxAuthorizationDenied::new(body).into());
             }
 
-            prepare_sandbox_writable_files(&repo_root, &write_targets, &create_targets)?
+            prepare_sandbox_writable_paths(
+                &repo_root,
+                &write_targets,
+                &create_targets,
+                &write_dirs,
+            )?
         }
     };
 
@@ -163,7 +230,7 @@ pub fn run_sandbox_in_repo(
     let result = run_sandboxed_command(
         &request.command,
         &cwd,
-        &writable_files,
+        &writable_paths,
         request.network,
         timeout,
     )?;
@@ -178,17 +245,43 @@ pub fn run_sandbox_in_repo(
     })
 }
 
-pub fn run_sandboxed_command(
+pub fn run_external_sandboxed_command(
     command: &str,
     cwd: &Path,
-    writable_files: &[PathBuf],
+    write_targets: &[PathBuf],
+    create_targets: &[PathBuf],
+    write_dirs: &[PathBuf],
     network: SandboxNetworkPolicy,
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
+    if command.trim().is_empty() {
+        anyhow::bail!("external-run command is required");
+    }
+
+    let writable_paths =
+        prepare_external_writable_paths(write_targets, create_targets, write_dirs)?;
+    let cwd = cwd
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("external-run cwd must exist: {error}"))?;
+    if !cwd.is_dir() {
+        anyhow::bail!("external-run cwd must be a directory");
+    }
+
+    run_sandboxed_command(command, &cwd, &writable_paths, network, timeout)
+}
+
+fn run_sandboxed_command(
+    command: &str,
+    cwd: &Path,
+    writable_paths: &[SandboxWritablePath],
+    network: SandboxNetworkPolicy,
+    timeout: Duration,
+) -> anyhow::Result<SandboxCommandResult> {
+    let temp_dir = sandbox_temp_dir(writable_paths);
     #[cfg(target_os = "macos")]
     {
         run_command_with_timeout(
-            seatbelt_command(command, cwd, writable_files, network),
+            seatbelt_command(command, cwd, writable_paths, temp_dir.as_deref(), network),
             timeout,
         )
     }
@@ -196,16 +289,95 @@ pub fn run_sandboxed_command(
     #[cfg(target_os = "linux")]
     {
         run_command_with_timeout(
-            bubblewrap_command(command, cwd, writable_files, network),
+            bubblewrap_command(command, cwd, writable_paths, temp_dir.as_deref(), network),
             timeout,
         )
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (command, cwd, writable_files, network, timeout);
+        let _ = (command, cwd, writable_paths, temp_dir, network, timeout);
         anyhow::bail!("stateful sandbox run is only supported on macOS and Linux");
     }
+}
+
+fn prepare_external_writable_paths(
+    write_targets: &[PathBuf],
+    create_targets: &[PathBuf],
+    write_dirs: &[PathBuf],
+) -> anyhow::Result<Vec<SandboxWritablePath>> {
+    let create_set = create_targets.iter().collect::<BTreeSet<_>>();
+
+    for path in create_targets {
+        ensure_external_file_target(path, true).map_err(|error| {
+            anyhow::anyhow!(
+                "stateful external-run create target `{}` is unsafe: {error}",
+                path.display()
+            )
+        })?;
+    }
+
+    for path in write_targets {
+        ensure_external_file_target(path, false).map_err(|error| {
+            anyhow::anyhow!(
+                "stateful external-run write target `{}` is unsafe: {error}",
+                path.display()
+            )
+        })?;
+        if !path.exists() && !create_set.contains(path) {
+            anyhow::bail!(
+                "stateful external-run write target `{}` must already exist or be listed in create targets",
+                path.display()
+            );
+        }
+    }
+
+    for path in write_dirs {
+        ensure_external_dir_target(path).map_err(|error| {
+            anyhow::anyhow!(
+                "stateful external-run write dir `{}` is unsafe: {error}",
+                path.display()
+            )
+        })?;
+    }
+
+    for path in create_targets {
+        let Some(parent) = path.parent() else {
+            anyhow::bail!(
+                "stateful external-run create target `{}` has no parent directory",
+                path.display()
+            );
+        };
+        if !parent.is_dir() {
+            anyhow::bail!(
+                "stateful external-run create target parent `{}` is not a directory",
+                parent.display()
+            );
+        }
+        if !path.exists() {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?;
+        }
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut writable_paths = Vec::new();
+    for path in write_targets.iter().chain(create_targets.iter()) {
+        let canonical = path.canonicalize()?;
+        if seen.insert(canonical.clone()) {
+            writable_paths.push(SandboxWritablePath::file(canonical));
+        }
+    }
+    for path in write_dirs {
+        let canonical = path.canonicalize()?;
+        if seen.insert(canonical.clone()) {
+            writable_paths.push(SandboxWritablePath::directory(canonical));
+        }
+    }
+
+    Ok(writable_paths)
 }
 
 fn normalize_sandbox_target_paths(field: &str, paths: &[String]) -> anyhow::Result<Vec<String>> {
@@ -302,6 +474,98 @@ fn ensure_repo_file_target(repo_root: &Path, relative_path: &str) -> anyhow::Res
     Ok(())
 }
 
+fn ensure_repo_dir_target(repo_root: &Path, relative_path: &str) -> anyhow::Result<()> {
+    let canonical_repo = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let target = repo_root.join(relative_path);
+
+    let mut cursor = repo_root.to_path_buf();
+    for component in Path::new(relative_path).components() {
+        cursor.push(component);
+        if let Ok(metadata) = fs::symlink_metadata(&cursor) {
+            if metadata.file_type().is_symlink() {
+                anyhow::bail!("stateful sandbox run refuses symlinked directory targets");
+            }
+            if !metadata.is_dir() {
+                anyhow::bail!("stateful sandbox run directory target path is not a directory");
+            }
+        }
+    }
+
+    if let Some(parent) = target.parent()
+        && parent.exists()
+    {
+        let canonical_parent = parent.canonicalize()?;
+        if !canonical_parent.starts_with(canonical_repo) {
+            anyhow::bail!("stateful sandbox run directory target escapes the repo");
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_external_file_target(path: &Path, allow_missing_file: bool) -> anyhow::Result<()> {
+    if !path.is_absolute() {
+        anyhow::bail!("external-run targets must be normalized absolute paths");
+    }
+    ensure_no_symlinked_existing_components(path)?;
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("external-run target has no parent directory");
+    };
+    if !parent.is_dir() {
+        anyhow::bail!("external-run target parent is not a directory");
+    }
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                anyhow::bail!("external-run refuses symlink file targets");
+            }
+            if metadata.is_dir() {
+                anyhow::bail!("external-run file target is a directory");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && allow_missing_file => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    Ok(())
+}
+
+fn ensure_external_dir_target(path: &Path) -> anyhow::Result<()> {
+    if !path.is_absolute() {
+        anyhow::bail!("external-run targets must be normalized absolute paths");
+    }
+    ensure_no_symlinked_existing_components(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("external-run refuses symlink directory targets");
+    }
+    if !metadata.is_dir() {
+        anyhow::bail!("external-run directory target is not a directory");
+    }
+
+    Ok(())
+}
+
+fn ensure_no_symlinked_existing_components(path: &Path) -> anyhow::Result<()> {
+    let mut cursor = PathBuf::new();
+    for component in path.components() {
+        cursor.push(component.as_os_str());
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!("external-run refuses symlinked target components");
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Ok(())
+}
+
 fn resolve_sandbox_cwd(repo_root: &Path) -> anyhow::Result<PathBuf> {
     let cwd = repo_root
         .canonicalize()
@@ -313,11 +577,12 @@ fn resolve_sandbox_cwd(repo_root: &Path) -> anyhow::Result<PathBuf> {
     Ok(cwd)
 }
 
-fn prepare_sandbox_writable_files(
+fn prepare_sandbox_writable_paths(
     repo_root: &Path,
     write_targets: &[String],
     create_targets: &[String],
-) -> anyhow::Result<Vec<PathBuf>> {
+    write_dirs: &[String],
+) -> anyhow::Result<Vec<SandboxWritablePath>> {
     let create_set = create_targets
         .iter()
         .map(String::as_str)
@@ -341,6 +606,18 @@ fn prepare_sandbox_writable_files(
         }
     }
 
+    for path in write_dirs {
+        ensure_repo_dir_target(repo_root, path).map_err(|error| {
+            anyhow::anyhow!("stateful sandbox run write dir `{path}` is unsafe: {error}")
+        })?;
+    }
+
+    for path in write_dirs {
+        let target = repo_root.join(path);
+        fs::create_dir_all(&target)?;
+        fs::create_dir_all(target.join(".stateful-tmp"))?;
+    }
+
     for path in create_targets {
         let target = repo_root.join(path);
         let Some(parent) = target.parent() else {
@@ -356,7 +633,7 @@ fn prepare_sandbox_writable_files(
     }
 
     let mut seen = BTreeSet::new();
-    let mut writable_files = Vec::new();
+    let mut writable_paths = Vec::new();
     for path in write_targets.iter().chain(create_targets.iter()) {
         if !seen.insert(path.clone()) {
             continue;
@@ -364,63 +641,138 @@ fn prepare_sandbox_writable_files(
         let canonical = repo_root.join(path).canonicalize().map_err(|error| {
             anyhow::anyhow!("stateful sandbox run target `{path}` must exist: {error}")
         })?;
-        writable_files.push(canonical);
+        writable_paths.push(SandboxWritablePath::file(canonical));
     }
 
-    Ok(writable_files)
+    for path in write_dirs {
+        let key = format!("{path}/");
+        if !seen.insert(key) {
+            continue;
+        }
+        let canonical = repo_root.join(path).canonicalize().map_err(|error| {
+            anyhow::anyhow!("stateful sandbox run write dir `{path}` must exist: {error}")
+        })?;
+        writable_paths.push(SandboxWritablePath::directory(canonical));
+    }
+
+    Ok(writable_paths)
 }
 
 fn validate_profile_targets(
     fs: SandboxFsProfile,
     write_targets: &[String],
     create_targets: &[String],
+    write_dirs: &[String],
 ) -> anyhow::Result<()> {
     match fs {
         SandboxFsProfile::ReadOnly => {
-            if !write_targets.is_empty() || !create_targets.is_empty() {
-                anyhow::bail!("read-only profile rejects write targets and create targets");
+            if !write_targets.is_empty() || !create_targets.is_empty() || !write_dirs.is_empty() {
+                anyhow::bail!(
+                    "read-only profile rejects write targets, create targets, and write dirs"
+                );
             }
         }
         SandboxFsProfile::WriteTargets => {
-            if write_targets.is_empty() && create_targets.is_empty() {
-                anyhow::bail!("write-targets profile requires at least one write or create target");
+            if write_targets.is_empty() && create_targets.is_empty() && write_dirs.is_empty() {
+                anyhow::bail!(
+                    "write-targets profile requires at least one write target, create target, or write dir"
+                );
+            }
+            for path in write_dirs {
+                ensure_artifact_write_dir_target(path)?;
             }
         }
     }
     Ok(())
 }
 
-fn authorize_sandbox_write(
-    runtime: &ServerRuntime,
-    repo_root: &Path,
-    paths: &GlobalPaths,
-    session_id: &str,
-    workspace_id: &str,
+fn ensure_artifact_write_dir_target(relative_path: &str) -> anyhow::Result<()> {
+    let top_level = relative_path.split('/').next().unwrap_or_default();
+    if top_level != "target" {
+        anyhow::bail!(
+            "stateful sandbox run --write-dir is limited to the target/ artifact tree; use native Codex edit tools or exact file write targets for source-tree edits"
+        );
+    }
+    Ok(())
+}
+
+fn sandbox_write_dir_display_path(path: &str) -> String {
+    format!("{}/", path.trim_end_matches('/'))
+}
+
+fn enrich_sandbox_write_dir_denial(mut body: Value) -> Value {
+    let is_unsupported_action = body
+        .get("reason_code")
+        .and_then(Value::as_str)
+        .is_some_and(|reason_code| reason_code == "unsupported_action");
+
+    if is_unsupported_action {
+        body["message"] = Value::String(
+            "The running stateful server does not support sandbox write directories.".to_string(),
+        );
+        body["required_next_action"] = Value::String(
+            "Restart the stateful server with the newly built stateful binary, then retry the sandbox run.".to_string(),
+        );
+    }
+
+    body
+}
+
+fn sandbox_temp_dir(writable_paths: &[SandboxWritablePath]) -> Option<PathBuf> {
+    writable_paths
+        .iter()
+        .find(|path| path.kind == SandboxWritablePathKind::Directory)
+        .map(|path| path.path.join(".stateful-tmp"))
+}
+
+fn apply_sandbox_temp_env(command: &mut Command, temp_dir: Option<&Path>) {
+    command.env(STATEFUL_SANDBOX_RUN_ACTIVE_ENV, "1");
+    let Some(temp_dir) = temp_dir else {
+        return;
+    };
+    command
+        .env("TMPDIR", temp_dir)
+        .env("TEMP", temp_dir)
+        .env("TMP", temp_dir);
+}
+
+struct SandboxAuthorizeContext<'a> {
+    runtime: &'a ServerRuntime,
+    repo_root: &'a Path,
+    paths: &'a GlobalPaths,
+    session_id: &'a str,
+    workspace_id: &'a str,
     network: SandboxNetworkPolicy,
+}
+
+fn authorize_sandbox_write(
+    context: &SandboxAuthorizeContext<'_>,
+    action: &str,
     path: &str,
 ) -> anyhow::Result<HttpResponse> {
     let body = protocol_envelope(ProtocolEnvelopeArgs {
-        runtime,
+        runtime: context.runtime,
         request_id: uuid::Uuid::new_v4().to_string(),
-        session_id: session_id.to_string(),
-        workspace_id: workspace_id.to_string(),
-        identity: repo_identity_for_enabled_repo(paths, repo_root).ok(),
+        session_id: context.session_id.to_string(),
+        workspace_id: context.workspace_id.to_string(),
+        identity: repo_identity_for_enabled_repo(context.paths, context.repo_root).ok(),
         source_kind: "cli",
         event: "sandbox_run",
         source_ref: "stateful.sandbox.run",
+        source_tool_name: None,
         payload: serde_json::json!({
-            "action": "write_file",
+            "action": action,
             "path": path,
             "queue_on_conflict": true,
             "fs_profile": "write-targets",
-            "network_policy": match network {
+            "network_policy": match context.network {
                 SandboxNetworkPolicy::Disabled => "disabled",
                 SandboxNetworkPolicy::Enabled => "enabled",
             },
         }),
     });
 
-    post_json(runtime, "/v1/authorize", &body)
+    post_json(context.runtime, "/v1/authorize", &body)
 }
 
 enum SandboxAuthorizeDecision {
@@ -468,10 +820,11 @@ fn is_git_internal_segment(segment: &str) -> bool {
 fn seatbelt_command(
     command: &str,
     cwd: &Path,
-    writable_files: &[PathBuf],
+    writable_paths: &[SandboxWritablePath],
+    temp_dir: Option<&Path>,
     network: SandboxNetworkPolicy,
 ) -> Command {
-    let profile = seatbelt_profile(writable_files, network);
+    let profile = seatbelt_profile(writable_paths, network);
     let mut sandbox = Command::new("/usr/bin/sandbox-exec");
     sandbox
         .arg("-p")
@@ -480,17 +833,24 @@ fn seatbelt_command(
         .arg("-c")
         .arg(command)
         .current_dir(cwd);
+    apply_sandbox_temp_env(&mut sandbox, temp_dir);
     sandbox
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn seatbelt_profile(writable_files: &[PathBuf], network: SandboxNetworkPolicy) -> String {
+fn seatbelt_profile(
+    writable_paths: &[SandboxWritablePath],
+    network: SandboxNetworkPolicy,
+) -> String {
     let mut profile = String::from(
-        "(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n(allow file-write* (literal \"/dev/null\")",
+        "(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n(allow sysctl-read)\n(allow file-write* (literal \"/dev/null\")",
     );
-    for file in writable_files {
-        profile.push_str(" (literal \"");
-        profile.push_str(&seatbelt_escape(&file.to_string_lossy()));
+    for writable_path in writable_paths {
+        profile.push_str(match writable_path.kind {
+            SandboxWritablePathKind::File => " (literal \"",
+            SandboxWritablePathKind::Directory => " (subpath \"",
+        });
+        profile.push_str(&seatbelt_escape(&writable_path.path.to_string_lossy()));
         profile.push_str("\")");
     }
     profile.push_str(")\n");
@@ -509,11 +869,13 @@ fn seatbelt_escape(value: &str) -> String {
 fn bubblewrap_command(
     command: &str,
     cwd: &Path,
-    writable_files: &[PathBuf],
+    writable_paths: &[SandboxWritablePath],
+    temp_dir: Option<&Path>,
     network: SandboxNetworkPolicy,
 ) -> Command {
     let mut bwrap = Command::new("bwrap");
-    bwrap.args(bubblewrap_args(command, cwd, writable_files, network));
+    bwrap.args(bubblewrap_args(command, cwd, writable_paths, network));
+    apply_sandbox_temp_env(&mut bwrap, temp_dir);
     bwrap
 }
 
@@ -521,7 +883,7 @@ fn bubblewrap_command(
 fn bubblewrap_args(
     command: &str,
     cwd: &Path,
-    writable_files: &[PathBuf],
+    writable_paths: &[SandboxWritablePath],
     network: SandboxNetworkPolicy,
 ) -> Vec<OsString> {
     let mut args = vec![
@@ -545,10 +907,10 @@ fn bubblewrap_args(
         OsString::from("/dev/null"),
     ]);
 
-    for file in writable_files {
+    for writable_path in writable_paths {
         args.push(OsString::from("--bind"));
-        args.push(file.as_os_str().to_owned());
-        args.push(file.as_os_str().to_owned());
+        args.push(writable_path.path.as_os_str().to_owned());
+        args.push(writable_path.path.as_os_str().to_owned());
     }
 
     args.push(OsString::from("--chdir"));
@@ -565,6 +927,7 @@ fn run_command_with_timeout(
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    isolate_sandbox_process_group(&mut command);
     let mut child = command.spawn()?;
     let mut stdout = child
         .stdout
@@ -591,15 +954,13 @@ fn run_command_with_timeout(
         }
         if Instant::now() >= deadline {
             timed_out = true;
-            match child.kill() {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {}
-                Err(error) => return Err(error.into()),
-            }
-            break child.wait()?;
+            break terminate_sandbox_child(&mut child)?.ok_or_else(|| {
+                anyhow::anyhow!("timed out and failed to terminate sandbox command")
+            })?;
         }
         thread::sleep(Duration::from_millis(25));
     };
+    cleanup_sandbox_process_group(&mut child, timed_out)?;
 
     let stdout = stdout_reader
         .join()
@@ -614,6 +975,96 @@ fn run_command_with_timeout(
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
     })
+}
+
+fn isolate_sandbox_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+}
+
+fn cleanup_sandbox_process_group(
+    child: &mut std::process::Child,
+    already_terminated: bool,
+) -> anyhow::Result<()> {
+    if already_terminated {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        signal_sandbox_process_group(child, SIGTERM);
+        thread::sleep(Duration::from_millis(100));
+        signal_sandbox_process_group(child, SIGKILL);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = child;
+    }
+
+    Ok(())
+}
+
+fn terminate_sandbox_child(child: &mut std::process::Child) -> anyhow::Result<Option<ExitStatus>> {
+    #[cfg(unix)]
+    {
+        signal_sandbox_process_group(child, SIGTERM);
+    }
+    #[cfg(not(unix))]
+    {
+        kill_direct_sandbox_child(child)?;
+    }
+
+    if let Some(status) = wait_for_sandbox_child_exit(child, Duration::from_millis(500))? {
+        #[cfg(unix)]
+        signal_sandbox_process_group(child, SIGKILL);
+        return Ok(Some(status));
+    }
+
+    #[cfg(unix)]
+    signal_sandbox_process_group(child, SIGKILL);
+    kill_direct_sandbox_child(child)?;
+    wait_for_sandbox_child_exit(child, Duration::from_millis(500))
+}
+
+fn kill_direct_sandbox_child(child: &mut std::process::Child) -> anyhow::Result<()> {
+    match child.kill() {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn wait_for_sandbox_child_exit(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> anyhow::Result<Option<ExitStatus>> {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn signal_sandbox_process_group(child: &std::process::Child, signal: i32) {
+    let signal = match signal {
+        SIGTERM => "-TERM",
+        SIGKILL => "-KILL",
+        _ => return,
+    };
+    let group = format!("-{}", child.id());
+    let _ = Command::new("/bin/kill")
+        .args([signal, group.as_str()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 #[cfg(test)]
@@ -657,6 +1108,53 @@ mod tests {
             allowed_write_targets: Vec::new(),
             denied_write_targets: Vec::new(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_process_group_descendants_before_joining_readers() {
+        if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
+            return;
+        }
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("(trap '' TERM HUP INT; sleep 5) & wait");
+
+        let started = Instant::now();
+        let output = run_command_with_timeout(command, Duration::from_millis(100))
+            .expect("sandbox command should time out and terminate");
+
+        assert_eq!(output.status, "timed_out");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "timeout cleanup should not wait for ignored-TERM descendants"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_wrapper_cleans_background_descendants_before_joining_readers() {
+        if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
+            return;
+        }
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("(trap '' TERM HUP INT; sleep 5) & printf done");
+
+        let started = Instant::now();
+        let output = run_command_with_timeout(command, Duration::from_secs(10))
+            .expect("sandbox command should exit and clean descendants");
+
+        assert_eq!(output.status, "exited");
+        assert_eq!(output.stdout, "done");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "normal exit cleanup should not wait for background descendants"
+        );
     }
 
     #[test]
@@ -705,14 +1203,15 @@ mod tests {
 
     #[test]
     fn bubblewrap_write_targets_bind_authorized_files_and_dev_null() {
-        let writable_files = vec![
-            PathBuf::from("/repo/src/allowed.ts"),
-            PathBuf::from("/repo/src/new.ts"),
+        let writable_paths = vec![
+            SandboxWritablePath::file(PathBuf::from("/repo/src/allowed.ts")),
+            SandboxWritablePath::file(PathBuf::from("/repo/src/new.ts")),
+            SandboxWritablePath::directory(PathBuf::from("/repo/target")),
         ];
         let args = bubblewrap_args(
             "printf ok > src/allowed.ts",
             Path::new("/repo"),
-            &writable_files,
+            &writable_paths,
             SandboxNetworkPolicy::Disabled,
         );
         let args = args
@@ -726,6 +1225,10 @@ mod tests {
         assert!(
             args.windows(3)
                 .any(|window| { window == ["--bind", "/repo/src/new.ts", "/repo/src/new.ts"] })
+        );
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--bind", "/repo/target", "/repo/target"] })
         );
         assert!(
             args.windows(3)
@@ -746,10 +1249,11 @@ mod tests {
         }
         fs::create_dir_all(repo_root.join("src")).expect("repo src dir should be creatable");
 
-        let error = prepare_sandbox_writable_files(
+        let error = prepare_sandbox_writable_paths(
             &repo_root,
             &["src/missing.txt".to_string()],
             &["src/new.txt".to_string()],
+            &["target".to_string()],
         )
         .expect_err("missing write target should fail before create target is materialized");
 
@@ -763,25 +1267,127 @@ mod tests {
             !repo_root.join("src/new.txt").exists(),
             "failed sandbox run should not leave create target behind"
         );
+        assert!(
+            !repo_root.join("target").exists(),
+            "failed sandbox run should not leave write dir behind"
+        );
 
         fs::remove_dir_all(&repo_root).expect("temp root should be removable");
     }
 
     #[test]
-    fn seatbelt_profile_allows_dev_null_and_exact_targets() {
+    fn prepare_writable_paths_creates_write_dirs() {
+        let repo_root =
+            std::env::temp_dir().join(format!("stateful-sandbox-write-dir-{}", std::process::id()));
+        if repo_root.exists() {
+            fs::remove_dir_all(&repo_root).expect("old temp root should be removable");
+        }
+        fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+
+        let writable_paths =
+            prepare_sandbox_writable_paths(&repo_root, &[], &[], &["target".to_string()])
+                .expect("write dir should prepare");
+
+        assert!(repo_root.join("target").is_dir());
+        assert!(repo_root.join("target/.stateful-tmp").is_dir());
+        assert_eq!(
+            writable_paths,
+            vec![SandboxWritablePath::directory(
+                repo_root
+                    .join("target")
+                    .canonicalize()
+                    .expect("target write dir should be canonicalizable")
+            )]
+        );
+
+        fs::remove_dir_all(&repo_root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn sandbox_temp_dir_uses_first_writable_directory() {
+        let writable_paths = vec![
+            SandboxWritablePath::file(PathBuf::from("/repo/README.md")),
+            SandboxWritablePath::directory(PathBuf::from("/repo/target")),
+        ];
+
+        assert_eq!(
+            sandbox_temp_dir(&writable_paths),
+            Some(PathBuf::from("/repo/target/.stateful-tmp"))
+        );
+    }
+
+    #[test]
+    fn write_dir_unsupported_action_denial_points_to_server_restart() {
+        let body = enrich_sandbox_write_dir_denial(serde_json::json!({
+            "decision": "deny",
+            "message": "Action is not supported by the v1 authorization API.",
+            "reason_code": "unsupported_action",
+            "required_next_action": "Use a supported action such as write_file."
+        }));
+
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("The running stateful server does not support sandbox write directories.")
+        );
+        assert_eq!(
+            body.get("required_next_action").and_then(Value::as_str),
+            Some(
+                "Restart the stateful server with the newly built stateful binary, then retry the sandbox run."
+            )
+        );
+    }
+
+    #[test]
+    fn apply_sandbox_temp_env_sets_standard_temp_vars() {
+        let mut command = Command::new("true");
+
+        apply_sandbox_temp_env(&mut command, Some(Path::new("/repo/target/.stateful-tmp")));
+
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            envs.get(STATEFUL_SANDBOX_RUN_ACTIVE_ENV),
+            Some(&Some("1".to_string()))
+        );
+        assert_eq!(
+            envs.get("TMPDIR"),
+            Some(&Some("/repo/target/.stateful-tmp".to_string()))
+        );
+        assert_eq!(
+            envs.get("TEMP"),
+            Some(&Some("/repo/target/.stateful-tmp".to_string()))
+        );
+        assert_eq!(
+            envs.get("TMP"),
+            Some(&Some("/repo/target/.stateful-tmp".to_string()))
+        );
+    }
+
+    #[test]
+    fn seatbelt_profile_allows_dev_null_exact_targets_and_directory_subpaths() {
         let profile = seatbelt_profile(
             &[
-                PathBuf::from("/repo/src/allowed.ts"),
-                PathBuf::from("/repo/src/quoted\"path.ts"),
+                SandboxWritablePath::file(PathBuf::from("/repo/src/allowed.ts")),
+                SandboxWritablePath::file(PathBuf::from("/repo/src/quoted\"path.ts")),
+                SandboxWritablePath::directory(PathBuf::from("/repo/target")),
             ],
             SandboxNetworkPolicy::Disabled,
         );
 
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("(allow file-read*)"));
+        assert!(profile.contains("(allow sysctl-read)"));
         assert!(profile.contains("(literal \"/dev/null\")"));
         assert!(profile.contains("(literal \"/repo/src/allowed.ts\")"));
         assert!(profile.contains("(literal \"/repo/src/quoted\\\"path.ts\")"));
+        assert!(profile.contains("(subpath \"/repo/target\")"));
         assert!(!profile.contains("subpath \"/repo/src\""));
         assert!(!profile.contains("subpath \"/dev\""));
         assert!(!profile.contains("(allow network*)"));

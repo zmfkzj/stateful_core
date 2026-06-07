@@ -7,19 +7,22 @@ use axum::{
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
-use policy_service::{AuthorizationOutcome, AuthorizeWriteInput, PolicyService};
+use policy_service::{
+    AuthorizationOutcome, AuthorizeWriteInput, CancelIntentInput, CancelIntentOutcome,
+    ClaimIntentInput, ClaimIntentOutcome, PolicyService, RequestIntentInput, RequestIntentOutcome,
+    WaitQueueInfo,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stateful_core::{ContextPackage, ReconciliationDecision, RenderMode, render_prompt_text};
-use stateful_store::{Event, OutboxEntry, Store};
-use stateful_validation::{ValidationResult, ValidationStatus, run_validation_profile};
+use stateful_store::{Event, OutboxEntry, Store, WaitRecord};
 use std::{
     net::SocketAddr,
-    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
 pub const CRATE_NAME: &str = "stateful-server";
+const RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -54,6 +57,9 @@ pub fn build_router(config: ServerConfig) -> Router {
         .route("/v1/session/register", post(session_register))
         .route("/v1/session/heartbeat", post(session_heartbeat))
         .route("/v1/intent/declare", post(intent_declare))
+        .route("/v1/intent/request", post(intent_request))
+        .route("/v1/intent/claim", post(intent_claim))
+        .route("/v1/intent/cancel", post(intent_cancel))
         .route("/v1/lease/acquire", post(lease_acquire))
         .route("/v1/lease/release", post(lease_release))
         .route("/v1/activity/observe", post(activity_observe))
@@ -62,7 +68,6 @@ pub fn build_router(config: ServerConfig) -> Router {
         .route("/v1/conflicts/check", post(conflicts_check))
         .route("/v1/context/render", post(context_render))
         .route("/v1/reconcile/ack", post(reconcile_ack))
-        .route("/v1/validation/run", post(validation_run))
         .route("/v1/notifications/poll", post(notifications_poll))
         .route("/v1/resume/next", post(resume_next))
         .route("/v1/outbox/sync", post(outbox_sync))
@@ -163,7 +168,8 @@ async fn runtime_identity(
         Json(json!({
             "status": "ok",
             "pid": std::process::id(),
-            "protocol_version": "stateful.v1"
+            "protocol_version": "stateful.v1",
+            "capabilities": RUNTIME_CAPABILITIES
         })),
     )
 }
@@ -226,10 +232,18 @@ async fn authorize(
         Ok(payload) => payload,
         Err(_) => return protocol::protocol_mismatch_response(),
     };
+    let stateful_core::RequestEnvelope {
+        session,
+        workspace,
+        source,
+        ..
+    } = envelope.request;
 
     let input = AuthorizeWriteInput {
-        session_id: envelope.request.session.session_id,
-        workspace_id: Some(envelope.request.workspace.workspace_id),
+        session_id: session.session_id,
+        workspace_id: Some(workspace.workspace_id),
+        source_kind: Some(source.kind),
+        source_tool_name: source.tool_name,
         queue_on_conflict: payload.queue_on_conflict,
         action: payload.action,
         old_path: payload.old_path,
@@ -294,6 +308,119 @@ async fn intent_declare(
             identity,
         ),
     )
+}
+
+async fn intent_request(
+    State(config): State<ServerConfig>,
+    headers: HeaderMap,
+    Json(input): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    if !has_valid_bearer_token(&headers, &config.bearer_token) {
+        return unauthorized();
+    }
+
+    let envelope = match protocol::require_v1_envelope(input) {
+        Ok(envelope) => envelope,
+        Err(error) => return error.response(),
+    };
+    let payload: IntentRequestPayload = match serde_json::from_value(envelope.payload) {
+        Ok(payload) => payload,
+        Err(_) => return protocol::protocol_mismatch_response(),
+    };
+
+    let input = RequestIntentInput {
+        session_id: envelope.request.session.session_id,
+        workspace_id: envelope.request.workspace.workspace_id,
+        request_id: payload.request_id,
+        action: payload.action,
+        path: payload.path,
+    };
+
+    match request_intent_with_policy(&config.store, input) {
+        Ok(outcome) => (StatusCode::OK, Json(request_intent_json(outcome))),
+        Err(message) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "status": "error",
+                "reason_code": "request_failed",
+                "message": message
+            })),
+        ),
+    }
+}
+
+async fn intent_claim(
+    State(config): State<ServerConfig>,
+    headers: HeaderMap,
+    Json(input): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    if !has_valid_bearer_token(&headers, &config.bearer_token) {
+        return unauthorized();
+    }
+
+    let envelope = match protocol::require_v1_envelope(input) {
+        Ok(envelope) => envelope,
+        Err(error) => return error.response(),
+    };
+    let payload: IntentClaimPayload = match serde_json::from_value(envelope.payload) {
+        Ok(payload) => payload,
+        Err(_) => return protocol::protocol_mismatch_response(),
+    };
+
+    let input = ClaimIntentInput {
+        session_id: envelope.request.session.session_id,
+        workspace_id: envelope.request.workspace.workspace_id,
+        wait_id: payload.wait_id,
+    };
+
+    match claim_intent_with_policy(&config.store, input) {
+        Ok(outcome) => (StatusCode::OK, Json(claim_intent_json(outcome))),
+        Err(message) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "status": "error",
+                "reason_code": "claim_failed",
+                "message": message
+            })),
+        ),
+    }
+}
+
+async fn intent_cancel(
+    State(config): State<ServerConfig>,
+    headers: HeaderMap,
+    Json(input): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    if !has_valid_bearer_token(&headers, &config.bearer_token) {
+        return unauthorized();
+    }
+
+    let envelope = match protocol::require_v1_envelope(input) {
+        Ok(envelope) => envelope,
+        Err(error) => return error.response(),
+    };
+    let payload: IntentCancelPayload = match serde_json::from_value(envelope.payload) {
+        Ok(payload) => payload,
+        Err(_) => return protocol::protocol_mismatch_response(),
+    };
+
+    let input = CancelIntentInput {
+        session_id: envelope.request.session.session_id,
+        workspace_id: envelope.request.workspace.workspace_id,
+        request_id: payload.request_id,
+    };
+
+    match cancel_intent_with_policy(&config.store, input) {
+        Ok(outcome) => (StatusCode::OK, Json(cancel_intent_json(outcome))),
+        Err(message) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "status": "error",
+                "reason_code": "cancel_failed",
+                "message": message
+            })),
+        ),
+    }
 }
 
 fn non_empty_identity(value: String) -> Option<String> {
@@ -438,6 +565,8 @@ async fn conflicts_check(
     let input = AuthorizeWriteInput {
         session_id: input.session_id,
         workspace_id: input.workspace_id,
+        source_kind: None,
+        source_tool_name: None,
         queue_on_conflict: input.queue_on_conflict,
         action: input.action,
         old_path: input.old_path,
@@ -616,7 +745,7 @@ async fn resume_next(
                 "status": "ok",
                 "resume_available": true,
                 "reservation": reservation,
-                "required_next_action": "Claim the reservation by retrying the write after rereading the file."
+                "required_next_action": "Reread the target, then call state.intent.claim for the reservation before writing."
             })),
         ),
         Ok(None) => (
@@ -637,50 +766,6 @@ async fn resume_next(
     }
 }
 
-async fn validation_run(
-    State(config): State<ServerConfig>,
-    headers: HeaderMap,
-    Json(input): Json<ValidationRunRequest>,
-) -> (StatusCode, Json<Value>) {
-    if !has_valid_bearer_token(&headers, &config.bearer_token) {
-        return unauthorized();
-    }
-
-    match run_validation_profile(&input.repo_root, &input.profile) {
-        Ok(result) => {
-            let record_result =
-                record_validation_result(&config.store, &input.workspace_id, &result);
-            if let Err(message) = record_result {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "workspace_id": input.workspace_id,
-                        "profile_id": result.profile_id,
-                        "status": "error",
-                        "exit_code": result.exit_code,
-                        "message": message
-                    })),
-                );
-            }
-
-            (
-                StatusCode::OK,
-                Json(validation_result_json(result, input.workspace_id)),
-            )
-        }
-        Err(message) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "workspace_id": input.workspace_id,
-                "profile_id": input.profile,
-                "status": "error",
-                "exit_code": null,
-                "message": message.to_string()
-            })),
-        ),
-    }
-}
-
 fn authorize_with_policy(
     store: &SharedStore,
     input: AuthorizeWriteInput,
@@ -690,6 +775,36 @@ fn authorize_with_policy(
         .lock()
         .map_err(|_| "store lock poisoned".to_string())?;
     PolicyService::new(&store).authorize_write(input, allow_queue_side_effects)
+}
+
+fn claim_intent_with_policy(
+    store: &SharedStore,
+    input: ClaimIntentInput,
+) -> Result<ClaimIntentOutcome, String> {
+    let store = store
+        .lock()
+        .map_err(|_| "store lock poisoned".to_string())?;
+    PolicyService::new(&store).claim_intent(input)
+}
+
+fn request_intent_with_policy(
+    store: &SharedStore,
+    input: RequestIntentInput,
+) -> Result<RequestIntentOutcome, String> {
+    let store = store
+        .lock()
+        .map_err(|_| "store lock poisoned".to_string())?;
+    PolicyService::new(&store).request_intent(input)
+}
+
+fn cancel_intent_with_policy(
+    store: &SharedStore,
+    input: CancelIntentInput,
+) -> Result<CancelIntentOutcome, String> {
+    let store = store
+        .lock()
+        .map_err(|_| "store lock poisoned".to_string())?;
+    PolicyService::new(&store).cancel_intent(input)
 }
 
 fn append_event_response(store: &SharedStore, event: Event) -> (StatusCode, Json<Value>) {
@@ -797,6 +912,78 @@ fn authorization_json(outcome: AuthorizationOutcome) -> Value {
     value
 }
 
+fn claim_intent_json(outcome: ClaimIntentOutcome) -> Value {
+    let reservation = outcome.reservation;
+    json!({
+        "status": "ok",
+        "reservation": {
+            "wait_id": reservation.wait_id,
+            "session_id": reservation.session_id,
+            "workspace_id": reservation.workspace_id,
+            "relative_path": reservation.relative_path,
+            "action": reservation.action,
+            "status": reservation.status,
+            "reservation_expires_at": reservation.reservation_expires_at,
+        }
+    })
+}
+
+fn request_intent_json(outcome: RequestIntentOutcome) -> Value {
+    let mut value = json!({
+        "status": "ok",
+        "request_id": outcome.request_id,
+        "request_state": outcome.request_state,
+    });
+
+    if let Some(wait) = outcome.wait {
+        value["wait"] = wait_queue_json(wait);
+    }
+    if let Some(reservation) = outcome.reservation {
+        value["reservation"] = reservation_json(reservation);
+    }
+
+    value
+}
+
+fn cancel_intent_json(outcome: CancelIntentOutcome) -> Value {
+    let request_state = outcome.wait.status.clone();
+    json!({
+        "status": "ok",
+        "request_id": outcome.request_id,
+        "request_state": request_state,
+        "wait": wait_record_json(outcome.wait, None),
+    })
+}
+
+fn wait_queue_json(wait: WaitQueueInfo) -> Value {
+    wait_record_json(wait.record, wait.queue_position)
+}
+
+fn wait_record_json(record: WaitRecord, queue_position: Option<u64>) -> Value {
+    json!({
+        "wait_id": record.wait_id,
+        "session_id": record.session_id,
+        "workspace_id": record.workspace_id,
+        "relative_path": record.relative_path,
+        "action": record.action,
+        "status": record.status,
+        "queue_position": queue_position,
+        "blocking_session_id": record.blocking_session_id,
+    })
+}
+
+fn reservation_json(reservation: WaitRecord) -> Value {
+    json!({
+        "wait_id": reservation.wait_id,
+        "session_id": reservation.session_id,
+        "workspace_id": reservation.workspace_id,
+        "relative_path": reservation.relative_path,
+        "action": reservation.action,
+        "status": reservation.status,
+        "reservation_expires_at": reservation.reservation_expires_at,
+    })
+}
+
 fn unauthorized() -> (StatusCode, Json<Value>) {
     (
         StatusCode::UNAUTHORIZED,
@@ -804,42 +991,6 @@ fn unauthorized() -> (StatusCode, Json<Value>) {
             "error": "unauthorized"
         })),
     )
-}
-
-fn validation_result_json(result: ValidationResult, workspace_id: String) -> Value {
-    json!({
-        "workspace_id": workspace_id,
-        "profile_id": result.profile_id,
-        "status": validation_status_str(result.status),
-        "exit_code": result.exit_code,
-        "message": result.message,
-    })
-}
-
-fn record_validation_result(
-    store: &SharedStore,
-    workspace_id: &str,
-    result: &ValidationResult,
-) -> Result<(), String> {
-    store
-        .lock()
-        .map_err(|_| "store lock poisoned".to_string())?
-        .append_validation_result(
-            workspace_id,
-            &result.profile_id,
-            validation_status_str(result.status),
-        )
-        .map_err(|error| error.to_string())
-}
-
-fn validation_status_str(status: ValidationStatus) -> &'static str {
-    match status {
-        ValidationStatus::Passed => "passed",
-        ValidationStatus::Failed => "failed",
-        ValidationStatus::FailedPolicy => "failed_policy",
-        ValidationStatus::Timeout => "timeout",
-        ValidationStatus::Error => "error",
-    }
 }
 
 fn has_valid_bearer_token(headers: &HeaderMap, expected_token: &str) -> bool {
@@ -857,6 +1008,23 @@ fn has_valid_bearer_token(headers: &HeaderMap, expected_token: &str) -> bool {
 #[derive(Debug, Deserialize)]
 struct IntentDeclarePayload {
     files_planned: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IntentRequestPayload {
+    request_id: String,
+    action: String,
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IntentClaimPayload {
+    wait_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IntentCancelPayload {
+    request_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -954,11 +1122,4 @@ struct OutboxSyncRequest {
     sequence: u64,
     event_type: String,
     payload: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct ValidationRunRequest {
-    workspace_id: String,
-    repo_root: PathBuf,
-    profile: String,
 }

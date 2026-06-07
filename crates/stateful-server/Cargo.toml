@@ -16,7 +16,6 @@ serde.workspace = true
 serde_json.workspace = true
 stateful-core = { path = "../stateful-core" }
 stateful-store = { path = "../stateful-store" }
-stateful-validation = { path = "../stateful-validation" }
 thiserror.workspace = true
 tokio.workspace = true
 

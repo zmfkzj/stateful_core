@@ -50,7 +50,7 @@ pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitRes
     let commit_message = TemporaryCommitMessage::create(message)?;
     let disabled_hooks = TemporaryHooksDir::create()?;
     let result = (|| -> anyhow::Result<CommitResult> {
-        let mut add_args = vec!["add", "--"];
+        let mut add_args = vec!["add", "--force", "--"];
         add_args.extend(paths.iter().map(String::as_str));
         git_status_with_index(&request.repo_root, &add_args, Some(&temporary_index.path))?;
 
@@ -206,6 +206,7 @@ fn authorize_path(request: &CommitRequest, target: &CommitTarget) -> anyhow::Res
         source_kind: "cli",
         event: "commit_authorize",
         source_ref: "stateful-commit",
+        source_tool_name: None,
         payload: serde_json::json!({
             "action": target.action,
             "path": target.path,

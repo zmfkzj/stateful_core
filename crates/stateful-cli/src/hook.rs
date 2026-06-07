@@ -10,7 +10,8 @@ use crate::outbox::queue_session_heartbeat_outbox;
 use crate::{
     CurrentSession, GlobalPaths, HookCommand, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
     ServerRuntime, discover_runtime_with_global, ensure_server, post_json, protocol_envelope,
-    repo_gate, repo_identity_for_enabled_repo, write_current_session_file,
+    repo_gate, repo_identity_for_enabled_repo, runtime_env_override_is_configured,
+    write_current_session_file,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +27,13 @@ struct SandboxRunInvocation {
     network: String,
     write_targets: Vec<String>,
     create_targets: Vec<String>,
+    write_dirs: Vec<String>,
     command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatefulExternalRunInvocation {
+    executable: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +115,9 @@ pub fn handle_pre_tool_use_in_repo(
     let paths = GlobalPaths::from_env()?;
     let repo_root = match repo_gate(&paths, &start)? {
         RepoGate::Enabled { repo_root } => {
-            ensure_server(&paths)?;
+            if !runtime_env_override_is_configured() {
+                ensure_server(&paths)?;
+            }
             repo_root
         }
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(HookOutcome::Allow),
@@ -131,7 +140,9 @@ pub fn handle_session_start_in_repo(
     let paths = GlobalPaths::from_env()?;
     let repo_root = match repo_gate(&paths, start)? {
         RepoGate::Enabled { repo_root } => {
-            ensure_server(&paths)?;
+            if !runtime_env_override_is_configured() {
+                ensure_server(&paths)?;
+            }
             repo_root
         }
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
@@ -150,7 +161,9 @@ pub fn handle_post_tool_use_in_repo(
     let paths = GlobalPaths::from_env()?;
     let repo_root = match repo_gate(&paths, start)? {
         RepoGate::Enabled { repo_root } => {
-            ensure_server(&paths)?;
+            if !runtime_env_override_is_configured() {
+                ensure_server(&paths)?;
+            }
             repo_root
         }
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
@@ -179,7 +192,9 @@ pub fn handle_user_prompt_submit_in_repo(
     let paths = GlobalPaths::from_env()?;
     let repo_root = match repo_gate(&paths, start)? {
         RepoGate::Enabled { repo_root } => {
-            ensure_server(&paths)?;
+            if !runtime_env_override_is_configured() {
+                ensure_server(&paths)?;
+            }
             repo_root
         }
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(String::new()),
@@ -194,7 +209,9 @@ pub fn handle_stop_in_repo(input: &str, repo_root: impl AsRef<Path>) -> anyhow::
     let paths = GlobalPaths::from_env()?;
     let repo_root = match repo_gate(&paths, start)? {
         RepoGate::Enabled { repo_root } => {
-            ensure_server(&paths)?;
+            if !runtime_env_override_is_configured() {
+                ensure_server(&paths)?;
+            }
             repo_root
         }
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
@@ -278,7 +295,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 fn stateful_command_policy_reminder() -> String {
     let binary = trusted_stateful_binary_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- Before using Bash, use the `stateful-command-policy` skill.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For writes, use `state_file_write` or `{binary} sandbox run --fs write-targets --write-target <path> --command '<cmd>'`."
+        "Stateful command policy reminder:\n- Before using Bash, use the `stateful-command-policy` skill.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For file edits, declare exact intent, acquire the same-session file lease successfully, then use native Codex edit tools such as `apply_patch` or Edit.\n- For command-shaped writes, declare exact intent, acquire the matching file or directory lease successfully, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`, `{binary} sandbox run --fs write-targets --create-target <file> --command '<cmd>'`, or `{binary} sandbox run --fs write-targets --write-dir target --command '<cmd>'` for target/ artifacts."
     )
 }
 
@@ -348,7 +365,17 @@ fn handle_pre_tool_use_with_runtime(
 
 fn authorize_bash(input: &PreToolUseInput) -> anyhow::Result<HookOutcome> {
     let command = input.command().unwrap_or_default();
-    Ok(authorize_sandbox_run_bash(command))
+    let sandbox = authorize_sandbox_run_bash(command);
+    if sandbox == HookOutcome::Allow {
+        return Ok(sandbox);
+    }
+
+    let external = authorize_external_run_bash(command);
+    if external == HookOutcome::Allow || command.contains("external-run") {
+        return Ok(external);
+    }
+
+    Ok(sandbox)
 }
 
 fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
@@ -374,15 +401,37 @@ fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
         return bash_policy_deny("stateful sandbox run requires a non-empty --command");
     }
     if invocation.fs == "read-only"
-        && (!invocation.write_targets.is_empty() || !invocation.create_targets.is_empty())
+        && (!invocation.write_targets.is_empty()
+            || !invocation.create_targets.is_empty()
+            || !invocation.write_dirs.is_empty())
     {
-        return bash_policy_deny("read-only sandbox run rejects write targets");
+        return bash_policy_deny(
+            "read-only sandbox run rejects write targets, create targets, and write dirs",
+        );
     }
     if invocation.fs == "write-targets"
         && invocation.write_targets.is_empty()
         && invocation.create_targets.is_empty()
+        && invocation.write_dirs.is_empty()
     {
-        return bash_policy_deny("write-targets sandbox run requires at least one write target");
+        return bash_policy_deny(
+            "write-targets sandbox run requires at least one write target, create target, or write dir",
+        );
+    }
+
+    HookOutcome::Allow
+}
+
+fn authorize_external_run_bash(command: &str) -> HookOutcome {
+    let invocation = match parse_external_run_invocation(command) {
+        Ok(invocation) => invocation,
+        Err(reason) => return bash_policy_deny(reason),
+    };
+
+    if !is_trusted_stateful_executable(&invocation.executable) {
+        return bash_policy_deny(
+            "stateful external-run requires the trusted absolute stateful binary",
+        );
     }
 
     HookOutcome::Allow
@@ -396,7 +445,8 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 
 fn bash_policy_guidance() -> String {
     format!(
-        "Use the `stateful-command-policy` skill before Bash. Raw Bash is denied; for read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`.",
+        "Use the `stateful-command-policy` skill before Bash. Raw Bash is denied; for read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`; for approved repo-external writes use `{} external-run request --purpose '<purpose>' --write-dir <dir> --command '<cmd>'`.",
+        trusted_stateful_binary_for_guidance(),
         trusted_stateful_binary_for_guidance()
     )
 }
@@ -409,7 +459,10 @@ fn trusted_stateful_binary_for_guidance() -> String {
 }
 
 fn parse_sandbox_run_invocation(command: &str) -> Result<SandboxRunInvocation, String> {
-    reject_outer_shell_syntax(command)?;
+    reject_outer_shell_syntax(
+        command,
+        "Bash wrapper must be a single stateful sandbox run command",
+    )?;
     let words = split_simple_command_words(command)?;
     if words.is_empty() {
         return Err("Bash commands must use stateful sandbox run".to_string());
@@ -425,6 +478,7 @@ fn parse_sandbox_run_invocation(command: &str) -> Result<SandboxRunInvocation, S
     let mut network = "disabled".to_string();
     let mut write_targets = Vec::new();
     let mut create_targets = Vec::new();
+    let mut write_dirs = Vec::new();
     let mut inner_command = None;
     let mut index = 3;
     while index < words.len() {
@@ -456,6 +510,10 @@ fn parse_sandbox_run_invocation(command: &str) -> Result<SandboxRunInvocation, S
                     index,
                     "--create-target",
                 )?);
+            }
+            "--write-dir" => {
+                index += 1;
+                write_dirs.push(parse_sandbox_run_arg_value(&words, index, "--write-dir")?);
             }
             "--command" => {
                 if inner_command.is_some() {
@@ -491,7 +549,33 @@ fn parse_sandbox_run_invocation(command: &str) -> Result<SandboxRunInvocation, S
         network,
         write_targets,
         create_targets,
+        write_dirs,
         command,
+    })
+}
+
+fn parse_external_run_invocation(command: &str) -> Result<StatefulExternalRunInvocation, String> {
+    reject_outer_shell_syntax(command, "Bash wrapper must be a single stateful command")?;
+    let words = split_simple_command_words(command)?;
+    if words.is_empty() {
+        return Err(
+            "Bash commands must use stateful sandbox run or stateful external-run".to_string(),
+        );
+    }
+    if first_word_is_env_assignment(&words[0]) {
+        return Err("Bash wrapper must not use outer environment assignments".to_string());
+    }
+    if words.len() < 3 || words[1] != "external-run" {
+        return Err(
+            "Bash commands must use stateful sandbox run or stateful external-run".to_string(),
+        );
+    }
+    if !matches!(words[2].as_str(), "request" | "approve" | "run" | "help") {
+        return Err("stateful external-run requires request, approve, or run".to_string());
+    }
+
+    Ok(StatefulExternalRunInvocation {
+        executable: words[0].clone(),
     })
 }
 
@@ -506,7 +590,7 @@ fn parse_sandbox_run_arg_value(
         .ok_or_else(|| format!("stateful sandbox run argument `{arg}` requires a value"))
 }
 
-fn reject_outer_shell_syntax(command: &str) -> Result<(), String> {
+fn reject_outer_shell_syntax(command: &str, single_command_message: &str) -> Result<(), String> {
     let mut state = QuoteState::None;
     let mut chars = command.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -521,9 +605,7 @@ fn reject_outer_shell_syntax(command: &str) -> Result<(), String> {
                     return Err("Bash wrapper must not use shell escapes".to_string());
                 }
                 ';' | '|' | '&' | '<' | '>' | '\n' | '\r' | '`' => {
-                    return Err(
-                        "Bash wrapper must be a single stateful sandbox run command".to_string()
-                    );
+                    return Err(single_command_message.to_string());
                 }
                 _ => {}
             },
@@ -725,7 +807,15 @@ fn normalize_targets(
         let Some(path) = normalize_file_tool_target(&target.path, repo_root, cwd)? else {
             return Ok(None);
         };
-        normalized.push(target.with_path(path));
+        let new_path = if let Some(new_path) = &target.new_path {
+            let Some(new_path) = normalize_file_tool_target(new_path, repo_root, cwd)? else {
+                return Ok(None);
+            };
+            Some(new_path)
+        } else {
+            None
+        };
+        normalized.push(target.with_paths(path, new_path));
     }
 
     Ok(Some(normalized))
@@ -739,7 +829,7 @@ fn authorize_targets(
     let Some(runtime) = runtime else {
         return Ok(HookOutcome::Deny {
             reason: format!(
-                "{} writes require a reachable stateful server and active file or directory intent",
+                "{} writes require a reachable stateful server, exact file intent, and a same-session file lease",
                 input.tool_name
             ),
         });
@@ -750,6 +840,15 @@ fn authorize_targets(
     }
 
     for target in targets {
+        let mut payload = json!({
+            "action": target.action,
+            "path": target.path,
+            "queue_on_conflict": true,
+        });
+        if let Some(new_path) = &target.new_path {
+            payload["old_path"] = json!(target.path);
+            payload["new_path"] = json!(new_path);
+        }
         let body = protocol_envelope(ProtocolEnvelopeArgs {
             runtime,
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -758,12 +857,9 @@ fn authorize_targets(
             identity: None,
             source_kind: "hook",
             event: "pre_tool_use",
-            source_ref: &input.tool_name,
-            payload: json!({
-                "action": target.action,
-                "path": target.path,
-                "queue_on_conflict": true,
-            }),
+            source_ref: "hook:pre_tool_use",
+            source_tool_name: Some(input.tool_name.as_str()),
+            payload,
         });
         let response = post_json(runtime, "/v1/authorize", &body)?;
 
@@ -823,18 +919,48 @@ fn normalize_file_tool_target(
 }
 
 fn extract_apply_patch_write_targets(patch: &str) -> Vec<PatchTarget> {
-    patch
-        .lines()
-        .filter_map(|line| {
-            if let Some(path) = line.strip_prefix("*** Update File: ") {
-                Some(PatchTarget::write(path))
-            } else if let Some(path) = line.strip_prefix("*** Add File: ") {
-                Some(PatchTarget::write(path))
-            } else {
-                line.strip_prefix("*** Delete File: ")
-                    .map(PatchTarget::delete)
+    let mut targets = Vec::new();
+    let mut pending_update: Option<String> = None;
+
+    for line in patch.lines() {
+        if let Some(path) = line.strip_prefix("*** Update File: ") {
+            if let Some(path) = pending_update.replace(path.trim().to_string())
+                && !path.is_empty()
+            {
+                targets.push(PatchTarget::write(&path));
             }
-        })
+        } else if let Some(path) = line.strip_prefix("*** Move to: ") {
+            if let Some(old_path) = pending_update.take() {
+                let new_path = path.trim();
+                if !old_path.is_empty() && !new_path.is_empty() {
+                    targets.push(PatchTarget::move_file(&old_path, new_path));
+                }
+            }
+        } else if let Some(path) = line.strip_prefix("*** Add File: ") {
+            if let Some(path) = pending_update.take()
+                && !path.is_empty()
+            {
+                targets.push(PatchTarget::write(&path));
+            }
+            targets.push(PatchTarget::write(path));
+        } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            if let Some(path) = pending_update.take()
+                && !path.is_empty()
+            {
+                targets.push(PatchTarget::write(&path));
+            }
+            targets.push(PatchTarget::delete(path));
+        }
+    }
+
+    if let Some(path) = pending_update
+        && !path.is_empty()
+    {
+        targets.push(PatchTarget::write(&path));
+    }
+
+    targets
+        .into_iter()
         .filter(|target| !target.path.is_empty())
         .collect()
 }
@@ -897,6 +1023,7 @@ fn string_payload_field<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Opti
 struct PatchTarget {
     action: &'static str,
     path: String,
+    new_path: Option<String>,
 }
 
 impl PatchTarget {
@@ -904,6 +1031,7 @@ impl PatchTarget {
         Self {
             action: "write_file",
             path: path.trim().to_string(),
+            new_path: None,
         }
     }
 
@@ -911,11 +1039,21 @@ impl PatchTarget {
         Self {
             action: "delete_file",
             path: path.trim().to_string(),
+            new_path: None,
         }
     }
 
-    fn with_path(mut self, path: String) -> Self {
+    fn move_file(old_path: &str, new_path: &str) -> Self {
+        Self {
+            action: "move_file",
+            path: old_path.trim().to_string(),
+            new_path: Some(new_path.trim().to_string()),
+        }
+    }
+
+    fn with_paths(mut self, path: String, new_path: Option<String>) -> Self {
         self.path = path;
+        self.new_path = new_path;
         self
     }
 }

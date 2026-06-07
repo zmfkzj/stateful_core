@@ -1,5 +1,7 @@
 # V1 Hardening Prototype Implementation Plan
 
+> Historical note: validation profile references in this plan are obsolete. Current test/build execution uses `stateful sandbox run --fs write-targets` with explicit write targets or `--write-dir target`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the v1 hardening prototype: explicit scheduling APIs, protocol metadata enforcement, a shared policy service, agent-agent conflict completion, portable hook wrappers, minimal context rendering, lazy expiration, and aligned docs.

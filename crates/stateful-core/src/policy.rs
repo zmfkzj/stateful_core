@@ -27,6 +27,11 @@ impl IntentScope {
         }
     }
 
+    pub fn allows_write_directory(&self, target: impl AsRef<str>) -> bool {
+        let target = normalize_directory_path(target.as_ref());
+        matches!(self, Self::Directory(scope) if scope == &target)
+    }
+
     pub fn allows_delete(&self, target: impl AsRef<str>) -> bool {
         let target = normalize_relative_path(target.as_ref());
         matches!(self, Self::File(path) if path == &target)
@@ -46,6 +51,13 @@ impl ScopeSet {
     pub fn allows_write(&self, target: impl AsRef<str>) -> bool {
         let target = target.as_ref();
         self.scopes.iter().any(|scope| scope.allows_write(target))
+    }
+
+    pub fn allows_write_directory(&self, target: impl AsRef<str>) -> bool {
+        let target = target.as_ref();
+        self.scopes
+            .iter()
+            .any(|scope| scope.allows_write_directory(target))
     }
 
     pub fn allows_delete(&self, target: impl AsRef<str>) -> bool {
@@ -123,6 +135,7 @@ impl PolicyState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthorizationInput {
     WriteFile { path: String },
+    WriteDirectory { path: String },
     DeleteFile { path: String },
     RenameFile { old_path: String, new_path: String },
     MoveFile { old_path: String, new_path: String },
@@ -132,6 +145,12 @@ impl AuthorizationInput {
     pub fn write_file(path: impl AsRef<str>) -> Self {
         Self::WriteFile {
             path: normalize_relative_path(path.as_ref()),
+        }
+    }
+
+    pub fn write_directory(path: impl AsRef<str>) -> Self {
+        Self::WriteDirectory {
+            path: normalize_directory_path(path.as_ref()),
         }
     }
 
@@ -199,6 +218,12 @@ pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decis
         AuthorizationInput::WriteFile { path } if scopes.allows_write(&path) => {
             Decision::allow("authorized", "Write target is inside active intent scope.")
         }
+        AuthorizationInput::WriteDirectory { path } if scopes.allows_write_directory(&path) => {
+            Decision::allow(
+                "authorized",
+                "Write directory target matches active directory intent.",
+            )
+        }
         AuthorizationInput::DeleteFile { path } if scopes.allows_delete(&path) => {
             Decision::allow("authorized", "Delete target has exact active file intent.")
         }
@@ -212,12 +237,13 @@ pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decis
             )
         }
         AuthorizationInput::WriteFile { .. }
+        | AuthorizationInput::WriteDirectory { .. }
         | AuthorizationInput::DeleteFile { .. }
         | AuthorizationInput::RenameFile { .. }
         | AuthorizationInput::MoveFile { .. } => Decision::deny(
             "scope_mismatch",
             "Target is outside active intent scope.",
-            "Declare intent for the exact file, or for writes only a directory scope that covers the target.",
+            "Declare intent for the exact file, or for write-directory actions the exact directory scope.",
         ),
     }
 }

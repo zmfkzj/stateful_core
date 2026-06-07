@@ -19,6 +19,21 @@ const TOOLS: &[(&str, &str, &str)] = &[
         "Declare file or directory intent before write actions.",
     ),
     (
+        "state_intent_request",
+        "state.intent.request",
+        "Request a write reservation explicitly, returning queued or reserved state.",
+    ),
+    (
+        "state_intent_claim",
+        "state.intent.claim",
+        "Claim an active reservation and turn it into write-authorizing intent.",
+    ),
+    (
+        "state_intent_cancel",
+        "state.intent.cancel",
+        "Cancel a queued or reserved write reservation request owned by the session.",
+    ),
+    (
         "state_lease_acquire",
         "state.lease.acquire",
         "Acquire an advisory lease on a file or resource.",
@@ -62,16 +77,6 @@ const TOOLS: &[(&str, &str, &str)] = &[
         "state_reconcile_ack",
         "state.reconcile.ack",
         "Acknowledge reconciliation after a human write conflict.",
-    ),
-    (
-        "state_validation_run",
-        "state.validation.run",
-        "Run a controlled validation profile.",
-    ),
-    (
-        "state_file_write",
-        "state.file.write",
-        "Write UTF-8 contents to a repo file after stateful authorization.",
     ),
     (
         "state_notifications_poll",
@@ -149,6 +154,38 @@ fn input_schema_for(protocol_name: &str) -> Value {
             ],
             ["files_planned"],
         ),
+        "state.intent.request" => object_schema(
+            [
+                ("session_id", string_schema()),
+                ("workspace_id", string_schema()),
+                ("request_id", string_schema()),
+                (
+                    "action",
+                    serde_json::json!({
+                        "type": "string",
+                        "enum": ["write_file", "write_directory"]
+                    }),
+                ),
+                ("path", string_schema()),
+            ],
+            ["request_id", "action", "path"],
+        ),
+        "state.intent.claim" => object_schema(
+            [
+                ("session_id", string_schema()),
+                ("workspace_id", string_schema()),
+                ("wait_id", string_schema()),
+            ],
+            ["wait_id"],
+        ),
+        "state.intent.cancel" => object_schema(
+            [
+                ("session_id", string_schema()),
+                ("workspace_id", string_schema()),
+                ("request_id", string_schema()),
+            ],
+            ["request_id"],
+        ),
         "state.lease.acquire" | "state.lease.release" => object_schema(
             [
                 ("session_id", string_schema()),
@@ -165,7 +202,13 @@ fn input_schema_for(protocol_name: &str) -> Value {
                     "action",
                     serde_json::json!({
                         "type": "string",
-                        "enum": ["write_file", "delete_file", "rename_file", "move_file"]
+                        "enum": [
+                            "write_file",
+                            "write_directory",
+                            "delete_file",
+                            "rename_file",
+                            "move_file"
+                        ]
                     }),
                 ),
                 ("path", string_schema()),
@@ -209,23 +252,6 @@ fn input_schema_for(protocol_name: &str) -> Value {
                 "files_reread",
                 "human_change_summary",
             ],
-        ),
-        "state.validation.run" => object_schema(
-            [
-                ("workspace_id", string_schema()),
-                ("repo_root", string_schema()),
-                ("profile", string_schema()),
-            ],
-            ["profile"],
-        ),
-        "state.file.write" => object_schema(
-            [
-                ("session_id", string_schema()),
-                ("workspace_id", string_schema()),
-                ("path", string_schema()),
-                ("contents", string_schema()),
-            ],
-            ["path", "contents"],
         ),
         _ => empty_object_schema(),
     }
@@ -284,6 +310,9 @@ pub fn map_tool_to_http(tool: ToolCall) -> Result<HttpToolRequest, String> {
         "state.session.register" => ("POST", "/v1/session/register"),
         "state.session.heartbeat" => ("POST", "/v1/session/heartbeat"),
         "state.intent.declare" => ("POST", "/v1/intent/declare"),
+        "state.intent.request" => ("POST", "/v1/intent/request"),
+        "state.intent.claim" => ("POST", "/v1/intent/claim"),
+        "state.intent.cancel" => ("POST", "/v1/intent/cancel"),
         "state.lease.acquire" => ("POST", "/v1/lease/acquire"),
         "state.lease.release" => ("POST", "/v1/lease/release"),
         "state.activity.observe" => ("POST", "/v1/activity/observe"),
@@ -293,12 +322,6 @@ pub fn map_tool_to_http(tool: ToolCall) -> Result<HttpToolRequest, String> {
         "state.events.read" => ("GET", "/v1/events"),
         "state.context.render" => ("POST", "/v1/context/render"),
         "state.reconcile.ack" => ("POST", "/v1/reconcile/ack"),
-        "state.validation.run" => ("POST", "/v1/validation/run"),
-        "state.file.write" => {
-            return Err(
-                "state.file.write is handled locally by the stateful CLI MCP bridge".to_string(),
-            );
-        }
         "state.notifications.poll" => ("POST", "/v1/notifications/poll"),
         "state.resume.next" => ("POST", "/v1/resume/next"),
         unknown => return Err(format!("unknown stateful MCP tool: {unknown}")),

@@ -7,6 +7,7 @@ use std::{
 
 mod codex_wrapper;
 mod commit;
+mod external_run;
 mod global_paths;
 mod hook;
 mod install;
@@ -17,12 +18,15 @@ mod repo_registry;
 mod runtime;
 mod sandbox;
 mod server_lifecycle;
-mod validation;
 
 pub use codex_wrapper::{
     CodexInvocation, CodexSandboxMode, CodexWrapperOptions, build_codex_invocation, run_codex,
 };
 pub use commit::{CommitRequest, CommitResult, run_structured_commit};
+pub use external_run::{
+    ExternalRunApproval, ExternalRunRequest, approve_external_run, request_external_run,
+    run_approved_external_run,
+};
 pub use global_paths::GlobalPaths;
 pub use hook::{
     HookOutcome, handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
@@ -40,21 +44,21 @@ pub use repo_registry::{
     enable_repo, repo_gate, repo_identity_for_enabled_repo,
 };
 pub use runtime::{
-    CurrentSession, HttpResponse, IntentDeclareArgs, ProtocolEnvelopeArgs,
-    STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime, declare_intent_via_http, discover_runtime,
+    CurrentSession, HttpResponse, IntentCancelArgs, IntentClaimArgs, IntentDeclareArgs,
+    IntentRequestArgs, ProtocolEnvelopeArgs, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime,
+    cancel_intent_via_http, claim_intent_via_http, declare_intent_via_http, discover_runtime,
     discover_runtime_with_global, discover_runtime_with_optional_global, get_json,
-    global_state_db_path, intent_declare_protocol_body, post_json, protocol_envelope,
-    read_current_session_file, read_current_session_file_for_codex_run, write_current_session_file,
+    global_state_db_path, intent_cancel_protocol_body, intent_claim_protocol_body,
+    intent_declare_protocol_body, intent_request_protocol_body, post_json, protocol_envelope,
+    read_current_session_file, read_current_session_file_for_codex_run, request_intent_via_http,
+    runtime_env_override_is_configured, runtime_has_required_identity,
+    runtime_identity_matches_pid, write_current_session_file,
     write_current_session_file_for_codex_run, write_global_runtime_file, write_runtime_file,
 };
 pub use sandbox::{SandboxFsProfile, SandboxNetworkPolicy};
 pub use server_lifecycle::{
     ServerStartOptions, detached_server_args, ensure_server, ensure_server_with,
     ensure_server_with_options, runtime_is_healthy, stop_server,
-};
-pub use validation::{
-    ResultParser, ValidationConfig, ValidationProfile, ValidationResult, ValidationStatus,
-    run_validation_profile,
 };
 
 #[derive(Debug, Parser)]
@@ -95,9 +99,6 @@ pub enum Command {
     Current,
     Events,
     Doctor,
-    Validate {
-        profile: String,
-    },
     Commit {
         #[arg(short = 'm', long)]
         message: String,
@@ -119,6 +120,8 @@ pub enum Command {
         #[arg(num_args = 0.., allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
+    #[command(subcommand)]
+    ExternalRun(ExternalRunCommand),
     #[command(subcommand)]
     Sandbox(SandboxCommand),
     Enable {
@@ -144,6 +147,34 @@ pub enum Command {
     SyncOutbox,
     #[command(subcommand)]
     Hook(HookCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ExternalRunCommand {
+    Request {
+        #[arg(long)]
+        purpose: String,
+        #[arg(long = "write-target")]
+        write_targets: Vec<String>,
+        #[arg(long = "create-target")]
+        create_targets: Vec<String>,
+        #[arg(long = "write-dir")]
+        write_dirs: Vec<String>,
+        #[arg(long, value_enum, default_value = "disabled")]
+        network: SandboxNetworkPolicy,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+        #[arg(long)]
+        command: String,
+    },
+    Approve {
+        request_id: String,
+        #[arg(long)]
+        run: bool,
+    },
+    Run {
+        request_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -175,6 +206,8 @@ pub enum SandboxCommand {
         write_targets: Vec<String>,
         #[arg(long = "create-target")]
         create_targets: Vec<String>,
+        #[arg(long = "write-dir")]
+        write_dirs: Vec<String>,
         #[arg(long)]
         command: String,
         #[arg(long)]
@@ -190,6 +223,34 @@ pub enum IntentCommand {
         #[arg(long)]
         workspace_id: Option<String>,
         files_planned: Vec<String>,
+    },
+    Request {
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        workspace_id: Option<String>,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        path: String,
+    },
+    Claim {
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        workspace_id: Option<String>,
+        #[arg(long)]
+        wait_id: String,
+    },
+    Cancel {
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        workspace_id: Option<String>,
+        #[arg(long)]
+        request_id: String,
     },
 }
 
@@ -341,13 +402,6 @@ pub fn run() -> anyhow::Result<()> {
             let report = doctor_report(current_repo_root_or_current_dir()?);
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Command::Validate { profile } => {
-            let result = run_validation_profile(current_repo_root_or_current_dir()?, &profile)?;
-            println!("{}", serde_json::to_string(&result)?);
-            if !matches!(result.status, ValidationStatus::Passed) {
-                std::process::exit(1);
-            }
-        }
         Command::Commit { message, paths } => {
             let cwd = std::env::current_dir()?;
             let repo_root = detect_git_root(&cwd)?;
@@ -403,11 +457,62 @@ pub fn run() -> anyhow::Result<()> {
             })?;
             std::process::exit(code);
         }
+        Command::ExternalRun(ExternalRunCommand::Request {
+            purpose,
+            write_targets,
+            create_targets,
+            write_dirs,
+            network,
+            timeout_seconds,
+            command,
+        }) => {
+            let approval = request_external_run(ExternalRunRequest {
+                repo_root: current_repo_root_or_current_dir()?,
+                paths: GlobalPaths::from_env()?,
+                purpose,
+                command,
+                write_targets,
+                create_targets,
+                write_dirs,
+                network,
+                timeout_seconds,
+            })?;
+            print!("{}", approval.guidance);
+        }
+        Command::ExternalRun(ExternalRunCommand::Approve { request_id, run }) => {
+            let paths = GlobalPaths::from_env()?;
+            let approval = approve_external_run(&paths, &request_id, run)?;
+            println!("{}", approval.guidance);
+            if run {
+                let output = run_approved_external_run(&paths, &request_id)?;
+                println!("{}", serde_json::to_string(&output)?);
+                if let Some(exit_code) =
+                    sandbox::sandbox_run_cli_exit_code(&sandbox::SandboxRunOutput {
+                        status: output.status,
+                        exit_code: output.exit_code,
+                        stdout: output.stdout.clone(),
+                        stderr: output.stderr.clone(),
+                        allowed_write_targets: Vec::new(),
+                        denied_write_targets: Vec::new(),
+                    })
+                {
+                    std::process::exit(exit_code);
+                }
+            }
+        }
+        Command::ExternalRun(ExternalRunCommand::Run { request_id }) => {
+            let output = run_approved_external_run(&GlobalPaths::from_env()?, &request_id)?;
+            println!("{}", serde_json::to_string(&output)?);
+            if output.status != "exited" || output.exit_code != Some(0) {
+                std::process::exit(output.exit_code.unwrap_or(1));
+            }
+        }
         Command::Sandbox(SandboxCommand::Run {
             fs,
             network,
             write_targets,
             create_targets,
+            write_dirs,
             command,
             timeout_seconds,
         }) => {
@@ -421,6 +526,7 @@ pub fn run() -> anyhow::Result<()> {
                     network,
                     write_targets,
                     create_targets,
+                    write_dirs,
                     command,
                     timeout_seconds,
                 },
@@ -542,6 +648,73 @@ pub fn run() -> anyhow::Result<()> {
                 },
             )?;
             println!("declared stateful intent");
+        }
+        Command::Intent(IntentCommand::Request {
+            session_id,
+            workspace_id,
+            request_id,
+            action,
+            path,
+        }) => {
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let (session_id, workspace_id) =
+                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            request_intent_via_http(
+                &runtime,
+                IntentRequestArgs {
+                    session_id,
+                    workspace_id,
+                    request_id,
+                    action,
+                    path,
+                    identity: GlobalPaths::from_env()
+                        .ok()
+                        .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
+                },
+            )?;
+            println!("requested stateful intent");
+        }
+        Command::Intent(IntentCommand::Claim {
+            session_id,
+            workspace_id,
+            wait_id,
+        }) => {
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let (session_id, workspace_id) =
+                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            claim_intent_via_http(
+                &runtime,
+                IntentClaimArgs {
+                    session_id,
+                    workspace_id,
+                    wait_id,
+                    identity: GlobalPaths::from_env()
+                        .ok()
+                        .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
+                },
+            )?;
+            println!("claimed stateful intent");
+        }
+        Command::Intent(IntentCommand::Cancel {
+            session_id,
+            workspace_id,
+            request_id,
+        }) => {
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let (session_id, workspace_id) =
+                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            cancel_intent_via_http(
+                &runtime,
+                IntentCancelArgs {
+                    session_id,
+                    workspace_id,
+                    request_id,
+                    identity: GlobalPaths::from_env()
+                        .ok()
+                        .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
+                },
+            )?;
+            println!("canceled stateful intent");
         }
         Command::Mcp(McpCommand::Call {
             tool_name,
@@ -698,7 +871,6 @@ pub struct DoctorReport {
     pub installed: bool,
     pub hooks_json: bool,
     pub config_yml: bool,
-    pub validation_yml: bool,
     pub runtime_server_json: bool,
     pub state_db: bool,
     pub global_config_yml: bool,
@@ -727,7 +899,6 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
     let hooks_json = repo_root.join(".codex").join("hooks.json").is_file();
     let codex_config_toml = repo_root.join(".codex").join("config.toml").is_file();
     let config_yml = repo_root.join(".stateful").join("config.yml").is_file();
-    let validation_yml = repo_root.join(".stateful").join("validation.yml").is_file();
     let runtime_server_json = repo_root
         .join(".stateful_core")
         .join("runtime")
@@ -740,12 +911,9 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
     };
 
     DoctorReport {
-        installed: (hooks_json || codex_config_toml || paths.config_yml.is_file())
-            && config_yml
-            && validation_yml,
+        installed: (hooks_json || codex_config_toml || paths.config_yml.is_file()) && config_yml,
         hooks_json,
         config_yml,
-        validation_yml,
         runtime_server_json,
         state_db,
         global_config_yml: paths.config_yml.is_file(),
@@ -815,10 +983,6 @@ fn install_repo_local_with_hooks(
         stateful_command_policy_skill(),
     )?;
     fs::write(repo_root.join(".stateful/config.yml"), default_config_yml())?;
-    fs::write(
-        repo_root.join(".stateful/validation.yml"),
-        default_validation_yml(),
-    )?;
 
     Ok(())
 }
@@ -1158,25 +1322,6 @@ delete_requires_exact_file_scope: true
 rename_requires_exact_file_scope: true
 default_write_policy: deny
 event_retention_days: 14
-"#
-}
-
-fn default_validation_yml() -> &'static str {
-    r#"profiles:
-  - profile_id: cargo-test
-    description: Run the Rust workspace test suite
-    command: cargo test --workspace
-    cwd: .
-    timeout_seconds: 300
-    allowed_writes:
-      - target/**
-    denied_writes:
-      - crates/**
-      - docs/**
-      - Cargo.toml
-      - Cargo.lock
-    exclusive: true
-    result_parser: exit_code
 "#
 }
 

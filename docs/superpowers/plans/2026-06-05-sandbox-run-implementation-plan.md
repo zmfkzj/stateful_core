@@ -1644,13 +1644,13 @@ In `crates/stateful-cli/src/lib.rs`, update `stateful_command_policy_skill()` so
 ```markdown
 - Use `stateful sandbox run --fs write-targets --write-target <path> --command <cmd>` for repo writes and other write-capable Bash. Declare intent first, keep targets explicit and repo-relative, and list new files with `--create-target`.
 - Use `stateful sandbox run --fs read-only --network disabled --command <cmd>` for read-only inspection commands in Codex sessions.
-- Treat generators, formatters, package managers, build commands, and tests that create artifacts as write-capable commands. Route them through `stateful sandbox run` with explicit targets, or use validation profiles outside Codex hooks.
+- Treat generators, formatters, package managers, build commands, and tests that create artifacts as write-capable commands. Route them through `stateful sandbox run` with explicit targets, using `--write-dir target` for build artifacts.
 ```
 
 Update the “If Blocked” section to say:
 
 ```markdown
-- If a command needs write permission, choose `stateful sandbox run --fs write-targets ...` or a validation profile outside Codex hooks.
+- If a command needs write permission, choose `stateful sandbox run --fs write-targets ...` with `--write-target`, `--create-target`, or `--write-dir` as appropriate.
 ```
 
 - [ ] **Step 4: Update docs**

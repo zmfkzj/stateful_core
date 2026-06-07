@@ -157,10 +157,12 @@ triggers makes the requested resources available:
 
 The promoted waiter receives a short reservation. Reservations prevent a later
 session from taking the resource ahead of the first waiter, but they are not
-active write authority. The reserved session claims the reservation before it
-becomes active intent and active leases. The default reservation TTL is 120
-seconds. If the reservation expires without being claimed, the server may promote
-the next eligible FIFO waiter.
+active write authority. The reserved session must reread the target, call
+`state.intent.claim` / `stateful intent claim --wait-id <id>`, and only then
+retry the write. The claim creates write-authorizing intent and the active
+same-session lease; retrying the write does not claim the reservation. The
+default reservation TTL is 120 seconds. If the reservation expires without being
+claimed, the server may promote the next eligible FIFO waiter.
 
 Resume is notification-driven rather than process-driven. The state server
 records a pending notification when it grants a reservation. Agents and
@@ -169,10 +171,14 @@ next resumable reservation, or receiving that context from a lifecycle hook.
 The state server does not wake a sleeping Codex process by itself; external
 orchestration can build on the notification and resume APIs.
 
-Full scheduling should work through immediate request/response plus polling.
-Future intent request APIs should return `granted`, `queued`, `reserved`,
-`canceled`, or `expired` state without blocking indefinitely. Waiting is handled
-by polling `stateful notifications poll` or `stateful resume next`.
+Full scheduling works through immediate request/response plus polling. Intent
+request APIs return `queued`, `reserved`, `canceled`, or `expired` state without
+blocking indefinitely. Immediate availability creates a `reserved` request state;
+the session must still reread the target, claim the reservation with
+`state.intent.claim` / `stateful intent claim --wait-id <id>`, and retry only
+after the claim creates write-authorizing intent and the same-session lease.
+Waiting is handled by polling `stateful notifications poll` or
+`stateful resume next`.
 `stateful intent wait --timeout` is not part of the v1 hardening implementation.
 
 `request_id` is required for idempotency. Repeating the same request id returns
@@ -220,7 +226,7 @@ opts the current repo into enforcement. Repo-local hooks remain available throug
 global Codex hooks and MCP config
 repo allowlist entry
 optional <repo>/.codex/hooks.json compatibility fallback
-<repo>/.stateful/validation.yml
+<repo>/.stateful/config.yml
 stateful binary available by absolute path or PATH lookup
 ```
 
@@ -236,7 +242,7 @@ back into Codex hook output. Policy stays in the state server. V1 implementation
 is Rust-only, so hooks invoke the compiled `stateful` binary.
 
 Every hook request should include a `protocol_version`. A major protocol
-mismatch fails closed for write, validation, and reconciliation paths.
+mismatch fails closed for write and reconciliation paths.
 
 ### Hook Responsibilities
 
@@ -288,6 +294,9 @@ The MCP surface should expose structured tools for the agent and hooks:
 state.session.register
 state.session.heartbeat
 state.intent.declare
+state.intent.request
+state.intent.claim
+state.intent.cancel
 state.lease.acquire
 state.lease.release
 state.activity.observe
@@ -297,20 +306,16 @@ state.current.read
 state.events.read
 state.context.render
 state.reconcile.ack
-state_validation_run / state.validation.run
-state_file_write / state.file.write
 state.notifications.poll
 state.resume.next
 ```
 
-Future scheduling tools should add `state.intent.request`, `state.intent.claim`,
-and `state.intent.cancel` when the corresponding server endpoints are
-implemented.
+`state.intent.request` and `state.intent.cancel` expose the explicit scheduling
+queue. `state.intent.claim` is the explicit reservation claim path.
 
 Hooks should call the same state server API as MCP tools so policy remains
-centralized. `state_file_write` / `state.file.write` is the structured repo file
-write path; sandbox-run remains the Bash wrapper for command-shaped shell
-writes.
+centralized. Native Codex edit tools are the repo file edit path after intent
+and lease; sandbox-run remains the Bash wrapper for command-shaped shell writes.
 
 ### State Server Responsibilities
 
@@ -351,15 +356,15 @@ V1 write enforcement is limited to tool paths where targets can be determined
 reliably:
 
 ```text
-state_file_write / state.file.write -> enforce from structured file arguments
-native Codex edit tools -> inspectable by hook when exposed, but not the normal
-  repo write path under the stateful read-only tmp profile
+native Codex edit tools -> enforce by inspecting hook-exposed targets after
+  intent and lease
 Bash read-only inspection -> require a strict trusted wrapper:
   <absolute-stateful-binary> sandbox run --fs read-only --network disabled
   --command <cmd>
 Bash command-shaped writes -> require the trusted wrapper with
   --fs write-targets plus explicit --write-target/--create-target values
-test execution -> run through controlled validation action
+test execution -> run through sandbox run with an authorized --write-dir after
+  exact directory intent and a same-session directory lease
 raw Bash or non-wrapper Bash -> deny
 ```
 
@@ -367,49 +372,30 @@ Bash denial should tell the agent to use
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
 --command <cmd>` for read-only inspection,
 `<absolute-stateful-binary> sandbox run --fs write-targets ... --command <cmd>`
-for command-shaped writes, `state_file_write` / `state.file.write` for
-structured file writes, and validation profiles for tests.
+for command-shaped writes, native Codex edit tools for repo file edits, and
+`sandbox run --write-dir` wrappers for tests after exact directory intent and a
+same-session directory lease.
 
 There is no command-text authorization path. Command text alone does not
 authorize `rg`, `git diff`, test runners, stateful operational commands, or any
-other Bash command. Arbitrary or project-specific test commands should run
-through `state_validation_run` / `state.validation.run` in Codex sessions, or
-`stateful validate <profile>` outside hook-mediated Bash. Validation profiles
-may allow cache or artifact writes, but source-tree writes must be denied unless
-a later policy explicitly permits them.
+other Bash command. Test commands should run through the trusted
+`stateful sandbox run --fs write-targets --write-dir target --command <cmd>`
+wrapper after exact `target/` directory intent and a successful same-session
+directory lease. Source-tree writes remain denied unless a later policy
+explicitly permits them.
 
-Validation profiles are static repo-defined config at `.stateful/validation.yml`.
-Agents cannot provide arbitrary commands at runtime.
-
-Minimum v1 profile shape:
+Minimum sandboxed test shape:
 
 ```text
-profile_id
-description
-command
-cwd
-timeout_seconds
-allowed_writes
-denied_writes
-exclusive
-env
-result_parser
+stateful intent declare --session-id <session> --workspace-id <workspace> target/
+stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
+stateful sandbox run --fs write-targets --network enabled --write-dir target --command <cmd>
 ```
 
-Default result parsing is `exit_code`. Validation status values are `passed`,
-`failed`, `failed_policy`, `timeout`, and `error`. Source-tree writes denied by
-the profile produce `failed_policy`, not ordinary test failure.
-
-V1 source-write detection uses `git status --porcelain` before and after the
-validation command. If a path matching `denied_writes` is already dirty before
-the run, validation does not start and returns `error`. If the run creates a new
-dirty path matching `denied_writes`, validation returns `failed_policy`.
-`allowed_writes` paths are ignored for policy failure.
-
-The current runner parses `exclusive`, but does not yet enforce a validation
-concurrency lock. Future policy should use `exclusive` to deny concurrent runs
-of the same profile in the workspace and warn for concurrent non-exclusive
-runs.
+`--write-dir` is limited to the `target/` artifact tree. Source-tree edits use native Codex
+edit tools such as `apply_patch` or Edit after exact intent declaration and a
+successful same-session file lease. Command-shaped source writes must use exact
+`--write-target` or `--create-target` entries.
 
 ## Conflict Policy
 
@@ -436,16 +422,14 @@ Initial policy should prefer advisory leases:
 - unknown repository identity: only same normalized absolute path can deny;
   repo-relative similarity is an unknown-confidence warning
 - expired lease: allow but surface stale-state context
-- test execution: allow only through controlled validation action
-- same validation profile active elsewhere: no current hard block; future
-  exclusive-profile locking should deny exclusive conflicts and warn for
-  non-exclusive conflicts
+- test execution: allow only through trusted sandbox-run wrappers with
+  authorized targets
 - task, port, or migration resource conflict: warn or info only in v1
 - human local changes detected: warn before edits and require extra care
 - human save observed after an agent lease or write: deny further agent writes
   until the agent acknowledges reconciliation or receives an explicit user
   instruction
-- reads, searches, diffs, and controlled validation after human writes: allow
+- reads, searches, diffs, and sandboxed tests after human writes: allow
 
 This avoids making the system too rigid while still preventing the highest-risk
 collisions.
@@ -536,7 +520,7 @@ the agent has refreshed context and reconciled the file.
 After `HumanWriteObserved` on a file with active agent work, the next write by
 that agent to the affected file should be denied. The block is not meant to stop
 investigation; the agent may still read the file, search, inspect diffs, and run
-controlled validation.
+sandboxed tests.
 
 To resume writing, the agent must acknowledge reconciliation:
 
@@ -570,7 +554,7 @@ V1 uses a split failure policy:
 
 ```text
 agent write path: fail closed
-validation path: fail closed
+sandbox write-target path: fail closed
 reconciliation path: fail closed
 human save path: fail open with warning
 non-Bash read/search/diff path: allow
@@ -583,8 +567,8 @@ When the state server is unavailable:
 - raw Bash and Bash calls that are not strict trusted
   `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrappers remain
   denied
-- `state_validation_run` / `state.validation.run` returns
-  `error: state_unavailable` and does not run the validation command
+- sandbox-run wrappers that need authorization fail closed and do not run the
+  command
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block
 - intent declaration, lease acquisition, and lease refresh fail
 - non-Bash read, search, and diff actions are allowed
@@ -642,8 +626,8 @@ and easier to rebase.
 Build the first version with Codex lifecycle hooks, MCP tools, and a
 `stateful_core` state server.
 
-The v1 MVP includes Codex hooks, MCP tools, the state server, controlled
-validation, and human-write reconciliation.
+The v1 MVP includes Codex hooks, MCP tools, the state server, sandboxed test
+execution, and human-write reconciliation.
 
 V1 is local-only. It coordinates one machine/workspace boundary. Team-shared,
 cross-machine, or hosted state sync is deferred to v1.5/v2.
@@ -652,8 +636,8 @@ The project should remain agent-runtime generic, with Codex as the first
 integration target. Codex-specific behavior belongs in adapters, not in the
 policy model.
 
-V1 defaults to strict enforcement. Supported writes, validation, and
-reconciliation fail closed when state cannot be trusted. Usability comes from
+V1 defaults to strict enforcement. Supported writes and reconciliation fail
+closed when state cannot be trusted. Usability comes from
 clear denial messages and diagnostics, not from silent grace periods.
 
 Event and audit history is retained for 14 days by default. Expired state may be
@@ -694,7 +678,7 @@ Resource authorization classes:
 
 ```text
 file/directory -> write-authorizing
-test -> controlled validation concurrency only
+test -> sandboxed test coordination only
 task/port/migration -> prompt context and warning only
 ```
 Delete operations require exact file scope. Rename and move operations require

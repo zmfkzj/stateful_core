@@ -1,5 +1,4 @@
 use std::{
-    fs,
     io::{Read, Write},
     path::Path,
 };
@@ -8,10 +7,12 @@ use serde_json::Value;
 use stateful_mcp::{ToolCall, map_tool_to_http, protocol_tool_name, tool_descriptors};
 
 use crate::{
-    CurrentSession, GlobalPaths, HttpResponse, IntentDeclareArgs, ProtocolEnvelopeArgs, RepoGate,
-    RepoIdentity, ServerRuntime, discover_runtime_with_global, ensure_server, get_json,
-    intent_declare_protocol_body, post_json, protocol_envelope, read_current_session_file,
-    repo_gate, repo_identity_for_enabled_repo,
+    CurrentSession, GlobalPaths, HttpResponse, IntentCancelArgs, IntentClaimArgs,
+    IntentDeclareArgs, IntentRequestArgs, RepoGate, RepoIdentity, ServerRuntime,
+    discover_runtime_with_global, ensure_server, get_json, intent_cancel_protocol_body,
+    intent_claim_protocol_body, intent_declare_protocol_body, intent_request_protocol_body,
+    post_json, read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
+    runtime_env_override_is_configured,
 };
 
 pub fn call_mcp_tool_in_repo(
@@ -28,6 +29,12 @@ pub fn call_mcp_tool_in_repo(
             "state_bash_write was removed; use stateful sandbox run ... --command ...",
         ));
     }
+    if matches!(tool_name.as_str(), "state_file_write" | "state.file.write") {
+        return Ok(error_response(
+            410,
+            "state_file_write was removed; use native Codex edit tools such as apply_patch or Edit after exact intent declaration and a successful same-session file lease.",
+        ));
+    }
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;
     let repo_root = match repo_gate(&paths, start)? {
         RepoGate::Enabled { repo_root } => {
@@ -36,7 +43,9 @@ pub fn call_mcp_tool_in_repo(
             {
                 return Ok(response);
             }
-            ensure_server(&paths)?;
+            if !runtime_env_override_is_configured() {
+                ensure_server(&paths)?;
+            }
             repo_root
         }
         RepoGate::Disabled | RepoGate::OutsideGitRepo => {
@@ -63,9 +72,6 @@ fn call_mcp_tool(
 ) -> anyhow::Result<HttpResponse> {
     let tool_name = tool_name.into();
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;
-    if protocol_name == "state.file.write" {
-        return call_file_write_tool(runtime, repo_root, paths, arguments);
-    }
     if let Some(response) = reject_mismatched_current_session(protocol_name, &arguments, repo_root)
     {
         return Ok(response);
@@ -82,6 +88,12 @@ fn call_mcp_tool(
         "POST" => {
             let body = if protocol_name == "state.intent.declare" {
                 intent_declare_mcp_body(runtime, request.body)?
+            } else if protocol_name == "state.intent.request" {
+                intent_request_mcp_body(runtime, request.body)?
+            } else if protocol_name == "state.intent.claim" {
+                intent_claim_mcp_body(runtime, request.body)?
+            } else if protocol_name == "state.intent.cancel" {
+                intent_cancel_mcp_body(runtime, request.body)?
             } else {
                 request.body
             };
@@ -89,81 +101,6 @@ fn call_mcp_tool(
         }
         method => anyhow::bail!("unsupported MCP HTTP method: {method}"),
     }
-}
-
-fn call_file_write_tool(
-    runtime: &ServerRuntime,
-    repo_root: &Path,
-    paths: &GlobalPaths,
-    arguments: Value,
-) -> anyhow::Result<HttpResponse> {
-    let args = match serde_json::from_value::<FileWriteArguments>(arguments) {
-        Ok(args) => args,
-        Err(error) => {
-            return Ok(error_response(
-                400,
-                format!("invalid state.file.write arguments: {error}"),
-            ));
-        }
-    };
-    let path = match normalize_repo_file_path(&args.path) {
-        Ok(path) => path,
-        Err(error) => return Ok(error_response(400, error.to_string())),
-    };
-    let current_session = read_current_session_file(repo_root).ok();
-    if let Some(response) = reject_argument_session_mismatch(
-        "state.file.write",
-        args.session_id.as_deref(),
-        args.workspace_id.as_deref(),
-        current_session.as_ref(),
-    ) {
-        return Ok(response);
-    }
-    let session_id = match current_session
-        .as_ref()
-        .map(|session| session.session_id.clone())
-        .or(args.session_id)
-    {
-        Some(session_id) => session_id,
-        None => {
-            return Ok(error_response(
-                400,
-                "state.file.write requires session_id or a current stateful session file",
-            ));
-        }
-    };
-    let workspace_id = current_session
-        .map(|session| session.workspace_id)
-        .or(args.workspace_id)
-        .unwrap_or_else(|| runtime.workspace_id.clone());
-
-    let response =
-        authorize_file_write(runtime, repo_root, paths, &session_id, &workspace_id, &path)?;
-    if !(200..300).contains(&response.status_code) {
-        return Ok(response);
-    }
-
-    let decision = serde_json::from_str::<FileWriteAuthorizeDecision>(&response.body)?;
-    if decision.decision != "allow" {
-        return Ok(HttpResponse {
-            status_code: 403,
-            body: response.body,
-        });
-    }
-
-    if let Err(error) = write_repo_file(repo_root, &path, &args.contents) {
-        return Ok(error_response(500, error.to_string()));
-    }
-
-    Ok(HttpResponse {
-        status_code: 200,
-        body: serde_json::json!({
-            "status": "ok",
-            "path": path,
-            "bytes": args.contents.len(),
-        })
-        .to_string(),
-    })
 }
 
 fn reject_mismatched_current_session(
@@ -234,131 +171,18 @@ fn is_session_bound_mcp_tool(protocol_name: &str) -> bool {
         "state.session.register"
             | "state.session.heartbeat"
             | "state.intent.declare"
+            | "state.intent.request"
+            | "state.intent.claim"
+            | "state.intent.cancel"
             | "state.lease.acquire"
             | "state.lease.release"
             | "state.activity.observe"
             | "state.activity.finalize"
             | "state.conflicts.check"
             | "state.reconcile.ack"
-            | "state.file.write"
             | "state.notifications.poll"
             | "state.resume.next"
     )
-}
-
-fn authorize_file_write(
-    runtime: &ServerRuntime,
-    repo_root: &Path,
-    paths: &GlobalPaths,
-    session_id: &str,
-    workspace_id: &str,
-    path: &str,
-) -> anyhow::Result<HttpResponse> {
-    let body = protocol_envelope(ProtocolEnvelopeArgs {
-        runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
-        session_id: session_id.to_string(),
-        workspace_id: workspace_id.to_string(),
-        identity: repo_identity_for_enabled_repo(paths, repo_root).ok(),
-        source_kind: "mcp",
-        event: "file_write",
-        source_ref: "state.file.write",
-        payload: serde_json::json!({
-            "action": "write_file",
-            "path": path,
-            "queue_on_conflict": true,
-        }),
-    });
-
-    post_json(runtime, "/v1/authorize", &body)
-}
-
-fn write_repo_file(repo_root: &Path, relative_path: &str, contents: &str) -> anyhow::Result<()> {
-    ensure_repo_file_target(repo_root, relative_path)?;
-    let target = repo_root.join(relative_path);
-    let Some(parent) = target.parent() else {
-        anyhow::bail!("state.file.write target has no parent directory");
-    };
-    fs::create_dir_all(parent)?;
-    fs::write(target, contents)?;
-    Ok(())
-}
-
-fn ensure_repo_file_target(repo_root: &Path, relative_path: &str) -> anyhow::Result<()> {
-    let canonical_repo = repo_root
-        .canonicalize()
-        .unwrap_or_else(|_| repo_root.to_path_buf());
-    let target = repo_root.join(relative_path);
-    let Some(parent) = Path::new(relative_path).parent() else {
-        anyhow::bail!("state.file.write target has no parent directory");
-    };
-
-    let mut cursor = repo_root.to_path_buf();
-    for component in parent.components() {
-        cursor.push(component);
-        if let Ok(metadata) = fs::symlink_metadata(&cursor) {
-            if metadata.file_type().is_symlink() {
-                anyhow::bail!("state.file.write refuses symlinked parent directories");
-            }
-            if !metadata.is_dir() {
-                anyhow::bail!("state.file.write parent path is not a directory");
-            }
-        }
-    }
-
-    if let Ok(metadata) = fs::symlink_metadata(&target) {
-        if metadata.file_type().is_symlink() {
-            anyhow::bail!("state.file.write refuses symlink file targets");
-        }
-        if metadata.is_dir() {
-            anyhow::bail!("state.file.write target is a directory");
-        }
-    }
-
-    if let Some(parent) = target.parent()
-        && parent.exists()
-    {
-        let canonical_parent = parent.canonicalize()?;
-        if !canonical_parent.starts_with(canonical_repo) {
-            anyhow::bail!("state.file.write parent path escapes the repo");
-        }
-    }
-
-    Ok(())
-}
-
-fn normalize_repo_file_path(path: &str) -> anyhow::Result<String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("state.file.write path is required");
-    }
-    if Path::new(trimmed).is_absolute() {
-        anyhow::bail!("state.file.write path must be repo-relative");
-    }
-
-    let normalized = trimmed.replace('\\', "/");
-    let mut segments = Vec::new();
-    for segment in normalized.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            anyhow::bail!("state.file.write path must stay inside the repo");
-        }
-        if is_git_internal_segment(segment) {
-            anyhow::bail!("state.file.write refuses to write Git internals");
-        }
-        if segment.chars().any(char::is_control) {
-            anyhow::bail!("state.file.write path must not contain control characters");
-        }
-        segments.push(segment);
-    }
-
-    if segments.is_empty() {
-        anyhow::bail!("state.file.write path is required");
-    }
-
-    Ok(segments.join("/"))
 }
 
 fn error_response(status_code: u16, message: impl Into<String>) -> HttpResponse {
@@ -370,10 +194,6 @@ fn error_response(status_code: u16, message: impl Into<String>) -> HttpResponse 
         })
         .to_string(),
     }
-}
-
-fn is_git_internal_segment(segment: &str) -> bool {
-    segment.eq_ignore_ascii_case(".git")
 }
 
 fn intent_declare_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
@@ -404,6 +224,90 @@ fn intent_declare_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Resu
     ))
 }
 
+fn intent_claim_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
+    let Value::Object(mut object) = body else {
+        anyhow::bail!("state.intent.claim arguments must be an object");
+    };
+
+    let wait_id = take_string(&mut object, "wait_id")
+        .ok_or_else(|| anyhow::anyhow!("state.intent.claim requires wait_id"))?;
+    let session_id = take_string(&mut object, "session_id")
+        .unwrap_or_else(|| format!("stateful-mcp:{}", runtime.pid));
+    let workspace_id =
+        take_string(&mut object, "workspace_id").unwrap_or_else(|| runtime.workspace_id.clone());
+    let identity = repo_identity_from_object(&mut object);
+
+    Ok(intent_claim_protocol_body(
+        runtime,
+        IntentClaimArgs {
+            session_id,
+            workspace_id,
+            wait_id,
+            identity,
+        },
+        "mcp",
+        "state.intent.claim",
+    ))
+}
+
+fn intent_request_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
+    let Value::Object(mut object) = body else {
+        anyhow::bail!("state.intent.request arguments must be an object");
+    };
+
+    let request_id = take_string(&mut object, "request_id")
+        .ok_or_else(|| anyhow::anyhow!("state.intent.request requires request_id"))?;
+    let action = take_string(&mut object, "action")
+        .ok_or_else(|| anyhow::anyhow!("state.intent.request requires action"))?;
+    let path = take_string(&mut object, "path")
+        .ok_or_else(|| anyhow::anyhow!("state.intent.request requires path"))?;
+    let session_id = take_string(&mut object, "session_id")
+        .unwrap_or_else(|| format!("stateful-mcp:{}", runtime.pid));
+    let workspace_id =
+        take_string(&mut object, "workspace_id").unwrap_or_else(|| runtime.workspace_id.clone());
+    let identity = repo_identity_from_object(&mut object);
+
+    Ok(intent_request_protocol_body(
+        runtime,
+        IntentRequestArgs {
+            session_id,
+            workspace_id,
+            request_id,
+            action,
+            path,
+            identity,
+        },
+        "mcp",
+        "state.intent.request",
+    ))
+}
+
+fn intent_cancel_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
+    let Value::Object(mut object) = body else {
+        anyhow::bail!("state.intent.cancel arguments must be an object");
+    };
+
+    let request_id = take_string(&mut object, "request_id")
+        .ok_or_else(|| anyhow::anyhow!("state.intent.cancel requires request_id"))?;
+    let session_id = take_string(&mut object, "session_id")
+        .unwrap_or_else(|| format!("stateful-mcp:{}", runtime.pid));
+    let workspace_id =
+        take_string(&mut object, "workspace_id").unwrap_or_else(|| runtime.workspace_id.clone());
+    let identity = repo_identity_from_object(&mut object);
+
+    Ok(intent_cancel_protocol_body(
+        runtime,
+        IntentCancelArgs {
+            session_id,
+            workspace_id,
+            request_id,
+            identity,
+        },
+        "mcp",
+        "state.intent.cancel",
+    ))
+}
+
 fn repo_identity_from_object(object: &mut serde_json::Map<String, Value>) -> Option<RepoIdentity> {
     Some(RepoIdentity {
         repo_id: take_string(object, "repo_id")?,
@@ -430,15 +334,13 @@ fn enrich_arguments(
         return arguments;
     };
 
-    if tool_name == "state.validation.run" {
-        object
-            .entry("workspace_id")
-            .or_insert_with(|| Value::String(runtime.workspace_id.clone()));
-        object
-            .entry("repo_root")
-            .or_insert_with(|| Value::String(repo_root.to_string_lossy().into_owned()));
-    }
-    if tool_name == "state.intent.declare" {
+    if matches!(
+        tool_name,
+        "state.intent.declare"
+            | "state.intent.request"
+            | "state.intent.claim"
+            | "state.intent.cancel"
+    ) {
         if !object.contains_key("session_id")
             && let Ok(session) = read_current_session_file(repo_root)
         {
@@ -476,21 +378,6 @@ fn add_repo_identity(
     object
         .entry("branch")
         .or_insert_with(|| Value::String(identity.branch));
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct FileWriteArguments {
-    #[serde(default)]
-    session_id: Option<String>,
-    #[serde(default)]
-    workspace_id: Option<String>,
-    path: String,
-    contents: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct FileWriteAuthorizeDecision {
-    decision: String,
 }
 
 pub fn handle_mcp_jsonrpc_in_repo(

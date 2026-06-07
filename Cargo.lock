@@ -1062,7 +1062,6 @@ dependencies = [
  "stateful-mcp",
  "stateful-server",
  "stateful-store",
- "stateful-validation",
  "tokio",
  "uuid",
 ]
@@ -1099,7 +1098,6 @@ dependencies = [
  "serde_json",
  "stateful-core",
  "stateful-store",
- "stateful-validation",
  "thiserror",
  "tokio",
  "tower",
@@ -1116,16 +1114,6 @@ dependencies = [
  "thiserror",
  "time",
  "uuid",
-]
-
-[[package]]
-name = "stateful-validation"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "globset",
- "serde",
- "serde_yaml",
 ]
 
 [[package]]

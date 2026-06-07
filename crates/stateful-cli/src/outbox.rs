@@ -339,7 +339,7 @@ fn outbox_files(outbox_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for entry in fs::read_dir(outbox_dir)? {
         let path = entry?.path();
-        if !path.extension().is_some_and(|ext| ext == "jsonl") {
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
             continue;
         }
         if existing_plain_file(&path, "outbox file")? {

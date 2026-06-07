@@ -9,6 +9,16 @@ fn directory_scope_allows_depth_two_but_not_depth_three() {
 }
 
 #[test]
+fn write_directory_requires_exact_directory_scope() {
+    let scope = IntentScope::directory("target/");
+
+    assert!(scope.allows_write_directory("target/"));
+    assert!(scope.allows_write_directory("target"));
+    assert!(!scope.allows_write_directory("target/debug/"));
+    assert!(!scope.allows_write_directory("other/"));
+}
+
+#[test]
 fn file_scope_allows_only_exact_file_write() {
     let scope = IntentScope::file("src/auth.ts");
 

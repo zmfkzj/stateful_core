@@ -263,7 +263,7 @@ fn run_pairs_aborts_when_agent_hits_usage_limit() {
         pairs: pairs_path,
         mode: RunMode::NoState,
         run_id: "synthetic-quota-abort".to_string(),
-        agent_cmd_template: r#"case '{pair_id}' in pair-quota*) printf '%s\n' '{"type":"error","message":"You'\''ve hit your usage limit."}'; exit 0;; pair-slow*) sleep 1; printf changed-{agent_id} > {workspace}/{agent_id}.txt;; *) printf changed-{agent_id} > {workspace}/{agent_id}.txt;; esac"#.to_string(),
+        agent_cmd_template: r#"case '{pair_id}' in pair-quota*) sleep 0.1; printf '%s\n' '{"type":"error","message":"You'\''ve hit your usage limit."}'; exit 0;; pair-slow*) (trap "" TERM HUP INT; sleep 0.7; printf leaked > {run_dir}/leaked-descendant.txt) & wait;; *) printf changed-{agent_id} > {workspace}/{agent_id}.txt;; esac"#.to_string(),
         output_dir: output_dir.clone(),
         timeout_seconds: 10,
         max_pairs: None,
@@ -286,18 +286,10 @@ fn run_pairs_aborts_when_agent_hits_usage_limit() {
             .join("pair-should-not-start-pair-should-not-start")
             .exists()
     );
+    std::thread::sleep(std::time::Duration::from_millis(1000));
     assert!(
-        !run_dir
-            .join("pair-slow-pair-slow")
-            .join("pair-run.json")
-            .exists()
-    );
-    assert!(
-        !run_dir
-            .join("pair-slow-pair-slow")
-            .join("workspace")
-            .join("agent-a.txt")
-            .exists()
+        !run_dir.join("leaked-descendant.txt").exists(),
+        "aborted agent descendants should not outlive process group cleanup"
     );
 
     fs::remove_dir_all(root).expect("temp root should clean up");
@@ -548,6 +540,7 @@ import json
 import os
 import socketserver
 import sys
+import time
 
 port = int(sys.argv[1])
 workspace_id = sys.argv[2]
@@ -576,7 +569,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return
 
 socketserver.TCPServer.allow_reuse_address = True
-socketserver.TCPServer(("127.0.0.1", port), Handler).serve_forever()
+deadline = time.time() + 5
+with socketserver.TCPServer(("127.0.0.1", port), Handler) as server:
+    server.timeout = 0.1
+    while time.time() < deadline:
+        server.handle_request()
 PY
   exit 0
 fi

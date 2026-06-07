@@ -59,21 +59,30 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(!command_policy_skill.contains("state.bash.write"));
     assert!(!command_policy_skill.contains("top-level read-only sandbox metadata"));
     assert!(command_policy_skill.contains("MCP or native read tools"));
-    assert!(command_policy_skill.contains("state_file_write"));
+    assert!(command_policy_skill.contains("apply_patch"));
+    assert!(command_policy_skill.contains("Edit"));
+    assert!(!command_policy_skill.contains("state_file_write"));
     assert!(command_policy_skill.contains("Raw test commands"));
     assert!(command_policy_skill.contains("Examples assume `/Users/arthur/.cargo/bin/stateful`"));
-    assert!(command_policy_skill.contains("--create-target docs/new.md"));
-    assert!(command_policy_skill.contains("Targets must be repo-relative"));
+    assert!(command_policy_skill.contains(
+        "\"/Users/arthur/.cargo/bin/stateful\" intent declare --session-id <session> --workspace-id <workspace> target/"
+    ));
+    assert!(command_policy_skill.contains("--create-target target/generated.txt"));
+    assert!(!command_policy_skill.contains("--create-target docs/new.md"));
+    assert!(!command_policy_skill.contains("--write-target README.md"));
+    assert!(command_policy_skill.contains("--write-dir target"));
+    assert!(command_policy_skill.contains("`stateful sandbox run` targets must be repo-relative"));
+    assert!(command_policy_skill.contains("external-run request --purpose"));
+    assert!(command_policy_skill.contains("copy-paste `external-run approve <id> --run`"));
+    assert!(command_policy_skill.contains("whole external directories after user approval"));
     assert!(command_policy_skill.contains("Raw read-only Bash is also denied"));
     assert!(command_policy_skill.contains("Use `stateful commit` / `stateful push`"));
-    assert!(command_policy_skill.contains("stateful validate cargo-test"));
+    assert!(!command_policy_skill.contains("stateful validate cargo-test"));
+    assert!(!command_policy_skill.contains("state_validation_run"));
     assert!(command_policy_skill.contains("`/dev/null` is writable inside the sandbox"));
     assert!(command_policy_skill.contains("macOS and Linux"));
 
-    let validation = fs::read_to_string(temp_root.join(".stateful/validation.yml"))
-        .expect("validation config should exist");
-    assert!(validation.contains("profiles:"));
-    assert!(validation.contains("profile_id: cargo-test"));
+    assert!(!temp_root.join(".stateful/validation.yml").exists());
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -131,7 +140,7 @@ command = "'/opt/stateful/bin/stateful' hook user-prompt-submit"
             .is_file()
     );
     assert!(temp_root.join(".stateful/config.yml").is_file());
-    assert!(temp_root.join(".stateful/validation.yml").is_file());
+    assert!(!temp_root.join(".stateful/validation.yml").exists());
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -326,7 +335,7 @@ approval_mode = "approve"
     assert!(codex_config.contains("[[hooks.PreToolUse]]"));
     assert!(codex_config.contains("hook pre-tool-use"));
     assert!(temp_root.join(".stateful/config.yml").exists());
-    assert!(temp_root.join(".stateful/validation.yml").exists());
+    assert!(!temp_root.join(".stateful/validation.yml").exists());
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -427,6 +436,7 @@ fn doctor_report_marks_repo_local_installation() {
         fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
     }
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
     install_repo_local(&temp_root, "target/debug/stateful").expect("repo install should succeed");
 
     let report = doctor_report(&temp_root);
@@ -434,7 +444,6 @@ fn doctor_report_marks_repo_local_installation() {
     assert!(report.installed);
     assert!(!report.hooks_json);
     assert!(report.config_yml);
-    assert!(report.validation_yml);
     assert!(!report.runtime_server_json);
     assert!(!report.state_db);
 
@@ -466,7 +475,6 @@ fn doctor_report_includes_global_install_and_repo_enabled_status() {
     assert!(report.global_config_yml);
     assert!(report.repo_enabled);
     assert!(report.config_yml);
-    assert!(report.validation_yml);
     fs::remove_dir_all(repo).expect("repo should remove");
     fs::remove_dir_all(home).expect("home should remove");
 }
