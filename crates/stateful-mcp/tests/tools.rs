@@ -1,5 +1,34 @@
 use stateful_mcp::{ToolCall, map_tool_to_http, protocol_tool_name, tool_descriptors};
 
+fn descriptor(name: &str) -> stateful_mcp::ToolDescriptor {
+    tool_descriptors()
+        .into_iter()
+        .find(|tool| tool.name == name)
+        .unwrap_or_else(|| panic!("{name} tool descriptor should exist"))
+}
+
+fn assert_injected_session_fields_are_hidden(schema: &serde_json::Value) {
+    let properties = schema["properties"]
+        .as_object()
+        .expect("schema properties should be an object");
+    assert!(!properties.contains_key("session_id"));
+    assert!(!properties.contains_key("workspace_id"));
+
+    let required = schema["required"]
+        .as_array()
+        .expect("schema required should be an array");
+    assert!(
+        !required
+            .iter()
+            .any(|value| value.as_str() == Some("session_id"))
+    );
+    assert!(
+        !required
+            .iter()
+            .any(|value| value.as_str() == Some("workspace_id"))
+    );
+}
+
 #[test]
 fn context_render_tool_maps_to_http_endpoint() {
     let tool = ToolCall::new("state.context.render", serde_json::json!({"mode": "brief"}));
@@ -139,22 +168,58 @@ fn file_write_tool_is_removed_from_mcp_surface() {
 }
 
 #[test]
+fn session_bound_descriptor_schemas_hide_injected_session_fields() {
+    for name in [
+        "state_session_register",
+        "state_session_heartbeat",
+        "state_intent_declare",
+        "state_intent_request",
+        "state_intent_claim",
+        "state_intent_cancel",
+        "state_lease_acquire",
+        "state_lease_release",
+        "state_activity_observe",
+        "state_activity_finalize",
+        "state_conflicts_check",
+        "state_reconcile_ack",
+        "state_notifications_poll",
+        "state_resume_next",
+    ] {
+        let tool = descriptor(name);
+
+        assert_injected_session_fields_are_hidden(&tool.input_schema);
+    }
+}
+
+#[test]
+fn run_bound_descriptor_schemas_are_empty() {
+    let empty_schema = serde_json::json!({
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+    });
+
+    for name in [
+        "state_session_register",
+        "state_session_heartbeat",
+        "state_activity_observe",
+        "state_activity_finalize",
+        "state_notifications_poll",
+        "state_resume_next",
+    ] {
+        let tool = descriptor(name);
+
+        assert_eq!(tool.input_schema, empty_schema, "{name} schema");
+    }
+}
+
+#[test]
 fn intent_declare_descriptor_exposes_required_input_schema() {
-    let tools = tool_descriptors();
-    let tool = tools
-        .iter()
-        .find(|tool| tool.name == "state_intent_declare")
-        .expect("intent tool descriptor should exist");
+    let tool = descriptor("state_intent_declare");
 
     assert_eq!(tool.input_schema["type"], "object");
-    assert_eq!(
-        tool.input_schema["properties"]["session_id"]["type"],
-        "string"
-    );
-    assert_eq!(
-        tool.input_schema["properties"]["workspace_id"]["type"],
-        "string"
-    );
+    assert_injected_session_fields_are_hidden(&tool.input_schema);
     assert_eq!(tool.input_schema["properties"]["purpose"]["type"], "string");
     assert_eq!(tool.input_schema["properties"]["purpose"]["minLength"], 1);
     assert_eq!(
@@ -182,12 +247,13 @@ fn intent_declare_descriptor_exposes_required_input_schema() {
 
 #[test]
 fn reconcile_ack_descriptor_does_not_require_non_empty_files_reread() {
-    let tools = tool_descriptors();
-    let tool = tools
-        .iter()
-        .find(|tool| tool.name == "state_reconcile_ack")
-        .expect("reconcile tool descriptor should exist");
+    let tool = descriptor("state_reconcile_ack");
 
+    assert_injected_session_fields_are_hidden(&tool.input_schema);
+    assert_eq!(
+        tool.input_schema["properties"]["decision"]["enum"],
+        serde_json::json!(["adopt", "reapply", "ask_user", "abandon"])
+    );
     assert_eq!(
         tool.input_schema["properties"]["files_reread"]["type"],
         "array"
@@ -201,25 +267,23 @@ fn reconcile_ack_descriptor_does_not_require_non_empty_files_reread() {
             .get("minItems")
             .is_none()
     );
+    assert_eq!(
+        tool.input_schema["properties"]["human_change_summary"]["type"],
+        "string"
+    );
+    assert_eq!(
+        tool.input_schema["required"],
+        serde_json::json!(["decision", "files_reread", "human_change_summary"])
+    );
+    assert_eq!(tool.input_schema["additionalProperties"], false);
 }
 
 #[test]
 fn intent_claim_descriptor_exposes_required_input_schema() {
-    let tools = tool_descriptors();
-    let tool = tools
-        .iter()
-        .find(|tool| tool.name == "state_intent_claim")
-        .expect("intent claim tool descriptor should exist");
+    let tool = descriptor("state_intent_claim");
 
     assert_eq!(tool.input_schema["type"], "object");
-    assert_eq!(
-        tool.input_schema["properties"]["session_id"]["type"],
-        "string"
-    );
-    assert_eq!(
-        tool.input_schema["properties"]["workspace_id"]["type"],
-        "string"
-    );
+    assert_injected_session_fields_are_hidden(&tool.input_schema);
     assert_eq!(tool.input_schema["properties"]["wait_id"]["type"], "string");
     assert_eq!(
         tool.input_schema["required"],
@@ -230,13 +294,10 @@ fn intent_claim_descriptor_exposes_required_input_schema() {
 
 #[test]
 fn intent_request_descriptor_exposes_required_input_schema() {
-    let tools = tool_descriptors();
-    let tool = tools
-        .iter()
-        .find(|tool| tool.name == "state_intent_request")
-        .expect("intent request tool descriptor should exist");
+    let tool = descriptor("state_intent_request");
 
     assert_eq!(tool.input_schema["type"], "object");
+    assert_injected_session_fields_are_hidden(&tool.input_schema);
     assert_eq!(
         tool.input_schema["properties"]["request_id"]["type"],
         "string"
@@ -258,13 +319,10 @@ fn intent_request_descriptor_exposes_required_input_schema() {
 
 #[test]
 fn intent_cancel_descriptor_exposes_required_input_schema() {
-    let tools = tool_descriptors();
-    let tool = tools
-        .iter()
-        .find(|tool| tool.name == "state_intent_cancel")
-        .expect("intent cancel tool descriptor should exist");
+    let tool = descriptor("state_intent_cancel");
 
     assert_eq!(tool.input_schema["type"], "object");
+    assert_injected_session_fields_are_hidden(&tool.input_schema);
     assert_eq!(
         tool.input_schema["properties"]["request_id"]["type"],
         "string"
@@ -277,13 +335,28 @@ fn intent_cancel_descriptor_exposes_required_input_schema() {
 }
 
 #[test]
-fn conflicts_check_descriptor_accepts_write_directory_action() {
-    let tools = tool_descriptors();
-    let tool = tools
-        .iter()
-        .find(|tool| tool.name == "state_conflicts_check")
-        .expect("conflicts check tool descriptor should exist");
+fn lease_descriptors_expose_path_only_schema() {
+    for name in ["state_lease_acquire", "state_lease_release"] {
+        let tool = descriptor(name);
 
+        assert_eq!(tool.input_schema["type"], "object");
+        assert_injected_session_fields_are_hidden(&tool.input_schema);
+        assert_eq!(tool.input_schema["properties"]["path"]["type"], "string");
+        assert_eq!(
+            tool.input_schema["required"],
+            serde_json::json!(["path"]),
+            "{name} required"
+        );
+        assert_eq!(tool.input_schema["additionalProperties"], false);
+    }
+}
+
+#[test]
+fn conflicts_check_descriptor_exposes_required_input_schema() {
+    let tool = descriptor("state_conflicts_check");
+
+    assert_eq!(tool.input_schema["type"], "object");
+    assert_injected_session_fields_are_hidden(&tool.input_schema);
     assert_eq!(
         tool.input_schema["properties"]["action"]["enum"],
         serde_json::json!([
@@ -294,4 +367,18 @@ fn conflicts_check_descriptor_accepts_write_directory_action() {
             "move_file"
         ])
     );
+    assert_eq!(tool.input_schema["properties"]["path"]["type"], "string");
+    assert_eq!(
+        tool.input_schema["properties"]["old_path"]["type"],
+        "string"
+    );
+    assert_eq!(
+        tool.input_schema["properties"]["new_path"]["type"],
+        "string"
+    );
+    assert_eq!(
+        tool.input_schema["required"],
+        serde_json::json!(["action", "path"])
+    );
+    assert_eq!(tool.input_schema["additionalProperties"], false);
 }

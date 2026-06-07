@@ -6,13 +6,13 @@ use std::{
 use serde_json::Value;
 use stateful_mcp::{ToolCall, map_tool_to_http, protocol_tool_name, tool_descriptors};
 
+use crate::runtime::read_codex_run_bound_current_session;
 use crate::{
     CurrentSession, GlobalPaths, HttpResponse, IntentCancelArgs, IntentClaimArgs,
     IntentDeclareArgs, IntentRequestArgs, RepoGate, RepoIdentity, ServerRuntime,
     discover_runtime_with_global, ensure_server, get_json, intent_cancel_protocol_body,
     intent_claim_protocol_body, intent_declare_protocol_body, intent_request_protocol_body,
-    post_json, read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
-    runtime_env_override_is_configured,
+    post_json, repo_gate, repo_identity_for_enabled_repo, runtime_env_override_is_configured,
 };
 
 pub fn call_mcp_tool_in_repo(
@@ -36,31 +36,41 @@ pub fn call_mcp_tool_in_repo(
         ));
     }
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;
-    let repo_root = match repo_gate(&paths, start)? {
+    match repo_gate(&paths, start)? {
         RepoGate::Enabled { repo_root } => {
-            if let Some(response) =
-                reject_mismatched_current_session(protocol_name, &arguments, &repo_root)
-            {
+            let current_session = match current_session_for_mcp_tool(protocol_name, &repo_root) {
+                Ok(current_session) => current_session,
+                Err(response) => return Ok(response),
+            };
+            if let Some(response) = reject_mismatched_current_session(
+                protocol_name,
+                &arguments,
+                current_session.as_ref(),
+            ) {
                 return Ok(response);
             }
             if !runtime_env_override_is_configured() {
                 ensure_server(&paths)?;
             }
-            repo_root
+            let runtime = discover_runtime_with_global(&repo_root, &paths)?;
+            call_mcp_tool(
+                &runtime,
+                &repo_root,
+                &paths,
+                tool_name,
+                arguments,
+                current_session.as_ref(),
+            )
         }
-        RepoGate::Disabled | RepoGate::OutsideGitRepo => {
-            return Ok(HttpResponse {
-                status_code: 409,
-                body: serde_json::json!({
-                    "status": "error",
-                    "message": "repo not enabled"
-                })
-                .to_string(),
-            });
-        }
-    };
-    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
-    call_mcp_tool(&runtime, &repo_root, &paths, tool_name, arguments)
+        RepoGate::Disabled | RepoGate::OutsideGitRepo => Ok(HttpResponse {
+            status_code: 409,
+            body: serde_json::json!({
+                "status": "error",
+                "message": "repo not enabled"
+            })
+            .to_string(),
+        }),
+    }
 }
 
 fn call_mcp_tool(
@@ -69,17 +79,21 @@ fn call_mcp_tool(
     paths: &GlobalPaths,
     tool_name: impl Into<String>,
     arguments: Value,
+    current_session: Option<&CurrentSession>,
 ) -> anyhow::Result<HttpResponse> {
     let tool_name = tool_name.into();
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;
-    if let Some(response) = reject_mismatched_current_session(protocol_name, &arguments, repo_root)
-    {
-        return Ok(response);
-    }
 
     let tool = ToolCall::new(
         protocol_name,
-        enrich_arguments(protocol_name, arguments, runtime, repo_root, paths),
+        enrich_arguments(
+            protocol_name,
+            arguments,
+            runtime,
+            repo_root,
+            paths,
+            current_session,
+        ),
     );
     let request = map_tool_to_http(tool).map_err(anyhow::Error::msg)?;
 
@@ -103,21 +117,33 @@ fn call_mcp_tool(
     }
 }
 
+fn current_session_for_mcp_tool(
+    protocol_name: &str,
+    repo_root: &Path,
+) -> Result<Option<CurrentSession>, HttpResponse> {
+    if !is_session_bound_mcp_tool(protocol_name) {
+        return Ok(None);
+    }
+
+    read_codex_run_bound_current_session(repo_root)
+        .map(Some)
+        .map_err(|error| current_session_resolution_response(protocol_name, error.to_string()))
+}
+
 fn reject_mismatched_current_session(
     protocol_name: &str,
     arguments: &Value,
-    repo_root: &Path,
+    current_session: Option<&CurrentSession>,
 ) -> Option<HttpResponse> {
     if !is_session_bound_mcp_tool(protocol_name) {
         return None;
     }
-    let current_session = read_current_session_file(repo_root).ok()?;
     let object = arguments.as_object()?;
     reject_argument_session_mismatch(
         protocol_name,
         object.get("session_id").and_then(Value::as_str),
         object.get("workspace_id").and_then(Value::as_str),
-        Some(&current_session),
+        current_session,
     )
 }
 
@@ -162,6 +188,13 @@ fn current_session_mismatch_response(
         format!(
             "{tool_name} cannot use {field} `{requested}` while the current stateful session uses `{current}`"
         ),
+    )
+}
+
+fn current_session_resolution_response(tool_name: &str, error: String) -> HttpResponse {
+    error_response(
+        403,
+        format!("{tool_name} cannot resolve current stateful session: {error}"),
     )
 }
 
@@ -335,10 +368,24 @@ fn enrich_arguments(
     runtime: &ServerRuntime,
     repo_root: &Path,
     paths: &GlobalPaths,
+    current_session: Option<&CurrentSession>,
 ) -> Value {
     let Value::Object(mut object) = arguments else {
         return arguments;
     };
+
+    if is_session_bound_mcp_tool(tool_name)
+        && let Some(session) = current_session
+    {
+        object.insert(
+            "session_id".to_string(),
+            Value::String(session.session_id.clone()),
+        );
+        object.insert(
+            "workspace_id".to_string(),
+            Value::String(session.workspace_id.clone()),
+        );
+    }
 
     if matches!(
         tool_name,
@@ -347,14 +394,6 @@ fn enrich_arguments(
             | "state.intent.claim"
             | "state.intent.cancel"
     ) {
-        if !object.contains_key("session_id")
-            && let Ok(session) = read_current_session_file(repo_root)
-        {
-            object.insert("session_id".to_string(), Value::String(session.session_id));
-            object
-                .entry("workspace_id")
-                .or_insert_with(|| Value::String(session.workspace_id));
-        }
         object
             .entry("workspace_id")
             .or_insert_with(|| Value::String(runtime.workspace_id.clone()));

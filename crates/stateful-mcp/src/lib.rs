@@ -139,17 +139,9 @@ fn input_schema_for(protocol_name: &str) -> Value {
         | "state.activity.observe"
         | "state.activity.finalize"
         | "state.notifications.poll"
-        | "state.resume.next" => object_schema(
-            [
-                ("session_id", string_schema()),
-                ("workspace_id", string_schema()),
-            ],
-            ["session_id", "workspace_id"],
-        ),
+        | "state.resume.next" => empty_object_schema(),
         "state.intent.declare" => object_schema(
             [
-                ("session_id", string_schema()),
-                ("workspace_id", string_schema()),
                 (
                     "purpose",
                     string_schema_with_description(
@@ -162,8 +154,6 @@ fn input_schema_for(protocol_name: &str) -> Value {
         ),
         "state.intent.request" => object_schema(
             [
-                ("session_id", string_schema()),
-                ("workspace_id", string_schema()),
                 ("request_id", string_schema()),
                 (
                     "action",
@@ -182,34 +172,13 @@ fn input_schema_for(protocol_name: &str) -> Value {
             ],
             ["request_id", "action", "path", "purpose"],
         ),
-        "state.intent.claim" => object_schema(
-            [
-                ("session_id", string_schema()),
-                ("workspace_id", string_schema()),
-                ("wait_id", string_schema()),
-            ],
-            ["wait_id"],
-        ),
-        "state.intent.cancel" => object_schema(
-            [
-                ("session_id", string_schema()),
-                ("workspace_id", string_schema()),
-                ("request_id", string_schema()),
-            ],
-            ["request_id"],
-        ),
-        "state.lease.acquire" | "state.lease.release" => object_schema(
-            [
-                ("session_id", string_schema()),
-                ("workspace_id", string_schema()),
-                ("path", string_schema()),
-            ],
-            ["session_id", "workspace_id", "path"],
-        ),
+        "state.intent.claim" => object_schema([("wait_id", string_schema())], ["wait_id"]),
+        "state.intent.cancel" => object_schema([("request_id", string_schema())], ["request_id"]),
+        "state.lease.acquire" | "state.lease.release" => {
+            object_schema([("path", string_schema())], ["path"])
+        }
         "state.conflicts.check" => object_schema(
             [
-                ("session_id", string_schema()),
-                ("workspace_id", string_schema()),
                 (
                     "action",
                     serde_json::json!({
@@ -227,7 +196,7 @@ fn input_schema_for(protocol_name: &str) -> Value {
                 ("old_path", string_schema()),
                 ("new_path", string_schema()),
             ],
-            ["session_id", "action", "path"],
+            ["action", "path"],
         ),
         "state.current.read" | "state.events.read" => empty_object_schema(),
         "state.context.render" => object_schema(
@@ -245,8 +214,6 @@ fn input_schema_for(protocol_name: &str) -> Value {
         ),
         "state.reconcile.ack" => object_schema(
             [
-                ("session_id", string_schema()),
-                ("workspace_id", string_schema()),
                 (
                     "decision",
                     serde_json::json!({
@@ -257,13 +224,7 @@ fn input_schema_for(protocol_name: &str) -> Value {
                 ("files_reread", string_array_schema()),
                 ("human_change_summary", string_schema()),
             ],
-            [
-                "session_id",
-                "workspace_id",
-                "decision",
-                "files_reread",
-                "human_change_summary",
-            ],
+            ["decision", "files_reread", "human_change_summary"],
         ),
         _ => empty_object_schema(),
     }

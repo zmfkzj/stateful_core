@@ -211,6 +211,16 @@ pub fn read_current_session_file(repo_root: impl AsRef<Path>) -> anyhow::Result<
     Ok(serde_json::from_str(&contents)?)
 }
 
+pub fn read_codex_run_bound_current_session(
+    repo_root: impl AsRef<Path>,
+) -> anyhow::Result<CurrentSession> {
+    let repo_root = repo_root.as_ref();
+    let codex_run_id = current_codex_run_id()?.ok_or_else(|| {
+        anyhow::anyhow!("{STATEFUL_CODEX_RUN_ID_ENV} is required for session-bound MCP tools")
+    })?;
+    read_current_session_file_for_codex_run(repo_root, &codex_run_id)
+}
+
 pub fn write_current_session_file_for_codex_run(
     repo_root: impl AsRef<Path>,
     codex_run_id: &str,
