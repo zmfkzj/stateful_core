@@ -763,6 +763,7 @@ fn authorize_sandbox_write(
         payload: serde_json::json!({
             "action": action,
             "path": path,
+            "purpose": sandbox_authorize_purpose(action, path),
             "queue_on_conflict": true,
             "fs_profile": "write-targets",
             "network_policy": match context.network {
@@ -773,6 +774,13 @@ fn authorize_sandbox_write(
     });
 
     post_json(context.runtime, "/v1/authorize", &body)
+}
+
+fn sandbox_authorize_purpose(action: &str, path: &str) -> String {
+    match action {
+        "write_directory" => format!("Run sandbox command for write directory `{path}`."),
+        _ => format!("Run sandbox command for write target `{path}`."),
+    }
 }
 
 enum SandboxAuthorizeDecision {

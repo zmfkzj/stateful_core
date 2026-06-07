@@ -1693,6 +1693,7 @@ impl Store {
             "purpose",
             "ALTER TABLE wait_queue ADD COLUMN purpose TEXT;",
         )?;
+        self.remove_legacy_rows_without_required_purpose()?;
         self.conn.execute_batch(
             "
             CREATE UNIQUE INDEX IF NOT EXISTS idx_wait_queue_request_id
@@ -1701,6 +1702,18 @@ impl Store {
             ",
         )?;
 
+        Ok(())
+    }
+
+    fn remove_legacy_rows_without_required_purpose(&self) -> StoreResult<()> {
+        self.conn.execute(
+            "DELETE FROM intents WHERE purpose IS NULL OR trim(purpose) = ''",
+            [],
+        )?;
+        self.conn.execute(
+            "DELETE FROM wait_queue WHERE purpose IS NULL OR trim(purpose) = ''",
+            [],
+        )?;
         Ok(())
     }
 

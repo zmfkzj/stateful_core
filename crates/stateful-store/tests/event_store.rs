@@ -270,6 +270,111 @@ fn migration_adds_repo_identity_columns_to_existing_events_table() {
 }
 
 #[test]
+fn migration_removes_legacy_coordination_rows_without_required_purpose() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-legacy-purpose-cleanup-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
+        conn.execute_batch(
+            "
+            CREATE TABLE intents (
+                intent_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                scopes_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                declared_at TEXT NOT NULL,
+                expires_at TEXT
+            );
+
+            INSERT INTO intents (
+                intent_id,
+                session_id,
+                workspace_id,
+                scopes_json,
+                status,
+                declared_at,
+                expires_at
+            ) VALUES (
+                'legacy-intent-1',
+                'legacy-session',
+                'legacy-workspace',
+                '[]',
+                'active',
+                '2026-05-31T00:00:00Z',
+                '2999-01-01T00:00:00Z'
+            );
+
+            CREATE TABLE wait_queue (
+                wait_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                action TEXT NOT NULL,
+                status TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                reservation_expires_at TEXT,
+                blocking_session_id TEXT
+            );
+
+            INSERT INTO wait_queue (
+                wait_id,
+                session_id,
+                workspace_id,
+                relative_path,
+                action,
+                status,
+                requested_at,
+                reservation_expires_at,
+                blocking_session_id
+            ) VALUES (
+                'legacy-waiter-1',
+                'legacy-waiter-session',
+                'legacy-workspace',
+                'src/auth.ts',
+                'write_file',
+                'queued',
+                '2026-05-31T00:00:00Z',
+                NULL,
+                'legacy-session'
+            );
+            ",
+        )
+        .expect("legacy coordination tables should be created");
+    }
+
+    let store = Store::open(&db_path).expect("store should migrate old coordination db");
+    let live = store
+        .live_current_state(None)
+        .expect("legacy purpose-less rows should not break live current state");
+
+    assert_eq!(live.summary.active_intent_count, 0);
+    assert!(live.items.is_empty());
+
+    drop(store);
+    let conn = rusqlite::Connection::open(&db_path).expect("migrated db should reopen");
+    let intent_count: u64 = conn
+        .query_row("SELECT COUNT(*) FROM intents", [], |row| row.get(0))
+        .expect("intent count should load");
+    let waiter_count: u64 = conn
+        .query_row("SELECT COUNT(*) FROM wait_queue", [], |row| row.get(0))
+        .expect("waiter count should load");
+    assert_eq!(intent_count, 0);
+    assert_eq!(waiter_count, 0);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn failed_materialization_rolls_back_event_insert_and_allows_future_appends() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

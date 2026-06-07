@@ -198,8 +198,16 @@ fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command(
         "src/allowed.ts"
     );
     assert_eq!(
+        request_json_body(&first)["payload"]["purpose"],
+        "Run sandbox command for write target `src/allowed.ts`."
+    );
+    assert_eq!(
         request_json_body(&second)["payload"]["path"],
         "src/denied.ts"
+    );
+    assert_eq!(
+        request_json_body(&second)["payload"]["purpose"],
+        "Run sandbox command for write target `src/denied.ts`."
     );
     assert_eq!(
         fs::read_to_string(repo_root.join("src/allowed.ts")).expect("allowed file should read"),
@@ -261,6 +269,10 @@ fn sandbox_run_write_dir_authorizes_directory_and_allows_artifact_write() {
         "write_directory"
     );
     assert_eq!(request_json_body(&request)["payload"]["path"], "target/");
+    assert_eq!(
+        request_json_body(&request)["payload"]["purpose"],
+        "Run sandbox command for write directory `target/`."
+    );
     assert_eq!(
         fs::read_to_string(repo_root.join("target/out.txt")).expect("artifact should read"),
         "artifact"
