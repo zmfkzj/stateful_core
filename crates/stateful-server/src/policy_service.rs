@@ -1,5 +1,5 @@
-use stateful_core::{AuthorizationInput, Decision};
-use stateful_store::{Store, WaitRecord};
+use stateful_core::{AuthorizationInput, Decision, DecisionKind, SourceKind};
+use stateful_store::{Event, IntentRequestInput, Store, WaitRecord};
 
 #[derive(Debug, Clone)]
 pub struct AuthorizationOutcome {
@@ -18,15 +18,81 @@ pub struct WaitQueueInfo {
 pub struct AuthorizeWriteInput {
     pub session_id: String,
     pub workspace_id: Option<String>,
+    pub source_kind: Option<SourceKind>,
+    pub source_tool_name: Option<String>,
     pub queue_on_conflict: bool,
+    pub queue_purpose: Option<String>,
     pub action: String,
     pub old_path: Option<String>,
     pub new_path: Option<String>,
     pub path: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ClaimIntentInput {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub wait_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaimIntentOutcome {
+    pub reservation: WaitRecord,
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestIntentInput {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub request_id: String,
+    pub action: String,
+    pub path: String,
+    pub purpose: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestIntentOutcome {
+    pub request_id: String,
+    pub request_state: String,
+    pub wait: Option<WaitQueueInfo>,
+    pub reservation: Option<WaitRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CancelIntentInput {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CancelIntentOutcome {
+    pub request_id: String,
+    pub wait: WaitRecord,
+}
+
 pub struct PolicyService<'a> {
     store: &'a Store,
+}
+
+fn is_multi_path_action(action: &str) -> bool {
+    matches!(action, "rename_file" | "move_file")
+}
+
+fn missing_rename_or_move_paths() -> AuthorizationOutcome {
+    AuthorizationOutcome {
+        decision: Decision::deny(
+            "missing_rename_paths",
+            "Rename or move authorization requires non-empty old_path and new_path.",
+            "Provide both old_path and new_path, declare exact intent for both paths, and acquire matching leases before writing.",
+        ),
+        wait: None,
+        reservation: None,
+    }
+}
+
+fn is_native_edit_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "apply_patch" | "Edit" | "Write" | "file_change")
 }
 
 impl<'a> PolicyService<'a> {
@@ -42,21 +108,26 @@ impl<'a> PolicyService<'a> {
         let path = input.path.clone();
         let authorization_input = match input.action.as_str() {
             "write_file" => AuthorizationInput::write_file(&path),
+            "write_directory" => AuthorizationInput::write_directory(&path),
             "delete_file" => AuthorizationInput::delete_file(&path),
-            "rename_file" => AuthorizationInput::rename_file(
-                input.old_path.as_deref().unwrap_or(path.as_str()),
-                input.new_path.as_deref().unwrap_or(path.as_str()),
-            ),
-            "move_file" => AuthorizationInput::move_file(
-                input.old_path.as_deref().unwrap_or(path.as_str()),
-                input.new_path.as_deref().unwrap_or(path.as_str()),
-            ),
+            "rename_file" => {
+                let Some((old_path, new_path)) = self.rename_or_move_paths(&input) else {
+                    return Ok(missing_rename_or_move_paths());
+                };
+                AuthorizationInput::rename_file(old_path, new_path)
+            }
+            "move_file" => {
+                let Some((old_path, new_path)) = self.rename_or_move_paths(&input) else {
+                    return Ok(missing_rename_or_move_paths());
+                };
+                AuthorizationInput::move_file(old_path, new_path)
+            }
             _ => {
                 return Ok(AuthorizationOutcome {
                     decision: Decision::deny(
                         "unsupported_action",
                         "Action is not supported by the v1 authorization API.",
-                        "Use a supported action such as write_file.",
+                        "Use a supported action such as write_file or write_directory.",
                     ),
                     wait: None,
                     reservation: None,
@@ -64,95 +135,564 @@ impl<'a> PolicyService<'a> {
             }
         };
 
-        let mut active_reservation = None;
         if let Some(workspace_id) = &input.workspace_id {
-            if let Some(reservation) = self
-                .store
-                .active_reservation(workspace_id, &path)
-                .map_err(|error| error.to_string())?
-            {
-                if reservation.session_id != input.session_id {
-                    return Ok(AuthorizationOutcome {
-                        decision: Decision::deny(
-                            "reservation_conflict",
-                            "Write target is reserved for the next waiting session.",
-                            "Wait for the active reservation to be claimed or expire.",
-                        ),
-                        wait: None,
-                        reservation: Some(reservation),
-                    });
-                }
-                active_reservation = Some(reservation);
-            }
+            let reservation_conflict = self.reservation_conflict(&input, workspace_id)?;
 
-            if let Some(owner) = self
-                .store
-                .active_lease_owner(workspace_id, &path)
-                .map_err(|error| error.to_string())?
-                && owner != input.session_id
-            {
-                let wait = if allow_queue_side_effects && input.queue_on_conflict {
-                    let waiter = self
-                        .store
-                        .enqueue_waiter(
-                            &input.session_id,
-                            workspace_id,
-                            &path,
-                            &input.action,
-                            Some(&owner),
-                        )
-                        .map_err(|error| error.to_string())?;
-                    let queue_position = self
-                        .store
-                        .queue_position(&waiter.wait_id)
-                        .map_err(|error| error.to_string())?;
-                    Some(WaitQueueInfo {
-                        record: waiter,
-                        queue_position,
-                    })
-                } else {
-                    None
-                };
-
+            if let Some(reservation) = reservation_conflict {
                 return Ok(AuthorizationOutcome {
                     decision: Decision::deny(
-                        "active_lease_conflict",
-                        "Write target is covered by another active session lease.",
-                        "Refresh current state, coordinate with the lease owner, or wait for the lease to release.",
+                        "reservation_conflict",
+                        "Write target is reserved for the next waiting session.",
+                        "Wait for the active reservation to be claimed or expire. Do not redeclare intent or change session_id; that does not release another session's reservation.",
                     ),
-                    wait,
-                    reservation: None,
+                    wait: None,
+                    reservation: Some(reservation),
+                });
+            }
+
+            let current_session_reservation =
+                self.current_session_reservation(&input, workspace_id)?;
+            if let Some(reservation) = current_session_reservation {
+                return Ok(AuthorizationOutcome {
+                    decision: Decision::deny(
+                        "reservation_claim_required",
+                        "Write target has an active reservation for this session, but it has not been claimed.",
+                        "Reread the target, then call state.intent.claim for the reservation before writing.",
+                    ),
+                    wait: None,
+                    reservation: Some(reservation),
                 });
             }
         }
 
-        let policy_state = self
-            .store
-            .policy_state_for_session(&input.session_id)
-            .map_err(|error| error.to_string())?;
+        let policy_state = if let Some(workspace_id) = &input.workspace_id {
+            self.store
+                .policy_state_for_session(&input.session_id, workspace_id)
+                .map_err(|error| error.to_string())?
+        } else {
+            Default::default()
+        };
 
         let decision = stateful_core::authorize_action(&policy_state, authorization_input);
-        let mut reservation = active_reservation;
-        if matches!(decision.decision, stateful_core::DecisionKind::Allow)
-            && let Some(active) = &reservation
+        if decision.decision != DecisionKind::Allow {
+            return Ok(AuthorizationOutcome {
+                decision,
+                wait: None,
+                reservation: None,
+            });
+        }
+
+        if matches!(input.source_kind.as_ref(), Some(SourceKind::Hook))
+            && input.source_tool_name.is_none()
         {
-            self.store
-                .claim_reservation(&active.wait_id, &input.session_id)
-                .map_err(|error| error.to_string())?;
-            if let Some(workspace_id) = &input.workspace_id {
-                self.store
-                    .acquire_lease(&input.session_id, workspace_id, &path)
+            return Ok(AuthorizationOutcome {
+                decision: Decision::deny(
+                    "missing_tool_name",
+                    "Hook write authorization requires source.tool_name.",
+                    "Send the native tool name in source.tool_name; do not use source_ref as the tool name.",
+                ),
+                wait: None,
+                reservation: None,
+            });
+        }
+
+        let Some(workspace_id) = &input.workspace_id else {
+            return Ok(AuthorizationOutcome {
+                decision: Decision::deny(
+                    "missing_lease",
+                    "Write target is inside active intent scope, but workspace is missing so lease ownership cannot be checked.",
+                    "Include workspace_id and acquire the relevant same-session file or directory lease successfully before writing. Do not change session_id; that does not create same-session lease ownership.",
+                ),
+                wait: None,
+                reservation: None,
+            });
+        };
+
+        if self.requires_exact_native_file_scope(&input)
+            && !self.has_exact_native_file_intent(&input, workspace_id)?
+        {
+            return Ok(AuthorizationOutcome {
+                decision: Decision::deny(
+                    "scope_mismatch",
+                    "Native edit targets require exact active file intent for every affected path.",
+                    "Declare exact file intent for every affected path and acquire matching same-session file leases before writing.",
+                ),
+                wait: None,
+                reservation: None,
+            });
+        }
+
+        let lease_owner = self.lease_conflict_owner(&input, workspace_id)?;
+        if let Some(owner) = lease_owner {
+            let wait = if allow_queue_side_effects
+                && input.queue_on_conflict
+                && !is_multi_path_action(&input.action)
+            {
+                let purpose = input
+                    .queue_purpose
+                    .as_deref()
+                    .ok_or_else(|| "queue purpose is required".to_string())?;
+                let waiter = self
+                    .store
+                    .enqueue_waiter(
+                        &input.session_id,
+                        workspace_id,
+                        &path,
+                        &input.action,
+                        purpose,
+                        Some(&owner),
+                    )
                     .map_err(|error| error.to_string())?;
-            }
-            if let Some(claimed) = &mut reservation {
-                claimed.status = "claimed".to_string();
-            }
+                let queue_position = self
+                    .store
+                    .queue_position(&waiter.wait_id)
+                    .map_err(|error| error.to_string())?;
+                Some(WaitQueueInfo {
+                    record: waiter,
+                    queue_position,
+                })
+            } else {
+                None
+            };
+
+            return Ok(AuthorizationOutcome {
+                decision: Decision::deny(
+                    "active_lease_conflict",
+                    "Write target is covered by another active session lease.",
+                    "Refresh current state, coordinate with the lease owner, or wait for the lease to release. Do not redeclare intent or change session_id; that does not release another session's lease.",
+                ),
+                wait,
+                reservation: None,
+            });
+        }
+
+        let requires_exact_native_file_scope = self.requires_exact_native_file_scope(&input);
+        let has_required_lease = if requires_exact_native_file_scope {
+            self.has_exact_native_file_lease(&input, workspace_id)?
+        } else {
+            self.has_required_lease(&input, workspace_id)?
+        };
+        if !has_required_lease {
+            let decision = if requires_exact_native_file_scope {
+                Decision::deny(
+                    "missing_lease",
+                    "Native edit targets require exact active same-session file leases for every affected path.",
+                    "Acquire matching same-session file leases for every affected path before writing. Do not change session_id; that does not create same-session lease ownership.",
+                )
+            } else {
+                Decision::deny(
+                    "missing_lease",
+                    "Write target is inside active intent scope, but no active same-session lease covers it.",
+                    "Acquire the relevant same-session file or directory lease successfully before writing. Do not change session_id; that does not create same-session lease ownership.",
+                )
+            };
+            return Ok(AuthorizationOutcome {
+                decision,
+                wait: None,
+                reservation: None,
+            });
         }
 
         Ok(AuthorizationOutcome {
             decision,
             wait: None,
+            reservation: None,
+        })
+    }
+
+    fn requires_exact_native_file_scope(&self, input: &AuthorizeWriteInput) -> bool {
+        if !matches!(input.source_kind.as_ref(), Some(SourceKind::Hook)) {
+            return false;
+        }
+        input
+            .source_tool_name
+            .as_deref()
+            .is_some_and(is_native_edit_tool)
+    }
+
+    fn has_exact_native_file_intent(
+        &self,
+        input: &AuthorizeWriteInput,
+        workspace_id: &str,
+    ) -> Result<bool, String> {
+        for path in self.affected_paths(input) {
+            if !self
+                .store
+                .active_exact_file_intent_by_session(workspace_id, path, &input.session_id)
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn has_exact_native_file_lease(
+        &self,
+        input: &AuthorizeWriteInput,
+        workspace_id: &str,
+    ) -> Result<bool, String> {
+        for path in self.affected_paths(input) {
+            if !self
+                .store
+                .active_exact_file_lease_by_session(workspace_id, path, &input.session_id)
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn has_required_lease(
+        &self,
+        input: &AuthorizeWriteInput,
+        workspace_id: &str,
+    ) -> Result<bool, String> {
+        match input.action.as_str() {
+            "write_directory" => self
+                .store
+                .active_lease_covers_directory_by_session(
+                    workspace_id,
+                    &input.path,
+                    &input.session_id,
+                )
+                .map_err(|error| error.to_string()),
+            "write_file" | "delete_file" => self
+                .store
+                .active_lease_covers_path_by_session(workspace_id, &input.path, &input.session_id)
+                .map_err(|error| error.to_string()),
+            "rename_file" | "move_file" => {
+                let Some((old_path, new_path)) = self.rename_or_move_paths(input) else {
+                    return Ok(false);
+                };
+                let old_lease = self
+                    .store
+                    .active_lease_covers_path_by_session(workspace_id, old_path, &input.session_id)
+                    .map_err(|error| error.to_string())?;
+                if !old_lease {
+                    return Ok(false);
+                }
+                self.store
+                    .active_lease_covers_path_by_session(workspace_id, new_path, &input.session_id)
+                    .map_err(|error| error.to_string())
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn rename_or_move_paths<'input>(
+        &self,
+        input: &'input AuthorizeWriteInput,
+    ) -> Option<(&'input str, &'input str)> {
+        let old_path = input.old_path.as_deref()?.trim();
+        let new_path = input.new_path.as_deref()?.trim();
+        if old_path.is_empty() || new_path.is_empty() {
+            return None;
+        }
+        Some((old_path, new_path))
+    }
+
+    fn affected_paths<'input>(&self, input: &'input AuthorizeWriteInput) -> Vec<&'input str> {
+        match input.action.as_str() {
+            "rename_file" | "move_file" => {
+                if let Some((old_path, new_path)) = self.rename_or_move_paths(input) {
+                    if old_path == new_path {
+                        vec![old_path]
+                    } else {
+                        vec![old_path, new_path]
+                    }
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => vec![input.path.as_str()],
+        }
+    }
+
+    fn reservation_conflict(
+        &self,
+        input: &AuthorizeWriteInput,
+        workspace_id: &str,
+    ) -> Result<Option<WaitRecord>, String> {
+        if input.action == "write_directory" {
+            return self
+                .store
+                .active_reservation_conflict_for_directory(
+                    workspace_id,
+                    &input.path,
+                    &input.session_id,
+                )
+                .map_err(|error| error.to_string());
+        }
+
+        for path in self.affected_paths(input) {
+            if let Some(reservation) = self
+                .store
+                .active_reservation_conflict_for_path(workspace_id, path, &input.session_id)
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(Some(reservation));
+            }
+        }
+        Ok(None)
+    }
+
+    fn current_session_reservation(
+        &self,
+        input: &AuthorizeWriteInput,
+        workspace_id: &str,
+    ) -> Result<Option<WaitRecord>, String> {
+        if input.action == "write_directory" {
+            return self
+                .store
+                .active_reservation_for_directory_by_session(
+                    workspace_id,
+                    &input.path,
+                    &input.session_id,
+                )
+                .map_err(|error| error.to_string());
+        }
+
+        for path in self.affected_paths(input) {
+            if let Some(reservation) = self
+                .store
+                .active_reservation_for_path_by_session(workspace_id, path, &input.session_id)
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(Some(reservation));
+            }
+        }
+        Ok(None)
+    }
+
+    fn lease_conflict_owner(
+        &self,
+        input: &AuthorizeWriteInput,
+        workspace_id: &str,
+    ) -> Result<Option<String>, String> {
+        if input.action == "write_directory" {
+            return self
+                .store
+                .active_lease_conflict_owner_for_directory(
+                    workspace_id,
+                    &input.path,
+                    &input.session_id,
+                )
+                .map_err(|error| error.to_string());
+        }
+
+        for path in self.affected_paths(input) {
+            if let Some(owner) = self
+                .store
+                .active_lease_conflict_owner_for_path(workspace_id, path, &input.session_id)
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(Some(owner));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn claim_intent(&self, input: ClaimIntentInput) -> Result<ClaimIntentOutcome, String> {
+        let reservation = self
+            .store
+            .reservation_by_id(&input.wait_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "reservation not found".to_string())?;
+        if reservation.session_id != input.session_id
+            || reservation.workspace_id != input.workspace_id
+        {
+            return Err("reservation owner mismatch".to_string());
+        }
+        if normalized_path_is_empty(&reservation.relative_path) {
+            return Err("intent scope is required".to_string());
+        }
+
+        self.store
+            .claim_reservation(&input.wait_id, &input.session_id)
+            .map_err(|error| error.to_string())?;
+
+        let scope = if reservation.action == "write_directory" {
+            format!("{}/", reservation.relative_path.trim_end_matches('/'))
+        } else {
+            reservation.relative_path.clone()
+        };
+        let lease_path = scope.clone();
+        self.store
+            .append(Event::intent_declared(
+                &input.session_id,
+                &input.workspace_id,
+                reservation.purpose.clone(),
+                [scope],
+            ))
+            .map_err(|error| error.to_string())?;
+        self.store
+            .acquire_lease(&input.session_id, &input.workspace_id, &lease_path)
+            .map_err(|error| error.to_string())?;
+
+        let mut claimed = reservation;
+        claimed.status = "claimed".to_string();
+        Ok(ClaimIntentOutcome {
+            reservation: claimed,
+        })
+    }
+
+    pub fn request_intent(
+        &self,
+        input: RequestIntentInput,
+    ) -> Result<RequestIntentOutcome, String> {
+        if !matches!(input.action.as_str(), "write_file" | "write_directory") {
+            return Err("unsupported intent request action".to_string());
+        }
+        if normalized_path_is_empty(&input.path) {
+            return Err("intent scope is required".to_string());
+        }
+
+        if let Some(existing) = self
+            .store
+            .waiter_by_request_id(&input.request_id)
+            .map_err(|error| error.to_string())?
+        {
+            if existing.session_id != input.session_id
+                || existing.workspace_id != input.workspace_id
+            {
+                return Err("intent request owner mismatch".to_string());
+            }
+            return self.request_outcome(input.request_id, existing);
+        }
+
+        let reservation_conflict = if input.action == "write_directory" {
+            self.store
+                .active_reservation_conflict_for_directory(
+                    &input.workspace_id,
+                    &input.path,
+                    &input.session_id,
+                )
+                .map_err(|error| error.to_string())?
+        } else {
+            self.store
+                .active_reservation_conflict_for_path(
+                    &input.workspace_id,
+                    &input.path,
+                    &input.session_id,
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let blocking_session_id = reservation_conflict
+            .as_ref()
+            .map(|reservation| reservation.session_id.as_str());
+
+        let lease_owner = if reservation_conflict.is_none() {
+            if input.action == "write_directory" {
+                self.store
+                    .active_lease_conflict_owner_for_directory(
+                        &input.workspace_id,
+                        &input.path,
+                        &input.session_id,
+                    )
+                    .map_err(|error| error.to_string())?
+            } else {
+                self.store
+                    .active_lease_conflict_owner_for_path(
+                        &input.workspace_id,
+                        &input.path,
+                        &input.session_id,
+                    )
+                    .map_err(|error| error.to_string())?
+            }
+        } else {
+            None
+        };
+        let blocking_session_id = blocking_session_id.or(lease_owner.as_deref());
+
+        let waiter = self
+            .store
+            .enqueue_intent_request(IntentRequestInput {
+                request_id: &input.request_id,
+                session_id: &input.session_id,
+                workspace_id: &input.workspace_id,
+                relative_path: &input.path,
+                action: &input.action,
+                purpose: &input.purpose,
+                blocking_session_id,
+            })
+            .map_err(|error| error.to_string())?;
+
+        if reservation_conflict.is_none() && lease_owner.is_none() {
+            self.store
+                .promote_next_waiter_for_path(&input.workspace_id, &input.path)
+                .map_err(|error| error.to_string())?;
+        }
+
+        let waiter = self
+            .store
+            .waiter_by_request_id(&input.request_id)
+            .map_err(|error| error.to_string())?
+            .unwrap_or(waiter);
+        self.request_outcome(input.request_id, waiter)
+    }
+
+    pub fn cancel_intent(&self, input: CancelIntentInput) -> Result<CancelIntentOutcome, String> {
+        let wait = self
+            .store
+            .cancel_intent_request(&input.request_id, &input.session_id, &input.workspace_id)
+            .map_err(|error| error.to_string())?;
+        Ok(CancelIntentOutcome {
+            request_id: input.request_id,
+            wait,
+        })
+    }
+
+    fn request_outcome(
+        &self,
+        request_id: String,
+        waiter: WaitRecord,
+    ) -> Result<RequestIntentOutcome, String> {
+        let request_state = waiter.status.clone();
+        let queue_position = if waiter.status == "queued" {
+            self.store
+                .queue_position(&waiter.wait_id)
+                .map_err(|error| error.to_string())?
+        } else {
+            None
+        };
+
+        let wait = if matches!(waiter.status.as_str(), "queued" | "canceled" | "expired") {
+            Some(WaitQueueInfo {
+                record: waiter.clone(),
+                queue_position,
+            })
+        } else {
+            None
+        };
+        let reservation = if matches!(waiter.status.as_str(), "reserved" | "claimed") {
+            Some(waiter)
+        } else {
+            None
+        };
+
+        Ok(RequestIntentOutcome {
+            request_id,
+            request_state,
+            wait,
             reservation,
         })
     }
+}
+
+fn normalized_path_is_empty(path: &str) -> bool {
+    let normalized = path.trim().replace(char::from(92), "/");
+    let mut segments = Vec::new();
+    for segment in normalized.split(char::from(47)) {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            segments.pop();
+        } else {
+            segments.push(segment);
+        }
+    }
+    segments.is_empty()
 }

@@ -13,8 +13,10 @@ semantics.
 V1 is Rust-only.
 
 The state server, policy engine, SQLite persistence, CLI, hook adapter commands,
-MCP adapter, watcher, validation runner, and prompt renderer should live in the
-same Rust codebase.
+MCP adapter, sandbox wrapper, and implemented prompt/context endpoints live in
+the same Rust codebase. Watcher-driven human observation and richer
+store-backed prompt rendering remain design targets unless a section below says
+they are implemented.
 
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --yes` configures global Codex hooks and MCP. `stateful enable`
@@ -25,13 +27,18 @@ Codex hooks should invoke the compiled `stateful` binary instead of embedding
 policy or adapter logic in separate scripts. Hook configuration may reference
 the binary directly by absolute path or by PATH lookup.
 
-This keeps parsing, authorization, rendering, validation, and outbox behavior in
+This keeps parsing, authorization, rendering, sandboxing, and outbox behavior in
 one implementation and avoids policy drift.
 
 ## Protocol Version
 
-Every request from hooks, MCP tools, CLI commands, observers, and future IDE
-clients must include:
+The `stateful.v1` envelope is the target request shape for side-effecting
+protocol calls. The current implementation enforces it for `/v1/authorize` and
+the intent declare/request/claim/cancel endpoints. Session, lease, activity,
+context, reconciliation, notification, resume, outbox, and read endpoints still
+use their current flat request bodies.
+
+Envelope-shaped requests include:
 
 ```text
 protocol_version: stateful.v1
@@ -41,10 +48,9 @@ workspace
 source
 ```
 
-`protocol_version` uses `name.major` form. A major mismatch fails closed for
-write authorization, validation, reconciliation, intent declaration, lease
-acquisition, and lease refresh. Read-only context requests may return
-`error: protocol_mismatch` with no side effects.
+`protocol_version` uses `name.major` form. A major mismatch fails closed on
+endpoints that currently enforce the envelope. Clients should not assume every
+endpoint accepts or requires the envelope until those routes are migrated.
 
 ## Common Request Envelope
 
@@ -89,6 +95,9 @@ GET  /v1/events
 POST /v1/session/register
 POST /v1/session/heartbeat
 POST /v1/intent/declare
+POST /v1/intent/request
+POST /v1/intent/claim
+POST /v1/intent/cancel
 POST /v1/lease/acquire
 POST /v1/lease/release
 POST /v1/activity/observe
@@ -97,7 +106,6 @@ POST /v1/authorize
 POST /v1/conflicts/check
 POST /v1/context/render
 POST /v1/reconcile/ack
-POST /v1/validation/run
 POST /v1/notifications/poll
 POST /v1/resume/next
 POST /v1/outbox/sync
@@ -109,26 +117,34 @@ GET  /v1/runtime/identity
 engine and must not create leases or write-authorizing state.
 `/v1/notifications/poll` returns pending coordination notifications for a
 session. `/v1/resume/next` returns the first active reservation that the session
-can claim after rereading the target. `/v1/runtime/identity` is an authenticated
-server identity endpoint used by `stateful server stop` to verify that the
-runtime file and process id describe the same stateful server. Full scheduling
-endpoints such as `intent/request`, `intent/claim`, and `intent/cancel` remain
-future contract work; the prototype implements `intent/declare` plus
-notifications and resume discovery.
+can claim after rereading the target. `/v1/intent/claim` is the explicit
+reservation claim path; it creates write-authorizing intent and an active lease
+for the reservation owner. `/v1/authorize` must not claim reservations
+implicitly. `/v1/intent/request` creates or returns an idempotent queued or
+reserved request by `request_id`; `/v1/intent/cancel` cancels queued or reserved
+requests owned by the caller. `/v1/runtime/identity` is an authenticated server
+identity endpoint used by `stateful server stop` to verify that the runtime file
+and process id describe the same stateful server.
 
 MCP tools map directly onto these endpoints. MCP handlers do not implement
 policy branches; they validate tool arguments, call the HTTP API, and return the
 server result.
+
+Current envelope enforcement is limited to `/v1/authorize` and
+`/v1/intent/declare`, `/v1/intent/request`, `/v1/intent/claim`, and
+`/v1/intent/cancel`. Intent declare requires non-empty `purpose` and non-empty
+`files_planned`; empty arrays and empty or normalized-empty paths fail with
+`missing_scope`. Intent request requires non-empty `purpose` and a non-empty
+`path`; empty or normalized-empty request paths fail with `missing_scope`.
 
 ## Authorization Input
 
 ```text
 action:
   read | search | diff
-  write_file
+  write_file | write_directory
   delete_file | rename_file | move_file
   bash
-  validation_run
   reconcile_ack
 targets:
   - operation: read | write | delete | rename | move
@@ -137,22 +153,28 @@ targets:
     old_path
     new_path
 command
-validation_profile
 override_instruction
 ```
 
-`state.file.write` maps to `write_file` and supplies the target path through
-structured tool arguments before calling `/v1/authorize`. Native Codex edit
-tools such as `apply_patch`, `Edit`, and `Write` may expose targets to hooks,
-but the `stateful codex` read-only tmp profile does not rely on them as the
-normal repo write path. For Bash, command text alone never authorizes tool use.
-The hook allows Bash only when the top-level tool payload supplies structured
-read-only sandbox metadata, network access is explicitly disabled, and writable
-roots are absent or limited to trusted tmp roots.
+Native Codex edit tools such as `apply_patch`, `Edit`, and `Write` expose
+targets to hooks. After exact intent and a successful same-session file lease, hooks call
+`/v1/authorize` with the operation-specific action before allowing the edit,
+including `write_file`, `delete_file`, and `move_file` with source `path` /
+`old_path` and destination `new_path`. For Bash, command text alone never
+authorizes tool use.
+Raw Bash is denied by stateful hooks. Bash hook calls are allowed only when the
+outer command is a single strict invocation of the trusted absolute `stateful`
+binary running `<absolute-stateful-binary> sandbox run ... --command <cmd>`.
+Read-only command-shaped inspection uses `<absolute-stateful-binary> sandbox run
+--fs read-only --network disabled --command <cmd>`. Command-shaped writes use
+`--fs write-targets` with explicit `--write-target` / `--create-target` values
+and target authorization.
 
 ## Decision Output
 
-All policy decisions use the same shape:
+Policy decisions use a common core shape. Endpoints may add scheduling fields
+such as `wait`, `reservation`, `current`, `items`, or `prompt_text`, and shipped
+responses may omit arrays that do not apply instead of returning empty arrays:
 
 ```text
 decision: allow | warn | deny | error
@@ -166,38 +188,39 @@ audit_event
 
 `deny` means the adapter must block the action. `warn` means the action may
 continue but the warning must be surfaced to the agent or human where the
-runtime allows it. `error` is used for state-server, protocol, or validation
-execution failures; write, validation, and reconciliation paths treat `error` as
-fail-closed.
+runtime allows it. `error` is used for state-server, protocol, or sandbox
+execution failures; write and reconciliation paths treat `error` as fail-closed.
 
 For scheduling APIs, a hard conflict decision may produce a queued intent
-request instead of an immediate write-authorizing grant. V1 queues only hard
+request instead of an immediate reservation. V1 queues only hard
 conflicts in the same `workspace_id` and normalized `absolute_path`. Soft
 repo-relative conflicts remain warning context because they signal future
 integration risk rather than immediate physical file overwrite.
 
-Queued requests are promoted FIFO. A request is grantable only when all requested
-resources are available. The server must not partially grant a multi-resource
-request. Promotion is triggered by explicit lease release, session or activity
+Queued requests are promoted FIFO. A request is reservable only when all
+requested resources are available. The server must not partially reserve a
+multi-resource request. Promotion is triggered by explicit lease release, session or activity
 finalization, or lease expiry. Promotion creates a short reservation and a
 pending notification for the waiting session.
 
 Promotion creates a reservation first. A reservation is not active write
-authority. The waiting session must claim the reservation before the server
-creates active intent and active leases. The default reservation TTL is 120
-seconds; the default lease TTL is 300 seconds and is refreshed by heartbeat.
+authority. The waiting session must reread the target, then explicitly claim the
+reservation with `state.intent.claim` or `stateful intent claim --wait-id <id>`.
+Only that claim creates write-authorizing intent and active same-session leases.
+The default reservation TTL is 120 seconds; the default lease TTL is 300 seconds
+and is refreshed by heartbeat.
 
-For multi-resource requests, the request is grantable only when it is the head
+For multi-resource requests, the request is reservable only when it is the head
 entry for every requested resource queue and none of those resources has an
 active lease. `request_id` is the idempotency key: repeating a request with the
 same id returns the existing state and must not enqueue a duplicate.
 
-Full scheduling APIs should return immediately with request state. Blocking
-waits can be implemented as a future client convenience by polling
-notifications or resume endpoints. Queued and reserved request cancellation is
-future contract work. Session or activity finalization should cancel that
-session's queued and reserved requests once those queues are implemented.
-Explicit user overrides do not reorder the wait queue or transfer reservations.
+Full scheduling APIs return immediately with request state. Blocking waits can
+be implemented as a future client convenience by polling notifications or resume
+endpoints. Queued and reserved request cancellation is explicit through
+`intent/cancel`; session or activity finalization cancellation remains future
+cleanup work. Explicit user overrides do not reorder the wait queue or transfer
+reservations.
 
 ## SQLite Storage
 
@@ -228,7 +251,6 @@ wait_queue
 notifications
 conflicts
 overrides
-validations
 reconciliations
 human_observations
 outbox
@@ -252,10 +274,13 @@ wait_queue(workspace_id, relative_path, status)
 wait_queue(session_id, status)
 notifications(target_session_id, status)
 conflicts(session_id, checked_at)
-validations(workspace_id, profile_id, status)
 reconciliations(session_id, created_at)
 outbox(session_id, sequence, sync_status)
 ```
+
+`SessionHeartbeat` materialization refreshes the session timestamp, active lease
+expiry, active activity expiry, and active intent expiry. Intent refresh is
+capped at 60 minutes from `declared_at`.
 
 Expiration may run in a background loop and may also be triggered lazily by
 reads. Lazy expiration must be transactionally equivalent to background
@@ -267,7 +292,6 @@ Committed project config lives under:
 
 ```text
 .stateful/config.yml
-.stateful/validation.yml
 ```
 
 User-level runtime state for the global server lives under `GlobalPaths`:
@@ -311,9 +335,8 @@ The token is a local trust guard, not a hard security boundary. It prevents
 casual spoofing by unrelated local processes but does not replace OS-level
 process isolation or managed hooks.
 
-If the token is missing or invalid, write, validation, reconciliation, intent,
-and lease paths fail closed. Read-only paths may return a minimal unauthorized
-error.
+If the token is missing or invalid, write, reconciliation, intent, and lease
+paths fail closed. Read-only paths may return a minimal unauthorized error.
 
 ## Hook Adapter Contract
 
@@ -386,8 +409,8 @@ stateful status
 stateful current
 stateful events
 stateful doctor
-stateful validate <profile>
-stateful intent declare [--session-id <id>] [--workspace-id <id>] <paths...>
+stateful sandbox run --fs read-only|write-targets ...
+stateful intent declare [--session-id <id>] [--workspace-id <id>] --purpose <purpose> <paths...>
 stateful notifications poll [--session-id <id>] [--workspace-id <id>]
 stateful resume next [--session-id <id>] [--workspace-id <id>]
 stateful mcp call <tool> [arguments-json]
@@ -406,8 +429,7 @@ without `--foreground` uses the detached lazy lifecycle. Bare legacy
 foreground and write runtime discovery. `stateful doctor` checks hook
 installation files, repo config files, global install fields, repo enabled
 status, and global path or registry errors. Active server reachability, config
-schema validation, SQLite migration inspection, and validation profile
-parseability checks are future doctor extensions.
+schema validation and SQLite migration inspection are future doctor extensions.
 `stateful commit -m <message> -- <paths...>` is the structured commit wrapper.
 `stateful push [remote branch]` is the structured push wrapper. It requires a
 clean working tree, an attached current branch, either the current branch's
@@ -415,23 +437,24 @@ configured upstream or an explicit `<remote> <branch>` pair matching the current
 branch, and rejects force-like target values. Raw `git add`, `git commit`, and
 `git push` through Bash remain denied.
 
-## Prototype Verification
+## Verification
 
-The prototype alignment pass must run:
+Before publishing or releasing a build, run:
 
 ```text
-cargo test --workspace
-./target/debug/stateful doctor
+cargo fmt --all --check
+env -u STATEFUL_CODEX_RUN_ID cargo test --workspace
+env -u STATEFUL_CODEX_RUN_ID cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The Task 10 verification run passed `cargo test --workspace`. The doctor command
-returned JSON containing the global install fields `global_config_yml`,
-`global_runtime_server_json`, `global_state_db`, `repo_enabled`,
-`global_paths_error`, and `global_registry_error`.
+Unset `STATEFUL_CODEX_RUN_ID` when running workspace tests from an active Codex
+session so tests do not inherit a run-bound session file from the caller.
+`stateful doctor` remains the local installation health check after installing
+or enabling a repository.
 
 ## Config Defaults
 
-`.stateful/config.yml` owns repo-level defaults:
+`.stateful/config.yml` documents repo-level defaults:
 
 ```text
 protocol_version: stateful.v1
@@ -444,9 +467,13 @@ default_write_policy: deny
 event_retention_days: 14
 ```
 
-`.stateful/validation.yml` owns controlled validation profiles. Agents may
-select a profile by name, but they may not provide arbitrary commands at
-runtime.
+The current implementation uses built-in Rust defaults for these values. Runtime
+loading of every config key and event-retention pruning are future hardening
+work.
+
+Command-shaped tests and checks run through the trusted `stateful sandbox run`
+wrapper. Artifact writes are scoped with `--write-dir target` after exact
+`target/` directory intent and a successful same-session directory lease.
 
 Glob semantics should use gitignore-style path matching relative to the
 workspace root. Identity and policy checks still use normalized canonical paths
@@ -454,19 +481,22 @@ after glob expansion.
 
 ## Test Contract
 
-V1 must have tests for:
+Implemented v1 behavior must have tests for:
 
 - policy decisions as table-driven unit tests
 - intent scope matching, including depth-2 directory behavior
 - exact file scope for delete, rename, and move
 - Bash full-deny classification and sandbox-gated hook authorization
-- `state_file_write` authorization plus Bash and native Codex edit hook fixtures
-- prompt renderer golden output for brief and detailed modes
+- native Codex edit hook authorization plus Bash sandbox fixtures
+- prompt renderer golden output for shipped store-backed rendering
+- heartbeat refresh of active leases, activities, and capped active intent TTL
+- missing purpose and empty `files_planned` rejection
 - SQLite event append plus materialized-view transaction behavior
-- validation profile execution in a temporary git worktree
+- sandbox-run execution with artifact writes limited to an authorized directory
 - state-server unavailable behavior
 - outbox idempotent sync
-- human-write reconciliation blocks and acknowledgements
+- human-write reconciliation blocks and acknowledgements when human-write
+  observation is shipped
 
 The policy engine should be testable without starting the HTTP server. HTTP,
 MCP, and hook tests should prove adapter correctness, not duplicate policy

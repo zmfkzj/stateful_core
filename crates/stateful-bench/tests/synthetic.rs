@@ -129,6 +129,16 @@ fn chaos_agent_manifest_records_tiers_baselines_schedules_and_lease_conflicts() 
     let sample60_path =
         root.join(".stateful_bench/agent_synthetic/chaos_agent_sample60_manifest.jsonl");
 
+    for fixture_path in [&full_path, &sample_path, &sample60_path] {
+        if !fixture_path.is_file() {
+            eprintln!(
+                "skipping chaos manifest fixture validation; missing {}",
+                fixture_path.display()
+            );
+            return;
+        }
+    }
+
     let full: Vec<serde_json::Value> =
         read_jsonl(&full_path).expect("full chaos manifest should parse");
     let sample: Vec<serde_json::Value> =

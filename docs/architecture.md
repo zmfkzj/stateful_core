@@ -17,7 +17,8 @@ Codex hooks observe and gate important agent actions. MCP tools give agents a
 structured way to read and update coordination state. The state server owns
 policy, persistence, TTLs, and conflict checks.
 
-The v1 MVP includes controlled validation through `state.validation.run` and
+The v1 MVP includes sandboxed test execution through `sandbox run --write-dir`
+after exact directory intent and a successful same-session directory lease, plus
 human-write reconciliation through `state.reconcile.ack`.
 
 V1 is local-only. It coordinates sessions, agents, subagents, and local human
@@ -57,7 +58,6 @@ The database should contain:
 
 - append-only coordination events
 - materialized current-state tables
-- validation run records
 - conflict decision records
 - local outbox sync records
 
@@ -93,8 +93,10 @@ This keeps policy centralized and avoids duplicating authorization logic inside
 hook scripts or MCP tool handlers.
 
 The concrete v1 HTTP API lives under `/v1` and is defined in the implementation
-contract. All clients use the same request envelope with `protocol_version`,
-session identity, workspace identity, and source metadata.
+contract. The intended envelope includes `protocol_version`, session identity,
+workspace identity, and source metadata. The current implementation enforces
+that envelope for write authorization and intent declare/request/claim/cancel;
+other POST routes still use flat request bodies.
 
 ## Hook Packaging
 
@@ -107,7 +109,7 @@ opts the current repo into enforcement. Repo-local hooks remain available throug
 global Codex hooks and MCP config
 repo allowlist entry
 optional <repo>/.codex/hooks.json compatibility fallback
-<repo>/.stateful/validation.yml
+<repo>/.stateful/config.yml
 stateful binary available by absolute path or PATH lookup
 ```
 
@@ -133,16 +135,16 @@ append local outbox event when observation cannot reach the server
 
 They must not own policy. In v1, these hook adapters are Rust commands from the
 compiled `stateful` binary. If the state server is unavailable, the hook follows
-the availability policy: agent writes, validation, and reconciliation fail
-closed; read/search/diff remains allowed.
+the availability policy: agent writes and reconciliation fail closed;
+read/search/diff remains allowed.
 
-Hook scripts should resolve paths from the git root and include a
-`protocol_version` in every state-server request. A major protocol mismatch
-fails closed for write, validation, and reconciliation paths.
+Hook scripts should resolve paths from the git root. Envelope-enforced routes
+include `protocol_version`; a major protocol mismatch fails closed on those
+write authorization and intent paths.
 
 ## Trigger Sources
 
-Initial trigger sources:
+Currently implemented trigger sources:
 
 - Codex `SessionStart`
 - Codex `UserPromptSubmit`
@@ -151,9 +153,13 @@ Initial trigger sources:
 - Codex `Stop`
 - Codex subagent start/stop and tool activity
 - MCP calls from the agent
-- git working tree or filesystem observation for conservative v1 human activity
+- CLI and state server calls
+
+Target and future trigger sources:
+
+- git working tree or filesystem observation for conservative human activity
   detection
-- v2 IDE extension events for human file open, dirty, save-attempt, and save
+- IDE extension events for human file open, dirty, save-attempt, and save
   completion signals
 
 Each trigger should carry the session id, actor identity when known, workspace,
@@ -179,8 +185,12 @@ valid intent scope. They still record activity and leases with their own
 `PreToolUse`:
 
 - deny supported write calls when the session has no active intent
-- deny Bash commands unless the top-level tool payload supplies read-only
-  sandbox metadata with network disabled
+- deny raw Bash and allow Bash only when the outer command is a single strict
+  invocation of the trusted absolute `stateful` binary running
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
+  command-shaped inspection uses `--fs read-only --network disabled`;
+  command-shaped writes use `--fs write-targets` with explicit write/create
+  targets.
 - check leases and planned edits for likely conflicts
 - return allow, warning context, or deny based on policy
 
@@ -204,6 +214,9 @@ The v1 MCP/tool surface is intentionally narrow:
 state.session.register
 state.session.heartbeat
 state.intent.declare
+state.intent.request
+state.intent.claim
+state.intent.cancel
 state.lease.acquire
 state.lease.release
 state.activity.observe
@@ -213,82 +226,75 @@ state.current.read
 state.events.read
 state.context.render
 state.reconcile.ack
-state.validation.run
 state.notifications.poll
 state.resume.next
 ```
 
 Hooks and MCP tools should call the same state server API. Policy must live in
-the state server, not in duplicated hook scripts.
+the state server, not in duplicated hook scripts. Native Codex edit tools are
+the repo file edit path after exact intent declaration and a successful file
+lease; command-shaped shell writes remain outside MCP and go through the
+sandbox-run wrapper.
+
+Intent declare and request payloads require a non-empty `purpose`; clients infer
+it from the user or agent instruction and send it explicitly. Intent declare
+also requires non-empty `files_planned`; empty arrays and empty or normalized-empty
+paths fail with `missing_scope`. Intent request also requires a non-empty
+`path`; empty or normalized-empty request paths fail with `missing_scope`.
 
 ## Tool Classification
 
 V1 enforcement is strict about write target extraction:
 
-- `state_file_write` / `state.file.write`: enforce using structured file
-  arguments before writing.
-- Native Codex edit tools such as `apply_patch`, `Edit`, and `Write`: hook
-  targets can be inspected when the runtime exposes them, but the
-  `stateful codex` read-only tmp profile does not make them the normal repo
-  write path.
-- Bash commands: deny unless the top-level Bash tool payload includes
-  structured read-only sandbox metadata, network access is explicitly disabled,
-  and writable roots are absent or limited to trusted tmp roots.
-- Test execution: run only through controlled validation actions such as
-  `state.validation.run`.
+- Native Codex edit tools such as `apply_patch`, `Edit`, and `Write`: enforce
+  by inspecting hook-exposed targets after exact intent declaration and a
+  successful same-session file lease.
+- Bash commands: deny raw Bash. Hook-mediated Bash is allowed only when the
+  outer command is a single strict invocation of the trusted absolute `stateful`
+  binary running `<absolute-stateful-binary> sandbox run ... --command <cmd>`.
+  Read-only command-shaped inspection uses `--fs read-only --network disabled`;
+  command-shaped writes use `--fs write-targets` with explicit
+  `--write-target` / `--create-target` values and target authorization.
+- Test execution: run only through sandboxed test actions such as
+  `stateful sandbox run --fs write-targets --write-dir target --command <cmd>`
+  after exact `target/` directory intent and a successful same-session
+  directory lease.
 - Bash command text alone never authorizes tool use, even when it appears
   read-only.
 
-Denied Bash should direct the agent to use a structured Bash tool call with
-read-only sandbox metadata, or use stateful MCP tools for writes and
-validation.
+Denied Bash should direct the agent to native Codex edit tools for repo file
+edits, the wrapper for command-shaped shell execution, and sandbox-run wrappers
+for tests.
 
-The Bash classifier is a deny-by-default diagnostic. It no longer has command
-allowlists for `rg`, `git diff`, test runners, or stateful operational
-commands. Arbitrary or project-specific test commands should run through
-validation profiles owned by the state server so source-tree writes can be
-denied while cache or artifact writes can be controlled.
+MCP does not perform local command-shaped file writes. Hook-mediated shell
+execution uses `<absolute-stateful-binary> sandbox run ... --command <cmd>`;
+plain CLI-context usage outside hooks can use `stateful sandbox run`. The MVP
+ships `read-only` and `write-targets` profiles; `git-metadata` and `workspace`
+profiles are deferred and fail closed. `/dev/null` is writable in every sandbox
+profile so common shell and Git behavior works. Command text alone does not
+authorize `rg`, `git diff`, test runners, stateful operational commands, or any
+other Bash command.
 
-## Validation Profiles
+## Sandboxed Tests
 
-Validation profiles live at `.stateful/validation.yml`.
-
-Agents cannot supply arbitrary test commands. They call:
-
-```text
-state.validation.run(profile)
-```
-
-The state server loads the named profile and executes its configured command.
-V1 profile fields:
+Agents cannot run raw Bash test commands through hooks. They call the trusted
+wrapper after exact `target/` directory intent and a successful same-session
+directory lease:
 
 ```text
-profile_id
-description
-command
-cwd
-timeout_seconds
-allowed_writes
-denied_writes
-exclusive
-env
-result_parser
+stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." target/
+stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
+stateful sandbox run --fs write-targets --network enabled --write-dir target --command <cmd>
 ```
 
-V1 uses `result_parser: exit_code` by default. Validation results should be
-recorded as `passed`, `failed`, `failed_policy`, `timeout`, or `error`.
-Source-tree writes that match `denied_writes` fail validation as
-`failed_policy`, separate from command test failure.
+The wrapper authorizes the `target/` artifact directory before execution and the
+OS sandbox limits writes to declared file targets, create targets, and the
+target artifact tree. Source-tree writes remain outside the allowed surface
+unless exact targets are declared and authorized.
 
-V1 detects source-tree writes with git status before/after comparison. Before a
-validation command starts, every path matching `denied_writes` must be clean in
-`git status --porcelain`; otherwise the validation returns `error`. After the
-command, any newly dirty path matching `denied_writes` returns `failed_policy`.
-Paths matching `allowed_writes` are ignored for policy failure.
-
-Validation profile concurrency is controlled by `exclusive`. Concurrent runs of
-the same exclusive profile are denied. Concurrent runs of non-exclusive profiles
-warn only.
+The macOS Seatbelt backend is the release-verified first-class backend. Linux
+bubblewrap support is implemented but experimental until it is verified in a
+Linux release environment.
 
 ## State Server
 
@@ -313,7 +319,7 @@ hard distributed locks.
 
 ## Policy Engine
 
-All write, validation, reconciliation, and conflict checks should flow through a
+All write, reconciliation, and conflict checks should flow through a
 single policy entry point:
 
 ```text
@@ -338,7 +344,6 @@ The policy engine owns:
 - lease conflict checks
 - collision-domain evaluation
 - human-write reconciliation checks
-- validation profile concurrency checks
 - state-server availability behavior
 
 Hooks and adapters only extract tool intent and targets, then call the policy
@@ -369,6 +374,10 @@ human's intent.
 
 ## Human Write Reconciliation
 
+The current implementation records `state.reconcile.ack` acknowledgements but
+does not yet observe `HumanWriteObserved` events or block writes because of
+human-written files. The target policy is:
+
 When `HumanWriteObserved` affects a file with active agent work, the next agent
 write to that file is blocked until reconciliation is acknowledged.
 
@@ -377,7 +386,7 @@ During this blocked state, the agent may still:
 - read the affected file
 - search the repository
 - inspect diffs
-- run controlled validation actions
+- run sandboxed tests with the authorized `target/` artifact tree
 
 To resume writing, the agent must call:
 
@@ -424,10 +433,8 @@ Initial policy:
   until the agent acknowledges reconciliation or receives an explicit user
   instruction
 - unrelated reads and searches: allow
-- reads, searches, diffs, and controlled validation after human writes: allow
-- tests: allow only through controlled validation actions
-- same non-exclusive validation profile active elsewhere: warn
-- same exclusive validation profile active elsewhere: deny
+- reads, searches, diffs, and sandboxed tests after human writes: allow
+- tests: allow only through trusted sandbox-run wrappers with authorized targets
 - task, port, or migration resource conflict: warn or info only in v1
 
 Conflict decisions must be auditable. Overrides are never automatic. They are
@@ -464,6 +471,10 @@ the agent decide what to avoid, wait for, or coordinate.
 resource filter. `brief` is for session start and prompt submit context.
 `detailed` is for denied actions or focused resource checks. Rendered output
 must include concrete next actions when a block or warning is present.
+
+The current server route renders store-backed live context from active intents,
+active leases, and queued or reserved wait records. The response includes
+summary counts, structured `items`, and prompt-ready `prompt_text`.
 
 The renderer should return both structured data and prompt-ready markdown:
 
@@ -504,10 +515,12 @@ The system should prefer explicit uncertainty:
 - hook failure -> warn and fail closed only for high-risk writes
 - state server unavailable -> deny supported writes that cannot prove active
   intent
-- state server unavailable -> deny Bash without structured top-level read-only
-  sandbox metadata
-- state server unavailable -> return `error: state_unavailable` for controlled
-  validation and do not run the validation command
+- state server unavailable -> deny raw Bash and any Bash call that is not a
+  strict `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper;
+  command-shaped writes through `--fs write-targets` fail closed when target
+  authorization cannot be proven
+- state server unavailable -> write-target sandbox authorization fails closed
+  and does not run the command
 - state server unavailable -> fail closed for `state.reconcile.ack`, intent
   declaration, lease acquisition, and lease refresh
 - state server unavailable -> allow non-Bash read, search, and diff actions
@@ -524,8 +537,8 @@ The system should prefer explicit uncertainty:
 - cached write grace periods are not part of v1
 - stale conflict -> allow with context, not hard block
 
-V1 defaults to strict enforcement. Supported writes, validation, and
-reconciliation fail closed when state cannot be trusted. To keep this usable,
+V1 defaults to strict enforcement. Supported writes and reconciliation fail
+closed when state cannot be trusted. To keep this usable,
 denial responses must explain the missing precondition and the next action
 instead of returning opaque policy failures. The prototype `stateful doctor`
 reports install/config/repo-enabled state plus global path and registry errors;

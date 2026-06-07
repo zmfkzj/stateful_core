@@ -97,13 +97,13 @@ pub enum ActionKind {
     Search,
     Diff,
     WriteFile,
+    WriteDirectory,
     EditFile,
     ApplyPatch,
     DeleteFile,
     RenameFile,
     MoveFile,
     Bash,
-    ValidationRun,
     ReconcileAck,
 }
 

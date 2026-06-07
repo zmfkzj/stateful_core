@@ -43,7 +43,11 @@ fn action_kind_uses_snake_case_protocol_names() {
 
     assert_eq!(action, ActionKind::WriteFile);
     assert_eq!(
-        serde_json::to_string(&ActionKind::ValidationRun).expect("action should serialize"),
-        r#""validation_run""#
+        serde_json::to_string(&ActionKind::WriteDirectory).expect("action should serialize"),
+        r#""write_directory""#
+    );
+    assert_eq!(
+        serde_json::to_string(&ActionKind::ReconcileAck).expect("action should serialize"),
+        r#""reconcile_ack""#
     );
 }

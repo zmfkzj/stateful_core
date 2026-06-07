@@ -103,13 +103,16 @@ provide the enforcement surface. This is a coordination guardrail, not a
 complete sandbox or security boundary.
 
 V1 only authorizes writes through tool paths with reliable target extraction.
-Repo file writes use the stateful structured write path,
-`state_file_write` / `state.file.write`, after declared intent. Native Codex
-edit tools such as `apply_patch`, `Edit`, and `Write` remain subject to hook
-authorization when their targets are exposed. Bash command text alone is never
-an authorization source; Bash requires top-level read-only sandbox metadata with
-network access disabled. Raw Bash test commands are not allowlisted; tests run
-through controlled validation actions.
+Repo file edits use native Codex edit tools such as `apply_patch`, `Edit`, and
+`Write` after exact intent and a successful same-session file lease. Bash command text alone
+is never an authorization source; raw Bash is denied by stateful hooks. Command-shaped
+read-only inspection must use the trusted absolute `stateful` wrapper:
+`<absolute-stateful-binary> sandbox run --fs read-only --network disabled
+--command <cmd>`. Command-shaped writes must use the wrapper with
+`--fs write-targets` and explicit target flags. Raw Bash test commands are not
+allowlisted; use `stateful sandbox run --fs write-targets --write-dir target
+--command <cmd>` after exact `target/` directory intent and a successful
+same-session directory lease.
 
 ## Product Shape
 

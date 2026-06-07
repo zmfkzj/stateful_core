@@ -108,7 +108,7 @@ def main() -> int:
 Before any file modification, inspect the code enough to identify the production
 file or files you plan to edit, then run:
 
-    {args.stateful_binary} intent declare --session-id {args.session_id} --workspace-id {args.workspace_id} <planned production files>
+    {args.stateful_binary} intent declare --session-id {args.session_id} --workspace-id {args.workspace_id} --purpose "<purpose inferred from the benchmark task>" <planned production files>
 
 Use this exact session id and workspace id. If intent declaration fails, stop
 without editing.

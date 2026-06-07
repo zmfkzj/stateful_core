@@ -1,0 +1,26 @@
+# Maintainer Agent Workflow
+
+This file describes the repository maintainer workflow used for local release
+work. External contributors do not need to follow it, and it is not a general
+agent policy for downstream users.
+
+After completing an implementation or behavior change, maintainers should run
+follow-up checks before final handoff.
+
+## Post-Change Subagents
+
+When available, use subagents for these independent checks and updates:
+
+- Update `SKILL.md` files so agent-facing guidance matches the implementation.
+- Update `README.md` so user-facing setup and behavior descriptions match the implementation.
+- Update other relevant documentation, including docs, plans, specs, and embedded templates.
+- Check for implementation-documentation conflicts across code, tests, skills, README content, and generated install-time docs.
+
+## Completion Flow
+
+After follow-up work is complete:
+
+- Review and integrate each subagent result.
+- Re-run targeted verification for the changed behavior when the environment allows it.
+- Commit the finished changes when the user or maintainer explicitly requests it.
+- Push only when the user or maintainer explicitly requests a push.

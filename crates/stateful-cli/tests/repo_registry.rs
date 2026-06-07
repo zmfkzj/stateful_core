@@ -19,10 +19,6 @@ fn enable_repo_registers_git_root_and_writes_repo_configs() {
 
     assert_eq!(entry.root, canonical_repo);
     assert_eq!(
-        entry.validation_config_path,
-        canonical_repo.join(".stateful/validation.yml")
-    );
-    assert_eq!(
         entry.policy_config_path,
         canonical_repo.join(".stateful/config.yml")
     );
@@ -37,7 +33,7 @@ fn enable_repo_registers_git_root_and_writes_repo_configs() {
     );
 
     assert!(repo.join(".stateful/config.yml").is_file());
-    assert!(repo.join(".stateful/validation.yml").is_file());
+    assert!(!repo.join(".stateful/validation.yml").exists());
     assert!(
         fixture
             .paths
@@ -173,6 +169,83 @@ fn repo_local_codex_refuses_similar_non_stateful_hooks_without_side_effects() {
         fs::read_to_string(hooks_path).expect("existing hooks should remain readable");
     assert_eq!(saved_hooks, hooks);
     assert!(!repo.join(".stateful/config.yml").exists());
+    assert!(!repo.join(".stateful/validation.yml").exists());
+}
+
+#[test]
+fn repo_local_codex_replaces_unmarked_legacy_stateful_codex_files() {
+    let fixture = TestFixture::new("repo-local-legacy-codex");
+    let repo = fixture.create_repo("repo");
+    let codex_dir = repo.join(".codex");
+    fs::create_dir_all(&codex_dir).expect("codex dir should be creatable");
+    fs::write(
+        codex_dir.join("hooks.json"),
+        r#"{
+  "hooks": {
+    "PostToolUse": [{
+      "hooks": [{
+        "command": "stateful hook post-tool-use",
+        "statusMessage": "Recording stateful activity",
+        "type": "command"
+      }],
+      "matcher": "Bash|apply_patch|Edit|Write|mcp__filesystem__.*"
+    }],
+    "PreToolUse": [{
+      "hooks": [{
+        "command": "stateful hook pre-tool-use",
+        "statusMessage": "Authorizing stateful tool use",
+        "type": "command"
+      }],
+      "matcher": "Bash|apply_patch|Edit|Write|mcp__filesystem__.*"
+    }],
+    "SessionStart": [{
+      "hooks": [{
+        "command": "stateful hook session-start",
+        "statusMessage": "Loading stateful current state",
+        "type": "command"
+      }],
+      "matcher": "startup|resume|clear|compact"
+    }],
+    "Stop": [{
+      "hooks": [{
+        "command": "stateful hook stop",
+        "statusMessage": "Finalizing stateful activity",
+        "type": "command"
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "command": "stateful hook user-prompt-submit",
+        "statusMessage": "Checking stateful intent context",
+        "type": "command"
+      }]
+    }]
+  }
+}
+"#,
+    )
+    .expect("legacy hooks should be writable");
+    fs::write(
+        codex_dir.join("config.toml"),
+        r#"[mcp_servers.stateful]
+command = "stateful"
+args = ["mcp", "serve"]
+startup_timeout_sec = 20
+
+[mcp_servers.stateful.tools.state_intent_declare]
+approval_mode = "approve"
+"#,
+    )
+    .expect("legacy config should be writable");
+
+    let entry = enable_repo(&fixture.paths, &repo, true).expect("repo should enable");
+
+    assert_eq!(entry.codex_mode, CodexMode::RepoLocal);
+    assert!(!repo.join(".codex/hooks.json").exists());
+    let config = fs::read_to_string(repo.join(".codex/config.toml")).expect("config should exist");
+    assert!(config.contains("# stateful-core-owned"));
+    assert!(config.contains("[[hooks.PreToolUse]]"));
+    assert!(repo.join(".stateful/config.yml").exists());
     assert!(!repo.join(".stateful/validation.yml").exists());
 }
 

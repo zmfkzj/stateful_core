@@ -1,10 +1,13 @@
 use std::{
     collections::BTreeSet,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
-use crate::{discover_runtime_with_optional_global, post_json, protocol_envelope};
+use crate::{
+    ProtocolEnvelopeArgs, discover_runtime_with_optional_global, post_json, protocol_envelope,
+};
 
 pub type AuthorizePath = Box<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 
@@ -33,7 +36,7 @@ pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitRes
     let explicit = paths.iter().cloned().collect::<BTreeSet<_>>();
 
     deny_unrelated_staged_changes(&request.repo_root, &explicit)?;
-    reject_rename_or_copy_status(&request.repo_root, &paths)?;
+    reject_rename_status(&request.repo_root, &paths)?;
     let targets = paths
         .iter()
         .map(|path| commit_target(&request.repo_root, path))
@@ -43,21 +46,58 @@ pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitRes
         authorize_path(&request, target)?;
     }
 
-    let mut add_args = vec!["add", "--"];
-    add_args.extend(paths.iter().map(String::as_str));
-    git_status(&request.repo_root, &add_args)?;
+    let temporary_index = TemporaryIndex::create(&request.repo_root)?;
+    let commit_message = TemporaryCommitMessage::create(message)?;
+    let disabled_hooks = TemporaryHooksDir::create()?;
+    let result = (|| -> anyhow::Result<CommitResult> {
+        let mut add_args = vec!["add", "--force", "--"];
+        add_args.extend(paths.iter().map(String::as_str));
+        git_status_with_index(&request.repo_root, &add_args, Some(&temporary_index.path))?;
 
-    deny_unrelated_staged_changes(&request.repo_root, &explicit)?;
+        run_commit_hooks_with_index(
+            &request.repo_root,
+            &temporary_index.path,
+            &commit_message.path,
+        )?;
+        revalidate_staged_targets(&request.repo_root, &targets, &temporary_index.path)?;
+        deny_unrelated_staged_changes_with_index(
+            &request.repo_root,
+            &explicit,
+            Some(&temporary_index.path),
+        )?;
+        reject_rename_status_with_index(&request.repo_root, &paths, Some(&temporary_index.path))?;
 
-    let mut commit_args = vec!["commit", "-m", message, "--"];
-    commit_args.extend(paths.iter().map(String::as_str));
-    git_status(&request.repo_root, &commit_args)?;
+        let hooks_config = format!("core.hooksPath={}", disabled_hooks.path.to_string_lossy());
+        let message_path = commit_message.path.to_string_lossy().to_string();
+        let commit_args = vec![
+            "-c",
+            hooks_config.as_str(),
+            "commit",
+            "--no-verify",
+            "-F",
+            message_path.as_str(),
+        ];
+        git_status_with_index(
+            &request.repo_root,
+            &commit_args,
+            Some(&temporary_index.path),
+        )?;
+        run_post_commit_hook_with_index(&request.repo_root, &temporary_index.path);
 
-    let commit_sha = git_stdout(&request.repo_root, &["rev-parse", "HEAD"])?;
-    Ok(CommitResult {
-        commit_sha: commit_sha.trim().to_string(),
-        committed_paths: paths,
-    })
+        let commit_sha = git_stdout(&request.repo_root, &["rev-parse", "HEAD"])?;
+        Ok(CommitResult {
+            commit_sha: commit_sha.trim().to_string(),
+            committed_paths: paths.clone(),
+        })
+    })();
+
+    match result {
+        Ok(result) => {
+            restore_committed_paths_to_head(&request.repo_root, &paths)?;
+            Ok(result)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn normalize_explicit_paths(repo_root: &Path, paths: &[String]) -> anyhow::Result<Vec<String>> {
@@ -67,13 +107,14 @@ fn normalize_explicit_paths(repo_root: &Path, paths: &[String]) -> anyhow::Resul
 
     let mut normalized = Vec::new();
     for path in paths {
-        let path = path.trim();
+        let original_path = path.as_str();
+        let path = original_path.strip_prefix("./").unwrap_or(original_path);
         if is_broad_pathspec(repo_root, path) {
-            anyhow::bail!("explicit file paths are required; rejected pathspec `{path}`");
+            anyhow::bail!("explicit file paths are required; rejected pathspec `{original_path}`");
         }
         let normalized_path = path.replace('\\', "/");
         if matches_tracked_directory(repo_root, &normalized_path)? {
-            anyhow::bail!("explicit file paths are required; rejected pathspec `{path}`");
+            anyhow::bail!("explicit file paths are required; rejected pathspec `{original_path}`");
         }
         normalized.push(normalized_path);
     }
@@ -91,7 +132,6 @@ fn is_broad_pathspec(repo_root: &Path, path: &str) -> bool {
         || Path::new(path).is_absolute()
         || path.starts_with('-')
         || path.starts_with(':')
-        || path.starts_with("./")
         || path.contains("..")
         || path.contains("//")
         || path.contains("/./")
@@ -116,7 +156,16 @@ fn deny_unrelated_staged_changes(
     repo_root: &Path,
     explicit: &BTreeSet<String>,
 ) -> anyhow::Result<()> {
-    let staged = git_stdout(repo_root, &["diff", "--cached", "--name-only"])?;
+    deny_unrelated_staged_changes_with_index(repo_root, explicit, None)
+}
+
+fn deny_unrelated_staged_changes_with_index(
+    repo_root: &Path,
+    explicit: &BTreeSet<String>,
+    index_path: Option<&Path>,
+) -> anyhow::Result<()> {
+    let staged =
+        git_stdout_with_index(repo_root, &["diff", "--cached", "--name-only"], index_path)?;
     let unrelated = staged
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -148,20 +197,21 @@ fn authorize_path(request: &CommitRequest, target: &CommitTarget) -> anyhow::Res
         .workspace_id
         .as_deref()
         .unwrap_or(runtime.workspace_id.as_str());
-    let body = protocol_envelope(
-        &runtime,
-        uuid::Uuid::new_v4().to_string(),
-        session_id,
-        workspace_id,
-        None,
-        "cli",
-        "commit_authorize",
-        "stateful-commit",
-        serde_json::json!({
+    let body = protocol_envelope(ProtocolEnvelopeArgs {
+        runtime: &runtime,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        identity: None,
+        source_kind: "cli",
+        event: "commit_authorize",
+        source_ref: "stateful-commit",
+        source_tool_name: None,
+        payload: serde_json::json!({
             "action": target.action,
             "path": target.path,
         }),
-    );
+    });
     let response = post_json(&runtime, "/v1/authorize", &body)?;
 
     if !(200..300).contains(&response.status_code) {
@@ -207,66 +257,183 @@ fn is_missing_tracked_file(repo_root: &Path, path: &str) -> anyhow::Result<bool>
         return Ok(false);
     }
 
-    Ok(Command::new("git")
-        .args(["ls-files", "--error-unmatch", "--", path])
-        .current_dir(repo_root)
-        .output()?
-        .status
-        .success())
+    Ok(git_command(
+        repo_root,
+        &["ls-files", "--error-unmatch", "--", path],
+        None,
+    )
+    .output()?
+    .status
+    .success())
 }
 
-fn reject_rename_or_copy_status(repo_root: &Path, paths: &[String]) -> anyhow::Result<()> {
-    let mut args = vec!["status", "--porcelain=v1", "--find-renames", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    let status = git_stdout(repo_root, &args)?;
-    for line in status.lines() {
-        let code = line.get(0..2).unwrap_or_default();
-        if code.contains('R') || code.contains('C') || line.contains(" -> ") {
+fn revalidate_staged_targets(
+    repo_root: &Path,
+    authorized_targets: &[CommitTarget],
+    index_path: &Path,
+) -> anyhow::Result<()> {
+    for authorized in authorized_targets {
+        let staged = staged_commit_target(repo_root, &authorized.path, index_path)?;
+        if staged.action != authorized.action {
             anyhow::bail!(
-                "stateful commit does not yet support rename/copy path status for explicit paths"
+                "stateful commit target `{}` changed from {} to {} after authorization; retry the commit",
+                authorized.path,
+                authorized.action,
+                staged.action
             );
         }
     }
+    Ok(())
+}
 
-    let has_missing_tracked = paths
-        .iter()
-        .map(|path| is_missing_tracked_file(repo_root, path))
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .into_iter()
-        .any(|missing| missing);
-    let has_new_file = paths
-        .iter()
-        .map(|path| path_is_new_in_worktree_or_index(repo_root, path))
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .into_iter()
-        .any(|is_new| is_new);
-    if has_missing_tracked && has_new_file {
+fn staged_commit_target(
+    repo_root: &Path,
+    path: &str,
+    index_path: &Path,
+) -> anyhow::Result<CommitTarget> {
+    let staged_entry = git_stdout_with_index(
+        repo_root,
+        &["ls-files", "--stage", "--", path],
+        Some(index_path),
+    )?;
+    let action = if staged_entry.trim().is_empty() {
+        "delete_file"
+    } else {
+        "write_file"
+    };
+
+    Ok(CommitTarget {
+        path: path.to_string(),
+        action,
+    })
+}
+
+fn run_commit_hooks_with_index(
+    repo_root: &Path,
+    index_path: &Path,
+    message_path: &Path,
+) -> anyhow::Result<()> {
+    run_git_hook_with_index(repo_root, index_path, "pre-commit", &[])?;
+    run_git_hook_with_index(
+        repo_root,
+        index_path,
+        "prepare-commit-msg",
+        &[message_path, Path::new("message")],
+    )?;
+    run_git_hook_with_index(repo_root, index_path, "commit-msg", &[message_path])?;
+    Ok(())
+}
+
+fn run_post_commit_hook_with_index(repo_root: &Path, index_path: &Path) {
+    let _ = run_git_hook_with_index(repo_root, index_path, "post-commit", &[]);
+}
+
+fn run_git_hook_with_index(
+    repo_root: &Path,
+    index_path: &Path,
+    hook_name: &str,
+    args: &[&Path],
+) -> anyhow::Result<()> {
+    let hook_rev_path = format!("hooks/{hook_name}");
+    let hook_path = git_stdout(
+        repo_root,
+        &["rev-parse", "--git-path", hook_rev_path.as_str()],
+    )?;
+    let hook_path = PathBuf::from(hook_path.trim());
+    let hook_path = if hook_path.is_absolute() {
+        hook_path
+    } else {
+        repo_root.join(hook_path)
+    };
+    if !hook_path.is_file() {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&hook_path)?.permissions().mode();
+        if mode & 0o111 == 0 {
+            return Ok(());
+        }
+    }
+
+    let mut command = Command::new(&hook_path);
+    command.current_dir(repo_root);
+    sanitize_git_environment(&mut command);
+    let git_dir = git_stdout(repo_root, &["rev-parse", "--absolute-git-dir"])?;
+    command.env("GIT_DIR", git_dir.trim());
+    command.env("GIT_WORK_TREE", repo_root);
+    command.env("GIT_INDEX_FILE", index_path);
+    command.args(args);
+    let output = command.output()?;
+    if !output.status.success() {
         anyhow::bail!(
-            "stateful commit does not yet support rename/copy path status for explicit paths"
+            "{hook_name} hook failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
     Ok(())
 }
 
-fn path_is_new_in_worktree_or_index(repo_root: &Path, path: &str) -> anyhow::Result<bool> {
-    if !repo_root.join(path).exists() {
-        return Ok(false);
-    }
+fn reject_rename_status(repo_root: &Path, paths: &[String]) -> anyhow::Result<()> {
+    reject_rename_status_with_index(repo_root, paths, None)
+}
 
-    Ok(!Command::new("git")
-        .args(["cat-file", "-e", &format!("HEAD:{path}")])
-        .current_dir(repo_root)
-        .output()?
-        .status
-        .success())
+fn reject_rename_status_with_index(
+    repo_root: &Path,
+    paths: &[String],
+    index_path: Option<&Path>,
+) -> anyhow::Result<()> {
+    let mut args = vec!["status", "--porcelain=v1", "--find-renames", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let status = git_stdout_with_index(repo_root, &args, index_path)?;
+    reject_rename_lines(status.lines())?;
+
+    let mut unstaged_args = vec!["diff", "--name-status", "--find-renames", "--"];
+    unstaged_args.extend(paths.iter().map(String::as_str));
+    let unstaged = git_stdout_with_index(repo_root, &unstaged_args, index_path)?;
+    reject_rename_lines(unstaged.lines())?;
+
+    let mut staged_args = vec!["diff", "--cached", "--name-status", "--find-renames", "--"];
+    staged_args.extend(paths.iter().map(String::as_str));
+    let staged = git_stdout_with_index(repo_root, &staged_args, index_path)?;
+    reject_rename_lines(staged.lines())?;
+
+    Ok(())
+}
+
+fn reject_rename_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> anyhow::Result<()> {
+    for line in lines {
+        let status = line.split_whitespace().next().unwrap_or_default();
+        let porcelain_code = line.get(0..2).unwrap_or_default();
+        if status.starts_with('R') || porcelain_code.contains('R') || line.contains(" -> ") {
+            anyhow::bail!(
+                "stateful commit does not yet support rename path status for explicit paths"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn restore_committed_paths_to_head(repo_root: &Path, paths: &[String]) -> anyhow::Result<()> {
+    let mut args = vec!["restore", "--staged", "--source", "HEAD", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    git_status(repo_root, &args)
 }
 
 fn git_status(repo_root: &Path, args: &[&str]) -> anyhow::Result<()> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo_root)
-        .output()?;
+    git_status_with_index(repo_root, args, None)
+}
+
+fn git_status_with_index(
+    repo_root: &Path,
+    args: &[&str],
+    index_path: Option<&Path>,
+) -> anyhow::Result<()> {
+    let mut command = git_command(repo_root, args, index_path);
+    let output = command.output()?;
 
     if !output.status.success() {
         anyhow::bail!(
@@ -279,11 +446,111 @@ fn git_status(repo_root: &Path, args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct TemporaryIndex {
+    path: PathBuf,
+}
+
+impl TemporaryIndex {
+    fn create(repo_root: &Path) -> anyhow::Result<Self> {
+        let index_path = git_index_path(repo_root)?;
+        let path = std::env::temp_dir().join(format!(
+            "stateful-commit-index-{}-{}.index",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        if index_path.is_file() {
+            fs::copy(&index_path, &path)?;
+        }
+        Ok(Self { path })
+    }
+
+    fn cleanup(&self) {
+        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_file(self.path.with_extension("index.lock"));
+    }
+}
+
+impl Drop for TemporaryIndex {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+struct TemporaryCommitMessage {
+    path: PathBuf,
+}
+
+impl TemporaryCommitMessage {
+    fn create(message: &str) -> anyhow::Result<Self> {
+        let path = std::env::temp_dir().join(format!(
+            "stateful-commit-message-{}-{}.txt",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&path, format!("{message}\n"))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for TemporaryCommitMessage {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+struct TemporaryHooksDir {
+    path: PathBuf,
+}
+
+impl TemporaryHooksDir {
+    fn create() -> anyhow::Result<Self> {
+        let path = std::env::temp_dir().join(format!(
+            "stateful-empty-hooks-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&path)?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for TemporaryHooksDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.path);
+    }
+}
+
+fn git_index_path(repo_root: &Path) -> anyhow::Result<PathBuf> {
+    let path = git_stdout(repo_root, &["rev-parse", "--git-path", "index"])?;
+    let path = PathBuf::from(path.trim());
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(repo_root.join(path))
+    }
+}
+
 fn git_stdout(repo_root: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo_root)
-        .output()?;
+    git_stdout_with_index(repo_root, args, None)
+}
+
+fn git_stdout_with_index(
+    repo_root: &Path,
+    args: &[&str],
+    index_path: Option<&Path>,
+) -> anyhow::Result<String> {
+    Ok(String::from_utf8(git_stdout_bytes_with_index(
+        repo_root, args, index_path,
+    )?)?)
+}
+
+fn git_stdout_bytes_with_index(
+    repo_root: &Path,
+    args: &[&str],
+    index_path: Option<&Path>,
+) -> anyhow::Result<Vec<u8>> {
+    let mut command = git_command(repo_root, args, index_path);
+    let output = command.output()?;
 
     if !output.status.success() {
         anyhow::bail!(
@@ -293,7 +560,39 @@ fn git_stdout(repo_root: &Path, args: &[&str]) -> anyhow::Result<String> {
         );
     }
 
-    Ok(String::from_utf8(output.stdout)?)
+    Ok(output.stdout)
+}
+
+fn git_command(repo_root: &Path, args: &[&str], index_path: Option<&Path>) -> Command {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(repo_root);
+    sanitize_git_environment(&mut command);
+    if let Some(index_path) = index_path {
+        command.env("GIT_INDEX_FILE", index_path);
+    }
+    command
+}
+
+fn sanitize_git_environment(command: &mut Command) {
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_PAGER",
+    ] {
+        command.env_remove(key);
+    }
+    for (key, _value) in std::env::vars_os() {
+        let key_name = key.to_string_lossy();
+        if key_name.starts_with("GIT_CONFIG_") || key_name.starts_with("GIT_TRACE") {
+            command.env_remove(&key);
+        }
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]

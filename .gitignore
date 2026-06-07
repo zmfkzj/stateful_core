@@ -14,5 +14,6 @@ __pycache__/
 .stateful_core/
 .stateful_bench/
 
-# Internal implementation plans and scratch specs live outside the public repo.
+# New scratch implementation plans stay local. Selected historical plans may
+# remain tracked under docs/superpowers/ for traceability.
 docs/superpowers/

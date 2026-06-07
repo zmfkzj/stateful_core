@@ -2,18 +2,78 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
+    path::Path,
     process::Command,
     sync::mpsc,
     thread,
 };
 
 use stateful_cli::{
-    CurrentSession, GlobalPaths, IntentDeclareArgs, ServerRuntime, declare_intent_via_http,
-    discover_runtime, discover_runtime_with_global, get_json, global_state_db_path, post_json,
-    read_current_session_file, read_current_session_file_for_codex_run, state_db_path,
+    CurrentSession, GlobalPaths, IntentCancelArgs, IntentClaimArgs, IntentDeclareArgs,
+    IntentRequestArgs, ServerRuntime, cancel_intent_via_http, claim_intent_via_http,
+    declare_intent_via_http, discover_runtime, discover_runtime_with_global, get_json,
+    global_state_db_path, post_json, read_current_session_file,
+    read_current_session_file_for_codex_run, request_intent_via_http, state_db_path,
     write_current_session_file, write_current_session_file_for_codex_run,
     write_global_runtime_file, write_runtime_file,
 };
+
+const CURRENT_SESSION_CHILD_CASE: &str = "STATEFUL_RUNTIME_CURRENT_SESSION_CHILD_CASE";
+const CURRENT_SESSION_CHILD_ROOT: &str = "STATEFUL_RUNTIME_CURRENT_SESSION_CHILD_ROOT";
+
+fn run_current_session_child(repo_root: &Path, child_case: &str) {
+    let output = Command::new(std::env::current_exe().expect("current test binary path"))
+        .arg("current_session_file_child_probe")
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env_clear()
+        .env(CURRENT_SESSION_CHILD_CASE, child_case)
+        .env(CURRENT_SESSION_CHILD_ROOT, repo_root)
+        .output()
+        .expect("current session child test should run");
+    assert!(
+        output.status.success(),
+        "current session child failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
+fn current_session_file_child_probe() {
+    let Ok(child_case) = std::env::var(CURRENT_SESSION_CHILD_CASE) else {
+        return;
+    };
+    let repo_root = std::path::PathBuf::from(
+        std::env::var_os(CURRENT_SESSION_CHILD_ROOT)
+            .expect("current session child root must be configured"),
+    );
+
+    match child_case.as_str() {
+        "read_symlink_error" => {
+            let error =
+                read_current_session_file(&repo_root).expect_err("symlinked session should fail");
+            assert!(error.to_string().contains("symlinked current session file"));
+        }
+        "write_symlink_error" => {
+            let error = write_current_session_file(&repo_root, &CurrentSession::new("s1", "w1"))
+                .expect_err("symlinked session write should fail");
+            assert!(error.to_string().contains("symlinked current session file"));
+        }
+        "write_non_regular_error" => {
+            let error = write_current_session_file(&repo_root, &CurrentSession::new("s1", "w1"))
+                .expect_err("socket session write should fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("current session file is not a regular file")
+            );
+        }
+        other => panic!("unknown current session child case `{other}`"),
+    }
+}
 
 #[test]
 fn runtime_file_round_trips_server_discovery() {
@@ -98,6 +158,7 @@ fn cli_current_uses_repo_local_runtime_when_global_paths_are_unavailable() {
         fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
     }
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -130,6 +191,101 @@ fn cli_current_uses_repo_local_runtime_when_global_paths_are_unavailable() {
 }
 
 #[test]
+fn cli_current_rejects_env_runtime_without_required_capabilities() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-runtime-env-old-server-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request_without_body(&mut stream);
+        assert!(request.contains("GET /v1/runtime/identity HTTP/1.1"));
+        write_http_response(
+            &mut stream,
+            r#"{"status":"ok","pid":77,"protocol_version":"stateful.v1"}"#,
+        );
+    });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+        .arg("current")
+        .current_dir(&temp_root)
+        .env_clear()
+        .env("STATEFUL_SERVER_URL", format!("http://{addr}"))
+        .env("STATEFUL_SERVER_TOKEN", "secret-token")
+        .output()
+        .expect("stateful current should run");
+
+    assert!(
+        !output.status.success(),
+        "old env runtime should fail capability validation"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("does not support required runtime capabilities"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn cli_current_accepts_env_runtime_with_required_capabilities() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-runtime-env-capable-server-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    thread::spawn(move || {
+        let (mut stream, _) = listener
+            .accept()
+            .expect("identity connection should arrive");
+        let request = read_http_request_without_body(&mut stream);
+        assert!(request.contains("GET /v1/runtime/identity HTTP/1.1"));
+        write_http_response(
+            &mut stream,
+            r#"{"status":"ok","pid":77,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+        );
+
+        let (mut stream, _) = listener.accept().expect("current connection should arrive");
+        let request = read_http_request_without_body(&mut stream);
+        assert!(request.contains("GET /v1/current HTTP/1.1"));
+        write_http_response(&mut stream, r#"{"status":"ok","current":{}}"#);
+    });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+        .arg("current")
+        .current_dir(&temp_root)
+        .env_clear()
+        .env("STATEFUL_SERVER_URL", format!("http://{addr}"))
+        .env("STATEFUL_SERVER_TOKEN", "secret-token")
+        .output()
+        .expect("stateful current should run");
+
+    assert!(
+        output.status.success(),
+        "capable env runtime should work: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"ok\""));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn current_session_file_round_trips_for_mcp_enrichment() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-current-session-test-{}",
@@ -146,6 +302,81 @@ fn current_session_file_round_trips_for_mcp_enrichment() {
     let session = read_current_session_file(&temp_root).expect("current session should read");
     assert_eq!(session.session_id, "s1");
     assert_eq!(session.workspace_id, "w1");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[cfg(unix)]
+#[test]
+fn current_session_file_refuses_symlink_before_reading() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-current-session-symlink-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(temp_root.join(".stateful_core/runtime"))
+        .expect("runtime dir should be creatable");
+    let victim = temp_root.join("victim-session.json");
+    fs::write(&victim, r#"{"session_id":"s1","workspace_id":"w1"}"#)
+        .expect("victim session should write");
+    std::os::unix::fs::symlink(
+        &victim,
+        temp_root.join(".stateful_core/runtime/session.json"),
+    )
+    .expect("current session symlink should create");
+
+    run_current_session_child(&temp_root, "read_symlink_error");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[cfg(unix)]
+#[test]
+fn current_session_file_refuses_symlink_before_writing() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-current-session-write-symlink-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(temp_root.join(".stateful_core/runtime"))
+        .expect("runtime dir should be creatable");
+    let victim = temp_root.join("victim-session.json");
+    fs::write(&victim, "victim\n").expect("victim should write");
+    std::os::unix::fs::symlink(
+        &victim,
+        temp_root.join(".stateful_core/runtime/session.json"),
+    )
+    .expect("current session symlink should create");
+
+    run_current_session_child(&temp_root, "write_symlink_error");
+    assert_eq!(
+        fs::read_to_string(&victim).expect("victim should read"),
+        "victim\n"
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[cfg(unix)]
+#[test]
+fn current_session_file_refuses_non_regular_file_before_writing() {
+    let temp_root = std::env::temp_dir().join(format!("scws-{}", std::process::id()));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(temp_root.join(".stateful_core/runtime"))
+        .expect("runtime dir should be creatable");
+    let session_path = temp_root.join(".stateful_core/runtime/session.json");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&session_path).expect("session socket should bind");
+
+    run_current_session_child(&temp_root, "write_non_regular_error");
+
+    drop(listener);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -253,6 +484,7 @@ fn post_json_sends_bearer_token_and_payload() {
         &serde_json::json!({
             "session_id": "s1",
             "workspace_id": "w1",
+            "purpose": "Fix auth validation behavior.",
             "files_planned": ["src/auth.ts"]
         }),
     )
@@ -263,6 +495,7 @@ fn post_json_sends_bearer_token_and_payload() {
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
+    assert!(request.contains("\"purpose\":\"Fix auth validation behavior.\""));
     assert!(request.contains("\"files_planned\":[\"src/auth.ts\"]"));
 }
 
@@ -314,6 +547,7 @@ fn declare_intent_via_http_posts_expected_payload() {
         IntentDeclareArgs {
             session_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
+            purpose: "Fix auth validation behavior.".to_string(),
             files_planned: vec!["src/auth.ts".to_string()],
             identity: None,
         },
@@ -344,10 +578,154 @@ fn declare_intent_via_http_posts_expected_payload() {
     assert_eq!(
         body["payload"],
         serde_json::json!({
+            "purpose": "Fix auth validation behavior.",
             "files_planned": ["src/auth.ts"]
         })
     );
     assert!(body.get("files_planned").is_none());
+}
+
+#[test]
+fn claim_intent_via_http_posts_expected_payload() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request(&mut stream);
+        tx.send(request).expect("request should send to test");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}")
+            .expect("response should write");
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
+
+    claim_intent_via_http(
+        &runtime,
+        IntentClaimArgs {
+            session_id: "s1".to_string(),
+            workspace_id: "w1".to_string(),
+            wait_id: "wait-1".to_string(),
+            identity: None,
+        },
+    )
+    .expect("intent claim should post");
+
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("POST /v1/intent/claim HTTP/1.1"));
+    let body = request_json_body(&request);
+    assert_eq!(body["protocol_version"], "stateful.v1");
+    assert_eq!(body["session"]["session_id"], "s1");
+    assert_eq!(body["workspace"]["workspace_id"], "w1");
+    assert_eq!(body["source"]["kind"], "cli");
+    assert_eq!(body["source"]["event"], "intent_claim");
+    assert_eq!(body["source"]["source_ref"], "stateful-cli");
+    assert_eq!(
+        body["payload"],
+        serde_json::json!({
+            "wait_id": "wait-1"
+        })
+    );
+    assert!(body.get("wait_id").is_none());
+}
+
+#[test]
+fn request_intent_via_http_posts_expected_payload() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request(&mut stream);
+        tx.send(request).expect("request should send to test");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}")
+            .expect("response should write");
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
+
+    request_intent_via_http(
+        &runtime,
+        IntentRequestArgs {
+            session_id: "s1".to_string(),
+            workspace_id: "w1".to_string(),
+            request_id: "request-1".to_string(),
+            action: "write_file".to_string(),
+            path: "src/auth.ts".to_string(),
+            purpose: "Queue auth file changes.".to_string(),
+            identity: None,
+        },
+    )
+    .expect("intent request should post");
+
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("POST /v1/intent/request HTTP/1.1"));
+    let body = request_json_body(&request);
+    assert_eq!(body["protocol_version"], "stateful.v1");
+    assert_eq!(body["session"]["session_id"], "s1");
+    assert_eq!(body["workspace"]["workspace_id"], "w1");
+    assert_eq!(body["source"]["kind"], "cli");
+    assert_eq!(body["source"]["event"], "intent_request");
+    assert_eq!(body["source"]["source_ref"], "stateful-cli");
+    assert_eq!(
+        body["payload"],
+        serde_json::json!({
+            "request_id": "request-1",
+            "action": "write_file",
+            "path": "src/auth.ts",
+            "purpose": "Queue auth file changes."
+        })
+    );
+    assert!(body.get("request_id").is_some());
+}
+
+#[test]
+fn cancel_intent_via_http_posts_expected_payload() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request(&mut stream);
+        tx.send(request).expect("request should send to test");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}")
+            .expect("response should write");
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
+
+    cancel_intent_via_http(
+        &runtime,
+        IntentCancelArgs {
+            session_id: "s1".to_string(),
+            workspace_id: "w1".to_string(),
+            request_id: "request-1".to_string(),
+            identity: None,
+        },
+    )
+    .expect("intent cancel should post");
+
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("POST /v1/intent/cancel HTTP/1.1"));
+    let body = request_json_body(&request);
+    assert_eq!(body["protocol_version"], "stateful.v1");
+    assert_eq!(body["session"]["session_id"], "s1");
+    assert_eq!(body["workspace"]["workspace_id"], "w1");
+    assert_eq!(body["source"]["kind"], "cli");
+    assert_eq!(body["source"]["event"], "intent_cancel");
+    assert_eq!(body["source"]["source_ref"], "stateful-cli");
+    assert_eq!(
+        body["payload"],
+        serde_json::json!({
+            "request_id": "request-1"
+        })
+    );
 }
 
 fn request_json_body(request: &str) -> serde_json::Value {
@@ -382,6 +760,16 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> String {
     buffer.extend_from_slice(&body);
 
     String::from_utf8(buffer).expect("request should be utf8")
+}
+
+fn write_http_response(stream: &mut std::net::TcpStream, body: &str) {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(response.as_bytes())
+        .expect("response should write");
 }
 
 fn read_http_request_without_body(stream: &mut std::net::TcpStream) -> String {

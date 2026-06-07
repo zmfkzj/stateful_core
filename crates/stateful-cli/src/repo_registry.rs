@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::Context;
 
-use crate::{GlobalPaths, default_config_yml, default_validation_yml, install_repo_local};
+use crate::{GlobalPaths, default_config_yml, install_repo_local_with_global_codex_config};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RepoRegistry {
@@ -85,7 +85,6 @@ pub struct RepoEntry {
     pub root: PathBuf,
     pub enabled: bool,
     pub enabled_at: String,
-    pub validation_config_path: PathBuf,
     pub policy_config_path: PathBuf,
     pub codex_mode: CodexMode,
 }
@@ -150,6 +149,15 @@ pub fn enable_repo(
     repo: impl AsRef<Path>,
     repo_local_codex: bool,
 ) -> anyhow::Result<RepoEntry> {
+    enable_repo_with_global_codex_config(paths, repo, repo_local_codex, None)
+}
+
+pub(crate) fn enable_repo_with_global_codex_config(
+    paths: &GlobalPaths,
+    repo: impl AsRef<Path>,
+    repo_local_codex: bool,
+    global_codex_config: Option<&Path>,
+) -> anyhow::Result<RepoEntry> {
     let root = detect_git_root(repo)?;
     if repo_local_codex {
         crate::ensure_repo_local_install_can_write(&root)?;
@@ -158,18 +166,13 @@ pub fn enable_repo(
     ensure_repo_configs(&root)?;
     if repo_local_codex {
         let policy_config = root.join(".stateful/config.yml");
-        let validation_config = root.join(".stateful/validation.yml");
         let policy_contents = fs::read(&policy_config)
             .with_context(|| format!("failed to read {}", policy_config.display()))?;
-        let validation_contents = fs::read(&validation_config)
-            .with_context(|| format!("failed to read {}", validation_config.display()))?;
         let binary_path = current_stateful_binary_path()?;
 
-        install_repo_local(&root, &binary_path)?;
+        install_repo_local_with_global_codex_config(&root, &binary_path, global_codex_config)?;
         fs::write(&policy_config, policy_contents)
             .with_context(|| format!("failed to restore {}", policy_config.display()))?;
-        fs::write(&validation_config, validation_contents)
-            .with_context(|| format!("failed to restore {}", validation_config.display()))?;
     }
 
     let entry = RepoEntry {
@@ -177,7 +180,6 @@ pub fn enable_repo(
         root: root.clone(),
         enabled: true,
         enabled_at: current_unix_timestamp()?,
-        validation_config_path: root.join(".stateful/validation.yml"),
         policy_config_path: root.join(".stateful/config.yml"),
         codex_mode: if repo_local_codex {
             CodexMode::RepoLocal
@@ -252,12 +254,6 @@ fn ensure_repo_configs(root: &Path) -> anyhow::Result<()> {
     if !policy_config.exists() {
         fs::write(&policy_config, default_config_yml())
             .with_context(|| format!("failed to write {}", policy_config.display()))?;
-    }
-
-    let validation_config = stateful_dir.join("validation.yml");
-    if !validation_config.exists() {
-        fs::write(&validation_config, default_validation_yml())
-            .with_context(|| format!("failed to write {}", validation_config.display()))?;
     }
 
     Ok(())

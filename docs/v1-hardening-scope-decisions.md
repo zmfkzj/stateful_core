@@ -1,8 +1,12 @@
 # V1 Hardening Scope Decisions
 
+This is a dated planning artifact for the v1 hardening pass, not a complete
+description of the current implementation. The README and implementation
+contract are authoritative for shipped behavior.
+
 This document locks the product and implementation decisions for the next v1
 hardening pass. The project should move beyond the current prototype surface and
-implement the stricter recommended direction for scheduling, validation,
+implement the stricter recommended direction for scheduling, sandboxed tests,
 protocol metadata, policy routing, local security, IDE save gating, structured
 MCP writes, doctor checks, and deployment UX.
 
@@ -11,7 +15,7 @@ are still out of scope.
 
 ## Scheduling
 
-Implement the full scheduling API now:
+Implement the full scheduling API:
 
 ```text
 POST /v1/intent/request
@@ -24,8 +28,18 @@ Available requests may grant immediately. Conflicting requests queue FIFO.
 
 `intent/claim` is the official reservation claim path. It creates
 write-authorizing intent and active leases only for the reservation owner.
-Implicit claim-on-authorize should be removed from the official path after the
-claim endpoint and clients are migrated.
+Implicit claim-on-authorize has been removed from the official path for
+`/v1/authorize`; clients must reread the reserved target, call
+`state.intent.claim` or `stateful intent claim --wait-id <id>`, then retry the
+write after the claim creates write-authorizing intent and active same-session
+leases.
+
+Current implementation status: `/v1/intent/request`, `/v1/intent/claim`, and
+`/v1/intent/cancel` are implemented with MCP tools and CLI commands. Immediate
+availability returns a `reserved` request state; the reserved session must still
+reread the target and call `intent/claim`. `/v1/authorize` no longer claims a
+reservation implicitly; it returns `reservation_claim_required` for the reserved
+session until the session explicitly claims the reservation.
 
 `intent/cancel` cancels queued or reserved requests owned by the caller. It must
 not cancel another session's reservation or reorder waiters.
@@ -34,38 +48,23 @@ Remove public `stateful intent wait --timeout` documentation and do not
 implement it in this pass. Waiting can be a later CLI convenience over
 notifications and `resume next`.
 
-## Validation Profiles
+## Sandboxed Tests
 
-Promote validation profiles from a convenience runner to a policy surface.
-Official validation execution paths are:
+Raw Bash commands are not a write-authorizing or test execution path. Official
+test execution uses the trusted sandbox wrapper:
 
 ```text
-stateful validate <profile>
-state.validation.run
-POST /v1/validation/run
+stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." target/
+stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
+stateful sandbox run --fs write-targets --network enabled --write-dir target --command <cmd>
 ```
 
-Raw Bash commands are not a write-authorizing or validation execution path. The
-hardening target is to deny Bash unless the tool payload carries structured
-read-only sandbox metadata with network disabled, and to tell the user to run
-named validation profiles for tests instead.
-
-Validation policy semantics:
-
-- `timeout_seconds` is enforced as it is today.
-- `exclusive: true` acquires a workspace-level validation lock. While active,
-  other validation runs and write-authorizing operations in the same workspace
-  are denied or queued according to policy.
-- `exclusive: false` allows concurrent validation when no other policy conflict
-  exists.
-- `denied_writes` always wins. Newly dirty paths matching `denied_writes`
-  produce policy failure.
-- `allowed_writes` becomes a real post-run policy input. Newly dirty paths must
-  be covered by `allowed_writes` unless they are already permitted by a more
-  specific profile rule.
-- Profile `env` is allowed but explicit. The runner should not blindly preserve
-  all sensitive shell environment into validation commands. Secret pass-through
-  requires a future allowlist and is not included here.
+Hook-mediated Bash must be a single strict invocation of the trusted absolute
+`stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
+<cmd>`. `--write-dir` is limited to the `target/` artifact tree; source-tree edits use native
+Codex edit tools such as `apply_patch` or Edit after exact intent declaration
+and a successful same-session file lease. Command-shaped source writes require exact
+`--write-target` or `--create-target` entries.
 
 ## Protocol Envelope
 
@@ -88,7 +87,7 @@ Side-effecting HTTP requests must use a v1 envelope:
     "branch": "main"
   },
   "source": {
-    "kind": "codex_hook",
+    "kind": "hook",
     "event": "pre_tool_use",
     "source_ref": "tool-call-id"
   },
@@ -111,7 +110,7 @@ other write-authorizing state transitions where duplicate retries are possible.
 
 ## Policy Service
 
-Introduce a two-layer policy architecture:
+The codebase uses a two-layer policy architecture:
 
 - `stateful-core` keeps pure, store-free decision logic.
 - `stateful-server::policy_service` owns store-aware orchestration.
@@ -120,23 +119,20 @@ HTTP handlers should authenticate and parse protocol input, then delegate final
 allow, warn, deny, and error decisions to the policy service. Handlers should not
 carry independent policy branches.
 
-The server policy service should normalize operations:
+The server policy service normalizes `authorize_write` and `claim_intent`.
+Remaining scheduling and orchestration work should extend it with:
 
 ```text
-authorize_write
 request_intent
-claim_intent
 cancel_intent
 acquire_lease
 release_lease
-run_validation
 ack_reconciliation
 check_conflicts
 ```
 
 The policy service may perform store-backed orchestration such as lazy
-expiration, reservation lookup, queue promotion, validation lock checks, and
-decision-to-event mapping.
+expiration, reservation lookup, queue promotion, and decision-to-event mapping.
 
 ## IDE Save Gate
 
@@ -150,18 +146,19 @@ requirements.
 
 Filesystem watcher inference remains out of scope for this pass.
 
-## Structured MCP Writes
+## Repo File Edits
 
-Support structured MCP filesystem and git write tools under stateful
-authorization.
+MCP file-write tools are not the current repo edit path. Repo file edits should
+use native Codex edit tools such as `apply_patch` or Edit after exact intent
+declaration and a successful same-session file lease. Hooks normalize hook-exposed targets,
+call the same policy service as MCP and CLI, fail closed on missing state,
+protocol mismatch, or denied authorization, and record activity after successful
+edits.
 
-MCP write tools must:
-
-- normalize targets before authorization
-- call the same policy service as hooks and CLI
-- use protocol envelopes
-- fail closed on missing state, protocol mismatch, or denied authorization
-- record activity after successful writes
+Command-shaped writes remain outside MCP and must use
+`stateful sandbox run --fs write-targets` with exact `--write-target` or
+`--create-target` entries. Artifact-producing tests use `--write-dir target`
+after exact `target/` intent and a successful same-session directory lease.
 
 Structured git writes should remain narrower than arbitrary git. `stateful
 commit` remains the default local wrapper, while MCP git tools can expose
@@ -201,7 +198,7 @@ Expand `stateful doctor` from install/config checks to actionable diagnostics:
 - runtime identity consistency
 - config schema validation
 - SQLite migration/version inspection
-- validation profile parseability
+- sandbox-run smoke checks
 - repo enabled/disabled status
 - hook and MCP installation status
 - prescriptive next action for common failure modes
@@ -225,18 +222,20 @@ distribution story for hook-capable agents:
 - Hosted state service
 - Broad filesystem watcher as the primary human observation mechanism
 - Full arbitrary git command authorization
-- Secret pass-through policy for validation environments
+- Secret pass-through policy for sandboxed test environments
 
 ## Implementation Order
 
-1. Remove `intent wait` docs.
-2. Add protocol envelope builders for CLI, hook, MCP, and outbox.
-3. Add server protocol parser and migration tests.
-4. Introduce policy service and move `/v1/authorize` first.
-5. Implement `intent/request`, `intent/claim`, and `intent/cancel`.
-6. Enforce validation profile policy semantics.
-7. Add IDE save gate API and structured MCP write tools.
-8. Add background expiration, retention pruning, and rolling maximum.
-9. Harden runtime files and local trust checks.
-10. Expand doctor diagnostics.
-11. Add managed hook and plugin deployment UX.
+1. Done: remove `intent wait` docs.
+2. Done: add protocol envelope builders for CLI, hook, MCP, and outbox.
+3. Done: add server protocol parser and migration tests.
+4. Done: introduce policy service and move `/v1/authorize` first.
+5. Done: implement explicit `intent/request`, `intent/claim`, and
+   `intent/cancel`.
+6. Done: enforce sandbox-run write-target policy semantics.
+7. Remaining: add IDE save gate API and harden native Codex edit hook target
+   extraction.
+8. Remaining: add background expiration, retention pruning, and rolling maximum.
+9. Remaining: harden runtime files and local trust checks.
+10. Remaining: expand doctor diagnostics.
+11. Remaining: add managed hook and plugin deployment UX.

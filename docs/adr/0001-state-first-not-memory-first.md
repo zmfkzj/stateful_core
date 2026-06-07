@@ -45,13 +45,18 @@ The default intent TTL is 15 minutes. Heartbeats may extend active intent up to
 a 60-minute maximum from declaration. Blocked or finalized work does not
 authorize writes.
 
-V1 denies Bash command text as an authorization source. Bash is allowed only
-when the top-level tool payload supplies structured read-only sandbox metadata,
-network access is explicitly disabled, and writable roots are absent or limited
-to trusted tmp roots. Repo write authorization starts with structured paths such
-as `state_file_write` / `state.file.write`, where target paths can be checked
-before writing. Raw Bash test commands are not allowlisted; tests run through
-controlled validation actions such as `state.validation.run`.
+The original V1 hardening target denied Bash command text as an authorization
+source and explored a constrained read-only hook path. The current
+implementation supersedes that target: raw Bash is denied by stateful hooks.
+Hook-mediated Bash must be a single strict invocation of the trusted absolute
+`stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
+<cmd>`. Repo file edit authorization starts with native Codex edit tools such as
+`apply_patch` or Edit after exact intent and a successful same-session file lease, where
+target paths can be checked before writing, or with `--fs write-targets` wrapper
+calls that declare explicit targets. Raw Bash test commands are not allowlisted;
+use `stateful sandbox run --fs write-targets --write-dir target --command <cmd>`
+after exact `target/` directory intent and a successful same-session directory
+lease.
 
 Overrides are never automatic. A blocked write can proceed only when the user
 explicitly instructs the current session to allow a specific resource override.

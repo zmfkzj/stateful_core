@@ -13,7 +13,6 @@ The model is intentionally narrow:
 - `conflict`
 - `finalization`
 - `override`
-- `validation`
 
 These state kinds describe active coordination, not general-purpose memory or
 all durable agent facts.
@@ -144,9 +143,9 @@ Only `file` and `directory` resources can authorize filesystem writes. Other
 resource types can warn, coordinate, or constrain controlled actions, but cannot
 authorize filesystem mutation.
 
-`test` resources are tied to controlled validation profiles. They may constrain
-`state.validation.run`, including denying concurrent execution when a profile is
-marked `exclusive`, but they do not authorize source writes.
+`test` resources may inform future test coordination policy, but they do not
+authorize filesystem mutation. Test commands write artifacts through explicit
+sandbox-run write directories.
 
 `task`, `port`, and `migration` resources are context and warning signals in v1.
 They can appear in prompt context and conflict records, but cannot block general
@@ -215,6 +214,7 @@ actions.
 ```text
 intent_id
 session_id
+purpose
 goal
 phase
 files_planned
@@ -228,10 +228,18 @@ status: active | superseded | finalized | expired
 ```
 
 Hooks must require an active intent before allowing supported write tool paths.
-For v1, a write-authorizing intent must include at least one file or directory
-scope in `files_planned`. Abstract resources in `resources_planned`, such as
+For v1, a write-authorizing intent must include a non-empty `purpose` plus at
+least one file or directory scope in `files_planned`. The server rejects an empty
+`files_planned` array or empty or normalized-empty path with `missing_scope`.
+Callers must infer purpose from the user or agent instruction when it is not
+explicit; the server does not generate a fallback purpose. Abstract resources in
+`resources_planned`, such as
 `task`, `test`, `port`, or `migration`, can provide context but cannot authorize
 writes.
+
+Intent declarations replace the session's active scope in that workspace; they
+do not append. When a caller adds or changes targets, it must redeclare the
+complete intended file set for that session and workspace.
 
 ## Intent Scope Matching
 
@@ -267,7 +275,7 @@ conflict_id
 session_id
 target_resource
 conflicting_session_id
-conflict_type: missing_intent | active_lease | planned_edit | stale_state | human_change | unreconciled_human_write | soft_repo_conflict | unknown_repo_identity | validation_profile_active | coordination_resource_overlap
+conflict_type: missing_intent | active_lease | planned_edit | stale_state | human_change | unreconciled_human_write | soft_repo_conflict | unknown_repo_identity | coordination_resource_overlap
 severity: warn | block
 decision: allow | warn | deny
 reason
@@ -285,17 +293,18 @@ checks with `conflict_type: missing_intent`.
 ## Wait Queue Record
 
 A wait queue record captures a hard-conflict intent request that cannot be
-granted immediately.
+reserved immediately.
 
 ```text
 queue_id
 request_id
 session_id
 workspace_id
+purpose
 resources
 queue_sequence
 queued_at
-status: queued | reserved | granted | canceled | expired
+status: queued | reserved | claimed | canceled | expired
 blocked_by_session_id
 blocked_by_lease_id
 reservation_expires_at
@@ -303,18 +312,25 @@ grant_trigger: explicit_release | session_finalization | lease_expiry
 ```
 
 The queue is FIFO by `queue_sequence`. A queued request can be promoted only
-when every requested resource is available. V1 uses atomic all-or-nothing grant:
-multi-resource requests are never partially granted.
+when every requested resource is available. `purpose` is required and remains the
+caller-supplied purpose from the original request. V1 uses atomic all-or-nothing
+reservation: multi-resource requests are never partially reserved.
+
+The current implementation handles one requested path per wait request.
+Multi-resource all-or-nothing scheduling is the target model for future
+hardening.
 
 Grant triggers are limited to explicit lease release, session or activity
 finalization, or lease expiry. Soft repo-relative conflicts do not create wait
 queue records in v1.
 
 Promotion creates a reservation, not active write authority. The waiting session
-must claim the reservation before the server creates active intent and active
-leases. The default reservation TTL is 120 seconds. If the reservation is not
-claimed before `reservation_expires_at`, the reservation expires and the server
-may promote the next eligible FIFO waiter.
+must reread the target, then explicitly claim the reservation with
+`state.intent.claim` or `stateful intent claim --wait-id <id>`. Only that claim
+creates write-authorizing intent and active same-session leases. The default
+reservation TTL is 120 seconds. If the reservation is not claimed before
+`reservation_expires_at`, the reservation expires and the server may promote the
+next eligible FIFO waiter.
 
 For multi-resource requests, a request is eligible only when it is at the head of
 every resource queue it participates in and every requested resource has no
@@ -322,16 +338,19 @@ active lease. A request that is first for one resource but blocked behind anothe
 request on a second resource stays queued.
 
 `request_id` is the idempotency key. Repeating an intent request with the same
-`request_id` must return the existing queue, reservation, grant, cancellation, or
-expiry state instead of creating a duplicate queue item.
+`request_id` must return the existing queue, reservation, claim, cancellation,
+or expiry state instead of creating a duplicate queue item.
 
 Queued or reserved requests can be canceled explicitly. Session or activity
-finalization cancels that session's queued and reserved requests.
+finalization cleanup for queued and reserved requests is target behavior; the
+current implementation releases active leases on finalization.
 
 ## Override Record
 
 An override records an explicit user instruction to permit a blocked resource in
 the current session. Overrides are never inferred or granted automatically.
+Override records are target model only; the current server does not expose an
+override authorization path.
 
 ```text
 override_id
@@ -374,39 +393,22 @@ Subagents may write only inside the parent session's active valid intent scope.
 Their activity and leases are still recorded under the subagent `actor_id`.
 Same-owner sessions do not receive automatic override authority.
 
-## Validation Profile
+## Sandboxed Test Execution
 
-Validation profiles are static repo-defined configuration loaded from
-`.stateful/validation.yml`. Agents run validation by profile name and cannot
-provide arbitrary commands at runtime.
-
-```text
-profile_id
-description
-command
-cwd
-timeout_seconds
-allowed_writes
-denied_writes
-exclusive
-env
-result_parser: exit_code
-```
-
-Validation results should distinguish command failure from policy failure:
+Raw Bash test commands are denied by hooks. Agents run tests through the trusted
+wrapper after exact `target/` directory intent and a successful same-session
+directory lease, for example:
 
 ```text
-status: passed | failed | failed_policy | timeout | error
+stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." target/
+stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
+stateful sandbox run --fs write-targets --network enabled --write-dir target --command 'cargo test --workspace'
 ```
 
-`failed_policy` means the validation command wrote to a denied source-tree path.
-V1 detects this by comparing `git status --porcelain` before and after
-validation. A denied path that is already dirty before validation produces
-`error`; a newly dirty denied path after validation produces `failed_policy`.
-
-If `exclusive` is true, only one run of that validation profile may be active in
-the workspace. A concurrent request for the same exclusive profile is denied. If
-`exclusive` is false or unset, concurrent runs produce warning context only.
+Source-tree edits should use native Codex edit tools such as `apply_patch` or
+Edit after exact intent declaration and a successful same-session file lease.
+Command-shaped source writes must use exact `--write-target` or `--create-target`
+entries, not the `target/` artifact directory scope.
 
 ## Finalization Record
 
@@ -454,6 +456,9 @@ blocked for the affected file and should release or shorten the affected lease.
 Clearing the block does not authorize writes by itself; active, unexpired,
 matching intent is still required.
 
+The current implementation records reconciliation acknowledgements but does not
+yet emit `HumanWriteObserved` events or enforce unreconciled-human-write blocks.
+
 ## Events
 
 The canonical event log should use explicit coordination events:
@@ -479,6 +484,8 @@ The canonical event log should use explicit coordination events:
 
 Accepted events update the materialized current-state view. Expiration may be
 driven by background TTL processing or by reads that discover stale state.
+Some event kinds above are target model entries and are not emitted by the
+current implementation, including override and human save-gate events.
 
 ## Freshness Rules
 
@@ -499,7 +506,9 @@ Freshness is required for all active coordination records.
 - Delete operations require exact file scope.
 - Rename and move operations require exact file scope for both source and
   destination.
-- Heartbeats extend active leases and activity records.
+- Heartbeats extend active leases and activity records. The current
+  implementation also refreshes active intent expiry during `SessionHeartbeat`
+  materialization, capped at 60 minutes from `declared_at`.
 - Missing heartbeats do not imply success.
 - Finalization as `done`, `failed`, or `blocked` finalizes active intents.
 - Turn end expires unused overrides.
@@ -512,6 +521,9 @@ V1 retains event and audit history for 14 days by default. Retention affects
 historical evidence only; it does not extend live TTLs, leases, intents, or
 write authorization.
 
+The current implementation expires live coordination rows lazily when policy
+reads detect stale state. Configurable event-retention pruning is future work.
+
 Projects may configure a longer retention window. Shorter retention should be
 allowed only when the system can still preserve required audit evidence for
 active conflicts, unreconciled human writes, and pending outbox sync.
@@ -522,14 +534,16 @@ When the state server is unavailable, coordination must fail closed for agent
 write authorization and fail open for human saves.
 
 - Supported writes are denied.
-- Bash commands without structured top-level read-only sandbox metadata are
-  denied.
-- `state.validation.run` returns `error: state_unavailable` and does not execute
-  the validation command.
+- Raw Bash and Bash calls that are not a strict
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper are
+  denied. Command-shaped writes through `--fs write-targets` fail closed when
+  target authorization cannot be proven.
+- write-target sandbox authorization fails closed and does not execute the
+  command.
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block.
 - Intent declaration, lease acquisition, and lease refresh fail.
 - Read, search, and diff actions are allowed.
-- IDE human save gates warn the user and allow the save.
+- Future IDE human save gates warn the user and allow the save.
 - Heartbeat, finalization, and observer events may be queued in a local outbox.
 - Local outbox events cannot authorize writes, clear reconciliation blocks, or
   extend leases until synced through the state server.
@@ -558,7 +572,9 @@ and inspection.
 
 ## Human Save Gate Rules
 
-Human save-gate events are advisory coordination evidence.
+Human save-gate events are advisory coordination evidence for future IDE
+integration. They are not emitted by the current CLI, MCP, or HTTP
+implementation.
 
 - IDE open, selection, dirty-buffer, and save-completion events may update
   human `activity` records.
@@ -570,7 +586,7 @@ Human save-gate events are advisory coordination evidence.
 - After `HumanWriteObserved` on a file with active agent work, later agent writes
   should be denied or warned until the agent refreshes state and reconciles the
   file.
-- Read, search, diff, and controlled validation actions remain allowed while a
+- Read, search, diff, and sandboxed test actions remain allowed while a
   human write is unreconciled.
 - `state.reconcile.ack` records reconciliation after the agent rereads the file
   and chooses `adopt`, `reapply`, `ask_user`, or `abandon`.
@@ -585,6 +601,11 @@ Expected materialized views:
 - conflicts by session
 - finalization summaries by session
 - prompt context package for Codex hooks and MCP tools
+
+The current server exposes `/v1/context/render` and `state.context.render` as a
+store-backed live view over active intents, active leases, and queued or reserved
+wait records. Responses include current summary counts, structured `items`, and
+prompt-ready `prompt_text`; an empty live state produces an empty prompt.
 
 Prompt context packages should support:
 

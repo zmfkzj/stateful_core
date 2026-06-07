@@ -39,14 +39,7 @@ fn install_yes_creates_global_files_and_database() {
     assert!(fixture.paths.config_yml.is_file());
     assert!(fixture.paths.state_db.is_file());
     assert!(fixture.codex_config.is_file());
-    assert!(
-        !fixture
-            .codex_config
-            .parent()
-            .unwrap()
-            .join("hooks.json")
-            .exists()
-    );
+    assert!(!fixture.codex_config_parent().join("hooks.json").exists());
 
     let registry = RepoRegistry::load(&fixture.paths).expect("registry should load");
     assert_eq!(registry, RepoRegistry::default());
@@ -75,7 +68,7 @@ fn install_yes_creates_global_files_and_database() {
 fn install_yes_backs_up_existing_codex_config_before_merge() {
     let fixture = TestFixture::new("backup");
     let existing = "[tools]\ncustom = true\n";
-    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
     apply_global_install(fixture.options(true)).expect("install should apply");
@@ -93,7 +86,7 @@ fn install_yes_backs_up_existing_codex_config_before_merge() {
 fn install_yes_preserves_existing_features_and_enables_hooks() {
     let fixture = TestFixture::new("features");
     let existing = "[features] # codex feature flags\nexperimental = true\nhooks = false\n\n[tools]\ncustom = true\n";
-    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
     apply_global_install(fixture.options(true)).expect("install should apply");
@@ -111,14 +104,14 @@ fn install_yes_preserves_existing_features_and_enables_hooks() {
 fn install_yes_preserves_quoted_project_tables() {
     let fixture = TestFixture::new("quoted-project");
     let existing =
-        "[projects.\"/Users/arthur\"]\ntrust_level = \"trusted\"\n\n[tools]\ncustom = true\n";
-    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+        "[projects.\"/workspace/project\"]\ntrust_level = \"trusted\"\n\n[tools]\ncustom = true\n";
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
     apply_global_install(fixture.options(true)).expect("install should apply");
 
     let merged = fs::read_to_string(&fixture.codex_config).expect("merged config should read");
-    assert!(merged.contains("[projects.\"/Users/arthur\"]"));
+    assert!(merged.contains("[projects.\"/workspace/project\"]"));
     assert!(merged.contains("trust_level = \"trusted\""));
     assert!(merged.contains("[tools]\ncustom = true"));
     assert!(merged.contains("[mcp_servers.stateful]"));
@@ -128,7 +121,7 @@ fn install_yes_preserves_quoted_project_tables() {
 fn install_yes_rejects_existing_unmarked_stateful_mcp_server() {
     let fixture = TestFixture::new("mcp-conflict");
     let existing = "[mcp_servers.stateful] # existing server\ncommand = \"other\"\n";
-    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
     let error = apply_global_install(fixture.options(true))
@@ -146,7 +139,7 @@ fn install_yes_rejects_existing_unmarked_stateful_mcp_server() {
 fn install_yes_rejects_quoted_stateful_mcp_table_header() {
     let fixture = TestFixture::new("quoted-mcp-conflict");
     let existing = "[\"mcp_servers\".\"stateful\"]\ncommand = \"other\"\n";
-    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
     let error = apply_global_install(fixture.options(true))
@@ -164,7 +157,7 @@ fn install_yes_rejects_quoted_stateful_mcp_table_header() {
 fn install_yes_rejects_quoted_stateful_mcp_table_header_with_escape() {
     let fixture = TestFixture::new("quoted-mcp-escape-conflict");
     let existing = "[\"mcp_servers\".\"state\\u0066ul\"]\ncommand = \"other\"\n";
-    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
     let error = apply_global_install(fixture.options(true))
@@ -182,7 +175,7 @@ fn install_yes_rejects_quoted_stateful_mcp_table_header_with_escape() {
 fn install_yes_rejects_quoted_features_table_header_with_escape() {
     let fixture = TestFixture::new("quoted-features-escape-conflict");
     let existing = "[\"feat\\u0075res\"]\nexperimental = true\n";
-    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
     let error = apply_global_install(fixture.options(true))
@@ -200,7 +193,7 @@ fn install_yes_rejects_quoted_features_table_header_with_escape() {
 fn install_yes_rejects_malformed_marker_block_without_writing() {
     let fixture = TestFixture::new("malformed-marker");
     let existing = "# stateful-core-global-install\n[mcp_servers.stateful]\ncommand = \"old\"\n";
-    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
     let error = apply_global_install(fixture.options(true))
@@ -218,7 +211,7 @@ fn install_yes_rejects_malformed_marker_block_without_writing() {
 fn install_yes_idempotent_rerun_does_not_create_extra_backup() {
     let fixture = TestFixture::new("backup-idempotent");
     let existing = "[tools]\ncustom = true\n";
-    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
     apply_global_install(fixture.options(true)).expect("first install should apply");
@@ -266,7 +259,7 @@ fn install_yes_rejects_binary_path_with_control_character() {
 fn install_yes_preserves_existing_codex_config_file_mode() {
     let fixture = TestFixture::new("file-mode");
     let existing = "[tools]\ncustom = true\n";
-    fs::create_dir_all(fixture.codex_config.parent().unwrap()).expect("codex dir should create");
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
     let mut permissions = fs::metadata(&fixture.codex_config)
         .expect("config metadata should read")
@@ -360,6 +353,12 @@ impl TestFixture {
             codex_config_path: self.codex_config.clone(),
             binary_path: "/opt/stateful/bin/stateful".to_string(),
         }
+    }
+
+    fn codex_config_parent(&self) -> &Path {
+        self.codex_config
+            .parent()
+            .expect("codex config should have a parent directory")
     }
 }
 

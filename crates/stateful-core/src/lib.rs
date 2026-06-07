@@ -1,11 +1,12 @@
-mod bash;
 mod context;
 mod policy;
 mod reconcile;
 mod types;
 
-pub use bash::{BashClassification, BashKind, classify_bash};
-pub use context::{ContextPackage, RenderMode, render_prompt_text};
+pub use context::{
+    ContextPackage, CurrentFreshness, CurrentItem, CurrentItemKind, CurrentSeverity, RenderMode,
+    render_prompt_text,
+};
 pub use policy::{
     AuthorizationInput, IntentPhase, IntentScope, PolicyState, ScopeSet, authorize_action,
 };

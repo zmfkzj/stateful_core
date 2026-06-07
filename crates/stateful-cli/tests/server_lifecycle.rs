@@ -197,7 +197,7 @@ fn ensure_server_rejects_unidentified_http_service_and_overwrites_runtime() {
 }
 
 #[test]
-fn runtime_health_requires_status_ok_and_authenticated_current() {
+fn runtime_health_requires_status_ok_authenticated_current_and_capabilities() {
     let health_not_ok = FakeHttpServer::start(vec![fake_response(503, "not ready")]);
     let runtime = ServerRuntime::new(health_not_ok.base_url(), "token", "w1", 1);
     assert!(!runtime_is_healthy(&runtime));
@@ -208,6 +208,28 @@ fn runtime_health_requires_status_ok_and_authenticated_current() {
     ]);
     let runtime = ServerRuntime::new(current_not_ok.base_url(), "token", "w1", 1);
     assert!(!runtime_is_healthy(&runtime));
+
+    let missing_capabilities = FakeHttpServer::start(vec![
+        fake_response(200, "ok"),
+        fake_response(200, r#"{"status":"ok","current":{}}"#),
+        fake_response(
+            200,
+            r#"{"status":"ok","pid":1,"protocol_version":"stateful.v1"}"#,
+        ),
+    ]);
+    let runtime = ServerRuntime::new(missing_capabilities.base_url(), "token", "w1", 1);
+    assert!(!runtime_is_healthy(&runtime));
+
+    let healthy = FakeHttpServer::start(vec![
+        fake_response(200, "ok"),
+        fake_response(200, r#"{"status":"ok","current":{}}"#),
+        fake_response(
+            200,
+            r#"{"status":"ok","pid":1,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+        ),
+    ]);
+    let runtime = ServerRuntime::new(healthy.base_url(), "token", "w1", 1);
+    assert!(runtime_is_healthy(&runtime));
 }
 
 #[test]
@@ -265,6 +287,10 @@ fn ensure_server_with_options_rejects_healthy_runtime_on_different_port() {
     let fake = FakeHttpServer::start(vec![
         fake_response(200, "ok"),
         fake_response(200, r#"{"status":"ok","current":{}}"#),
+        fake_response(
+            200,
+            r#"{"status":"ok","pid":123,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+        ),
     ]);
     let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 123);
     stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");

@@ -7,6 +7,7 @@ use std::{
 
 mod codex_wrapper;
 mod commit;
+mod external_run;
 mod global_paths;
 mod hook;
 mod install;
@@ -15,19 +16,21 @@ mod outbox;
 mod push;
 mod repo_registry;
 mod runtime;
+mod sandbox;
 mod server_lifecycle;
-mod validation;
 
 pub use codex_wrapper::{
-    CodexInvocation, CodexSandboxMode, CodexWrapperOptions, STATEFUL_TRUSTED_SANDBOX_ENV,
-    build_codex_invocation, run_codex,
+    CodexInvocation, CodexSandboxMode, CodexWrapperOptions, build_codex_invocation, run_codex,
 };
 pub use commit::{CommitRequest, CommitResult, run_structured_commit};
+pub use external_run::{
+    ExternalRunApproval, ExternalRunRequest, approve_external_run, request_external_run,
+    run_approved_external_run,
+};
 pub use global_paths::GlobalPaths;
 pub use hook::{
     HookOutcome, handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
-    handle_pre_tool_use_with_trusted_sandbox, handle_session_start_in_repo, handle_stop_in_repo,
-    handle_user_prompt_submit_in_repo,
+    handle_session_start_in_repo, handle_stop_in_repo, handle_user_prompt_submit_in_repo,
 };
 pub use install::{
     InstallOptions, InstallPlan, apply_global_install, current_stateful_binary_path,
@@ -41,20 +44,21 @@ pub use repo_registry::{
     enable_repo, repo_gate, repo_identity_for_enabled_repo,
 };
 pub use runtime::{
-    CurrentSession, HttpResponse, IntentDeclareArgs, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime,
-    declare_intent_via_http, discover_runtime, discover_runtime_with_global,
-    discover_runtime_with_optional_global, get_json, global_state_db_path,
-    intent_declare_protocol_body, post_json, protocol_envelope, read_current_session_file,
-    read_current_session_file_for_codex_run, write_current_session_file,
+    CurrentSession, HttpResponse, IntentCancelArgs, IntentClaimArgs, IntentDeclareArgs,
+    IntentRequestArgs, ProtocolEnvelopeArgs, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime,
+    cancel_intent_via_http, claim_intent_via_http, declare_intent_via_http, discover_runtime,
+    discover_runtime_with_global, discover_runtime_with_optional_global, get_json,
+    global_state_db_path, intent_cancel_protocol_body, intent_claim_protocol_body,
+    intent_declare_protocol_body, intent_request_protocol_body, post_json, protocol_envelope,
+    read_current_session_file, read_current_session_file_for_codex_run, request_intent_via_http,
+    runtime_env_override_is_configured, runtime_has_required_identity,
+    runtime_identity_matches_pid, write_current_session_file,
     write_current_session_file_for_codex_run, write_global_runtime_file, write_runtime_file,
 };
+pub use sandbox::{SandboxFsProfile, SandboxNetworkPolicy};
 pub use server_lifecycle::{
     ServerStartOptions, detached_server_args, ensure_server, ensure_server_with,
     ensure_server_with_options, runtime_is_healthy, stop_server,
-};
-pub use validation::{
-    ResultParser, ValidationConfig, ValidationProfile, ValidationResult, ValidationStatus,
-    run_validation_profile,
 };
 
 #[derive(Debug, Parser)]
@@ -95,9 +99,6 @@ pub enum Command {
     Current,
     Events,
     Doctor,
-    Validate {
-        profile: String,
-    },
     Commit {
         #[arg(short = 'm', long)]
         message: String,
@@ -119,6 +120,10 @@ pub enum Command {
         #[arg(num_args = 0.., allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
+    #[command(subcommand)]
+    ExternalRun(ExternalRunCommand),
+    #[command(subcommand)]
+    Sandbox(SandboxCommand),
     Enable {
         #[arg(long)]
         repo: Option<PathBuf>,
@@ -145,6 +150,34 @@ pub enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ExternalRunCommand {
+    Request {
+        #[arg(long)]
+        purpose: String,
+        #[arg(long = "write-target")]
+        write_targets: Vec<String>,
+        #[arg(long = "create-target")]
+        create_targets: Vec<String>,
+        #[arg(long = "write-dir")]
+        write_dirs: Vec<String>,
+        #[arg(long, value_enum, default_value = "disabled")]
+        network: SandboxNetworkPolicy,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+        #[arg(long)]
+        command: String,
+    },
+    Approve {
+        request_id: String,
+        #[arg(long)]
+        run: bool,
+    },
+    Run {
+        request_id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum ServerCommand {
     Start {
         #[arg(long)]
@@ -163,13 +196,66 @@ pub enum ServerCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum SandboxCommand {
+    Run {
+        #[arg(long, value_enum, default_value = "read-only")]
+        fs: SandboxFsProfile,
+        #[arg(long, value_enum, default_value = "disabled")]
+        network: SandboxNetworkPolicy,
+        #[arg(long = "write-target")]
+        write_targets: Vec<String>,
+        #[arg(long = "create-target")]
+        create_targets: Vec<String>,
+        #[arg(long = "write-dir")]
+        write_dirs: Vec<String>,
+        #[arg(long)]
+        command: String,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum IntentCommand {
     Declare {
         #[arg(long)]
         session_id: Option<String>,
         #[arg(long)]
         workspace_id: Option<String>,
+        #[arg(long)]
+        purpose: String,
+        #[arg(required = true, num_args = 1..)]
         files_planned: Vec<String>,
+    },
+    Request {
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        workspace_id: Option<String>,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        path: String,
+        #[arg(long)]
+        purpose: String,
+    },
+    Claim {
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        workspace_id: Option<String>,
+        #[arg(long)]
+        wait_id: String,
+    },
+    Cancel {
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        workspace_id: Option<String>,
+        #[arg(long)]
+        request_id: String,
     },
 }
 
@@ -220,7 +306,7 @@ pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init { binary } => {
-            install_repo_local(std::env::current_dir()?, binary)?;
+            install_repo_local_avoiding_global_hook_duplicates(std::env::current_dir()?, binary)?;
             println!("installed stateful repo-local configuration");
         }
         Command::Install {
@@ -321,13 +407,6 @@ pub fn run() -> anyhow::Result<()> {
             let report = doctor_report(current_repo_root_or_current_dir()?);
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Command::Validate { profile } => {
-            let result = run_validation_profile(current_repo_root_or_current_dir()?, &profile)?;
-            println!("{}", serde_json::to_string(&result)?);
-            if !matches!(result.status, ValidationStatus::Passed) {
-                std::process::exit(1);
-            }
-        }
         Command::Commit { message, paths } => {
             let cwd = std::env::current_dir()?;
             let repo_root = detect_git_root(&cwd)?;
@@ -383,13 +462,113 @@ pub fn run() -> anyhow::Result<()> {
             })?;
             std::process::exit(code);
         }
+        Command::ExternalRun(ExternalRunCommand::Request {
+            purpose,
+            write_targets,
+            create_targets,
+            write_dirs,
+            network,
+            timeout_seconds,
+            command,
+        }) => {
+            let approval = request_external_run(ExternalRunRequest {
+                repo_root: current_repo_root_or_current_dir()?,
+                paths: GlobalPaths::from_env()?,
+                purpose,
+                command,
+                write_targets,
+                create_targets,
+                write_dirs,
+                network,
+                timeout_seconds,
+            })?;
+            print!("{}", approval.guidance);
+        }
+        Command::ExternalRun(ExternalRunCommand::Approve { request_id, run }) => {
+            let paths = GlobalPaths::from_env()?;
+            let approval = approve_external_run(&paths, &request_id, run)?;
+            println!("{}", approval.guidance);
+            if run {
+                let output = run_approved_external_run(&paths, &request_id)?;
+                println!("{}", serde_json::to_string(&output)?);
+                if let Some(exit_code) =
+                    sandbox::sandbox_run_cli_exit_code(&sandbox::SandboxRunOutput {
+                        status: output.status,
+                        exit_code: output.exit_code,
+                        stdout: output.stdout.clone(),
+                        stderr: output.stderr.clone(),
+                        allowed_write_targets: Vec::new(),
+                        denied_write_targets: Vec::new(),
+                    })
+                {
+                    std::process::exit(exit_code);
+                }
+            }
+        }
+        Command::ExternalRun(ExternalRunCommand::Run { request_id }) => {
+            let output = run_approved_external_run(&GlobalPaths::from_env()?, &request_id)?;
+            println!("{}", serde_json::to_string(&output)?);
+            if output.status != "exited" || output.exit_code != Some(0) {
+                std::process::exit(output.exit_code.unwrap_or(1));
+            }
+        }
+        Command::Sandbox(SandboxCommand::Run {
+            fs,
+            network,
+            write_targets,
+            create_targets,
+            write_dirs,
+            command,
+            timeout_seconds,
+        }) => {
+            let paths = GlobalPaths::from_env()?;
+            let repo_root = current_repo_root_or_current_dir()?;
+            let output = match sandbox::run_sandbox_in_repo(
+                &repo_root,
+                &paths,
+                sandbox::SandboxRunRequest {
+                    fs,
+                    network,
+                    write_targets,
+                    create_targets,
+                    write_dirs,
+                    command,
+                    timeout_seconds,
+                },
+            ) {
+                Ok(output) => output,
+                Err(error) => {
+                    if let Some(denied) =
+                        error.downcast_ref::<sandbox::SandboxAuthorizationDenied>()
+                    {
+                        println!("{}", denied.body());
+                        std::process::exit(1);
+                    }
+                    return Err(error);
+                }
+            };
+            println!("{}", serde_json::to_string(&output)?);
+            if let Some(exit_code) = sandbox::sandbox_run_cli_exit_code(&output) {
+                std::process::exit(exit_code);
+            }
+        }
         Command::Enable {
             repo,
             repo_local_codex,
         } => {
             let paths = GlobalPaths::from_env()?;
             let repo = repo.unwrap_or(std::env::current_dir()?);
-            let entry = enable_repo(&paths, repo, repo_local_codex)?;
+            let global_codex_config = if repo_local_codex {
+                default_codex_config_path().ok()
+            } else {
+                None
+            };
+            let entry = repo_registry::enable_repo_with_global_codex_config(
+                &paths,
+                repo,
+                repo_local_codex,
+                global_codex_config.as_deref(),
+            )?;
             println!("{}", serde_json::to_string(&entry)?);
         }
         Command::Disable { repo } => {
@@ -440,6 +619,7 @@ pub fn run() -> anyhow::Result<()> {
         Command::Intent(IntentCommand::Declare {
             session_id,
             workspace_id,
+            purpose,
             files_planned,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
@@ -467,6 +647,7 @@ pub fn run() -> anyhow::Result<()> {
                 IntentDeclareArgs {
                     session_id,
                     workspace_id,
+                    purpose,
                     files_planned,
                     identity: GlobalPaths::from_env()
                         .ok()
@@ -474,6 +655,75 @@ pub fn run() -> anyhow::Result<()> {
                 },
             )?;
             println!("declared stateful intent");
+        }
+        Command::Intent(IntentCommand::Request {
+            session_id,
+            workspace_id,
+            request_id,
+            action,
+            path,
+            purpose,
+        }) => {
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let (session_id, workspace_id) =
+                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            request_intent_via_http(
+                &runtime,
+                IntentRequestArgs {
+                    session_id,
+                    workspace_id,
+                    request_id,
+                    action,
+                    path,
+                    purpose,
+                    identity: GlobalPaths::from_env()
+                        .ok()
+                        .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
+                },
+            )?;
+            println!("requested stateful intent");
+        }
+        Command::Intent(IntentCommand::Claim {
+            session_id,
+            workspace_id,
+            wait_id,
+        }) => {
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let (session_id, workspace_id) =
+                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            claim_intent_via_http(
+                &runtime,
+                IntentClaimArgs {
+                    session_id,
+                    workspace_id,
+                    wait_id,
+                    identity: GlobalPaths::from_env()
+                        .ok()
+                        .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
+                },
+            )?;
+            println!("claimed stateful intent");
+        }
+        Command::Intent(IntentCommand::Cancel {
+            session_id,
+            workspace_id,
+            request_id,
+        }) => {
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let (session_id, workspace_id) =
+                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            cancel_intent_via_http(
+                &runtime,
+                IntentCancelArgs {
+                    session_id,
+                    workspace_id,
+                    request_id,
+                    identity: GlobalPaths::from_env()
+                        .ok()
+                        .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
+                },
+            )?;
+            println!("canceled stateful intent");
         }
         Command::Mcp(McpCommand::Call {
             tool_name,
@@ -521,18 +771,34 @@ fn root_relative_paths(
     Ok(paths
         .into_iter()
         .map(|path| {
-            let path = path.trim();
-            if Path::new(path).is_absolute() {
+            if Path::new(&path).is_absolute() {
                 path.to_string()
             } else if let Some(prefix) =
                 cwd_relative.filter(|prefix| !prefix.as_os_str().is_empty())
             {
-                prefix.join(path).to_string_lossy().replace('\\', "/")
+                normalize_root_relative_path(&prefix.join(&path))
             } else {
                 path.to_string()
             }
         })
         .collect())
+}
+
+fn normalize_root_relative_path(path: &Path) -> String {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized.to_string_lossy().replace('\\', "/")
 }
 
 fn resolve_session_workspace(
@@ -614,7 +880,6 @@ pub struct DoctorReport {
     pub installed: bool,
     pub hooks_json: bool,
     pub config_yml: bool,
-    pub validation_yml: bool,
     pub runtime_server_json: bool,
     pub state_db: bool,
     pub global_config_yml: bool,
@@ -643,7 +908,6 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
     let hooks_json = repo_root.join(".codex").join("hooks.json").is_file();
     let codex_config_toml = repo_root.join(".codex").join("config.toml").is_file();
     let config_yml = repo_root.join(".stateful").join("config.yml").is_file();
-    let validation_yml = repo_root.join(".stateful").join("validation.yml").is_file();
     let runtime_server_json = repo_root
         .join(".stateful_core")
         .join("runtime")
@@ -656,12 +920,9 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
     };
 
     DoctorReport {
-        installed: (hooks_json || codex_config_toml || paths.config_yml.is_file())
-            && config_yml
-            && validation_yml,
+        installed: (hooks_json || codex_config_toml || paths.config_yml.is_file()) && config_yml,
         hooks_json,
         config_yml,
-        validation_yml,
         runtime_server_json,
         state_db,
         global_config_yml: paths.config_yml.is_file(),
@@ -676,6 +937,38 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
 pub fn install_repo_local(
     repo_root: impl AsRef<Path>,
     binary_path: impl AsRef<str>,
+) -> anyhow::Result<()> {
+    install_repo_local_with_hooks(repo_root, binary_path, true)
+}
+
+pub fn install_repo_local_avoiding_global_hook_duplicates(
+    repo_root: impl AsRef<Path>,
+    binary_path: impl AsRef<str>,
+) -> anyhow::Result<()> {
+    let global_codex_config = default_codex_config_path().ok();
+    install_repo_local_with_global_codex_config(
+        repo_root,
+        binary_path,
+        global_codex_config.as_deref(),
+    )
+}
+
+pub fn install_repo_local_with_global_codex_config(
+    repo_root: impl AsRef<Path>,
+    binary_path: impl AsRef<str>,
+    global_codex_config: Option<&Path>,
+) -> anyhow::Result<()> {
+    let include_hooks = match global_codex_config {
+        Some(path) => !global_codex_config_has_stateful_hooks(path)?,
+        None => true,
+    };
+    install_repo_local_with_hooks(repo_root, binary_path, include_hooks)
+}
+
+fn install_repo_local_with_hooks(
+    repo_root: impl AsRef<Path>,
+    binary_path: impl AsRef<str>,
+    include_hooks: bool,
 ) -> anyhow::Result<()> {
     let repo_root = repo_root.as_ref();
     let binary_path = binary_path.as_ref();
@@ -692,35 +985,68 @@ pub fn install_repo_local(
     }
     fs::write(
         repo_root.join(".codex/config.toml"),
-        mcp_config_toml(binary_path),
+        repo_local_codex_config_toml(binary_path, include_hooks),
     )?;
     fs::write(
         repo_root.join(".codex/skills/stateful-command-policy/SKILL.md"),
         stateful_command_policy_skill(),
     )?;
     fs::write(repo_root.join(".stateful/config.yml"), default_config_yml())?;
-    fs::write(
-        repo_root.join(".stateful/validation.yml"),
-        default_validation_yml(),
-    )?;
 
     Ok(())
+}
+
+const STATEFUL_GLOBAL_CODEX_BLOCK_START: &str = "# stateful-core-global-install";
+const STATEFUL_GLOBAL_CODEX_BLOCK_END: &str = "# /stateful-core-global-install";
+
+fn global_codex_config_has_stateful_hooks(path: &Path) -> anyhow::Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let contents = fs::read_to_string(path)?;
+    let Some(start) = contents.find(STATEFUL_GLOBAL_CODEX_BLOCK_START) else {
+        return Ok(false);
+    };
+    let block = &contents[start..];
+    let block = match block.find(STATEFUL_GLOBAL_CODEX_BLOCK_END) {
+        Some(end) => &block[..end],
+        None => block,
+    };
+
+    Ok(block.contains("[[hooks.SessionStart]]")
+        || block.contains("[[hooks.UserPromptSubmit]]")
+        || block.contains("[[hooks.PreToolUse]]")
+        || block.contains("[[hooks.PostToolUse]]")
+        || block.contains("[[hooks.Stop]]"))
 }
 
 const STATEFUL_CODEX_JSON_MARKER: &str = "stateful_core_owned";
 const STATEFUL_CODEX_TOML_MARKER: &str = "# stateful-core-owned";
 
 pub(crate) fn ensure_repo_local_install_can_write(repo_root: &Path) -> anyhow::Result<()> {
-    for path in [
-        repo_root.join(".codex/hooks.json"),
-        repo_root.join(".codex/config.toml"),
-    ] {
-        if path.exists() && !is_stateful_owned_codex_file(&path)? {
-            anyhow::bail!(
-                "repo-local Codex install would overwrite existing Codex config {}",
-                path.display()
-            );
-        }
+    let hooks_json = repo_root.join(".codex/hooks.json");
+    let config_toml = repo_root.join(".codex/config.toml");
+    let has_legacy_stateful_hooks =
+        hooks_json.exists() && is_legacy_stateful_hooks_file(&hooks_json)?;
+
+    if hooks_json.exists()
+        && !is_stateful_owned_codex_file(&hooks_json)?
+        && !has_legacy_stateful_hooks
+    {
+        anyhow::bail!(
+            "repo-local Codex install would overwrite existing Codex config {}",
+            hooks_json.display()
+        );
+    }
+
+    if config_toml.exists()
+        && !is_stateful_owned_codex_file(&config_toml)?
+        && !(has_legacy_stateful_hooks && is_legacy_stateful_codex_toml_file(&config_toml)?)
+    {
+        anyhow::bail!(
+            "repo-local Codex install would overwrite existing Codex config {}",
+            config_toml.display()
+        );
     }
 
     Ok(())
@@ -746,7 +1072,168 @@ fn is_stateful_owned_codex_file(path: &Path) -> anyhow::Result<bool> {
     }
 }
 
-fn mcp_config_toml(binary_path: &str) -> String {
+fn is_legacy_stateful_hooks_file(path: &Path) -> anyhow::Result<bool> {
+    let contents = fs::read_to_string(path)?;
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return Ok(false);
+    };
+
+    Ok(is_legacy_stateful_hooks_json(&value))
+}
+
+fn is_legacy_stateful_codex_toml_file(path: &Path) -> anyhow::Result<bool> {
+    let contents = fs::read_to_string(path)?;
+    Ok(is_legacy_stateful_codex_toml(&contents))
+}
+
+const LEGACY_STATEFUL_HOOKS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "user-prompt-submit"),
+    ("PreToolUse", "pre-tool-use"),
+    ("PostToolUse", "post-tool-use"),
+    ("Stop", "stop"),
+];
+
+fn is_legacy_stateful_hooks_json(value: &serde_json::Value) -> bool {
+    let Some(root) = value.as_object() else {
+        return false;
+    };
+    if root.keys().any(|key| key != "hooks") {
+        return false;
+    }
+
+    let Some(hooks) = root.get("hooks").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    if hooks.len() != LEGACY_STATEFUL_HOOKS.len() {
+        return false;
+    }
+
+    LEGACY_STATEFUL_HOOKS.iter().all(|(event, action)| {
+        let Some(entries) = hooks.get(*event).and_then(serde_json::Value::as_array) else {
+            return false;
+        };
+        if entries.is_empty() {
+            return false;
+        }
+
+        entries.iter().all(|entry| {
+            let Some(commands) = entry.get("hooks").and_then(serde_json::Value::as_array) else {
+                return false;
+            };
+            if commands.is_empty() {
+                return false;
+            }
+
+            commands.iter().all(|command_hook| {
+                let hook_type = command_hook
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let command = command_hook
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+
+                hook_type == "command" && command_invokes_stateful_hook(command, action)
+            })
+        })
+    })
+}
+
+fn command_invokes_stateful_hook(command: &str, action: &str) -> bool {
+    let suffix = format!(" hook {action}");
+    let Some(binary) = command.trim().strip_suffix(&suffix) else {
+        return false;
+    };
+
+    is_stateful_binary_reference(binary.trim())
+}
+
+fn is_stateful_binary_reference(binary: &str) -> bool {
+    let binary = strip_matching_double_quotes(binary.trim());
+    binary == "stateful" || binary.ends_with("/stateful")
+}
+
+fn strip_matching_double_quotes(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value)
+}
+
+fn is_legacy_stateful_codex_toml(contents: &str) -> bool {
+    let mut saw_section = false;
+    let mut current_section_is_stateful_mcp = false;
+    let mut saw_stateful_mcp_server = false;
+    let mut saw_stateful_command = false;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if trimmed.starts_with('[') {
+            let Some(section) = simple_toml_table_name(trimmed) else {
+                return false;
+            };
+            if !is_legacy_stateful_codex_toml_section(section) {
+                return false;
+            }
+
+            saw_stateful_mcp_server |= section == "mcp_servers.stateful";
+            current_section_is_stateful_mcp = section == "mcp_servers.stateful";
+            saw_section = true;
+            continue;
+        }
+
+        if !saw_section {
+            return false;
+        }
+
+        if current_section_is_stateful_mcp {
+            if let Some(command) = simple_toml_string_assignment(trimmed, "command") {
+                saw_stateful_command = is_stateful_binary_reference(&command);
+            }
+        }
+    }
+
+    saw_stateful_mcp_server && saw_stateful_command
+}
+
+fn simple_toml_table_name(line: &str) -> Option<&str> {
+    let body = line.strip_prefix('[')?.strip_suffix(']')?;
+    if body.starts_with('[') || body.ends_with(']') || body.is_empty() {
+        return None;
+    }
+
+    if body.split('.').all(|segment| {
+        !segment.is_empty()
+            && segment.chars().all(|character| {
+                character.is_ascii_alphanumeric() || character == '_' || character == '-'
+            })
+    }) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+fn is_legacy_stateful_codex_toml_section(section: &str) -> bool {
+    section == "mcp_servers.stateful" || section.starts_with("mcp_servers.stateful.tools.")
+}
+
+fn simple_toml_string_assignment(line: &str, key: &str) -> Option<String> {
+    let (left, right) = line.split_once('=')?;
+    if left.trim() != key {
+        return None;
+    }
+
+    serde_json::from_str(right.trim()).ok()
+}
+
+fn repo_local_codex_config_toml(binary_path: &str, include_hooks: bool) -> String {
     let mcp_command = if Path::new(binary_path).is_absolute() {
         binary_path.to_string()
     } else if binary_path.contains('/') {
@@ -754,6 +1241,19 @@ fn mcp_config_toml(binary_path: &str) -> String {
     } else {
         binary_path.to_string()
     };
+    let mcp_config = format!(
+        r#"{STATEFUL_CODEX_TOML_MARKER}
+[mcp_servers.stateful]
+command = "{}"
+args = ["mcp", "serve"]
+startup_timeout_sec = 20
+"#,
+        escape_toml_string(&mcp_command),
+    );
+    if !include_hooks {
+        return mcp_config;
+    }
+
     let hook_binary = if Path::new(binary_path).is_absolute() {
         binary_path.to_string()
     } else {
@@ -834,69 +1334,6 @@ event_retention_days: 14
 "#
 }
 
-fn default_validation_yml() -> &'static str {
-    r#"profiles:
-  - profile_id: cargo-test
-    description: Run the Rust workspace test suite
-    command: cargo test --workspace
-    cwd: .
-    timeout_seconds: 300
-    allowed_writes:
-      - target/**
-    denied_writes:
-      - crates/**
-      - docs/**
-      - Cargo.toml
-      - Cargo.lock
-    exclusive: true
-    result_parser: exit_code
-"#
-}
-
 fn stateful_command_policy_skill() -> &'static str {
-    r#"---
-name: stateful-command-policy
-description: Use when running shell commands, editing files, or responding to stateful hook denials in a repo with stateful Codex hooks
----
-
-# Stateful Command Policy
-
-Stateful hooks are authoritative. Pick commands that match the installed hooks before invoking tools.
-
-## Default Write Flow
-
-- Declare exact file intent first with `state_intent_declare` / `state.intent.declare`. Use Bash `stateful intent declare <paths...>` only when MCP tools are unavailable.
-- Keep declared paths narrow; prefer exact files for edits, deletes, renames, and moves.
-- Write repo files with `state_file_write` / `state.file.write` after intent. It authorizes and writes from structured arguments.
-- Use `state_bash_write` / `state.bash.write` for write-capable Bash. Pass explicit repo-relative `write_targets`, and `create_targets` for new files; the bridge authorizes each file and then runs the command in the OS sandbox.
-- Re-read a file immediately before `state_file_write`; it writes full contents, so preserve unrelated user changes.
-- `apply_patch`, `Edit`, `Write`, and `file_change` are hook-authorized only when targets are visible to stateful policy. If denied, switch to structured write instead of retrying patch variants.
-- If a hook denies an action, read the denial and choose the documented alternative instead of retrying variants.
-
-## Prefer
-
-- MCP or native read tools for search and inspection when available.
-- `state_bash_write` for command-shaped writes that need a real shell but can be limited to exact file targets.
-- Structured Bash only when the tool call carries top-level read-only sandbox metadata with network disabled.
-- Validation: `state_validation_run` / `state.validation.run`, or `stateful validate <profile>`.
-- Stateful diagnostics through MCP tools or a structured sandboxed Bash call.
-
-## Avoid In Bash
-
-- Any Bash command without top-level read-only sandbox metadata and explicit network disabled metadata.
-- Shell write syntax: `>`, `>>`, heredocs, and `| tee`.
-- Direct file mutation: `rm`, `mv`, `cp`, `mkdir`, `touch`, `chmod`, `chown`.
-- Any generator, formatter, package manager, or script that creates, updates, deletes, or moves repo files.
-- Raw mutation git commands: `git checkout`, `git switch`, `git restore`, `git reset`, `git clean`, `git apply`, `git merge`, `git rebase`.
-- Raw test commands; use validation profiles for commands that write build or test artifacts.
-- Most `stateful` control commands through Bash; use MCP tools when available.
-
-## If Blocked
-
-- Do not retry the same command with small variations.
-- If the denial asks for scope, declare or narrow intent, then use `state_file_write` for repo changes.
-- If Bash is blocked, choose MCP/native inspection, structured MCP write, `state_bash_write`, a validation profile, or a Bash tool call with top-level read-only sandbox metadata and network disabled.
-- If a denial mentions a structured tool, prefer the stateful MCP tool in Codex sessions.
-- If no policy-compliant path is available, report the exact command and denial reason.
-"#
+    include_str!("../assets/stateful-command-policy/SKILL.md")
 }

@@ -7,14 +7,17 @@ sandbox, access-control system, or hard file-locking boundary.
 ## Supported Scope
 
 Security fixes are handled for the current `main` branch until a stable release
-policy exists.
+policy exists. The current platform support posture is macOS first. Linux
+bubblewrap support is implemented but experimental until release verification is
+in place.
 
 ## Reporting a Vulnerability
 
-Do not open a public issue for a suspected vulnerability. Use GitHub private
+Do not open a public issue with vulnerability details. Use GitHub private
 vulnerability reporting for the repository when available. If private reporting
-is not enabled, contact the repository owner through the owner profile and share
-only the minimum detail needed to establish a private channel.
+is not enabled and no private contact is listed on the owner profile, open a
+minimal public issue asking for a private security channel and do not include
+exploit details, affected paths, tokens, logs, or reproduction steps there.
 
 Useful reports include:
 
@@ -44,7 +47,9 @@ artifacts, absolute paths, or bearer tokens and should not be committed:
 - `.stateful_core/`
 - `.stateful_bench/`
 
-The repository `.gitignore` excludes those paths by default.
+The repository `.gitignore` excludes those paths by default. Public release
+archives should be created from Git, for example with `git archive` or a clean
+clone, rather than from a working-tree tarball.
 
 ## Out of Scope
 

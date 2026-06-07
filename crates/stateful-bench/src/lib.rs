@@ -19,6 +19,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 const DEFAULT_DATASET: &str = "SWE-bench/SWE-bench_Verified";
 const DEFAULT_CONFIG: &str = "default";
 const DEFAULT_SPLIT: &str = "test";
@@ -26,6 +29,11 @@ const DEFAULT_CACHE: &str = ".stateful_bench/datasets/swe-bench-verified.jsonl";
 const DEFAULT_PAIRS: &str = ".stateful_bench/pairs/all.jsonl";
 const DEFAULT_FALLBACK_PREFLIGHT: &str = ".stateful_bench/pairs/same-version-preflight.jsonl";
 const DEFAULT_RUNS: &str = ".stateful_bench/runs";
+
+#[cfg(unix)]
+const SIGTERM: i32 = 15;
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
 
 #[derive(Debug, Parser)]
 #[command(name = "stateful-bench")]
@@ -1644,6 +1652,7 @@ fn spawn_agent(
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
     apply_extra_env(&mut process, extra_env);
+    isolate_process_group(&mut process);
     process.spawn().context("failed to spawn agent command")
 }
 
@@ -1771,8 +1780,7 @@ fn wait_for_agents(
         if started.elapsed() >= timeout {
             for (index, agent) in agents.iter_mut().enumerate() {
                 if records[index].is_none() {
-                    let _ = agent.child.kill();
-                    let _ = agent.child.wait();
+                    let _ = terminate_child(&mut agent.child);
                     records[index] = Some(AgentRunRecord::timed_out(
                         agent.agent_id.as_str(),
                         elapsed_ms(started.elapsed()),
@@ -1900,7 +1908,8 @@ fn start_stateful_workspace(
 
     let stdout = File::create(pair_dir.join("stateful-server.stdout.log"))?;
     let stderr = File::create(pair_dir.join("stateful-server.stderr.log"))?;
-    let mut child = ProcessCommand::new(stateful_binary)
+    let mut process = ProcessCommand::new(stateful_binary);
+    process
         .args([
             "server",
             "--host",
@@ -1913,7 +1922,9 @@ fn start_stateful_workspace(
         .current_dir(workspace)
         .env("STATEFUL_HOME", stateful_home)
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
+        .stderr(Stdio::from(stderr));
+    isolate_process_group(&mut process);
+    let mut child = process
         .spawn()
         .context("failed to start stateful server in benchmark workspace")?;
     wait_for_stateful_ready(stateful_home, &mut child, Duration::from_secs(10)).with_context(
@@ -1966,9 +1977,56 @@ fn stateful_current_is_ready(stateful_home: &Path) -> bool {
 }
 
 fn terminate_child(child: &mut Child) -> Result<()> {
-    let _ = child.kill();
-    let _ = child.wait();
+    #[cfg(unix)]
+    {
+        signal_process_group(child, SIGTERM);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+    let exited_after_term = wait_for_child_exit(child, Duration::from_millis(500))?;
+
+    #[cfg(unix)]
+    signal_process_group(child, SIGKILL);
+    if !exited_after_term {
+        let _ = child.kill();
+    }
+    let _ = wait_for_child_exit(child, Duration::from_millis(500))?;
     Ok(())
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Result<bool> {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if child.try_wait()?.is_some() {
+            return Ok(true);
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Ok(false)
+}
+
+fn isolate_process_group(process: &mut ProcessCommand) {
+    #[cfg(unix)]
+    {
+        process.process_group(0);
+    }
+}
+
+#[cfg(unix)]
+fn signal_process_group(child: &Child, signal: i32) {
+    let signal = match signal {
+        SIGTERM => "-TERM",
+        SIGKILL => "-KILL",
+        _ => return,
+    };
+    let group = format!("-{}", child.id());
+    let _ = ProcessCommand::new("/bin/kill")
+        .args([signal, group.as_str()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 fn run_shell_command(
