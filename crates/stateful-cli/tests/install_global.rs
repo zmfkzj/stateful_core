@@ -104,14 +104,14 @@ fn install_yes_preserves_existing_features_and_enables_hooks() {
 fn install_yes_preserves_quoted_project_tables() {
     let fixture = TestFixture::new("quoted-project");
     let existing =
-        "[projects.\"/Users/arthur\"]\ntrust_level = \"trusted\"\n\n[tools]\ncustom = true\n";
+        "[projects.\"/workspace/project\"]\ntrust_level = \"trusted\"\n\n[tools]\ncustom = true\n";
     fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
     apply_global_install(fixture.options(true)).expect("install should apply");
 
     let merged = fs::read_to_string(&fixture.codex_config).expect("merged config should read");
-    assert!(merged.contains("[projects.\"/Users/arthur\"]"));
+    assert!(merged.contains("[projects.\"/workspace/project\"]"));
     assert!(merged.contains("trust_level = \"trusted\""));
     assert!(merged.contains("[tools]\ncustom = true"));
     assert!(merged.contains("[mcp_servers.stateful]"));

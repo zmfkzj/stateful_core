@@ -1,5 +1,9 @@
 # V1 Hardening Scope Decisions
 
+This is a dated planning artifact for the v1 hardening pass, not a complete
+description of the current implementation. The README and implementation
+contract are authoritative for shipped behavior.
+
 This document locks the product and implementation decisions for the next v1
 hardening pass. The project should move beyond the current prototype surface and
 implement the stricter recommended direction for scheduling, sandboxed tests,

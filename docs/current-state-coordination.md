@@ -486,10 +486,10 @@ Human-derived state should carry lower confidence when inferred indirectly. For
 example, a file watcher can say a file changed, but it cannot always know the
 human's goal.
 
-V1 uses conservative git working-tree or filesystem observation for human
-activity. This is enough to trigger warnings and reconciliation blocks, but it
-should not claim to understand the human's intent. The dedicated IDE save gate is
-deferred to v2.
+The current implementation does not ship a filesystem watcher, git working-tree
+observer, or IDE integration for human activity. `state.reconcile.ack` exists as
+an explicit acknowledgement record, but human-write observation and automatic
+reconciliation blocks are future integrations.
 
 ### V2 IDE Soft Save Gate
 
@@ -516,6 +516,10 @@ affected file as changed by a human and warn or deny later agent writes until
 the agent has refreshed context and reconciled the file.
 
 ### Agent Reconciliation After Human Writes
+
+The current implementation records reconciliation acknowledgements but does not
+yet emit `HumanWriteObserved` or deny writes because of observed human writes.
+The target policy is:
 
 After `HumanWriteObserved` on a file with active agent work, the next write by
 that agent to the affected file should be denied. The block is not meant to stop
@@ -654,8 +658,7 @@ supported write action + target outside intent scope -> deny
 raw Bash or non-wrapper Bash -> deny
 delete action + non-exact file scope -> deny
 rename/move action + non-exact source or destination scope -> deny
-active write lease in hard conflict domain -> deny unless explicit user override
-is present in the current session
+active write lease in hard conflict domain -> deny
 ```
 
 For wait queue scheduling, the same hard conflict becomes a queued request when
@@ -663,10 +666,11 @@ the caller asks to queue on conflict. Queue promotion happens only after
 explicit release, session or activity finalization, or lease expiry. Soft
 repo-relative conflicts remain warning context in v1.
 
-Overrides are not scheduling priority. An explicit override can allow a direct
-write authorization exception for the current session and resource, but it does
-not reorder existing waiters, steal a reservation, or move the overriding
-session to the head of a queue.
+Explicit overrides are target policy and are not implemented in the current
+server. When implemented, an explicit override can allow a direct write
+authorization exception for the current session and resource, but it must not
+reorder existing waiters, steal a reservation, or move the overriding session to
+the head of a queue.
 
 A v1 write-authorizing intent must be active, unexpired, belong to the same
 session, and include matching file or directory scope. Abstract task, test, port,
@@ -710,6 +714,9 @@ example: "Allow override for src/auth.ts."
 responsibility: user owns the judgment and risk
 ```
 
+This override policy is future work until the server has an explicit override
+record and authorization path.
+
 Prompt context rendering:
 
 ```text
@@ -721,6 +728,9 @@ sections: Blocking, Required Next Action, Warnings, Nearby Activity, Stale/Expir
 `brief` is used for session start and user prompt context. `detailed` is used
 after denied actions or for focused resource checks. Rendering should be
 actionable, not a raw event dump.
+
+The current server route accepts the render request but returns an empty context
+package. Store-backed prompt context rendering is future hardening work.
 
 The renderer returns structured data plus prompt-ready markdown:
 

@@ -199,7 +199,7 @@ impl<'a> PolicyService<'a> {
                 decision: Decision::deny(
                     "missing_lease",
                     "Write target is inside active intent scope, but workspace is missing so lease ownership cannot be checked.",
-                    "Include workspace_id and acquire the relevant file or directory lease successfully before writing.",
+                    "Include workspace_id and acquire the relevant same-session file or directory lease successfully before writing. Do not change session_id; that does not create same-session lease ownership.",
                 ),
                 wait: None,
                 reservation: None,
@@ -270,13 +270,13 @@ impl<'a> PolicyService<'a> {
                 Decision::deny(
                     "missing_lease",
                     "Native edit targets require exact active same-session file leases for every affected path.",
-                    "Acquire matching same-session file leases for every affected path before writing.",
+                    "Acquire matching same-session file leases for every affected path before writing. Do not change session_id; that does not create same-session lease ownership.",
                 )
             } else {
                 Decision::deny(
                     "missing_lease",
                     "Write target is inside active intent scope, but no active same-session lease covers it.",
-                    "Acquire the relevant file or directory lease successfully before writing.",
+                    "Acquire the relevant same-session file or directory lease successfully before writing. Do not change session_id; that does not create same-session lease ownership.",
                 )
             };
             return Ok(AuthorizationOutcome {

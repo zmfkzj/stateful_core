@@ -309,6 +309,10 @@ The queue is FIFO by `queue_sequence`. A queued request can be promoted only
 when every requested resource is available. V1 uses atomic all-or-nothing grant:
 multi-resource requests are never partially granted.
 
+The current implementation handles one requested path per wait request.
+Multi-resource all-or-nothing scheduling is the target model for future
+hardening.
+
 Grant triggers are limited to explicit lease release, session or activity
 finalization, or lease expiry. Soft repo-relative conflicts do not create wait
 queue records in v1.
@@ -331,12 +335,15 @@ request on a second resource stays queued.
 expiry state instead of creating a duplicate queue item.
 
 Queued or reserved requests can be canceled explicitly. Session or activity
-finalization cancels that session's queued and reserved requests.
+finalization cleanup for queued and reserved requests is target behavior; the
+current implementation releases active leases on finalization.
 
 ## Override Record
 
 An override records an explicit user instruction to permit a blocked resource in
 the current session. Overrides are never inferred or granted automatically.
+Override records are target model only; the current server does not expose an
+override authorization path.
 
 ```text
 override_id
@@ -442,6 +449,9 @@ blocked for the affected file and should release or shorten the affected lease.
 Clearing the block does not authorize writes by itself; active, unexpired,
 matching intent is still required.
 
+The current implementation records reconciliation acknowledgements but does not
+yet emit `HumanWriteObserved` events or enforce unreconciled-human-write blocks.
+
 ## Events
 
 The canonical event log should use explicit coordination events:
@@ -467,6 +477,8 @@ The canonical event log should use explicit coordination events:
 
 Accepted events update the materialized current-state view. Expiration may be
 driven by background TTL processing or by reads that discover stale state.
+Some event kinds above are target model entries and are not emitted by the
+current implementation, including override and human save-gate events.
 
 ## Freshness Rules
 
@@ -500,6 +512,9 @@ V1 retains event and audit history for 14 days by default. Retention affects
 historical evidence only; it does not extend live TTLs, leases, intents, or
 write authorization.
 
+The current implementation expires live coordination rows lazily when policy
+reads detect stale state. Configurable event-retention pruning is future work.
+
 Projects may configure a longer retention window. Shorter retention should be
 allowed only when the system can still preserve required audit evidence for
 active conflicts, unreconciled human writes, and pending outbox sync.
@@ -519,7 +534,7 @@ write authorization and fail open for human saves.
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block.
 - Intent declaration, lease acquisition, and lease refresh fail.
 - Read, search, and diff actions are allowed.
-- IDE human save gates warn the user and allow the save.
+- Future IDE human save gates warn the user and allow the save.
 - Heartbeat, finalization, and observer events may be queued in a local outbox.
 - Local outbox events cannot authorize writes, clear reconciliation blocks, or
   extend leases until synced through the state server.
@@ -548,7 +563,9 @@ and inspection.
 
 ## Human Save Gate Rules
 
-Human save-gate events are advisory coordination evidence.
+Human save-gate events are advisory coordination evidence for future IDE
+integration. They are not emitted by the current CLI, MCP, or HTTP
+implementation.
 
 - IDE open, selection, dirty-buffer, and save-completion events may update
   human `activity` records.
@@ -575,6 +592,9 @@ Expected materialized views:
 - conflicts by session
 - finalization summaries by session
 - prompt context package for Codex hooks and MCP tools
+
+The current server exposes context rendering but returns an empty package.
+Store-backed prompt context packages are future hardening work.
 
 Prompt context packages should support:
 

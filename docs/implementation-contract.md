@@ -13,8 +13,10 @@ semantics.
 V1 is Rust-only.
 
 The state server, policy engine, SQLite persistence, CLI, hook adapter commands,
-MCP adapter, watcher, sandbox wrapper, and prompt renderer should live in the
-same Rust codebase.
+MCP adapter, sandbox wrapper, and implemented prompt/context endpoints live in
+the same Rust codebase. Watcher-driven human observation and richer
+store-backed prompt rendering remain design targets unless a section below says
+they are implemented.
 
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --yes` configures global Codex hooks and MCP. `stateful enable`
@@ -30,8 +32,13 @@ one implementation and avoids policy drift.
 
 ## Protocol Version
 
-Every request from hooks, MCP tools, CLI commands, observers, and future IDE
-clients must include:
+The `stateful.v1` envelope is the target request shape for side-effecting
+protocol calls. The current implementation enforces it for `/v1/authorize` and
+the intent declare/request/claim/cancel endpoints. Session, lease, activity,
+context, reconciliation, notification, resume, outbox, and read endpoints still
+use their current flat request bodies.
+
+Envelope-shaped requests include:
 
 ```text
 protocol_version: stateful.v1
@@ -41,10 +48,9 @@ workspace
 source
 ```
 
-`protocol_version` uses `name.major` form. A major mismatch fails closed for
-write authorization, reconciliation, intent declaration, lease acquisition, and
-lease refresh. Read-only context requests may return `error: protocol_mismatch`
-with no side effects.
+`protocol_version` uses `name.major` form. A major mismatch fails closed on
+endpoints that currently enforce the envelope. Clients should not assume every
+endpoint accepts or requires the envelope until those routes are migrated.
 
 ## Common Request Envelope
 
@@ -123,6 +129,10 @@ and process id describe the same stateful server.
 MCP tools map directly onto these endpoints. MCP handlers do not implement
 policy branches; they validate tool arguments, call the HTTP API, and return the
 server result.
+
+Current envelope enforcement is limited to `/v1/authorize` and
+`/v1/intent/declare`, `/v1/intent/request`, `/v1/intent/claim`, and
+`/v1/intent/cancel`.
 
 ## Authorization Input
 
@@ -418,23 +428,24 @@ configured upstream or an explicit `<remote> <branch>` pair matching the current
 branch, and rejects force-like target values. Raw `git add`, `git commit`, and
 `git push` through Bash remain denied.
 
-## Prototype Verification
+## Verification
 
-The prototype alignment pass must run:
+Before publishing or releasing a build, run:
 
 ```text
-cargo test --workspace
-./target/debug/stateful doctor
+cargo fmt --all --check
+env -u STATEFUL_CODEX_RUN_ID cargo test --workspace
+env -u STATEFUL_CODEX_RUN_ID cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The Task 10 verification run passed `cargo test --workspace`. The doctor command
-returned JSON containing the global install fields `global_config_yml`,
-`global_runtime_server_json`, `global_state_db`, `repo_enabled`,
-`global_paths_error`, and `global_registry_error`.
+Unset `STATEFUL_CODEX_RUN_ID` when running workspace tests from an active Codex
+session so tests do not inherit a run-bound session file from the caller.
+`stateful doctor` remains the local installation health check after installing
+or enabling a repository.
 
 ## Config Defaults
 
-`.stateful/config.yml` owns repo-level defaults:
+`.stateful/config.yml` documents repo-level defaults:
 
 ```text
 protocol_version: stateful.v1
@@ -447,6 +458,10 @@ default_write_policy: deny
 event_retention_days: 14
 ```
 
+The current implementation uses built-in Rust defaults for these values. Runtime
+loading of every config key and event-retention pruning are future hardening
+work.
+
 Command-shaped tests and checks run through the trusted `stateful sandbox run`
 wrapper. Artifact writes are scoped with `--write-dir target` after exact
 `target/` directory intent and a successful same-session directory lease.
@@ -457,19 +472,20 @@ after glob expansion.
 
 ## Test Contract
 
-V1 must have tests for:
+Implemented v1 behavior must have tests for:
 
 - policy decisions as table-driven unit tests
 - intent scope matching, including depth-2 directory behavior
 - exact file scope for delete, rename, and move
 - Bash full-deny classification and sandbox-gated hook authorization
 - native Codex edit hook authorization plus Bash sandbox fixtures
-- prompt renderer golden output for brief and detailed modes
+- prompt renderer golden output for shipped store-backed rendering
 - SQLite event append plus materialized-view transaction behavior
 - sandbox-run execution with artifact writes limited to an authorized directory
 - state-server unavailable behavior
 - outbox idempotent sync
-- human-write reconciliation blocks and acknowledgements
+- human-write reconciliation blocks and acknowledgements when human-write
+  observation is shipped
 
 The policy engine should be testable without starting the HTTP server. HTTP,
 MCP, and hook tests should prove adapter correctness, not duplicate policy

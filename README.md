@@ -135,6 +135,9 @@ Prerequisites:
 
 - Rust 1.85 or newer
 - Git
+- Codex CLI, when using the bundled lifecycle hooks or `stateful codex`
+- A supported OS sandbox backend for `stateful sandbox run`: macOS uses
+  `/usr/bin/sandbox-exec`; Linux uses `bwrap`
 
 Build the workspace:
 
@@ -200,11 +203,20 @@ stateful current
 stateful intent declare --session-id demo --workspace-id local README.md
 ```
 
-Run tests in a sandbox and check local installation health:
+Run tests normally from a plain checkout:
 
 ```bash
-stateful intent declare --session-id demo --workspace-id local target/
-stateful mcp call state_lease_acquire '{"session_id":"demo","workspace_id":"local","path":"target/"}'
+cargo test --workspace
+```
+
+Run tests in a stateful sandbox from inside an active `stateful codex` session
+and check local installation health. The sandbox runner reads the current
+session file created by lifecycle hooks, so declaring an arbitrary
+`--session-id` in a plain terminal is not enough for `--fs write-targets`.
+
+```bash
+stateful intent declare target/
+stateful mcp call state_lease_acquire '{"session_id":"<current-session>","workspace_id":"<workspace>","path":"target/"}'
 stateful sandbox run --fs write-targets --network enabled --write-dir target --command 'cargo test --workspace'
 stateful doctor
 ```
@@ -367,15 +379,15 @@ approval request and prints a copy-paste command for a user to approve and run:
 ```bash
 stateful external-run request \
   --purpose "install rebuilt stateful binaries" \
-  --write-dir /Users/arthur/.cargo/bin \
-  --command 'install -m 755 target/release/stateful /Users/arthur/.cargo/bin/stateful'
+  --write-dir "$HOME/.cargo/bin" \
+  --command 'install -m 755 target/release/stateful "$HOME/.cargo/bin/stateful"'
 ```
 
 The output includes the purpose, normalized write scope, command, and an
 approval command like:
 
 ```bash
-'/Users/arthur/.cargo/bin/stateful' external-run approve <request-id> --run
+<absolute-stateful-binary> external-run approve <request-id> --run
 ```
 
 ## HTTP And MCP Surface
@@ -410,12 +422,14 @@ names:
 Most MCP tools map directly to HTTP routes. `state_file_write` /
 `state.file.write` and `state_bash_write` / `state.bash.write` were removed.
 Use native Codex edit tools for file edits after exact intent declaration and a
-successful same-session file lease, and use `stateful sandbox run --fs write-targets
-... --command ...` for command-shaped writes.
+successful same-session file lease, and use
+`stateful sandbox run --fs write-targets ... --command ...` for command-shaped
+writes.
 
-Side-effecting write authorization and intent declaration endpoints require the
-`stateful.v1` request envelope with `payload`. Flat legacy bodies are rejected
-with `protocol_mismatch` for those paths.
+The `/v1/authorize` endpoint and the intent declare/request/claim/cancel
+endpoints require the `stateful.v1` request envelope with `payload`. Flat
+legacy bodies are rejected with `protocol_mismatch` for those paths. Other POST
+routes still accept their current flat request bodies.
 
 ## Sandboxed Tests
 
@@ -472,7 +486,10 @@ That directory can contain `runtime/server.json`, `runtime/session.json`,
 run-bound `runtime/sessions/*.json` files, repo-local `state.db`, and outbox
 JSONL files under `outbox/`.
 
-Commit reusable documentation and source code, not local generated state.
+Commit reusable documentation and source code, not local generated state. For
+public source archives, prefer `git archive` or a clean clone instead of a
+working-tree tarball so ignored runtime and benchmark artifacts are not
+bundled.
 
 ## Environment Variables
 
@@ -502,7 +519,8 @@ Commit reusable documentation and source code, not local generated state.
   pairs, sampling, running paired agents, reporting, comparing, and synthetic
   experiments.
 - `docs/`: concept, state model, architecture, implementation contract,
-  coordination, hardening-scope, ADR, and tracked implementation-plan documents.
+  coordination, hardening-scope, ADR, and selected historical
+  implementation-plan documents.
 
 ## Benchmark Tooling
 

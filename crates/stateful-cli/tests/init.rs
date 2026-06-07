@@ -63,9 +63,9 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(command_policy_skill.contains("Edit"));
     assert!(!command_policy_skill.contains("state_file_write"));
     assert!(command_policy_skill.contains("Raw test commands"));
-    assert!(command_policy_skill.contains("Examples assume `/Users/arthur/.cargo/bin/stateful`"));
+    assert!(command_policy_skill.contains("Examples assume `<absolute-stateful-binary>`"));
     assert!(command_policy_skill.contains(
-        "\"/Users/arthur/.cargo/bin/stateful\" intent declare --session-id <session> --workspace-id <workspace> target/"
+        "<absolute-stateful-binary> intent declare --session-id <session> --workspace-id <workspace> target/"
     ));
     assert!(command_policy_skill.contains("--create-target target/generated.txt"));
     assert!(!command_policy_skill.contains("--create-target docs/new.md"));
@@ -75,6 +75,11 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(command_policy_skill.contains("external-run request --purpose"));
     assert!(command_policy_skill.contains("copy-paste `external-run approve <id> --run`"));
     assert!(command_policy_skill.contains("whole external directories after user approval"));
+    let former_local_home = String::from_utf8(vec![
+        47, 85, 115, 101, 114, 115, 47, 97, 114, 116, 104, 117, 114,
+    ])
+    .expect("literal should be valid UTF-8");
+    assert!(!command_policy_skill.contains(&former_local_home));
     assert!(command_policy_skill.contains("Raw read-only Bash is also denied"));
     assert!(command_policy_skill.contains("Use `stateful commit` / `stateful push`"));
     assert!(!command_policy_skill.contains("stateful validate cargo-test"));

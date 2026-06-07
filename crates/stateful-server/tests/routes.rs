@@ -1,6 +1,6 @@
 use axum::{
     body::{Body, to_bytes},
-    http::{Request, StatusCode},
+    http::{Request, Response, StatusCode},
 };
 use stateful_server::{ServerConfig, build_router};
 use stateful_store::{Event, Store};
@@ -560,6 +560,59 @@ async fn declared_intent_without_same_session_lease_denies_matching_authorize_re
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "missing_lease");
+}
+
+#[tokio::test]
+async fn missing_lease_cannot_be_bypassed_by_changing_session_id() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    for session_id in ["s-original", "s-swapped"] {
+        let declare = app
+            .clone()
+            .oneshot(protocol_request(
+                "/v1/intent/declare",
+                session_id,
+                "w1",
+                serde_json::json!({
+                    "files_planned": ["src/auth.ts"]
+                }),
+            ))
+            .await
+            .expect("intent declaration should complete");
+        assert_eq!(declare.status(), StatusCode::OK);
+    }
+
+    let original = app
+        .clone()
+        .oneshot(native_hook_authorize_request(
+            "s-original",
+            "w1",
+            "src/auth.ts",
+            "apply_patch",
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(original.status(), StatusCode::OK);
+    let json = response_json(original, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_lease");
+
+    let swapped = app
+        .oneshot(native_hook_authorize_request(
+            "s-swapped",
+            "w1",
+            "src/auth.ts",
+            "apply_patch",
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(swapped.status(), StatusCode::OK);
+    let json = response_json(swapped, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_lease");
+    let required_next_action = json["required_next_action"].as_str().unwrap_or_default();
+    assert!(required_next_action.contains("same-session file leases"));
+    assert!(required_next_action.contains("Do not change session_id"));
 }
 
 #[tokio::test]
@@ -1409,6 +1462,290 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
     assert_eq!(json["decision"], "allow");
     assert_eq!(json["reason_code"], "authorized");
     assert!(json.get("reservation").is_none());
+}
+
+#[tokio::test]
+async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_claim_and_lease() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    for session_id in ["codex-a", "codex-b", "codex-c"] {
+        let register = app
+            .clone()
+            .oneshot(json_request(
+                "/v1/session/register",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "workspace_id": "w1"
+                }),
+            ))
+            .await
+            .expect("session register should complete");
+        assert_eq!(register.status(), StatusCode::OK);
+    }
+
+    let declare_a = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "codex-a",
+            "w1",
+            serde_json::json!({
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare_a.status(), StatusCode::OK);
+
+    let lease_a = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "codex-a",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease_a.status(), StatusCode::OK);
+
+    let allowed_a = app
+        .clone()
+        .oneshot(native_hook_authorize_request(
+            "codex-a",
+            "w1",
+            "src/auth.ts",
+            "apply_patch",
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(allowed_a.status(), StatusCode::OK);
+    let json = response_json(allowed_a, 2048).await;
+    assert_eq!(json["decision"], "allow");
+    assert_eq!(json["reason_code"], "authorized");
+
+    let request_b = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "codex-b",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-codex-b",
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(request_b.status(), StatusCode::OK);
+    let json = response_json(request_b, 2048).await;
+    assert_eq!(json["request_state"], "queued");
+    assert_eq!(json["wait"]["queue_position"], 1);
+    assert_eq!(json["wait"]["blocking_session_id"], "codex-a");
+    let codex_b_wait_id = json["wait"]["wait_id"]
+        .as_str()
+        .expect("wait id should be present")
+        .to_string();
+
+    let request_c = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "codex-c",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-codex-c",
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(request_c.status(), StatusCode::OK);
+    let json = response_json(request_c, 2048).await;
+    assert_eq!(json["request_state"], "queued");
+    assert_eq!(json["wait"]["queue_position"], 2);
+    assert_eq!(json["wait"]["blocking_session_id"], "codex-a");
+    let codex_c_wait_id = json["wait"]["wait_id"]
+        .as_str()
+        .expect("wait id should be present")
+        .to_string();
+
+    let finalize_a = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/activity/finalize",
+            serde_json::json!({
+                "session_id": "codex-a",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("activity finalize should complete");
+    assert_eq!(finalize_a.status(), StatusCode::OK);
+    let json = response_json(finalize_a, 2048).await;
+    assert_eq!(json["released_leases"], 1);
+
+    let resume_b = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/resume/next",
+            serde_json::json!({
+                "session_id": "codex-b",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("resume next should complete");
+    assert_eq!(resume_b.status(), StatusCode::OK);
+    let json = response_json(resume_b, 2048).await;
+    assert_eq!(json["resume_available"], true);
+    assert_eq!(json["reservation"]["wait_id"], codex_b_wait_id);
+    assert_eq!(json["reservation"]["status"], "reserved");
+
+    let blocked_c = app
+        .clone()
+        .oneshot(native_hook_authorize_request(
+            "codex-c",
+            "w1",
+            "src/auth.ts",
+            "Edit",
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(blocked_c.status(), StatusCode::OK);
+    let json = response_json(blocked_c, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "reservation_conflict");
+    assert_eq!(json["reservation"]["session_id"], "codex-b");
+
+    let unclaimed_b = app
+        .clone()
+        .oneshot(native_hook_authorize_request(
+            "codex-b",
+            "w1",
+            "src/auth.ts",
+            "apply_patch",
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(unclaimed_b.status(), StatusCode::OK);
+    let json = response_json(unclaimed_b, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "reservation_claim_required");
+    assert_eq!(json["reservation"]["wait_id"], codex_b_wait_id);
+
+    let claim_b = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/claim",
+            "codex-b",
+            "w1",
+            serde_json::json!({
+                "wait_id": codex_b_wait_id
+            }),
+        ))
+        .await
+        .expect("intent claim should complete");
+    assert_eq!(claim_b.status(), StatusCode::OK);
+    let json = response_json(claim_b, 2048).await;
+    assert_eq!(json["reservation"]["status"], "claimed");
+
+    let allowed_b = app
+        .clone()
+        .oneshot(native_hook_authorize_request(
+            "codex-b",
+            "w1",
+            "src/auth.ts",
+            "Edit",
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(allowed_b.status(), StatusCode::OK);
+    let json = response_json(allowed_b, 2048).await;
+    assert_eq!(json["decision"], "allow");
+    assert_eq!(json["reason_code"], "authorized");
+
+    let blocked_a = app
+        .clone()
+        .oneshot(native_hook_authorize_request(
+            "codex-a",
+            "w1",
+            "src/auth.ts",
+            "apply_patch",
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(blocked_a.status(), StatusCode::OK);
+    let json = response_json(blocked_a, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "active_lease_conflict");
+
+    let finalize_b = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/activity/finalize",
+            serde_json::json!({
+                "session_id": "codex-b",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("activity finalize should complete");
+    assert_eq!(finalize_b.status(), StatusCode::OK);
+    let json = response_json(finalize_b, 2048).await;
+    assert_eq!(json["released_leases"], 1);
+
+    let resume_c = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/resume/next",
+            serde_json::json!({
+                "session_id": "codex-c",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("resume next should complete");
+    assert_eq!(resume_c.status(), StatusCode::OK);
+    let json = response_json(resume_c, 2048).await;
+    assert_eq!(json["resume_available"], true);
+    assert_eq!(json["reservation"]["wait_id"], codex_c_wait_id);
+    assert_eq!(json["reservation"]["status"], "reserved");
+
+    let claim_c = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/claim",
+            "codex-c",
+            "w1",
+            serde_json::json!({
+                "wait_id": codex_c_wait_id
+            }),
+        ))
+        .await
+        .expect("intent claim should complete");
+    assert_eq!(claim_c.status(), StatusCode::OK);
+    let json = response_json(claim_c, 2048).await;
+    assert_eq!(json["reservation"]["status"], "claimed");
+
+    let allowed_c = app
+        .oneshot(native_hook_authorize_request(
+            "codex-c",
+            "w1",
+            "src/auth.ts",
+            "file_change",
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(allowed_c.status(), StatusCode::OK);
+    let json = response_json(allowed_c, 2048).await;
+    assert_eq!(json["decision"], "allow");
+    assert_eq!(json["reason_code"], "authorized");
 }
 
 #[tokio::test]
@@ -2894,6 +3231,35 @@ fn protocol_request(
     payload: serde_json::Value,
 ) -> Request<Body> {
     json_request(path, protocol_body(session_id, workspace_id, payload))
+}
+
+fn native_hook_authorize_request(
+    session_id: &str,
+    workspace_id: &str,
+    path: &str,
+    tool_name: &str,
+) -> Request<Body> {
+    let mut body = protocol_body(
+        session_id,
+        workspace_id,
+        serde_json::json!({
+            "action": "write_file",
+            "path": path
+        }),
+    );
+    body["source"]["kind"] = serde_json::json!("hook");
+    body["source"]["event"] = serde_json::json!("pre_tool_use");
+    body["source"]["source_ref"] = serde_json::json!(format!("hook:{session_id}:{tool_name}"));
+    body["source"]["tool_name"] = serde_json::json!(tool_name);
+
+    json_request("/v1/authorize", body)
+}
+
+async fn response_json(response: Response<Body>, limit: usize) -> serde_json::Value {
+    let body = to_bytes(response.into_body(), limit)
+        .await
+        .expect("body should read");
+    serde_json::from_slice(&body).expect("body should be json")
 }
 
 fn authorized_get(path: &str) -> Request<Body> {

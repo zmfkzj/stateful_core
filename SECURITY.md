@@ -11,10 +11,11 @@ policy exists.
 
 ## Reporting a Vulnerability
 
-Do not open a public issue for a suspected vulnerability. Use GitHub private
+Do not open a public issue with vulnerability details. Use GitHub private
 vulnerability reporting for the repository when available. If private reporting
-is not enabled, contact the repository owner through the owner profile and share
-only the minimum detail needed to establish a private channel.
+is not enabled and no private contact is listed on the owner profile, open a
+minimal public issue asking for a private security channel and do not include
+exploit details, affected paths, tokens, logs, or reproduction steps there.
 
 Useful reports include:
 

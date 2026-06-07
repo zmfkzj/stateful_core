@@ -93,8 +93,10 @@ This keeps policy centralized and avoids duplicating authorization logic inside
 hook scripts or MCP tool handlers.
 
 The concrete v1 HTTP API lives under `/v1` and is defined in the implementation
-contract. All clients use the same request envelope with `protocol_version`,
-session identity, workspace identity, and source metadata.
+contract. The intended envelope includes `protocol_version`, session identity,
+workspace identity, and source metadata. The current implementation enforces
+that envelope for write authorization and intent declare/request/claim/cancel;
+other POST routes still use flat request bodies.
 
 ## Hook Packaging
 
@@ -136,13 +138,13 @@ compiled `stateful` binary. If the state server is unavailable, the hook follows
 the availability policy: agent writes and reconciliation fail closed;
 read/search/diff remains allowed.
 
-Hook scripts should resolve paths from the git root and include a
-`protocol_version` in every state-server request. A major protocol mismatch
-fails closed for write and reconciliation paths.
+Hook scripts should resolve paths from the git root. Envelope-enforced routes
+include `protocol_version`; a major protocol mismatch fails closed on those
+write authorization and intent paths.
 
 ## Trigger Sources
 
-Initial trigger sources:
+Currently implemented trigger sources:
 
 - Codex `SessionStart`
 - Codex `UserPromptSubmit`
@@ -151,9 +153,13 @@ Initial trigger sources:
 - Codex `Stop`
 - Codex subagent start/stop and tool activity
 - MCP calls from the agent
-- git working tree or filesystem observation for conservative v1 human activity
+- CLI and state server calls
+
+Target and future trigger sources:
+
+- git working tree or filesystem observation for conservative human activity
   detection
-- v2 IDE extension events for human file open, dirty, save-attempt, and save
+- IDE extension events for human file open, dirty, save-attempt, and save
   completion signals
 
 Each trigger should carry the session id, actor identity when known, workspace,
@@ -208,6 +214,9 @@ The v1 MCP/tool surface is intentionally narrow:
 state.session.register
 state.session.heartbeat
 state.intent.declare
+state.intent.request
+state.intent.claim
+state.intent.cancel
 state.lease.acquire
 state.lease.release
 state.activity.observe
@@ -355,6 +364,10 @@ human's intent.
 
 ## Human Write Reconciliation
 
+The current implementation records `state.reconcile.ack` acknowledgements but
+does not yet observe `HumanWriteObserved` events or block writes because of
+human-written files. The target policy is:
+
 When `HumanWriteObserved` affects a file with active agent work, the next agent
 write to that file is blocked until reconciliation is acknowledged.
 
@@ -448,6 +461,10 @@ the agent decide what to avoid, wait for, or coordinate.
 resource filter. `brief` is for session start and prompt submit context.
 `detailed` is for denied actions or focused resource checks. Rendered output
 must include concrete next actions when a block or warning is present.
+
+The current server route accepts these inputs but returns an empty context
+package. Store-backed rendering of active conflicts, warnings, and stale state
+is future hardening work.
 
 The renderer should return both structured data and prompt-ready markdown:
 
