@@ -54,7 +54,7 @@ Raw Bash commands are not a write-authorizing or test execution path. Official
 test execution uses the trusted sandbox wrapper:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> target/
+stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." target/
 stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
 stateful sandbox run --fs write-targets --network enabled --write-dir target --command <cmd>
 ```

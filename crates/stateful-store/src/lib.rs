@@ -1,7 +1,9 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use stateful_core::{IntentScope, PolicyState};
-use std::path::Path;
+use stateful_core::{
+    CurrentFreshness, CurrentItem, CurrentItemKind, CurrentSeverity, IntentScope, PolicyState,
+};
+use std::{collections::HashMap, path::Path};
 use thiserror::Error;
 use time::{Date, Duration, Month, OffsetDateTime, Time};
 use uuid::Uuid;
@@ -27,6 +29,8 @@ pub enum StoreError {
     IntentRequestOwnerMismatch,
     #[error("intent request is not cancelable")]
     IntentRequestNotCancelable,
+    #[error("purpose is required")]
+    MissingPurpose,
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -146,6 +150,258 @@ impl Store {
             active_intent_count,
             event_count,
         })
+    }
+
+    pub fn live_current_state(
+        &self,
+        resource_filter: Option<&str>,
+    ) -> StoreResult<LiveCurrentState> {
+        self.expire_stale()?;
+        let summary = self.current_summary()?;
+        let resource_filter = resource_filter.map(normalize_relative_path);
+        let purpose_by_session = self.active_intent_purpose_by_session()?;
+        let mut items = Vec::new();
+
+        items.extend(self.live_intent_items(resource_filter.as_deref())?);
+        items.extend(self.live_lease_items(resource_filter.as_deref(), &purpose_by_session)?);
+        items.extend(self.live_wait_queue_items(resource_filter.as_deref())?);
+
+        Ok(LiveCurrentState { summary, items })
+    }
+
+    fn active_intent_purpose_by_session(&self) -> StoreResult<HashMap<(String, String), String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT session_id, workspace_id, purpose
+             FROM intents
+             WHERE status = 'active'",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    fn live_intent_items(&self, resource_filter: Option<&str>) -> StoreResult<Vec<CurrentItem>> {
+        let mut statement = self.conn.prepare(
+            "SELECT session_id, workspace_id, scopes_json, purpose, declared_at, expires_at
+             FROM intents
+             WHERE status = 'active'
+             ORDER BY declared_at DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        let rows = rows.collect::<Result<Vec<_>, _>>()?;
+        let mut items = Vec::new();
+
+        for (session_id, workspace_id, scopes_json, purpose, declared_at, expires_at) in rows {
+            let scopes: Vec<IntentScope> = serde_json::from_str(&scopes_json).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
+            for scope in scopes {
+                let resource = intent_scope_resource(&scope);
+                if !resource_matches_filter(&resource, resource_filter) {
+                    continue;
+                }
+                items.push(
+                    CurrentItem::new(
+                        CurrentItemKind::Intent,
+                        CurrentSeverity::Info,
+                        CurrentFreshness::Live,
+                        resource.clone(),
+                        purpose.clone(),
+                        format!("Session {session_id} declared intent for {resource}."),
+                    )
+                    .with_next_action(format!(
+                        "Avoid overlapping edits to {resource} unless coordinating with {session_id}."
+                    ))
+                    .with_session(session_id.clone())
+                    .with_workspace(workspace_id.clone())
+                    .with_source_ref("IntentDeclared")
+                    .with_observed_at(declared_at.clone())
+                    .with_expires_at(expires_at.clone()),
+                );
+            }
+        }
+
+        Ok(items)
+    }
+
+    fn live_lease_items(
+        &self,
+        resource_filter: Option<&str>,
+        purpose_by_session: &HashMap<(String, String), String>,
+    ) -> StoreResult<Vec<CurrentItem>> {
+        let mut statement = self.conn.prepare(
+            "SELECT session_id, workspace_id, relative_path, expires_at
+             FROM leases
+             WHERE status = 'active' AND relative_path IS NOT NULL
+             ORDER BY rowid ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        let rows = rows.collect::<Result<Vec<_>, _>>()?;
+        let mut items = Vec::new();
+
+        for (session_id, workspace_id, relative_path, expires_at) in rows {
+            if !resource_matches_filter(&relative_path, resource_filter) {
+                continue;
+            }
+            let Some(purpose) = session_id
+                .as_ref()
+                .and_then(|session_id| {
+                    purpose_by_session
+                        .get(&(session_id.clone(), workspace_id.clone()))
+                        .cloned()
+                })
+                .filter(|purpose| !purpose.trim().is_empty())
+            else {
+                continue;
+            };
+            let session_summary = session_id.as_deref().unwrap_or("unknown session");
+            let mut item = CurrentItem::new(
+                CurrentItemKind::Lease,
+                CurrentSeverity::Block,
+                CurrentFreshness::Live,
+                relative_path.clone(),
+                purpose,
+                format!("{session_summary} has an active write lease on {relative_path}."),
+            )
+            .with_next_action(format!(
+                "Wait for the lease to release, or coordinate with {session_summary}."
+            ))
+            .with_workspace(workspace_id.clone())
+            .with_source_ref("LeaseAcquired")
+            .with_expires_at(expires_at);
+            if let Some(session_id) = session_id {
+                item = item.with_session(session_id);
+            }
+            items.push(item);
+        }
+
+        Ok(items)
+    }
+
+    fn live_wait_queue_items(
+        &self,
+        resource_filter: Option<&str>,
+    ) -> StoreResult<Vec<CurrentItem>> {
+        let mut statement = self.conn.prepare(
+            "SELECT
+                wait_id,
+                session_id,
+                workspace_id,
+                relative_path,
+                action,
+                status,
+                requested_at,
+                reservation_expires_at,
+                blocking_session_id,
+                purpose
+             FROM wait_queue
+             WHERE status IN ('queued', 'reserved')
+             ORDER BY rowid ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, String>(9)?,
+            ))
+        })?;
+        let rows = rows.collect::<Result<Vec<_>, _>>()?;
+        let mut items = Vec::new();
+
+        for (
+            wait_id,
+            session_id,
+            workspace_id,
+            relative_path,
+            action,
+            status,
+            requested_at,
+            reservation_expires_at,
+            blocking_session_id,
+            purpose,
+        ) in rows
+        {
+            if !resource_matches_filter(&relative_path, resource_filter) {
+                continue;
+            }
+            let (kind, severity, summary, next_action) = if status == "reserved" {
+                (
+                    CurrentItemKind::Reservation,
+                    CurrentSeverity::Info,
+                    format!(
+                        "Session {session_id} has a claimable reservation for {action} on {relative_path}."
+                    ),
+                    format!(
+                        "Reread {relative_path}, then call state.intent.claim with wait_id {wait_id}."
+                    ),
+                )
+            } else {
+                (
+                    CurrentItemKind::WaitQueue,
+                    CurrentSeverity::Warn,
+                    format!("Session {session_id} is queued for {action} on {relative_path}."),
+                    format!(
+                        "Wait for the active blocker to release before assuming {relative_path} is writable."
+                    ),
+                )
+            };
+            let evidence = blocking_session_id.map(|blocking_session_id| {
+                format!("Blocked by session {blocking_session_id}; wait_id {wait_id}.")
+            });
+            let mut item = CurrentItem::new(
+                kind,
+                severity,
+                CurrentFreshness::Live,
+                relative_path.clone(),
+                purpose,
+                summary,
+            )
+            .with_next_action(next_action)
+            .with_session(session_id)
+            .with_workspace(workspace_id)
+            .with_source_ref("IntentRequested")
+            .with_observed_at(requested_at)
+            .with_expires_at(reservation_expires_at);
+            if let Some(evidence) = evidence {
+                item = item.with_evidence(evidence);
+            }
+            items.push(item);
+        }
+
+        Ok(items)
     }
 
     pub fn recent_events(&self, limit: u64) -> StoreResult<Vec<EventRecord>> {
@@ -481,10 +737,12 @@ impl Store {
         workspace_id: impl AsRef<str>,
         relative_path: impl AsRef<str>,
         action: impl AsRef<str>,
+        purpose: impl AsRef<str>,
         blocking_session_id: Option<&str>,
     ) -> StoreResult<WaitRecord> {
         self.expire_stale()?;
         let relative_path = normalize_relative_path(relative_path.as_ref());
+        let purpose = required_purpose(purpose.as_ref())?;
         let existing = self
             .conn
             .query_row(
@@ -522,8 +780,9 @@ impl Store {
                 status,
                 requested_at,
                 reservation_expires_at,
-                blocking_session_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, NULL, ?7)",
+                blocking_session_id,
+                purpose
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, NULL, ?7, ?8)",
             params![
                 wait_id,
                 session_id.as_ref(),
@@ -532,6 +791,7 @@ impl Store {
                 action.as_ref(),
                 now_timestamp(),
                 blocking_session_id,
+                purpose,
             ],
         )?;
 
@@ -539,22 +799,15 @@ impl Store {
             .map(|waiter| waiter.expect("inserted waiter should load"))
     }
 
-    pub fn enqueue_intent_request(
-        &self,
-        request_id: impl AsRef<str>,
-        session_id: impl AsRef<str>,
-        workspace_id: impl AsRef<str>,
-        relative_path: impl AsRef<str>,
-        action: impl AsRef<str>,
-        blocking_session_id: Option<&str>,
-    ) -> StoreResult<WaitRecord> {
+    pub fn enqueue_intent_request(&self, input: IntentRequestInput<'_>) -> StoreResult<WaitRecord> {
         self.expire_stale()?;
-        if let Some(waiter) = self.waiter_by_request_id(request_id.as_ref())? {
+        let purpose = required_purpose(input.purpose)?;
+        if let Some(waiter) = self.waiter_by_request_id(input.request_id)? {
             return Ok(waiter);
         }
 
         let wait_id = Uuid::new_v4().to_string();
-        let relative_path = normalize_relative_path(relative_path.as_ref());
+        let relative_path = normalize_relative_path(input.relative_path);
         self.conn.execute(
             "INSERT INTO wait_queue (
                 wait_id,
@@ -566,17 +819,19 @@ impl Store {
                 status,
                 requested_at,
                 reservation_expires_at,
-                blocking_session_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, NULL, ?8)",
+                blocking_session_id,
+                purpose
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, NULL, ?8, ?9)",
             params![
                 wait_id,
-                request_id.as_ref(),
-                session_id.as_ref(),
-                workspace_id.as_ref(),
+                input.request_id,
+                input.session_id,
+                input.workspace_id,
                 relative_path,
-                action.as_ref(),
+                input.action,
                 now_timestamp(),
-                blocking_session_id,
+                input.blocking_session_id,
+                purpose,
             ],
         )?;
 
@@ -731,7 +986,8 @@ impl Store {
                     status,
                     requested_at,
                     reservation_expires_at,
-                    blocking_session_id
+                    blocking_session_id,
+                    purpose
                  FROM wait_queue
                  WHERE workspace_id = ?1 AND relative_path = ?2 AND status = 'reserved'
                  ORDER BY rowid ASC
@@ -763,7 +1019,8 @@ impl Store {
                     status,
                     requested_at,
                     reservation_expires_at,
-                    blocking_session_id
+                    blocking_session_id,
+                    purpose
                  FROM wait_queue
                  WHERE workspace_id = ?1
                     AND session_id != ?2
@@ -808,7 +1065,8 @@ impl Store {
                     status,
                     requested_at,
                     reservation_expires_at,
-                    blocking_session_id
+                    blocking_session_id,
+                    purpose
                  FROM wait_queue
                  WHERE workspace_id = ?1
                     AND session_id = ?2
@@ -852,7 +1110,8 @@ impl Store {
                     status,
                     requested_at,
                     reservation_expires_at,
-                    blocking_session_id
+                    blocking_session_id,
+                    purpose
                  FROM wait_queue
                  WHERE workspace_id = ?1
                     AND session_id != ?2
@@ -889,7 +1148,8 @@ impl Store {
                     status,
                     requested_at,
                     reservation_expires_at,
-                    blocking_session_id
+                    blocking_session_id,
+                    purpose
                  FROM wait_queue
                  WHERE workspace_id = ?1
                     AND session_id = ?2
@@ -934,7 +1194,8 @@ impl Store {
                     status,
                     requested_at,
                     reservation_expires_at,
-                    blocking_session_id
+                    blocking_session_id,
+                    purpose
                  FROM wait_queue
                  WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'reserved'
                  ORDER BY rowid ASC
@@ -1294,6 +1555,7 @@ impl Store {
                 intent_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
+                purpose TEXT NOT NULL,
                 scopes_json TEXT NOT NULL,
                 status TEXT NOT NULL,
                 declared_at TEXT NOT NULL,
@@ -1333,7 +1595,8 @@ impl Store {
                 status TEXT NOT NULL,
                 requested_at TEXT NOT NULL,
                 reservation_expires_at TEXT,
-                blocking_session_id TEXT
+                blocking_session_id TEXT,
+                purpose TEXT NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_wait_queue_workspace_path_status
@@ -1420,6 +1683,16 @@ impl Store {
             "request_id",
             "ALTER TABLE wait_queue ADD COLUMN request_id TEXT;",
         )?;
+        self.add_column_if_missing(
+            "intents",
+            "purpose",
+            "ALTER TABLE intents ADD COLUMN purpose TEXT;",
+        )?;
+        self.add_column_if_missing(
+            "wait_queue",
+            "purpose",
+            "ALTER TABLE wait_queue ADD COLUMN purpose TEXT;",
+        )?;
         self.conn.execute_batch(
             "
             CREATE UNIQUE INDEX IF NOT EXISTS idx_wait_queue_request_id
@@ -1434,7 +1707,8 @@ impl Store {
     fn add_column_if_missing(&self, table: &str, column: &str, ddl: &str) -> StoreResult<()> {
         let supported = (table == "events"
             && matches!(column, "repo_id" | "worktree_id" | "root" | "branch"))
-            || (table == "wait_queue" && column == "request_id");
+            || (table == "intents" && column == "purpose")
+            || (table == "wait_queue" && matches!(column, "request_id" | "purpose"));
         if !supported {
             return Ok(());
         }
@@ -1463,6 +1737,11 @@ impl Store {
             }
             EventType::IntentDeclared => {
                 let scopes_json = event.payload["scopes"].to_string();
+                let purpose = required_purpose(
+                    event.payload["purpose"]
+                        .as_str()
+                        .ok_or(StoreError::MissingPurpose)?,
+                )?;
                 self.conn.execute(
                     "UPDATE intents SET status = 'superseded'
                      WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'",
@@ -1473,15 +1752,17 @@ impl Store {
                         intent_id,
                         session_id,
                         workspace_id,
+                        purpose,
                         scopes_json,
                         status,
                         declared_at,
                         expires_at
-                    ) VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6)",
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7)",
                     params![
                         event.event_id,
                         event.session_id,
                         event.workspace_id,
+                        purpose,
                         scopes_json,
                         event.created_at,
                         timestamp_after(&event.created_at, INTENT_TTL_SECONDS),
@@ -1505,7 +1786,8 @@ impl Store {
                     status,
                     requested_at,
                     reservation_expires_at,
-                    blocking_session_id
+                    blocking_session_id,
+                    purpose
                  FROM wait_queue
                  WHERE wait_id = ?1",
                 params![wait_id],
@@ -1541,7 +1823,8 @@ impl Store {
                 status,
                 requested_at,
                 reservation_expires_at,
-                blocking_session_id
+                blocking_session_id,
+                purpose
              FROM wait_queue
              WHERE workspace_id = ?1
                 AND status = 'queued'
@@ -1649,6 +1932,36 @@ fn normalize_relative_path(path: &str) -> String {
         .join("/")
 }
 
+fn required_purpose(purpose: &str) -> StoreResult<String> {
+    let purpose = purpose.trim().to_string();
+    if purpose.is_empty() {
+        return Err(StoreError::MissingPurpose);
+    }
+    Ok(purpose)
+}
+
+fn intent_scope_resource(scope: &IntentScope) -> String {
+    match scope {
+        IntentScope::File(path) => path.clone(),
+        IntentScope::Directory(path) => format!("{}/", path.trim_end_matches('/')),
+    }
+}
+
+fn resource_matches_filter(resource: &str, filter: Option<&str>) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    let resource = normalize_relative_path(resource.trim_end_matches('/'));
+    let filter = normalize_relative_path(filter.trim_end_matches('/'));
+    resource == filter
+        || resource
+            .strip_prefix(&format!("{filter}/"))
+            .is_some_and(|rest| !rest.is_empty())
+        || filter
+            .strip_prefix(&format!("{resource}/"))
+            .is_some_and(|rest| !rest.is_empty())
+}
+
 fn now_timestamp() -> String {
     format_timestamp(OffsetDateTime::now_utc())
 }
@@ -1707,6 +2020,7 @@ fn wait_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WaitRecord>
         requested_at: row.get(6)?,
         reservation_expires_at: row.get(7)?,
         blocking_session_id: row.get(8)?,
+        purpose: row.get(9)?,
     })
 }
 
@@ -1812,6 +2126,7 @@ impl Event {
     pub fn intent_declared<I, S>(
         session_id: impl Into<String>,
         workspace_id: impl Into<String>,
+        purpose: impl Into<String>,
         files_planned: I,
     ) -> Self
     where
@@ -1820,6 +2135,11 @@ impl Event {
     {
         let session_id = session_id.into();
         let workspace_id = workspace_id.into();
+        let purpose = purpose.into().trim().to_string();
+        assert!(
+            !purpose.is_empty(),
+            "IntentDeclared event should include non-empty purpose"
+        );
         let scopes = files_planned
             .into_iter()
             .map(|path| {
@@ -1838,6 +2158,7 @@ impl Event {
             payload: serde_json::json!({
                 "session_id": session_id,
                 "workspace_id": workspace_id,
+                "purpose": purpose,
                 "scopes": scopes,
             }),
             session_id,
@@ -1882,6 +2203,23 @@ pub struct CurrentSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LiveCurrentState {
+    pub summary: CurrentSummary,
+    pub items: Vec<CurrentItem>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IntentRequestInput<'a> {
+    pub request_id: &'a str,
+    pub session_id: &'a str,
+    pub workspace_id: &'a str,
+    pub relative_path: &'a str,
+    pub action: &'a str,
+    pub purpose: &'a str,
+    pub blocking_session_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EventRecord {
     pub event_id: String,
     pub event_type: String,
@@ -1905,6 +2243,7 @@ pub struct WaitRecord {
     pub requested_at: String,
     pub reservation_expires_at: Option<String>,
     pub blocking_session_id: Option<String>,
+    pub purpose: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

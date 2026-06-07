@@ -1,5 +1,5 @@
 use stateful_core::{AuthorizationInput, Decision, DecisionKind, SourceKind};
-use stateful_store::{Event, Store, WaitRecord};
+use stateful_store::{Event, IntentRequestInput, Store, WaitRecord};
 
 #[derive(Debug, Clone)]
 pub struct AuthorizationOutcome {
@@ -21,6 +21,7 @@ pub struct AuthorizeWriteInput {
     pub source_kind: Option<SourceKind>,
     pub source_tool_name: Option<String>,
     pub queue_on_conflict: bool,
+    pub queue_purpose: Option<String>,
     pub action: String,
     pub old_path: Option<String>,
     pub new_path: Option<String>,
@@ -46,6 +47,7 @@ pub struct RequestIntentInput {
     pub request_id: String,
     pub action: String,
     pub path: String,
+    pub purpose: String,
 }
 
 #[derive(Debug, Clone)]
@@ -226,6 +228,10 @@ impl<'a> PolicyService<'a> {
                 && input.queue_on_conflict
                 && !is_multi_path_action(&input.action)
             {
+                let purpose = input
+                    .queue_purpose
+                    .as_deref()
+                    .ok_or_else(|| "queue purpose is required".to_string())?;
                 let waiter = self
                     .store
                     .enqueue_waiter(
@@ -233,6 +239,7 @@ impl<'a> PolicyService<'a> {
                         workspace_id,
                         &path,
                         &input.action,
+                        purpose,
                         Some(&owner),
                     )
                     .map_err(|error| error.to_string())?;
@@ -512,6 +519,7 @@ impl<'a> PolicyService<'a> {
             .append(Event::intent_declared(
                 &input.session_id,
                 &input.workspace_id,
+                reservation.purpose.clone(),
                 [scope],
             ))
             .map_err(|error| error.to_string())?;
@@ -597,14 +605,15 @@ impl<'a> PolicyService<'a> {
 
         let waiter = self
             .store
-            .enqueue_intent_request(
-                &input.request_id,
-                &input.session_id,
-                &input.workspace_id,
-                &input.path,
-                &input.action,
+            .enqueue_intent_request(IntentRequestInput {
+                request_id: &input.request_id,
+                session_id: &input.session_id,
+                workspace_id: &input.workspace_id,
+                relative_path: &input.path,
+                action: &input.action,
+                purpose: &input.purpose,
                 blocking_session_id,
-            )
+            })
             .map_err(|error| error.to_string())?;
 
         if reservation_conflict.is_none() && lease_owner.is_none() {

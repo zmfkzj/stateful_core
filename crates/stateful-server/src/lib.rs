@@ -3,7 +3,7 @@ mod protocol;
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
@@ -93,6 +93,7 @@ async fn health() -> StatusCode {
 
 async fn current(
     State(config): State<ServerConfig>,
+    Query(input): Query<CurrentQuery>,
     headers: HeaderMap,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
@@ -103,14 +104,19 @@ async fn current(
         .store
         .lock()
         .map_err(|_| "store lock poisoned".to_string())
-        .and_then(|store| store.current_summary().map_err(|error| error.to_string()));
+        .and_then(|store| {
+            store
+                .live_current_state(input.resource.as_deref())
+                .map_err(|error| error.to_string())
+        });
 
     match result {
-        Ok(summary) => (
+        Ok(live) => (
             StatusCode::OK,
             Json(json!({
                 "status": "ok",
-                "current": summary
+                "current": live.summary,
+                "items": live.items
             })),
         ),
         Err(message) => (
@@ -238,6 +244,17 @@ async fn authorize(
         source,
         ..
     } = envelope.request;
+    let queue_purpose = if payload.queue_on_conflict {
+        let Some(purpose) = payload.purpose else {
+            return missing_purpose_response();
+        };
+        match require_purpose(purpose) {
+            Ok(purpose) => Some(purpose),
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
 
     let input = AuthorizeWriteInput {
         session_id: session.session_id,
@@ -245,6 +262,7 @@ async fn authorize(
         source_kind: Some(source.kind),
         source_tool_name: source.tool_name,
         queue_on_conflict: payload.queue_on_conflict,
+        queue_purpose,
         action: payload.action,
         old_path: payload.old_path,
         new_path: payload.new_path,
@@ -290,6 +308,10 @@ async fn intent_declare(
         Ok(payload) => payload,
         Err(_) => return protocol::protocol_mismatch_response(),
     };
+    let purpose = match require_purpose(payload.purpose) {
+        Ok(purpose) => purpose,
+        Err(response) => return response,
+    };
     let identity = WorkspaceIdentityRequest {
         repo_id: non_empty_identity(envelope.request.workspace.repo_id),
         worktree_id: non_empty_identity(envelope.request.workspace.worktree_id),
@@ -303,6 +325,7 @@ async fn intent_declare(
             Event::intent_declared(
                 envelope.request.session.session_id,
                 envelope.request.workspace.workspace_id,
+                purpose,
                 payload.files_planned,
             ),
             identity,
@@ -327,6 +350,10 @@ async fn intent_request(
         Ok(payload) => payload,
         Err(_) => return protocol::protocol_mismatch_response(),
     };
+    let purpose = match require_purpose(payload.purpose) {
+        Ok(purpose) => purpose,
+        Err(response) => return response,
+    };
 
     let input = RequestIntentInput {
         session_id: envelope.request.session.session_id,
@@ -334,6 +361,7 @@ async fn intent_request(
         request_id: payload.request_id,
         action: payload.action,
         path: payload.path,
+        purpose,
     };
 
     match request_intent_with_policy(&config.store, input) {
@@ -425,6 +453,25 @@ async fn intent_cancel(
 
 fn non_empty_identity(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
+}
+
+fn missing_purpose_response() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "status": "error",
+            "reason_code": "missing_purpose",
+            "message": "Intent purpose is required and must be inferred from the user or agent instruction when it is not explicit."
+        })),
+    )
+}
+
+fn require_purpose(purpose: String) -> Result<String, (StatusCode, Json<Value>)> {
+    let purpose = purpose.trim().to_string();
+    if purpose.is_empty() {
+        return Err(missing_purpose_response());
+    }
+    Ok(purpose)
 }
 
 async fn lease_acquire(
@@ -536,8 +583,29 @@ async fn context_render(
         Some("detailed") => RenderMode::Detailed,
         _ => RenderMode::Brief,
     };
-    let _resource = input.resource;
-    let package = ContextPackage::empty();
+    let result = config
+        .store
+        .lock()
+        .map_err(|_| "store lock poisoned".to_string())
+        .and_then(|store| {
+            store
+                .live_current_state(input.resource.as_deref())
+                .map_err(|error| error.to_string())
+        });
+
+    let live = match result {
+        Ok(live) => live,
+        Err(message) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "message": message
+                })),
+            );
+        }
+    };
+    let package = ContextPackage::from_items(live.items.clone());
     let prompt_text = render_prompt_text(&package, mode);
 
     (
@@ -548,6 +616,8 @@ async fn context_render(
                 RenderMode::Brief => "brief",
                 RenderMode::Detailed => "detailed",
             },
+            "current": live.summary,
+            "items": live.items,
             "prompt_text": prompt_text
         })),
     )
@@ -568,6 +638,7 @@ async fn conflicts_check(
         source_kind: None,
         source_tool_name: None,
         queue_on_conflict: input.queue_on_conflict,
+        queue_purpose: None,
         action: input.action,
         old_path: input.old_path,
         new_path: input.new_path,
@@ -969,6 +1040,7 @@ fn wait_record_json(record: WaitRecord, queue_position: Option<u64>) -> Value {
         "status": record.status,
         "queue_position": queue_position,
         "blocking_session_id": record.blocking_session_id,
+        "purpose": record.purpose,
     })
 }
 
@@ -981,6 +1053,7 @@ fn reservation_json(reservation: WaitRecord) -> Value {
         "action": reservation.action,
         "status": reservation.status,
         "reservation_expires_at": reservation.reservation_expires_at,
+        "purpose": reservation.purpose,
     })
 }
 
@@ -1006,7 +1079,13 @@ fn has_valid_bearer_token(headers: &HeaderMap, expected_token: &str) -> bool {
 }
 
 #[derive(Debug, Deserialize)]
+struct CurrentQuery {
+    resource: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct IntentDeclarePayload {
+    purpose: String,
     files_planned: Vec<String>,
 }
 
@@ -1015,6 +1094,7 @@ struct IntentRequestPayload {
     request_id: String,
     action: String,
     path: String,
+    purpose: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1076,6 +1156,8 @@ struct ResumeNextRequest {
 struct AuthorizePayload {
     #[serde(default)]
     queue_on_conflict: bool,
+    #[serde(default)]
+    purpose: Option<String>,
     action: String,
     #[serde(default)]
     old_path: Option<String>,

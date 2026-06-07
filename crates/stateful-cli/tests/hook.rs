@@ -11,9 +11,9 @@ use std::{
 };
 
 use stateful_cli::{
-    GlobalPaths, HookOutcome, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime, enable_repo,
-    handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
-    read_current_session_file, read_current_session_file_for_codex_run, write_global_runtime_file,
+    CurrentSession, GlobalPaths, HookOutcome, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime,
+    enable_repo, handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
+    read_current_session_file_for_codex_run, write_global_runtime_file,
 };
 
 fn assert_raw_bash_denied_with_sandbox_run_guidance(outcome: HookOutcome) {
@@ -42,6 +42,12 @@ fn trusted_stateful_path() -> String {
         .expect("test executable path should resolve")
         .to_string_lossy()
         .into_owned()
+}
+
+fn read_legacy_current_session_file(repo_root: &Path) -> CurrentSession {
+    let path = repo_root.join(".stateful_core/runtime/session.json");
+    let contents = fs::read_to_string(path).expect("legacy current session should read");
+    serde_json::from_str(&contents).expect("legacy current session should decode")
 }
 
 #[test]
@@ -501,7 +507,7 @@ fn pre_tool_use_in_repo_records_current_session_for_mcp() {
         "stateful hook failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let session = read_current_session_file(&repo_root).expect("current session should read");
+    let session = read_legacy_current_session_file(&repo_root);
     assert_eq!(session.session_id, "s-current");
     assert_eq!(session.workspace_id, "w1");
 
@@ -594,7 +600,7 @@ fn pre_tool_use_from_enabled_subdir_records_session_at_repo_root() {
         String::from_utf8_lossy(&output.stderr)
     );
     let _request = rx.recv().expect("captured request should arrive");
-    let session = read_current_session_file(&repo_root).expect("root current session should read");
+    let session = read_legacy_current_session_file(&repo_root);
     assert_eq!(session.session_id, "s-subdir");
     assert!(!subdir.join(".stateful_core/runtime/session.json").exists());
 
@@ -642,7 +648,7 @@ fn pre_tool_use_denies_raw_stateful_intent_declare() {
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
       "tool_input": {
-        "command": "stateful intent declare --session-id s1 --workspace-id w1 src/auth.ts"
+      "command": "stateful intent declare --session-id s1 --workspace-id w1 --purpose 'Fix auth validation behavior.' src/auth.ts"
       }
     }"#;
 
@@ -1129,7 +1135,7 @@ fn run_hook_uses_payload_cwd_for_repo_gate() {
     );
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/authorize HTTP/1.1"));
-    let session = read_current_session_file(&repo_root).expect("root current session should read");
+    let session = read_legacy_current_session_file(&repo_root);
     assert_eq!(session.session_id, "s-cwd");
     assert!(!outside.join(".stateful_core/runtime/session.json").exists());
 

@@ -67,6 +67,7 @@ parent_session_id
 parent_actor_id
 workspace
 branch
+purpose
 goal
 phase: exploring | editing | testing | blocked | done | failed | idle
 files_read
@@ -181,8 +182,9 @@ Waiting is handled by polling `stateful notifications poll` or
 `stateful resume next`.
 `stateful intent wait --timeout` is not part of the v1 hardening implementation.
 
-`request_id` is required for idempotency. Repeating the same request id returns
-the existing request state and must not create duplicate queue entries. A queued
+`request_id` and non-empty `purpose` are required for idempotency and live state
+explanation. Repeating the same request id returns the existing request state and
+must not create duplicate queue entries or replace the original purpose. A queued
 or reserved request can be canceled explicitly. Session or activity finalization
 cancels that session's queued and reserved requests.
 
@@ -310,6 +312,9 @@ state.notifications.poll
 state.resume.next
 ```
 
+`state.intent.declare` and `state.intent.request` require a non-empty `purpose`.
+The caller must infer that purpose from the user or agent instruction when it is
+not explicit; the server must not synthesize a fallback purpose.
 `state.intent.request` and `state.intent.cancel` expose the explicit scheduling
 queue. `state.intent.claim` is the explicit reservation claim path.
 
@@ -387,7 +392,7 @@ explicitly permits them.
 Minimum sandboxed test shape:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> target/
+stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." target/
 stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
 stateful sandbox run --fs write-targets --network enabled --write-dir target --command <cmd>
 ```

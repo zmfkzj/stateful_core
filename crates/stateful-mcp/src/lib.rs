@@ -150,9 +150,15 @@ fn input_schema_for(protocol_name: &str) -> Value {
             [
                 ("session_id", string_schema()),
                 ("workspace_id", string_schema()),
+                (
+                    "purpose",
+                    string_schema_with_description(
+                        "Required purpose inferred from the user or agent instruction when it is not explicit.",
+                    ),
+                ),
                 ("files_planned", string_array_schema()),
             ],
-            ["files_planned"],
+            ["purpose", "files_planned"],
         ),
         "state.intent.request" => object_schema(
             [
@@ -167,8 +173,14 @@ fn input_schema_for(protocol_name: &str) -> Value {
                     }),
                 ),
                 ("path", string_schema()),
+                (
+                    "purpose",
+                    string_schema_with_description(
+                        "Required purpose inferred from the user or agent instruction when it is not explicit.",
+                    ),
+                ),
             ],
-            ["request_id", "action", "path"],
+            ["request_id", "action", "path", "purpose"],
         ),
         "state.intent.claim" => object_schema(
             [
@@ -286,6 +298,14 @@ fn object_schema<const P: usize, const R: usize>(
 
 fn string_schema() -> Value {
     serde_json::json!({ "type": "string" })
+}
+
+fn string_schema_with_description(description: &str) -> Value {
+    serde_json::json!({
+        "type": "string",
+        "minLength": 1,
+        "description": description
+    })
 }
 
 fn string_array_schema() -> Value {

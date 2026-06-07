@@ -415,6 +415,8 @@ fn intent_declare_command_parses_file_scopes() {
         "s1",
         "--workspace-id",
         "w1",
+        "--purpose",
+        "Fix auth validation behavior.",
         "src/auth.ts",
         "src/session/",
     ])
@@ -425,25 +427,36 @@ fn intent_declare_command_parses_file_scopes() {
         Command::Intent(stateful_cli::IntentCommand::Declare {
             ref session_id,
             ref workspace_id,
+            ref purpose,
             ref files_planned,
         }) if session_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
+            && purpose == "Fix auth validation behavior."
             && files_planned == &vec!["src/auth.ts".to_string(), "src/session/".to_string()]
     ));
 }
 
 #[test]
 fn intent_declare_command_can_default_session_and_workspace() {
-    let cli = Cli::try_parse_from(["stateful", "intent", "declare", "src/auth.ts"])
-        .expect("intent declare command should parse without explicit session flags");
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "intent",
+        "declare",
+        "--purpose",
+        "Fix auth validation behavior.",
+        "src/auth.ts",
+    ])
+    .expect("intent declare command should parse without explicit session flags");
 
     assert!(matches!(
         cli.command,
         Command::Intent(stateful_cli::IntentCommand::Declare {
             session_id: None,
             workspace_id: None,
+            ref purpose,
             ref files_planned,
-        }) if files_planned == &vec!["src/auth.ts".to_string()]
+        }) if purpose == "Fix auth validation behavior."
+            && files_planned == &vec!["src/auth.ts".to_string()]
     ));
 }
 
@@ -490,6 +503,8 @@ fn intent_request_command_parses_request_id_action_and_path() {
         "write_file",
         "--path",
         "src/auth.ts",
+        "--purpose",
+        "Queue auth file changes.",
     ])
     .expect("intent request command should parse");
 
@@ -501,11 +516,13 @@ fn intent_request_command_parses_request_id_action_and_path() {
             ref request_id,
             ref action,
             ref path,
+            ref purpose,
         }) if session_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
             && request_id == "request-1"
             && action == "write_file"
             && path == "src/auth.ts"
+            && purpose == "Queue auth file changes."
     ));
 }
 

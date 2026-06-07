@@ -2,6 +2,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
+    path::Path,
     process::Command,
     sync::mpsc,
     thread,
@@ -16,6 +17,63 @@ use stateful_cli::{
     write_current_session_file, write_current_session_file_for_codex_run,
     write_global_runtime_file, write_runtime_file,
 };
+
+const CURRENT_SESSION_CHILD_CASE: &str = "STATEFUL_RUNTIME_CURRENT_SESSION_CHILD_CASE";
+const CURRENT_SESSION_CHILD_ROOT: &str = "STATEFUL_RUNTIME_CURRENT_SESSION_CHILD_ROOT";
+
+fn run_current_session_child(repo_root: &Path, child_case: &str) {
+    let output = Command::new(std::env::current_exe().expect("current test binary path"))
+        .arg("current_session_file_child_probe")
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env_clear()
+        .env(CURRENT_SESSION_CHILD_CASE, child_case)
+        .env(CURRENT_SESSION_CHILD_ROOT, repo_root)
+        .output()
+        .expect("current session child test should run");
+    assert!(
+        output.status.success(),
+        "current session child failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
+fn current_session_file_child_probe() {
+    let Ok(child_case) = std::env::var(CURRENT_SESSION_CHILD_CASE) else {
+        return;
+    };
+    let repo_root = std::path::PathBuf::from(
+        std::env::var_os(CURRENT_SESSION_CHILD_ROOT)
+            .expect("current session child root must be configured"),
+    );
+
+    match child_case.as_str() {
+        "read_symlink_error" => {
+            let error =
+                read_current_session_file(&repo_root).expect_err("symlinked session should fail");
+            assert!(error.to_string().contains("symlinked current session file"));
+        }
+        "write_symlink_error" => {
+            let error = write_current_session_file(&repo_root, &CurrentSession::new("s1", "w1"))
+                .expect_err("symlinked session write should fail");
+            assert!(error.to_string().contains("symlinked current session file"));
+        }
+        "write_non_regular_error" => {
+            let error = write_current_session_file(&repo_root, &CurrentSession::new("s1", "w1"))
+                .expect_err("socket session write should fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("current session file is not a regular file")
+            );
+        }
+        other => panic!("unknown current session child case `{other}`"),
+    }
+}
 
 #[test]
 fn runtime_file_round_trips_server_discovery() {
@@ -269,9 +327,7 @@ fn current_session_file_refuses_symlink_before_reading() {
     )
     .expect("current session symlink should create");
 
-    let error = read_current_session_file(&temp_root).expect_err("symlinked session should fail");
-
-    assert!(error.to_string().contains("symlinked current session file"));
+    run_current_session_child(&temp_root, "read_symlink_error");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -296,10 +352,7 @@ fn current_session_file_refuses_symlink_before_writing() {
     )
     .expect("current session symlink should create");
 
-    let error = write_current_session_file(&temp_root, &CurrentSession::new("s1", "w1"))
-        .expect_err("symlinked session write should fail");
-
-    assert!(error.to_string().contains("symlinked current session file"));
+    run_current_session_child(&temp_root, "write_symlink_error");
     assert_eq!(
         fs::read_to_string(&victim).expect("victim should read"),
         "victim\n"
@@ -321,15 +374,9 @@ fn current_session_file_refuses_non_regular_file_before_writing() {
     let listener =
         std::os::unix::net::UnixListener::bind(&session_path).expect("session socket should bind");
 
-    let error = write_current_session_file(&temp_root, &CurrentSession::new("s1", "w1"))
-        .expect_err("socket session write should fail");
+    run_current_session_child(&temp_root, "write_non_regular_error");
 
     drop(listener);
-    assert!(
-        error
-            .to_string()
-            .contains("current session file is not a regular file")
-    );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -437,6 +484,7 @@ fn post_json_sends_bearer_token_and_payload() {
         &serde_json::json!({
             "session_id": "s1",
             "workspace_id": "w1",
+            "purpose": "Fix auth validation behavior.",
             "files_planned": ["src/auth.ts"]
         }),
     )
@@ -447,6 +495,7 @@ fn post_json_sends_bearer_token_and_payload() {
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
+    assert!(request.contains("\"purpose\":\"Fix auth validation behavior.\""));
     assert!(request.contains("\"files_planned\":[\"src/auth.ts\"]"));
 }
 
@@ -498,6 +547,7 @@ fn declare_intent_via_http_posts_expected_payload() {
         IntentDeclareArgs {
             session_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
+            purpose: "Fix auth validation behavior.".to_string(),
             files_planned: vec!["src/auth.ts".to_string()],
             identity: None,
         },
@@ -528,6 +578,7 @@ fn declare_intent_via_http_posts_expected_payload() {
     assert_eq!(
         body["payload"],
         serde_json::json!({
+            "purpose": "Fix auth validation behavior.",
             "files_planned": ["src/auth.ts"]
         })
     );
@@ -605,6 +656,7 @@ fn request_intent_via_http_posts_expected_payload() {
             request_id: "request-1".to_string(),
             action: "write_file".to_string(),
             path: "src/auth.ts".to_string(),
+            purpose: "Queue auth file changes.".to_string(),
             identity: None,
         },
     )
@@ -624,7 +676,8 @@ fn request_intent_via_http_posts_expected_payload() {
         serde_json::json!({
             "request_id": "request-1",
             "action": "write_file",
-            "path": "src/auth.ts"
+            "path": "src/auth.ts",
+            "purpose": "Queue auth file changes."
         })
     );
     assert!(body.get("request_id").is_some());

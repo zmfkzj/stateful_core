@@ -401,7 +401,7 @@ stateful current
 stateful events
 stateful doctor
 stateful sandbox run --fs read-only|write-targets ...
-stateful intent declare [--session-id <id>] [--workspace-id <id>] <paths...>
+stateful intent declare [--session-id <id>] [--workspace-id <id>] --purpose <purpose> <paths...>
 stateful notifications poll [--session-id <id>] [--workspace-id <id>]
 stateful resume next [--session-id <id>] [--workspace-id <id>]
 stateful mcp call <tool> [arguments-json]

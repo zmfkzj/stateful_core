@@ -222,6 +222,8 @@ pub enum IntentCommand {
         session_id: Option<String>,
         #[arg(long)]
         workspace_id: Option<String>,
+        #[arg(long)]
+        purpose: String,
         files_planned: Vec<String>,
     },
     Request {
@@ -235,6 +237,8 @@ pub enum IntentCommand {
         action: String,
         #[arg(long)]
         path: String,
+        #[arg(long)]
+        purpose: String,
     },
     Claim {
         #[arg(long)]
@@ -614,6 +618,7 @@ pub fn run() -> anyhow::Result<()> {
         Command::Intent(IntentCommand::Declare {
             session_id,
             workspace_id,
+            purpose,
             files_planned,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
@@ -641,6 +646,7 @@ pub fn run() -> anyhow::Result<()> {
                 IntentDeclareArgs {
                     session_id,
                     workspace_id,
+                    purpose,
                     files_planned,
                     identity: GlobalPaths::from_env()
                         .ok()
@@ -655,6 +661,7 @@ pub fn run() -> anyhow::Result<()> {
             request_id,
             action,
             path,
+            purpose,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let (session_id, workspace_id) =
@@ -667,6 +674,7 @@ pub fn run() -> anyhow::Result<()> {
                     request_id,
                     action,
                     path,
+                    purpose,
                     identity: GlobalPaths::from_env()
                         .ok()
                         .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),

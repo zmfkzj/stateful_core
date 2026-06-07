@@ -1,4 +1,7 @@
-use stateful_core::{ContextPackage, ReconciliationDecision, RenderMode, render_prompt_text};
+use stateful_core::{
+    ContextPackage, CurrentFreshness, CurrentItem, CurrentItemKind, CurrentSeverity,
+    ReconciliationDecision, RenderMode, render_prompt_text,
+};
 
 #[test]
 fn empty_context_renders_no_prompt_text() {
@@ -18,6 +21,7 @@ fn blocked_context_renders_required_next_action() {
     assert!(text.contains("Blocking"));
     assert!(text.contains("Required Next Action"));
     assert!(text.contains("src/auth.ts"));
+    assert!(text.contains("purpose: Reconcile a human write"));
     assert!(text.contains("state.reconcile.ack"));
 }
 
@@ -36,6 +40,37 @@ fn detailed_context_renders_warning_nearby_and_stale_sections() {
     assert!(text.contains("src/session.ts"));
     assert!(text.contains("src/auth/mod.ts"));
     assert!(text.contains("src/old_auth.ts"));
+}
+
+#[test]
+fn structured_items_render_purpose_and_required_actions() {
+    let package = ContextPackage::from_items(vec![
+        CurrentItem::new(
+            CurrentItemKind::Lease,
+            CurrentSeverity::Block,
+            CurrentFreshness::Live,
+            "src/auth.ts",
+            "Fix auth validation behavior requested by the user.",
+            "Session s1 has an active write lease.",
+        )
+        .with_next_action("Wait for s1 to release the lease."),
+        CurrentItem::new(
+            CurrentItemKind::Reservation,
+            CurrentSeverity::Info,
+            CurrentFreshness::Live,
+            "src/session.ts",
+            "Resume queued session cleanup after rereading.",
+            "Session s2 has a claimable reservation.",
+        ),
+    ]);
+
+    let text = render_prompt_text(&package, RenderMode::Brief);
+
+    assert!(text.contains("Blocking"));
+    assert!(text.contains("Required Next Action"));
+    assert!(text.contains("purpose: Fix auth validation behavior requested by the user"));
+    assert!(text.contains("Nearby Activity"));
+    assert!(text.contains("purpose: Resume queued session cleanup after rereading"));
 }
 
 #[test]

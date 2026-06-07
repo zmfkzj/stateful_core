@@ -236,6 +236,9 @@ the repo file edit path after exact intent declaration and a successful file
 lease; command-shaped shell writes remain outside MCP and go through the
 sandbox-run wrapper.
 
+Intent declare and request payloads require a non-empty `purpose`; clients infer
+it from the user or agent instruction and send it explicitly.
+
 ## Tool Classification
 
 V1 enforcement is strict about write target extraction:
@@ -276,7 +279,7 @@ wrapper after exact `target/` directory intent and a successful same-session
 directory lease:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> target/
+stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." target/
 stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
 stateful sandbox run --fs write-targets --network enabled --write-dir target --command <cmd>
 ```

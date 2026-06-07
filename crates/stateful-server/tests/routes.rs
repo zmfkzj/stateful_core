@@ -131,6 +131,7 @@ async fn side_effecting_routes_intent_declare_rejects_legacy_body() {
             serde_json::json!({
                 "session_id": "s1",
                 "workspace_id": "w1",
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -157,6 +158,7 @@ async fn side_effecting_routes_intent_declare_accepts_protocol_envelope() {
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -215,6 +217,32 @@ async fn side_effecting_routes_intent_declare_accepts_protocol_envelope() {
 }
 
 #[tokio::test]
+async fn side_effecting_routes_intent_declare_rejects_empty_purpose() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "   ",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["reason_code"], "missing_purpose");
+}
+
+#[tokio::test]
 async fn side_effecting_routes_intent_declare_does_not_store_empty_identity_sentinels() {
     let app = build_router(ServerConfig::new("secret-token"));
 
@@ -244,6 +272,7 @@ async fn side_effecting_routes_intent_declare_does_not_store_empty_identity_sent
                     "source_ref": "routes-test"
                 },
                 "payload": {
+                    "purpose": "Test requested work.",
                     "files_planned": ["src/auth.ts"]
                 }
             }),
@@ -304,6 +333,7 @@ async fn authorize_uses_policy_service_and_preserves_scope_denial() {
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -533,6 +563,7 @@ async fn declared_intent_without_same_session_lease_denies_matching_authorize_re
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -574,6 +605,7 @@ async fn missing_lease_cannot_be_bypassed_by_changing_session_id() {
                 session_id,
                 "w1",
                 serde_json::json!({
+                    "purpose": "Test requested work.",
                     "files_planned": ["src/auth.ts"]
                 }),
             ))
@@ -626,6 +658,7 @@ async fn declared_intent_denies_out_of_scope_authorize_request() {
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -667,6 +700,7 @@ async fn hook_native_write_requires_exact_file_intent_even_when_directory_scope_
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/"]
             }),
         ))
@@ -732,6 +766,7 @@ async fn hook_write_requires_tool_name_even_when_source_ref_names_native_tool() 
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/"]
             }),
         ))
@@ -790,6 +825,7 @@ async fn hook_native_write_requires_exact_file_lease_even_when_directory_lease_c
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -855,6 +891,7 @@ async fn hook_native_write_allows_exact_file_intent_and_exact_file_lease() {
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -914,6 +951,7 @@ async fn cli_sandbox_write_file_keeps_directory_intent_and_lease_semantics() {
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/"]
             }),
         ))
@@ -972,6 +1010,7 @@ async fn authorize_requires_intent_in_same_workspace_as_lease() {
             "s1",
             "w2",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -1022,6 +1061,7 @@ async fn authorize_requires_intent_in_same_workspace_as_lease() {
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -1076,6 +1116,7 @@ async fn active_lease_by_other_session_denies_authorize_even_with_matching_inten
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -1136,7 +1177,8 @@ async fn queue_on_conflict_without_intent_denies_without_wait_record() {
             serde_json::json!({
                 "action": "write_file",
                 "path": "src/auth.ts",
-                "queue_on_conflict": true
+                "queue_on_conflict": true,
+                "purpose": "Queue requested write after blocker clears."
             }),
         ))
         .await
@@ -1186,6 +1228,34 @@ async fn queue_on_conflict_without_intent_denies_without_wait_record() {
 }
 
 #[tokio::test]
+async fn queue_on_conflict_rejects_missing_purpose() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "queue_on_conflict": true
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["reason_code"], "missing_purpose");
+}
+
+#[tokio::test]
 async fn queue_on_conflict_out_of_scope_denies_without_wait_record() {
     let store = Store::open_in_memory().expect("store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -1211,6 +1281,7 @@ async fn queue_on_conflict_out_of_scope_denies_without_wait_record() {
             "s2",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -1227,7 +1298,8 @@ async fn queue_on_conflict_out_of_scope_denies_without_wait_record() {
             serde_json::json!({
                 "action": "write_file",
                 "path": "src/session.ts",
-                "queue_on_conflict": true
+                "queue_on_conflict": true,
+                "purpose": "Queue requested write after blocker clears."
             }),
         ))
         .await
@@ -1303,6 +1375,7 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
                 session_id,
                 "w1",
                 serde_json::json!({
+                    "purpose": "Test requested work.",
                     "files_planned": ["src/auth.ts"]
                 }),
             ))
@@ -1320,7 +1393,8 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
             serde_json::json!({
                 "action": "write_file",
                 "path": "src/auth.ts",
-                "queue_on_conflict": true
+                "queue_on_conflict": true,
+                "purpose": "Queue requested write after blocker clears."
             }),
         ))
         .await
@@ -1349,7 +1423,8 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
             serde_json::json!({
                 "action": "write_file",
                 "path": "src/auth.ts",
-                "queue_on_conflict": true
+                "queue_on_conflict": true,
+                "purpose": "Queue requested write after blocker clears."
             }),
         ))
         .await
@@ -1383,7 +1458,8 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
             serde_json::json!({
                 "action": "write_file",
                 "path": "src/auth.ts",
-                "queue_on_conflict": true
+                "queue_on_conflict": true,
+                "purpose": "Queue requested write after blocker clears."
             }),
         ))
         .await
@@ -1491,6 +1567,7 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
             "codex-a",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -1536,7 +1613,8 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
             serde_json::json!({
                 "request_id": "request-codex-b",
                 "action": "write_file",
-                "path": "src/auth.ts"
+                "path": "src/auth.ts",
+                "purpose": "Queue codex-b after codex-a finishes auth changes."
             }),
         ))
         .await
@@ -1560,7 +1638,8 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
             serde_json::json!({
                 "request_id": "request-codex-c",
                 "action": "write_file",
-                "path": "src/auth.ts"
+                "path": "src/auth.ts",
+                "purpose": "Queue codex-c after codex-a finishes auth changes."
             }),
         ))
         .await
@@ -1762,7 +1841,8 @@ async fn intent_request_reserves_available_target_but_still_requires_claim() {
             serde_json::json!({
                 "request_id": "request-1",
                 "action": "write_file",
-                "path": "src/auth.ts"
+                "path": "src/auth.ts",
+                "purpose": "Reserve auth file before writing."
             }),
         ))
         .await
@@ -1778,6 +1858,10 @@ async fn intent_request_reserves_available_target_but_still_requires_claim() {
     assert_eq!(json["reservation"]["session_id"], "s1");
     assert_eq!(json["reservation"]["relative_path"], "src/auth.ts");
     assert_eq!(json["reservation"]["status"], "reserved");
+    assert_eq!(
+        json["reservation"]["purpose"],
+        "Reserve auth file before writing."
+    );
     let wait_id = json["reservation"]["wait_id"]
         .as_str()
         .expect("wait id should be present")
@@ -1803,6 +1887,35 @@ async fn intent_request_reserves_available_target_but_still_requires_claim() {
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "reservation_claim_required");
     assert_eq!(json["reservation"]["wait_id"], wait_id);
+}
+
+#[tokio::test]
+async fn intent_request_rejects_empty_purpose() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let requested = app
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-1",
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "purpose": ""
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+
+    assert_eq!(requested.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(requested.into_body(), 1024)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["reason_code"], "missing_purpose");
 }
 
 #[tokio::test]
@@ -1833,7 +1946,8 @@ async fn intent_request_queues_conflict_and_reuses_request_id() {
             serde_json::json!({
                 "request_id": "request-2",
                 "action": "write_file",
-                "path": "src/auth.ts"
+                "path": "src/auth.ts",
+                "purpose": "Queue s2 auth changes."
             }),
         ))
         .await
@@ -1848,6 +1962,7 @@ async fn intent_request_queues_conflict_and_reuses_request_id() {
     assert_eq!(json["wait"]["status"], "queued");
     assert_eq!(json["wait"]["queue_position"], 1);
     assert_eq!(json["wait"]["blocking_session_id"], "s1");
+    assert_eq!(json["wait"]["purpose"], "Queue s2 auth changes.");
     let first_wait_id = json["wait"]["wait_id"]
         .as_str()
         .expect("wait id should be present")
@@ -1862,7 +1977,8 @@ async fn intent_request_queues_conflict_and_reuses_request_id() {
             serde_json::json!({
                 "request_id": "request-2",
                 "action": "write_file",
-                "path": "src/auth.ts"
+                "path": "src/auth.ts",
+                "purpose": "Retry should not replace queued request purpose."
             }),
         ))
         .await
@@ -1875,6 +1991,7 @@ async fn intent_request_queues_conflict_and_reuses_request_id() {
     assert_eq!(json["request_state"], "queued");
     assert_eq!(json["wait"]["wait_id"], first_wait_id);
     assert_eq!(json["wait"]["queue_position"], 1);
+    assert_eq!(json["wait"]["purpose"], "Queue s2 auth changes.");
 
     let second = app
         .oneshot(protocol_request(
@@ -1884,7 +2001,8 @@ async fn intent_request_queues_conflict_and_reuses_request_id() {
             serde_json::json!({
                 "request_id": "request-3",
                 "action": "write_file",
-                "path": "src/auth.ts"
+                "path": "src/auth.ts",
+                "purpose": "Queue s3 auth changes."
             }),
         ))
         .await
@@ -1927,7 +2045,8 @@ async fn intent_cancel_cancels_reserved_request_and_promotes_next_waiter() {
                 serde_json::json!({
                     "request_id": request_id,
                     "action": "write_file",
-                    "path": "src/auth.ts"
+                    "path": "src/auth.ts",
+                    "purpose": format!("Queue {session_id} auth changes.")
                 }),
             ))
             .await
@@ -2005,7 +2124,8 @@ async fn intent_cancel_rejects_other_session_request() {
             serde_json::json!({
                 "request_id": "request-2",
                 "action": "write_file",
-                "path": "src/auth.ts"
+                "path": "src/auth.ts",
+                "purpose": "Queue s2 auth changes."
             }),
         ))
         .await
@@ -2058,6 +2178,7 @@ async fn activity_finalize_releases_leases_and_notifications_poll_returns_resume
             "s2",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -2074,7 +2195,8 @@ async fn activity_finalize_releases_leases_and_notifications_poll_returns_resume
             serde_json::json!({
                 "action": "write_file",
                 "path": "src/auth.ts",
-                "queue_on_conflict": true
+                "queue_on_conflict": true,
+                "purpose": "Queue requested write after blocker clears."
             }),
         ))
         .await
@@ -2144,6 +2266,7 @@ async fn resume_next_returns_active_reservation_for_session() {
             "s2",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -2160,7 +2283,8 @@ async fn resume_next_returns_active_reservation_for_session() {
             serde_json::json!({
                 "action": "write_file",
                 "path": "src/auth.ts",
-                "queue_on_conflict": true
+                "queue_on_conflict": true,
+                "purpose": "Queue requested write after blocker clears."
             }),
         ))
         .await
@@ -2232,6 +2356,7 @@ async fn active_lease_by_same_session_allows_matching_authorize() {
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -2268,6 +2393,7 @@ async fn rename_file_denies_when_other_session_leases_destination() {
         .append(Event::intent_declared(
             "s1",
             "w1",
+            "Test rename authorization behavior.",
             ["src/old.ts", "src/new.ts"],
         ))
         .expect("intent should append");
@@ -2289,7 +2415,8 @@ async fn rename_file_denies_when_other_session_leases_destination() {
                 "path": "src/old.ts",
                 "old_path": "src/old.ts",
                 "new_path": "src/new.ts",
-                "queue_on_conflict": true
+                "queue_on_conflict": true,
+                "purpose": "Queue requested rename after blocker clears."
             }),
         ))
         .await
@@ -2311,6 +2438,7 @@ async fn rename_file_denies_when_other_session_leases_source() {
         .append(Event::intent_declared(
             "s1",
             "w1",
+            "Test rename authorization behavior.",
             ["src/old.ts", "src/new.ts"],
         ))
         .expect("intent should append");
@@ -2352,11 +2480,19 @@ async fn rename_file_denies_when_other_session_reserves_destination() {
         .append(Event::intent_declared(
             "s1",
             "w1",
+            "Test rename authorization behavior.",
             ["src/old.ts", "src/new.ts"],
         ))
         .expect("intent should append");
     store
-        .enqueue_waiter("s2", "w1", "src/new.ts", "write_file", Some("s3"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "src/new.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s3"),
+        )
         .expect("destination waiter should enqueue");
     store
         .promote_next_waiter("w1", "src/new.ts")
@@ -2394,11 +2530,19 @@ async fn rename_file_denies_when_other_session_reserves_source() {
         .append(Event::intent_declared(
             "s1",
             "w1",
+            "Test rename authorization behavior.",
             ["src/old.ts", "src/new.ts"],
         ))
         .expect("intent should append");
     store
-        .enqueue_waiter("s2", "w1", "src/old.ts", "write_file", Some("s3"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "src/old.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s3"),
+        )
         .expect("source waiter should enqueue");
     store
         .promote_next_waiter("w1", "src/old.ts")
@@ -2477,6 +2621,7 @@ async fn delete_file_action_requires_exact_file_intent_over_http() {
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/"]
             }),
         ))
@@ -2517,6 +2662,7 @@ async fn write_directory_action_requires_exact_directory_intent_over_http() {
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["target/"]
             }),
         ))
@@ -2604,6 +2750,7 @@ async fn write_directory_action_denies_when_subtree_has_other_session_lease() {
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["target/"]
             }),
         ))
@@ -2658,6 +2805,7 @@ async fn write_file_action_denies_when_ancestor_directory_has_other_session_leas
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["target/out.txt"]
             }),
         ))
@@ -2691,7 +2839,14 @@ async fn write_file_action_denies_when_ancestor_directory_has_other_session_leas
 async fn write_file_action_denies_when_ancestor_directory_has_other_session_reservation() {
     let store = Store::open_in_memory().expect("store should open");
     store
-        .enqueue_waiter("s2", "w1", "target", "write_directory", Some("s3"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target",
+            "write_directory",
+            "Queue requested directory write after blocker clears.",
+            Some("s3"),
+        )
         .expect("directory waiter should enqueue");
     store
         .promote_next_waiter("w1", "target")
@@ -2705,6 +2860,7 @@ async fn write_file_action_denies_when_ancestor_directory_has_other_session_rese
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["target/out.txt"]
             }),
         ))
@@ -2740,7 +2896,14 @@ async fn write_file_action_denies_when_ancestor_directory_has_other_session_rese
 async fn write_file_action_requires_claim_when_same_session_has_ancestor_directory_reservation() {
     let store = Store::open_in_memory().expect("store should open");
     store
-        .enqueue_waiter("s2", "w1", "target", "write_directory", Some("s3"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target",
+            "write_directory",
+            "Queue requested directory write after blocker clears.",
+            Some("s3"),
+        )
         .expect("directory waiter should enqueue");
     let wait = store
         .promote_next_waiter("w1", "target")
@@ -2755,6 +2918,7 @@ async fn write_file_action_requires_claim_when_same_session_has_ancestor_directo
             "s2",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["target/out.txt"]
             }),
         ))
@@ -2812,6 +2976,7 @@ async fn queued_write_directory_conflict_reserves_waiter_after_child_lease_relea
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["target/"]
             }),
         ))
@@ -2828,7 +2993,8 @@ async fn queued_write_directory_conflict_reserves_waiter_after_child_lease_relea
             serde_json::json!({
                 "action": "write_directory",
                 "path": "target/",
-                "queue_on_conflict": true
+                "queue_on_conflict": true,
+                "purpose": "Queue requested directory write after blocker clears."
             }),
         ))
         .await
@@ -2903,6 +3069,7 @@ async fn queued_child_file_conflict_reserves_waiter_after_directory_lease_releas
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["target/out.txt"]
             }),
         ))
@@ -2919,7 +3086,8 @@ async fn queued_child_file_conflict_reserves_waiter_after_directory_lease_releas
             serde_json::json!({
                 "action": "write_file",
                 "path": "target/out.txt",
-                "queue_on_conflict": true
+                "queue_on_conflict": true,
+                "purpose": "Queue requested file write after blocker clears."
             }),
         ))
         .await
@@ -2979,6 +3147,7 @@ async fn current_returns_materialized_state_summary() {
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -2999,6 +3168,9 @@ async fn current_returns_materialized_state_summary() {
     assert_eq!(json["status"], "ok");
     assert_eq!(json["current"]["active_intent_count"], 1);
     assert_eq!(json["current"]["event_count"], 1);
+    assert_eq!(json["items"][0]["kind"], "intent");
+    assert_eq!(json["items"][0]["resource"], "src/auth.ts");
+    assert_eq!(json["items"][0]["purpose"], "Test requested work.");
 }
 
 #[tokio::test]
@@ -3012,6 +3184,7 @@ async fn events_returns_recent_audit_events() {
             "s1",
             "w1",
             serde_json::json!({
+                "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -3043,7 +3216,12 @@ async fn authorize_uses_supplied_sqlite_store() {
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     store
-        .append(Event::intent_declared("s1", "w1", ["src/auth.ts"]))
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            "Test supplied sqlite store authorization.",
+            ["src/auth.ts"],
+        ))
         .expect("intent should append");
     store
         .acquire_lease("s1", "w1", "src/auth.ts")
@@ -3094,6 +3272,50 @@ async fn context_render_returns_empty_prompt_when_no_blocking_state_exists() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["status"], "ok");
     assert_eq!(json["prompt_text"], "");
+}
+
+#[tokio::test]
+async fn context_render_includes_live_current_state_purpose() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "Fix auth validation behavior.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "resource": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 4096)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["items"][0]["purpose"], "Fix auth validation behavior.");
+    assert!(
+        json["prompt_text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("purpose: Fix auth validation behavior")
+    );
 }
 
 #[tokio::test]

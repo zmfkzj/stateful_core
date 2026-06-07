@@ -195,12 +195,12 @@ run and use that run-bound session by default. Outside hooks, pass session and
 workspace IDs explicitly.
 
 ```bash
-stateful intent declare README.md
+stateful intent declare --purpose "Update README content requested by the user." README.md
 stateful current
 ```
 
 ```bash
-stateful intent declare --session-id demo --workspace-id local README.md
+stateful intent declare --session-id demo --workspace-id local --purpose "Update README content requested by the user." README.md
 ```
 
 Run tests normally from a plain checkout:
@@ -215,7 +215,7 @@ session file created by lifecycle hooks, so declaring an arbitrary
 `--session-id` in a plain terminal is not enough for `--fs write-targets`.
 
 ```bash
-stateful intent declare target/
+stateful intent declare --purpose "Run the workspace test suite." target/
 stateful mcp call state_lease_acquire '{"session_id":"<current-session>","workspace_id":"<workspace>","path":"target/"}'
 stateful sandbox run --fs write-targets --network enabled --write-dir target --command 'cargo test --workspace'
 stateful doctor
@@ -246,13 +246,15 @@ stateful enable --repo-local-codex
   install fields and repo-enabled status.
 - `stateful current` prints current-state summary counts.
 - `stateful events` prints recent stored state events.
-- `stateful intent declare <paths...>` declares planned file or directory
-  scope. Session and workspace may be explicit or inferred from the current
-  hook session file. Each declaration replaces that session's active scope in
-  that workspace; it does not append, so callers must redeclare the complete
-  intended file set.
+- `stateful intent declare --purpose <purpose> <paths...>` declares planned file
+  or directory scope. The purpose is required and must be supplied by the caller,
+  inferred from the user or agent instruction when it is not explicit. Session
+  and workspace may be explicit or inferred from the current hook session file.
+  Each declaration replaces that session's active scope in that workspace; it
+  does not append, so callers must redeclare the complete intended file set.
 - `stateful intent request --request-id <id> --action write_file|write_directory
-  --path <path>` creates or returns an idempotent queued/reserved write
+  --path <path> --purpose <purpose>` creates or returns an idempotent
+  queued/reserved write
   request.
 - `stateful intent claim --wait-id <id>` claims a granted reservation after the
   session rereads the target; the claim creates write-authorizing intent and an
@@ -430,6 +432,8 @@ The `/v1/authorize` endpoint and the intent declare/request/claim/cancel
 endpoints require the `stateful.v1` request envelope with `payload`. Flat
 legacy bodies are rejected with `protocol_mismatch` for those paths. Other POST
 routes still accept their current flat request bodies.
+Intent declare and request payloads require a non-empty `purpose`; clients must
+infer it from the user or agent instruction and send it explicitly.
 
 ## Sandboxed Tests
 
@@ -438,7 +442,7 @@ run` wrapper after exact `target/` directory intent and a successful
 same-session directory lease before commands that write build output:
 
 ```bash
-stateful intent declare --session-id <session> --workspace-id <workspace> target/
+stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." target/
 stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
 stateful sandbox run --fs write-targets --network enabled --write-dir target --command 'cargo test --workspace'
 ```

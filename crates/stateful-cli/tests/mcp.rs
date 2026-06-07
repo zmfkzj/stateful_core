@@ -464,7 +464,15 @@ fn mcp_tools_list_returns_stateful_tool_descriptors() {
         .expect("intent tool should be listed");
     assert_eq!(
         intent_tool["inputSchema"]["required"],
-        serde_json::json!(["files_planned"])
+        serde_json::json!(["purpose", "files_planned"])
+    );
+    assert_eq!(
+        intent_tool["inputSchema"]["properties"]["purpose"]["type"],
+        "string"
+    );
+    assert_eq!(
+        intent_tool["inputSchema"]["properties"]["purpose"]["minLength"],
+        1
     );
     assert_eq!(
         intent_tool["inputSchema"]["properties"]["files_planned"]["items"]["type"],
@@ -571,6 +579,7 @@ fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
             "arguments":{
               "session_id":"s1",
               "workspace_id":"w1",
+              "purpose":"Fix auth validation behavior.",
               "files_planned":["src/auth.ts"]
             }
           }
@@ -614,6 +623,7 @@ fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
     assert_eq!(
         body["payload"],
         serde_json::json!({
+            "purpose": "Fix auth validation behavior.",
             "files_planned": ["src/auth.ts"]
         })
     );
@@ -646,7 +656,17 @@ fn intent_declare_command_posts_repo_identity() {
     write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
         .expect("current session should write");
 
-    let output = run_stateful_in_repo(&repo_root, &paths, &["intent", "declare", "src/auth.ts"]);
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "intent",
+            "declare",
+            "--purpose",
+            "Fix auth validation behavior.",
+            "src/auth.ts",
+        ],
+    );
 
     assert!(
         output.status.success(),
@@ -684,6 +704,7 @@ fn intent_declare_command_posts_repo_identity() {
     assert_eq!(
         body["payload"],
         serde_json::json!({
+            "purpose": "Fix auth validation behavior.",
             "files_planned": ["src/auth.ts"]
         })
     );
@@ -713,6 +734,7 @@ fn mcp_intent_declare_defaults_to_current_hook_session() {
           "params":{
             "name":"state_intent_declare",
             "arguments":{
+              "purpose":"Fix auth validation behavior.",
               "files_planned":["src/auth.ts"]
             }
           }
@@ -727,6 +749,7 @@ fn mcp_intent_declare_defaults_to_current_hook_session() {
     assert_eq!(
         body["payload"],
         serde_json::json!({
+            "purpose": "Fix auth validation behavior.",
             "files_planned": ["src/auth.ts"]
         })
     );
@@ -761,6 +784,7 @@ fn mcp_intent_declare_refuses_session_id_that_differs_from_current_session() {
             "arguments":{
               "session_id":"s-other",
               "workspace_id":"w1",
+              "purpose":"Fix auth validation behavior.",
               "files_planned":["src/auth.ts"]
             }
           }
@@ -858,7 +882,8 @@ fn mcp_tools_call_for_intent_request_posts_to_state_server() {
               "workspace_id":"w1",
               "request_id":"request-1",
               "action":"write_file",
-              "path":"src/auth.ts"
+              "path":"src/auth.ts",
+              "purpose":"Queue auth file changes."
             }
           }
         }"#,
@@ -879,7 +904,8 @@ fn mcp_tools_call_for_intent_request_posts_to_state_server() {
         serde_json::json!({
             "request_id": "request-1",
             "action": "write_file",
-            "path": "src/auth.ts"
+            "path": "src/auth.ts",
+            "purpose": "Queue auth file changes."
         })
     );
 

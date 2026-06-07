@@ -214,6 +214,7 @@ actions.
 ```text
 intent_id
 session_id
+purpose
 goal
 phase
 files_planned
@@ -227,8 +228,10 @@ status: active | superseded | finalized | expired
 ```
 
 Hooks must require an active intent before allowing supported write tool paths.
-For v1, a write-authorizing intent must include at least one file or directory
-scope in `files_planned`. Abstract resources in `resources_planned`, such as
+For v1, a write-authorizing intent must include a non-empty `purpose` plus at
+least one file or directory scope in `files_planned`. Callers must infer purpose
+from the user or agent instruction when it is not explicit; the server does not
+generate a fallback purpose. Abstract resources in `resources_planned`, such as
 `task`, `test`, `port`, or `migration`, can provide context but cannot authorize
 writes.
 
@@ -295,6 +298,7 @@ queue_id
 request_id
 session_id
 workspace_id
+purpose
 resources
 queue_sequence
 queued_at
@@ -306,8 +310,9 @@ grant_trigger: explicit_release | session_finalization | lease_expiry
 ```
 
 The queue is FIFO by `queue_sequence`. A queued request can be promoted only
-when every requested resource is available. V1 uses atomic all-or-nothing grant:
-multi-resource requests are never partially granted.
+when every requested resource is available. `purpose` is required and remains the
+caller-supplied purpose from the original request. V1 uses atomic all-or-nothing
+grant: multi-resource requests are never partially granted.
 
 The current implementation handles one requested path per wait request.
 Multi-resource all-or-nothing scheduling is the target model for future
@@ -393,7 +398,7 @@ wrapper after exact `target/` directory intent and a successful same-session
 directory lease, for example:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> target/
+stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." target/
 stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
 stateful sandbox run --fs write-targets --network enabled --write-dir target --command 'cargo test --workspace'
 ```

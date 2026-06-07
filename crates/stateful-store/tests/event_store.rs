@@ -1,5 +1,5 @@
-use stateful_core::{AuthorizationInput, DecisionKind};
-use stateful_store::{Event, OutboxEntry, Store};
+use stateful_core::{AuthorizationInput, CurrentItemKind, DecisionKind};
+use stateful_store::{Event, IntentRequestInput, OutboxEntry, Store};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -54,7 +54,12 @@ fn intent_declared_materializes_active_policy_state() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared("s1", "w1", ["src/auth.ts"]))
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            "Fix auth validation behavior.",
+            ["src/auth.ts"],
+        ))
         .expect("intent event should append");
 
     let state = store
@@ -71,10 +76,20 @@ fn intent_declarations_replace_scope_only_in_same_workspace() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared("s1", "w1", ["src/auth.ts"]))
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            "Fix auth validation behavior.",
+            ["src/auth.ts"],
+        ))
         .expect("w1 intent should append");
     store
-        .append(Event::intent_declared("s1", "w2", ["docs/guide.md"]))
+        .append(Event::intent_declared(
+            "s1",
+            "w2",
+            "Update the public guide.",
+            ["docs/guide.md"],
+        ))
         .expect("w2 intent should append");
 
     let w1_state = store
@@ -92,7 +107,12 @@ fn intent_declarations_replace_scope_only_in_same_workspace() {
     assert_eq!(w2_decision.decision, DecisionKind::Allow);
 
     store
-        .append(Event::intent_declared("s1", "w1", ["src/session.ts"]))
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            "Fix session behavior.",
+            ["src/session.ts"],
+        ))
         .expect("replacement w1 intent should append");
 
     let w1_state = store
@@ -119,7 +139,12 @@ fn intent_declarations_replace_scope_only_in_same_workspace() {
 #[test]
 fn expired_intent_is_not_write_authorizing_or_counted_active() {
     let store = Store::open_in_memory().expect("in-memory store should open");
-    let mut stale_intent = Event::intent_declared("stale-session", "w1", ["src/auth.ts"]);
+    let mut stale_intent = Event::intent_declared(
+        "stale-session",
+        "w1",
+        "Fix stale auth behavior.",
+        ["src/auth.ts"],
+    );
     stale_intent.created_at = "1970-01-01T00:00:00Z".to_string();
 
     store
@@ -284,7 +309,12 @@ fn failed_materialization_rolls_back_event_insert_and_allows_future_appends() {
     let store = Store::open(&db_path).expect("store should open");
 
     let error = store
-        .append(Event::intent_declared("s1", "w1", ["src/auth.ts"]))
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            "Fix auth validation behavior.",
+            ["src/auth.ts"],
+        ))
         .expect_err("intent materialization should fail");
     assert!(
         error
@@ -310,7 +340,12 @@ fn current_summary_counts_sessions_events_and_active_intents() {
         .append(Event::session_registered("s1", "w1"))
         .expect("session event should append");
     store
-        .append(Event::intent_declared("s1", "w1", ["src/auth.ts"]))
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            "Fix auth validation behavior.",
+            ["src/auth.ts"],
+        ))
         .expect("intent event should append");
 
     let summary = store.current_summary().expect("summary should load");
@@ -321,6 +356,64 @@ fn current_summary_counts_sessions_events_and_active_intents() {
 }
 
 #[test]
+fn live_current_state_reports_active_items_with_purpose() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    store
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            "Fix auth validation behavior.",
+            ["src/auth.ts"],
+        ))
+        .expect("intent should append");
+    store
+        .acquire_lease("s1", "w1", "src/auth.ts")
+        .expect("lease should acquire");
+    store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-1",
+            session_id: "s2",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "Update the same auth file after the active lease clears.",
+            blocking_session_id: Some("s1"),
+        })
+        .expect("waiter should enqueue");
+
+    let live = store
+        .live_current_state(Some("src/auth.ts"))
+        .expect("live current state should load");
+
+    assert_eq!(live.summary.active_intent_count, 1);
+    let intent = live
+        .items
+        .iter()
+        .find(|item| item.kind == CurrentItemKind::Intent)
+        .expect("intent item should exist");
+    assert_eq!(intent.resource, "src/auth.ts");
+    assert_eq!(intent.purpose, "Fix auth validation behavior.");
+
+    let lease = live
+        .items
+        .iter()
+        .find(|item| item.kind == CurrentItemKind::Lease)
+        .expect("lease item should exist");
+    assert_eq!(lease.purpose, "Fix auth validation behavior.");
+
+    let waiter = live
+        .items
+        .iter()
+        .find(|item| item.kind == CurrentItemKind::WaitQueue)
+        .expect("wait queue item should exist");
+    assert_eq!(
+        waiter.purpose,
+        "Update the same auth file after the active lease clears."
+    );
+}
+
+#[test]
 fn event_records_return_recent_audit_events() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
@@ -328,7 +421,10 @@ fn event_records_return_recent_audit_events() {
         .append(Event::session_registered("s1", "w1").with_event_id("event-1"))
         .expect("first event should append");
     store
-        .append(Event::intent_declared("s1", "w1", ["src/auth.ts"]).with_event_id("event-2"))
+        .append(
+            Event::intent_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"])
+                .with_event_id("event-2"),
+        )
         .expect("second event should append");
 
     let events = store.recent_events(10).expect("events should load");
@@ -537,7 +633,12 @@ fn active_exact_file_intent_by_same_session_ignores_directory_intent() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared("s1", "w1", ["src/"]))
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            "Edit files under src.",
+            ["src/"],
+        ))
         .expect("directory intent should append");
     assert!(
         !store
@@ -546,7 +647,12 @@ fn active_exact_file_intent_by_same_session_ignores_directory_intent() {
     );
 
     store
-        .append(Event::intent_declared("s1", "w1", ["src/auth.ts"]))
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            "Fix auth validation behavior.",
+            ["src/auth.ts"],
+        ))
         .expect("file intent should append");
     assert!(
         store
@@ -602,10 +708,24 @@ fn released_lease_promotes_first_waiter_to_reservation() {
         .acquire_lease("s1", "w1", "src/auth.ts")
         .expect("lease should acquire");
     let first = store
-        .enqueue_waiter("s2", "w1", "src/auth.ts", "write_file", Some("s1"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
         .expect("first waiter should enqueue");
     let second = store
-        .enqueue_waiter("s3", "w1", "src/auth.ts", "write_file", Some("s1"))
+        .enqueue_waiter(
+            "s3",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
         .expect("second waiter should enqueue");
 
     store
@@ -632,28 +752,31 @@ fn intent_request_id_is_idempotent_for_wait_queue_records() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     let first = store
-        .enqueue_intent_request(
-            "request-1",
-            "s2",
-            "w1",
-            "src/auth.ts",
-            "write_file",
-            Some("s1"),
-        )
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-1",
+            session_id: "s2",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "Fix auth validation behavior.",
+            blocking_session_id: Some("s1"),
+        })
         .expect("intent request should enqueue");
     let repeated = store
-        .enqueue_intent_request(
-            "request-1",
-            "s2",
-            "w1",
-            "src/auth.ts",
-            "write_file",
-            Some("s1"),
-        )
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-1",
+            session_id: "s2",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "A different retry purpose should not replace the original.",
+            blocking_session_id: Some("s1"),
+        })
         .expect("intent request retry should load existing waiter");
 
     assert_eq!(repeated.wait_id, first.wait_id);
     assert_eq!(repeated.status, "queued");
+    assert_eq!(repeated.purpose, "Fix auth validation behavior.");
     assert_eq!(
         store
             .queue_position(&repeated.wait_id)
@@ -666,24 +789,26 @@ fn intent_request_id_is_idempotent_for_wait_queue_records() {
 fn canceling_reserved_intent_request_promotes_next_waiter() {
     let store = Store::open_in_memory().expect("in-memory store should open");
     let first = store
-        .enqueue_intent_request(
-            "request-1",
-            "s2",
-            "w1",
-            "src/auth.ts",
-            "write_file",
-            Some("s1"),
-        )
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-1",
+            session_id: "s2",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "Fix auth validation behavior.",
+            blocking_session_id: Some("s1"),
+        })
         .expect("first request should enqueue");
     let second = store
-        .enqueue_intent_request(
-            "request-2",
-            "s3",
-            "w1",
-            "src/auth.ts",
-            "write_file",
-            Some("s1"),
-        )
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-2",
+            session_id: "s3",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "Update session handling.",
+            blocking_session_id: Some("s1"),
+        })
         .expect("second request should enqueue");
     store
         .promote_next_waiter("w1", "src/auth.ts")
@@ -711,7 +836,14 @@ fn released_child_lease_promotes_directory_waiter_to_reservation() {
         .acquire_lease("s1", "w1", "target/out.txt")
         .expect("child lease should acquire");
     let wait = store
-        .enqueue_waiter("s2", "w1", "target", "write_directory", Some("s1"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target",
+            "write_directory",
+            "Queue requested directory write after blocker clears.",
+            Some("s1"),
+        )
         .expect("directory waiter should enqueue");
 
     store
@@ -745,7 +877,14 @@ fn released_child_lease_does_not_promote_directory_waiter_while_another_child_le
         .acquire_lease("s3", "w1", "target/other.txt")
         .expect("second child lease should acquire");
     let wait = store
-        .enqueue_waiter("s2", "w1", "target", "write_directory", Some("s1"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target",
+            "write_directory",
+            "Queue requested directory write after blocker clears.",
+            Some("s1"),
+        )
         .expect("directory waiter should enqueue");
 
     store
@@ -784,10 +923,24 @@ fn released_child_lease_promotes_earlier_directory_waiter_before_later_child_wai
         .acquire_lease("s1", "w1", "target/out.txt")
         .expect("child lease should acquire");
     let directory_wait = store
-        .enqueue_waiter("s2", "w1", "target", "write_directory", Some("s1"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target",
+            "write_directory",
+            "Queue requested directory write after blocker clears.",
+            Some("s1"),
+        )
         .expect("directory waiter should enqueue");
     let child_wait = store
-        .enqueue_waiter("s3", "w1", "target/out.txt", "write_file", Some("s1"))
+        .enqueue_waiter(
+            "s3",
+            "w1",
+            "target/out.txt",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
         .expect("child waiter should enqueue");
 
     store
@@ -815,7 +968,14 @@ fn released_directory_lease_promotes_child_file_waiter_to_reservation() {
         .acquire_lease("s1", "w1", "target")
         .expect("directory lease should acquire");
     let wait = store
-        .enqueue_waiter("s2", "w1", "target/out.txt", "write_file", Some("s1"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target/out.txt",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
         .expect("child file waiter should enqueue");
 
     store
@@ -844,7 +1004,14 @@ fn released_directory_lease_promotes_child_directory_waiter_to_reservation() {
         .acquire_lease("s1", "w1", "target")
         .expect("directory lease should acquire");
     let wait = store
-        .enqueue_waiter("s2", "w1", "target/debug", "write_directory", Some("s1"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target/debug",
+            "write_directory",
+            "Queue requested directory write after blocker clears.",
+            Some("s1"),
+        )
         .expect("child directory waiter should enqueue");
 
     store
@@ -865,7 +1032,14 @@ fn reservation_promotion_creates_pending_notification_for_waiter() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .enqueue_waiter("s2", "w1", "src/auth.ts", "write_file", Some("s1"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
         .expect("waiter should enqueue");
     store
         .promote_next_waiter("w1", "src/auth.ts")
@@ -886,7 +1060,14 @@ fn reservation_blocks_other_sessions_until_claimed_or_expired() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     let wait = store
-        .enqueue_waiter("s2", "w1", "src/auth.ts", "write_file", Some("s1"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
         .expect("waiter should enqueue");
     store
         .promote_next_waiter("w1", "src/auth.ts")
@@ -921,7 +1102,14 @@ fn active_reservation_conflict_for_directory_matches_subtree_paths() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .enqueue_waiter("s2", "w1", "target/out.txt", "write_file", Some("s1"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target/out.txt",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
         .expect("waiter should enqueue");
     store
         .promote_next_waiter("w1", "target/out.txt")
@@ -951,7 +1139,14 @@ fn active_reservation_conflict_for_directory_matches_subtree_paths() {
 fn active_reservation_conflict_for_directory_matches_ancestor_directory_paths() {
     let store = Store::open_in_memory().expect("in-memory store should open");
     store
-        .enqueue_waiter("s2", "w1", "target", "write_directory", Some("s3"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target",
+            "write_directory",
+            "Queue requested directory write after blocker clears.",
+            Some("s3"),
+        )
         .expect("ancestor directory waiter should enqueue");
     store
         .promote_next_waiter("w1", "target")
@@ -969,7 +1164,14 @@ fn active_reservation_conflict_for_path_matches_ancestor_directory_paths() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .enqueue_waiter("s2", "w1", "target", "write_directory", Some("s1"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target",
+            "write_directory",
+            "Queue requested directory write after blocker clears.",
+            Some("s1"),
+        )
         .expect("directory waiter should enqueue");
     store
         .promote_next_waiter("w1", "target")
@@ -1000,10 +1202,24 @@ fn expired_reservation_promotes_next_waiter() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     let first = store
-        .enqueue_waiter("s2", "w1", "src/auth.ts", "write_file", Some("s1"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
         .expect("first waiter should enqueue");
     let second = store
-        .enqueue_waiter("s3", "w1", "src/auth.ts", "write_file", Some("s1"))
+        .enqueue_waiter(
+            "s3",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
         .expect("second waiter should enqueue");
     store
         .promote_next_waiter("w1", "src/auth.ts")
@@ -1045,10 +1261,24 @@ fn stale_reservation_expiry_promotes_next_waiter() {
     let store = Store::open(&db_path).expect("file store should open");
 
     let first = store
-        .enqueue_waiter("s2", "w1", "src/auth.ts", "write_file", Some("s1"))
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
         .expect("first waiter should enqueue");
     let second = store
-        .enqueue_waiter("s3", "w1", "src/auth.ts", "write_file", Some("s1"))
+        .enqueue_waiter(
+            "s3",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
         .expect("second waiter should enqueue");
     store
         .promote_next_waiter("w1", "src/auth.ts")

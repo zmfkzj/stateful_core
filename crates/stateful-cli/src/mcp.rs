@@ -205,6 +205,8 @@ fn intent_declare_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Resu
         .remove("files_planned")
         .ok_or_else(|| anyhow::anyhow!("state.intent.declare requires files_planned"))
         .and_then(|value| serde_json::from_value::<Vec<String>>(value).map_err(Into::into))?;
+    let purpose = take_string(&mut object, "purpose")
+        .ok_or_else(|| anyhow::anyhow!("state.intent.declare requires purpose"))?;
     let session_id = take_string(&mut object, "session_id")
         .unwrap_or_else(|| format!("stateful-mcp:{}", runtime.pid));
     let workspace_id =
@@ -216,6 +218,7 @@ fn intent_declare_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Resu
         IntentDeclareArgs {
             session_id,
             workspace_id,
+            purpose,
             files_planned,
             identity,
         },
@@ -261,6 +264,8 @@ fn intent_request_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Resu
         .ok_or_else(|| anyhow::anyhow!("state.intent.request requires action"))?;
     let path = take_string(&mut object, "path")
         .ok_or_else(|| anyhow::anyhow!("state.intent.request requires path"))?;
+    let purpose = take_string(&mut object, "purpose")
+        .ok_or_else(|| anyhow::anyhow!("state.intent.request requires purpose"))?;
     let session_id = take_string(&mut object, "session_id")
         .unwrap_or_else(|| format!("stateful-mcp:{}", runtime.pid));
     let workspace_id =
@@ -275,6 +280,7 @@ fn intent_request_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Resu
             request_id,
             action,
             path,
+            purpose,
             identity,
         },
         "mcp",

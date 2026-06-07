@@ -65,7 +65,7 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(command_policy_skill.contains("Raw test commands"));
     assert!(command_policy_skill.contains("Examples assume `<absolute-stateful-binary>`"));
     assert!(command_policy_skill.contains(
-        "<absolute-stateful-binary> intent declare --session-id <session> --workspace-id <workspace> target/"
+        "<absolute-stateful-binary> intent declare --session-id <session> --workspace-id <workspace> --purpose \"<purpose inferred from the user or agent instruction>\" target/"
     ));
     assert!(command_policy_skill.contains("--create-target target/generated.txt"));
     assert!(!command_policy_skill.contains("--create-target docs/new.md"));

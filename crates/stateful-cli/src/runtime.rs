@@ -20,6 +20,7 @@ const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
 pub struct IntentDeclareArgs {
     pub session_id: String,
     pub workspace_id: String,
+    pub purpose: String,
     pub files_planned: Vec<String>,
     pub identity: Option<RepoIdentity>,
 }
@@ -39,6 +40,7 @@ pub struct IntentRequestArgs {
     pub request_id: String,
     pub action: String,
     pub path: String,
+    pub purpose: String,
     pub identity: Option<RepoIdentity>,
 }
 
@@ -481,6 +483,7 @@ pub fn intent_declare_protocol_body(
     let IntentDeclareArgs {
         session_id,
         workspace_id,
+        purpose,
         files_planned,
         identity,
     } = args;
@@ -495,6 +498,7 @@ pub fn intent_declare_protocol_body(
         source_ref,
         source_tool_name: None,
         payload: serde_json::json!({
+            "purpose": purpose,
             "files_planned": files_planned
         }),
     })
@@ -540,6 +544,7 @@ pub fn intent_request_protocol_body(
         request_id,
         action,
         path,
+        purpose,
         identity,
     } = args;
     protocol_envelope(ProtocolEnvelopeArgs {
@@ -555,7 +560,8 @@ pub fn intent_request_protocol_body(
         payload: serde_json::json!({
             "request_id": request_id,
             "action": action,
-            "path": path
+            "path": path,
+            "purpose": purpose
         }),
     })
 }

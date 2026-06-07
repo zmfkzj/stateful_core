@@ -50,7 +50,7 @@ Create a command-generated file after declaring exact intent and acquiring the m
 Run tests after declaring directory intent such as `target/` and acquiring the matching directory lease:
 
 ```bash
-<absolute-stateful-binary> intent declare --session-id <session> --workspace-id <workspace> target/
+<absolute-stateful-binary> intent declare --session-id <session> --workspace-id <workspace> --purpose "<purpose inferred from the user or agent instruction>" target/
 <absolute-stateful-binary> mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
 <absolute-stateful-binary> sandbox run --fs write-targets --network enabled --write-dir target --command 'cargo test --workspace'
 ```
