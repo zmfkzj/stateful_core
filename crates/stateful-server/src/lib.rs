@@ -661,13 +661,22 @@ async fn context_render(
         Some("detailed") => RenderMode::Detailed,
         _ => RenderMode::Brief,
     };
+    let Some(workspace_id) = input.workspace_id.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error",
+                "message": "workspace_id is required"
+            })),
+        );
+    };
     let result = config
         .store
         .lock()
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .live_current_state(input.resource.as_deref())
+                .live_current_state_for_workspace(workspace_id, input.resource.as_deref())
                 .map_err(|error| error.to_string())
         });
 
@@ -1263,6 +1272,7 @@ struct AuthorizeRequest {
 struct ContextRenderRequest {
     mode: Option<String>,
     resource: Option<String>,
+    workspace_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

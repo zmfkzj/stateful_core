@@ -1768,6 +1768,7 @@ fn user_prompt_submit_posts_context_render() {
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/context/render HTTP/1.1"));
     assert!(request.contains("\"mode\":\"brief\""));
+    assert!(request.contains("\"workspace_id\":\"w1\""));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

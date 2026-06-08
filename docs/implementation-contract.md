@@ -326,6 +326,11 @@ repo-local .stateful_core/runtime/server.json compatibility fallback
 `protocol_version`, and `started_at`. The prototype writes it with normal local
 filesystem defaults; user-only file permissions are a future hardening item.
 
+`stateful lan serve` starts a LAN-reachable HTTP runtime and prints join
+commands. `stateful lan join` validates the host runtime, installs global
+stateful/Codex MCP configuration, writes global runtime discovery for the host
+server, and only enables the current repo when `--enable-repo` is supplied.
+
 ## Local HTTP Trust
 
 The server binds to `127.0.0.1` by default. Requests, except `/health`, must
@@ -405,6 +410,8 @@ stateful server
 stateful server start [--foreground]
 stateful server stop
 stateful server status
+stateful lan serve [--host <host>] [--port <port>] [--token <token>] [--workspace-id <id>]
+stateful lan join <base-url> --token <token> [--workspace-id <id>] [--enable-repo]
 stateful status
 stateful current
 stateful events
@@ -443,12 +450,13 @@ Before publishing or releasing a build, run:
 
 ```text
 cargo fmt --all --check
-env -u STATEFUL_CODEX_RUN_ID cargo test --workspace
-env -u STATEFUL_CODEX_RUN_ID cargo clippy --workspace --all-targets -- -D warnings
+env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo test --workspace
+env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Unset `STATEFUL_CODEX_RUN_ID` when running workspace tests from an active Codex
-session so tests do not inherit a run-bound session file from the caller.
+Unset `STATEFUL_CODEX_RUN_ID` and `CODEX_THREAD_ID` when running workspace tests
+from an active Codex session so tests do not inherit a run-bound session file
+from the caller.
 `stateful doctor` remains the local installation health check after installing
 or enabling a repository.
 

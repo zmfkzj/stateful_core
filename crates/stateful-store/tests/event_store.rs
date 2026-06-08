@@ -985,6 +985,30 @@ fn acquire_lease_rejects_existing_active_file_lease_conflict() {
 }
 
 #[test]
+fn acquire_lease_allows_same_path_in_different_workspaces() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
+    acquire_test_lease(&store, "s2", "w2", "src/auth.ts");
+
+    assert_eq!(store.lease_count().expect("lease count should load"), 2);
+    assert_eq!(
+        store
+            .active_lease_owner("w1", "src/auth.ts")
+            .expect("w1 lease owner should load")
+            .as_deref(),
+        Some("s1")
+    );
+    assert_eq!(
+        store
+            .active_lease_owner("w2", "src/auth.ts")
+            .expect("w2 lease owner should load")
+            .as_deref(),
+        Some("s2")
+    );
+}
+
+#[test]
 fn same_session_can_acquire_exact_file_lease_under_directory_lease() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 

@@ -139,18 +139,53 @@ impl Store {
     }
 
     pub fn current_summary(&self) -> StoreResult<CurrentSummary> {
+        self.current_summary_filtered(None)
+    }
+
+    pub fn current_summary_for_workspace(
+        &self,
+        workspace_id: impl AsRef<str>,
+    ) -> StoreResult<CurrentSummary> {
+        self.current_summary_filtered(Some(workspace_id.as_ref()))
+    }
+
+    fn current_summary_filtered(
+        &self,
+        workspace_filter: Option<&str>,
+    ) -> StoreResult<CurrentSummary> {
         self.expire_stale()?;
-        let session_count = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| {
-                row.get::<_, u64>(0)
-            })?;
-        let active_intent_count = self.conn.query_row(
-            "SELECT COUNT(*) FROM intents WHERE status = 'active'",
-            [],
-            |row| row.get::<_, u64>(0),
-        )?;
-        let event_count = self.event_count()?;
+        let session_count = match workspace_filter {
+            Some(workspace_id) => self.conn.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| row.get::<_, u64>(0),
+            )?,
+            None => self
+                .conn
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| {
+                    row.get::<_, u64>(0)
+                })?,
+        };
+        let active_intent_count = match workspace_filter {
+            Some(workspace_id) => self.conn.query_row(
+                "SELECT COUNT(*) FROM intents WHERE status = 'active' AND workspace_id = ?1",
+                [workspace_id],
+                |row| row.get::<_, u64>(0),
+            )?,
+            None => self.conn.query_row(
+                "SELECT COUNT(*) FROM intents WHERE status = 'active'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )?,
+        };
+        let event_count = match workspace_filter {
+            Some(workspace_id) => self.conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| row.get::<_, u64>(0),
+            )?,
+            None => self.event_count()?,
+        };
 
         Ok(CurrentSummary {
             session_count,
@@ -163,18 +198,38 @@ impl Store {
         &self,
         resource_filter: Option<&str>,
     ) -> StoreResult<LiveCurrentState> {
+        self.live_current_state_filtered(None, resource_filter)
+    }
+
+    pub fn live_current_state_for_workspace(
+        &self,
+        workspace_id: impl AsRef<str>,
+        resource_filter: Option<&str>,
+    ) -> StoreResult<LiveCurrentState> {
+        self.live_current_state_filtered(Some(workspace_id.as_ref()), resource_filter)
+    }
+
+    fn live_current_state_filtered(
+        &self,
+        workspace_filter: Option<&str>,
+        resource_filter: Option<&str>,
+    ) -> StoreResult<LiveCurrentState> {
         self.expire_stale()?;
-        let summary = self.current_summary()?;
+        let summary = self.current_summary_filtered(workspace_filter)?;
         let resource_filter = resource_filter.map(normalize_relative_path);
         let mut items = Vec::new();
 
-        items.extend(self.live_intent_items(resource_filter.as_deref())?);
-        items.extend(self.live_lease_items(resource_filter.as_deref())?);
-        items.extend(self.live_wait_queue_items(resource_filter.as_deref())?);
+        items.extend(self.live_intent_items(workspace_filter, resource_filter.as_deref())?);
+        items.extend(self.live_lease_items(workspace_filter, resource_filter.as_deref())?);
+        items.extend(self.live_wait_queue_items(workspace_filter, resource_filter.as_deref())?);
 
         Ok(LiveCurrentState { summary, items })
     }
-    fn live_intent_items(&self, resource_filter: Option<&str>) -> StoreResult<Vec<CurrentItem>> {
+    fn live_intent_items(
+        &self,
+        workspace_filter: Option<&str>,
+        resource_filter: Option<&str>,
+    ) -> StoreResult<Vec<CurrentItem>> {
         let mut statement = self.conn.prepare(
             "SELECT session_id, workspace_id, scopes_json, purpose, declared_at, expires_at
              FROM intents
@@ -195,6 +250,9 @@ impl Store {
         let mut items = Vec::new();
 
         for (session_id, workspace_id, scopes_json, purpose, declared_at, expires_at) in rows {
+            if workspace_filter.is_some_and(|filter| workspace_id != filter) {
+                continue;
+            }
             let scopes: Vec<IntentScope> = serde_json::from_str(&scopes_json).map_err(|err| {
                 rusqlite::Error::FromSqlConversionFailure(
                     0,
@@ -272,7 +330,11 @@ impl Store {
         }
     }
 
-    fn live_lease_items(&self, resource_filter: Option<&str>) -> StoreResult<Vec<CurrentItem>> {
+    fn live_lease_items(
+        &self,
+        workspace_filter: Option<&str>,
+        resource_filter: Option<&str>,
+    ) -> StoreResult<Vec<CurrentItem>> {
         let mut statement = self.conn.prepare(
             "SELECT session_id, workspace_id, relative_path, action, purpose, expires_at
              FROM leases
@@ -293,6 +355,9 @@ impl Store {
         let mut items = Vec::new();
 
         for (session_id, workspace_id, relative_path, action, purpose, expires_at) in rows {
+            if workspace_filter.is_some_and(|filter| workspace_id != filter) {
+                continue;
+            }
             if !resource_matches_filter(&relative_path, resource_filter) {
                 continue;
             }
@@ -330,6 +395,7 @@ impl Store {
 
     fn live_wait_queue_items(
         &self,
+        workspace_filter: Option<&str>,
         resource_filter: Option<&str>,
     ) -> StoreResult<Vec<CurrentItem>> {
         let mut statement = self.conn.prepare(
@@ -378,6 +444,9 @@ impl Store {
             purpose,
         ) in rows
         {
+            if workspace_filter.is_some_and(|filter| workspace_id != filter) {
+                continue;
+            }
             if !resource_matches_filter(&relative_path, resource_filter) {
                 continue;
             }

@@ -1,0 +1,362 @@
+use std::{
+    fs,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
+    thread,
+};
+
+use stateful_cli::{
+    GlobalPaths, LanJoinOptions, LanServeOptions, RepoRegistry, ServerRuntime, join_lan_runtime,
+    lan_join_commands, serve_lan_runtime, write_global_runtime_file,
+};
+
+#[test]
+fn lan_join_writes_global_runtime_without_enabling_repo_by_default() {
+    let fixture = TestFixture::new("join-global-only");
+    let host = FakeHttpServer::start(vec![identity_response(200)]);
+
+    let result = join_lan_runtime(LanJoinOptions {
+        paths: fixture.paths.clone(),
+        codex_config_path: fixture.codex_config.clone(),
+        binary_path: "/opt/stateful/bin/stateful".to_string(),
+        base_url: host.base_url(),
+        token: "secret-token".to_string(),
+        workspace_id: "shared".to_string(),
+        enable_repo_root: None,
+    })
+    .expect("lan join should succeed");
+
+    assert_eq!(result.status, "ok");
+    assert!(!result.repo_enabled);
+    assert_eq!(result.runtime.base_url, host.base_url());
+    assert_eq!(result.runtime.token, "secret-token");
+    assert_eq!(result.runtime.pid, 0);
+    assert_eq!(result.runtime.workspace_id, "shared");
+    assert!(fixture.paths.server_json.is_file());
+    assert!(fixture.codex_config.is_file());
+    assert!(!fixture.repo.join(".stateful_core").exists());
+    assert_eq!(
+        RepoRegistry::load(&fixture.paths).expect("registry should load"),
+        RepoRegistry::default()
+    );
+}
+
+#[test]
+fn lan_join_enable_repo_only_when_requested() {
+    let fixture = TestFixture::new("join-enable-repo");
+    let host = FakeHttpServer::start(vec![identity_response(200)]);
+    init_git_repo(&fixture.repo);
+
+    let result = join_lan_runtime(LanJoinOptions {
+        paths: fixture.paths.clone(),
+        codex_config_path: fixture.codex_config.clone(),
+        binary_path: "/opt/stateful/bin/stateful".to_string(),
+        base_url: host.base_url(),
+        token: "secret-token".to_string(),
+        workspace_id: "shared".to_string(),
+        enable_repo_root: Some(fixture.repo.clone()),
+    })
+    .expect("lan join should enable repo");
+
+    assert!(result.repo_enabled);
+    let registry = RepoRegistry::load(&fixture.paths).expect("registry should load");
+    assert!(registry.enabled_entry(&fixture.repo).is_some());
+}
+
+#[test]
+fn lan_join_invalid_token_fails_before_writing() {
+    let fixture = TestFixture::new("join-invalid-token");
+    let host = FakeHttpServer::start(vec![identity_response(401)]);
+
+    let error = join_lan_runtime(LanJoinOptions {
+        paths: fixture.paths.clone(),
+        codex_config_path: fixture.codex_config.clone(),
+        binary_path: "/opt/stateful/bin/stateful".to_string(),
+        base_url: host.base_url(),
+        token: "bad-token".to_string(),
+        workspace_id: "shared".to_string(),
+        enable_repo_root: None,
+    })
+    .expect_err("invalid token should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("valid stateful runtime identity")
+    );
+    assert!(!fixture.paths.server_json.exists());
+    assert!(!fixture.codex_config.exists());
+}
+
+#[test]
+fn lan_join_missing_capability_fails_before_writing() {
+    let fixture = TestFixture::new("join-missing-capability");
+    let host = FakeHttpServer::start(vec![identity_response_without_write_dir_capability()]);
+
+    let error = join_lan_runtime(LanJoinOptions {
+        paths: fixture.paths.clone(),
+        codex_config_path: fixture.codex_config.clone(),
+        binary_path: "/opt/stateful/bin/stateful".to_string(),
+        base_url: host.base_url(),
+        token: "secret-token".to_string(),
+        workspace_id: "shared".to_string(),
+        enable_repo_root: None,
+    })
+    .expect_err("missing capability should fail");
+
+    assert!(error.to_string().contains("authorize.write_directory"));
+    assert!(!fixture.paths.server_json.exists());
+    assert!(!fixture.codex_config.exists());
+}
+
+#[test]
+fn lan_join_writes_requested_workspace_id() {
+    let fixture = TestFixture::new("join-workspace");
+    let host = FakeHttpServer::start(vec![identity_response(200)]);
+
+    let result = join_lan_runtime(LanJoinOptions {
+        paths: fixture.paths.clone(),
+        codex_config_path: fixture.codex_config.clone(),
+        binary_path: "/opt/stateful/bin/stateful".to_string(),
+        base_url: host.base_url(),
+        token: "secret-token".to_string(),
+        workspace_id: "w1".to_string(),
+        enable_repo_root: None,
+    })
+    .expect("lan join should succeed");
+
+    assert_eq!(result.runtime.workspace_id, "w1");
+}
+
+#[test]
+fn lan_join_commands_render_one_command_per_address() {
+    let commands = lan_join_commands(
+        &[
+            "192.168.0.23".parse().expect("ip should parse"),
+            "10.0.0.7".parse().expect("ip should parse"),
+        ],
+        43873,
+        "secret-token",
+    );
+
+    assert_eq!(
+        commands,
+        vec![
+            "stateful lan join http://192.168.0.23:43873 --token secret-token",
+            "stateful lan join http://10.0.0.7:43873 --token secret-token",
+        ]
+    );
+}
+
+#[test]
+fn lan_join_commands_bracket_ipv6_addresses() {
+    let commands = lan_join_commands(
+        &["fe80::1".parse().expect("ip should parse")],
+        43873,
+        "secret-token",
+    );
+
+    assert_eq!(
+        commands,
+        vec!["stateful lan join http://[fe80::1]:43873 --token secret-token"]
+    );
+}
+
+#[test]
+fn lan_serve_without_token_reuses_existing_runtime_token() {
+    let fixture = TestFixture::new("serve-reuse-token");
+    let host = FakeRuntimeServer::start();
+    let runtime = ServerRuntime::new(host.base_url(), "existing-token", "shared", 0);
+    write_global_runtime_file(&fixture.paths, &runtime).expect("runtime should write");
+
+    let result = serve_lan_runtime(LanServeOptions {
+        paths: fixture.paths.clone(),
+        host: "127.0.0.1".to_string(),
+        port: host.port(),
+        token: None,
+        workspace_id: "shared".to_string(),
+    })
+    .expect("lan serve should reuse existing runtime");
+
+    assert_eq!(result.runtime.token, "existing-token");
+    assert_eq!(
+        result.join_commands,
+        vec![format!(
+            "stateful lan join http://127.0.0.1:{} --token existing-token",
+            host.port()
+        )]
+    );
+}
+
+#[test]
+fn lan_serve_explicit_host_and_workspace_are_reflected_in_join_command() {
+    let fixture = TestFixture::new("serve-explicit-host-workspace");
+    let host = FakeRuntimeServer::start();
+    let runtime = ServerRuntime::new(host.base_url(), "secret-token", "w1", 0);
+    write_global_runtime_file(&fixture.paths, &runtime).expect("runtime should write");
+
+    let result = serve_lan_runtime(LanServeOptions {
+        paths: fixture.paths.clone(),
+        host: "127.0.0.1".to_string(),
+        port: host.port(),
+        token: Some("secret-token".to_string()),
+        workspace_id: "w1".to_string(),
+    })
+    .expect("lan serve should reuse existing runtime");
+
+    assert_eq!(
+        result.join_commands,
+        vec![format!(
+            "stateful lan join http://127.0.0.1:{} --token secret-token --workspace-id w1",
+            host.port()
+        )]
+    );
+}
+
+struct TestFixture {
+    root: PathBuf,
+    paths: GlobalPaths,
+    codex_config: PathBuf,
+    repo: PathBuf,
+}
+
+impl TestFixture {
+    fn new(name: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("stateful-lan-{name}-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("old temp root should remove");
+        }
+        fs::create_dir_all(&root).expect("temp root should create");
+        let paths = GlobalPaths::new(root.join("home"));
+        let codex_config = root.join("codex").join("config.toml");
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("repo dir should create");
+        Self {
+            root,
+            paths,
+            codex_config,
+            repo,
+        }
+    }
+}
+
+impl Drop for TestFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+struct FakeHttpServer {
+    addr: std::net::SocketAddr,
+}
+
+impl FakeHttpServer {
+    fn start(responses: Vec<String>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fake server should bind");
+        let addr = listener.local_addr().expect("fake addr should be known");
+        thread::spawn(move || {
+            for response in responses {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    read_request(&mut stream);
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("fake response should write");
+                }
+            }
+        });
+        Self { addr }
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+}
+
+struct FakeRuntimeServer {
+    addr: std::net::SocketAddr,
+}
+
+impl FakeRuntimeServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fake runtime should bind");
+        let addr = listener.local_addr().expect("fake addr should be known");
+        thread::spawn(move || {
+            for response in [
+                http_response(200, r#"{"status":"ok"}"#),
+                http_response(200, r#"{"status":"ok","current":{}}"#),
+                identity_response(200),
+            ] {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    read_any_request(&mut stream);
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("fake response should write");
+                }
+            }
+        });
+        Self { addr }
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    fn port(&self) -> u16 {
+        self.addr.port()
+    }
+}
+
+fn read_request(stream: &mut TcpStream) {
+    let mut buffer = [0_u8; 1024];
+    let bytes = stream.read(&mut buffer).expect("request should read");
+    let request = String::from_utf8_lossy(&buffer[..bytes]);
+    assert!(request.contains("GET /v1/runtime/identity HTTP/1.1"));
+    assert!(
+        request.contains("Authorization: Bearer secret-token")
+            || request.contains("Authorization: Bearer bad-token")
+    );
+}
+
+fn read_any_request(stream: &mut TcpStream) {
+    let mut buffer = [0_u8; 1024];
+    let _ = stream.read(&mut buffer).expect("request should read");
+}
+
+fn identity_response(status: u16) -> String {
+    if status == 401 {
+        return http_response(401, r#"{"error":"unauthorized"}"#);
+    }
+    http_response(
+        200,
+        r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+    )
+}
+
+fn identity_response_without_write_dir_capability() -> String {
+    http_response(
+        200,
+        r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":[]}"#,
+    )
+}
+
+fn http_response(status: u16, body: &str) -> String {
+    let reason = match status {
+        200 => "OK",
+        401 => "Unauthorized",
+        _ => "Unknown",
+    };
+    format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn init_git_repo(path: &Path) {
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg(path)
+        .status()
+        .expect("git init should run");
+    assert!(status.success());
+}

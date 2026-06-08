@@ -278,7 +278,7 @@ fn ensure_runtime_matches_options(
     }
 
     anyhow::bail!(
-        "existing stateful server runtime does not match requested server options: existing {} workspace {} pid {}, requested {} workspace {}",
+        "existing stateful server runtime does not match requested server options: existing {} workspace {} pid {}, requested {} workspace {}; stop the existing server with `stateful server stop`, then retry the requested command",
         runtime.base_url,
         runtime.workspace_id,
         runtime.pid,

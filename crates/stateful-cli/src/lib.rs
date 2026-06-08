@@ -11,6 +11,7 @@ mod external_run;
 mod global_paths;
 mod hook;
 mod install;
+mod lan;
 mod mcp;
 mod outbox;
 mod push;
@@ -36,6 +37,10 @@ pub use install::{
     InstallOptions, InstallPlan, apply_global_install, current_stateful_binary_path,
     default_codex_config_path, plan_global_install,
 };
+pub use lan::{
+    LanCommand, LanJoinOptions, LanJoinResult, LanServeOptions, LanServeResult, join_lan_runtime,
+    lan_join_commands, serve_lan_runtime,
+};
 pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio_in_repo};
 pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime};
 pub use push::{PushRequest, PushResult, run_structured_push};
@@ -44,14 +49,14 @@ pub use repo_registry::{
     enable_repo, repo_gate, repo_identity_for_enabled_repo,
 };
 pub use runtime::{
-    CurrentSession, HttpResponse, IntentCancelArgs, IntentClaimArgs, IntentDeclareArgs,
-    IntentRequestArgs, ProtocolEnvelopeArgs, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime,
-    cancel_intent_via_http, claim_intent_via_http, declare_intent_via_http, discover_runtime,
-    discover_runtime_with_global, discover_runtime_with_optional_global, get_json,
-    global_state_db_path, intent_cancel_protocol_body, intent_claim_protocol_body,
+    CODEX_THREAD_ID_ENV, CurrentSession, HttpResponse, IntentCancelArgs, IntentClaimArgs,
+    IntentDeclareArgs, IntentRequestArgs, ProtocolEnvelopeArgs, STATEFUL_CODEX_RUN_ID_ENV,
+    ServerRuntime, cancel_intent_via_http, claim_intent_via_http, declare_intent_via_http,
+    discover_runtime, discover_runtime_with_global, discover_runtime_with_optional_global,
+    get_json, global_state_db_path, intent_cancel_protocol_body, intent_claim_protocol_body,
     intent_declare_protocol_body, intent_request_protocol_body, post_json, protocol_envelope,
     read_current_session_file, read_current_session_file_for_codex_run, request_intent_via_http,
-    runtime_env_override_is_configured, runtime_has_required_identity,
+    runtime_env_override_is_configured, runtime_from_remote, runtime_has_required_identity,
     runtime_identity_matches_pid, write_current_session_file,
     write_current_session_file_for_codex_run, write_global_runtime_file, write_runtime_file,
 };
@@ -95,6 +100,8 @@ pub enum Command {
         #[arg(long, default_value = "local")]
         workspace_id: String,
     },
+    #[command(subcommand)]
+    Lan(LanCommand),
     Status,
     Current,
     Events,
@@ -383,6 +390,65 @@ pub fn run() -> anyhow::Result<()> {
                 let paths = GlobalPaths::from_env()?;
                 stop_server(&paths)?;
                 println!("{}", serde_json::json!({ "status": "ok" }));
+            }
+        },
+        Command::Lan(command) => match command {
+            LanCommand::Serve {
+                host,
+                port,
+                token,
+                workspace_id,
+            } => {
+                lan::run_lan_command(
+                    LanCommand::Serve {
+                        host,
+                        port,
+                        token,
+                        workspace_id,
+                    },
+                    GlobalPaths::from_env()?,
+                )?;
+            }
+            LanCommand::Join {
+                base_url,
+                token,
+                workspace_id,
+                enable_repo,
+                binary,
+                codex_config,
+            } => {
+                let paths = GlobalPaths::from_env()?;
+                let binary_path = match binary {
+                    Some(binary) => binary,
+                    None => current_stateful_binary_path()?,
+                };
+                let codex_config_path = match codex_config {
+                    Some(path) => path,
+                    None => default_codex_config_path()?,
+                };
+                let enable_repo_root = if enable_repo {
+                    Some(current_repo_root_or_current_dir()?)
+                } else {
+                    None
+                };
+                let result = join_lan_runtime(LanJoinOptions {
+                    paths,
+                    codex_config_path,
+                    binary_path,
+                    base_url,
+                    token,
+                    workspace_id,
+                    enable_repo_root,
+                })?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": result.status,
+                        "base_url": result.runtime.base_url,
+                        "workspace_id": result.runtime.workspace_id,
+                        "repo_enabled": result.repo_enabled,
+                    }))?
+                );
             }
         },
         Command::Status => {
@@ -1246,6 +1312,7 @@ fn repo_local_codex_config_toml(binary_path: &str, include_hooks: bool) -> Strin
 [mcp_servers.stateful]
 command = "{}"
 args = ["mcp", "serve"]
+env_vars = ["STATEFUL_CODEX_RUN_ID", "CODEX_THREAD_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
 startup_timeout_sec = 20
 "#,
         escape_toml_string(&mcp_command),
@@ -1269,6 +1336,7 @@ hooks = true
 [mcp_servers.stateful]
 command = "{}"
 args = ["mcp", "serve"]
+env_vars = ["STATEFUL_CODEX_RUN_ID", "CODEX_THREAD_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
 startup_timeout_sec = 20
 
 [[hooks.SessionStart]]

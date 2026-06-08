@@ -27,6 +27,9 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(codex_config.contains("# stateful-core-owned"));
     assert!(codex_config.contains("hooks = true"));
     assert!(codex_config.contains("[mcp_servers.stateful]"));
+    assert!(codex_config.contains(
+        "env_vars = [\"STATEFUL_CODEX_RUN_ID\", \"CODEX_THREAD_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
+    ));
     assert!(codex_config.contains("[[hooks.PreToolUse]]"));
     assert!(codex_config.contains("$(git rev-parse --show-toplevel)/target/debug/stateful"));
     assert!(codex_config.contains("hook pre-tool-use"));

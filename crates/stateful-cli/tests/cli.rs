@@ -1,6 +1,6 @@
 use clap::Parser;
 use stateful_cli::{
-    Cli, CodexSandboxMode, Command, ExternalRunCommand, HookCommand, McpCommand,
+    Cli, CodexSandboxMode, Command, ExternalRunCommand, HookCommand, LanCommand, McpCommand,
     NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand, SandboxFsProfile,
     SandboxNetworkPolicy, ServerCommand,
 };
@@ -662,6 +662,100 @@ fn parses_legacy_server_runtime_options() {
             && token.as_deref() == Some("secret-token")
             && workspace_id == "w1"
     ));
+}
+
+#[test]
+fn parses_lan_serve_defaults() {
+    let cli = Cli::try_parse_from(["stateful", "lan", "serve"]).expect("lan serve should parse");
+
+    match cli.command {
+        Command::Lan(LanCommand::Serve {
+            host,
+            port,
+            token,
+            workspace_id,
+        }) => {
+            assert_eq!(host, "0.0.0.0");
+            assert_eq!(port, 43873);
+            assert_eq!(token, None);
+            assert_eq!(workspace_id, "shared");
+        }
+        other => panic!("expected lan serve command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_lan_join_without_repo_enablement() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "lan",
+        "join",
+        "http://192.168.0.23:43873",
+        "--token",
+        "secret-token",
+    ])
+    .expect("lan join should parse");
+
+    match cli.command {
+        Command::Lan(LanCommand::Join {
+            base_url,
+            token,
+            workspace_id,
+            enable_repo,
+            binary,
+            codex_config,
+        }) => {
+            assert_eq!(base_url, "http://192.168.0.23:43873");
+            assert_eq!(token, "secret-token");
+            assert_eq!(workspace_id, "shared");
+            assert!(!enable_repo);
+            assert_eq!(binary, None);
+            assert_eq!(codex_config, None);
+        }
+        other => panic!("expected lan join command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_lan_join_with_repo_enablement_and_install_overrides() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "lan",
+        "join",
+        "http://192.168.0.23:43873",
+        "--token",
+        "secret-token",
+        "--workspace-id",
+        "w1",
+        "--enable-repo",
+        "--binary",
+        "/opt/stateful/bin/stateful",
+        "--codex-config",
+        "/Users/me/.codex/config.toml",
+    ])
+    .expect("lan join should parse");
+
+    match cli.command {
+        Command::Lan(LanCommand::Join {
+            base_url,
+            token,
+            workspace_id,
+            enable_repo,
+            binary,
+            codex_config,
+        }) => {
+            assert_eq!(base_url, "http://192.168.0.23:43873");
+            assert_eq!(token, "secret-token");
+            assert_eq!(workspace_id, "w1");
+            assert!(enable_repo);
+            assert_eq!(binary.as_deref(), Some("/opt/stateful/bin/stateful"));
+            assert_eq!(
+                codex_config,
+                Some(std::path::PathBuf::from("/Users/me/.codex/config.toml"))
+            );
+        }
+        other => panic!("expected lan join command, got {other:?}"),
+    }
 }
 
 #[test]

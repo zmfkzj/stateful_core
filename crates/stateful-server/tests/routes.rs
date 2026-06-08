@@ -3694,7 +3694,8 @@ async fn context_render_returns_empty_prompt_when_no_blocking_state_exists() {
             "/v1/context/render",
             serde_json::json!({
                 "mode": "detailed",
-                "resource": "src/auth.ts"
+                "resource": "src/auth.ts",
+                "workspace_id": "w1"
             }),
         ))
         .await
@@ -3707,6 +3708,27 @@ async fn context_render_returns_empty_prompt_when_no_blocking_state_exists() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["status"], "ok");
     assert_eq!(json["prompt_text"], "");
+}
+
+#[tokio::test]
+async fn context_render_rejects_missing_workspace_id() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "resource": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["message"], "workspace_id is required");
 }
 
 #[tokio::test]
@@ -3733,7 +3755,8 @@ async fn context_render_includes_live_current_state_purpose() {
             "/v1/context/render",
             serde_json::json!({
                 "mode": "detailed",
-                "resource": "src/auth.ts"
+                "resource": "src/auth.ts",
+                "workspace_id": "w1"
             }),
         ))
         .await
@@ -3751,6 +3774,66 @@ async fn context_render_includes_live_current_state_purpose() {
             .unwrap_or_default()
             .contains("purpose: Fix auth validation behavior")
     );
+}
+
+#[tokio::test]
+async fn context_render_filters_items_to_requested_workspace() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare_w1 = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "Fix auth validation behavior.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("w1 intent declaration should complete");
+    assert_eq!(declare_w1.status(), StatusCode::OK);
+
+    let declare_w2 = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s2",
+            "w2",
+            serde_json::json!({
+                "purpose": "Update public docs from a separate workspace.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("w2 intent declaration should complete");
+    assert_eq!(declare_w2.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "resource": "src/auth.ts",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["workspace_id"], "w1");
+    assert_eq!(items[0]["purpose"], "Fix auth validation behavior.");
+    assert_eq!(json["current"]["session_count"], 0);
+    assert_eq!(json["current"]["active_intent_count"], 1);
+    assert_eq!(json["current"]["event_count"], 1);
+    let prompt_text = json["prompt_text"].as_str().unwrap_or_default();
+    assert!(prompt_text.contains("purpose: Fix auth validation behavior"));
+    assert!(!prompt_text.contains("Update public docs from a separate workspace"));
 }
 
 #[tokio::test]

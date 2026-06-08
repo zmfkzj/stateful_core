@@ -14,6 +14,7 @@ use crate::repo_registry::RepoIdentity;
 use serde::{Deserialize, Serialize};
 
 pub const STATEFUL_CODEX_RUN_ID_ENV: &str = "STATEFUL_CODEX_RUN_ID";
+pub const CODEX_THREAD_ID_ENV: &str = "CODEX_THREAD_ID";
 const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,10 +216,16 @@ pub fn read_codex_run_bound_current_session(
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<CurrentSession> {
     let repo_root = repo_root.as_ref();
-    let codex_run_id = current_codex_run_id()?.ok_or_else(|| {
-        anyhow::anyhow!("{STATEFUL_CODEX_RUN_ID_ENV} is required for session-bound MCP tools")
-    })?;
-    read_current_session_file_for_codex_run(repo_root, &codex_run_id)
+    if let Some(codex_run_id) = current_codex_run_id()? {
+        return read_current_session_file_for_codex_run(repo_root, &codex_run_id);
+    }
+    if let Some(codex_thread_id) = current_codex_thread_id()? {
+        return read_current_session_file_for_codex_thread(repo_root, &codex_thread_id);
+    }
+
+    anyhow::bail!(
+        "{STATEFUL_CODEX_RUN_ID_ENV} or {CODEX_THREAD_ID_ENV} is required for session-bound MCP tools"
+    )
 }
 
 pub fn write_current_session_file_for_codex_run(
@@ -263,6 +270,54 @@ pub fn read_current_session_file_for_codex_run(
         "current session file",
     )?;
     Ok(serde_json::from_str(&contents)?)
+}
+
+fn read_current_session_file_for_codex_thread(
+    repo_root: &Path,
+    codex_thread_id: &str,
+) -> anyhow::Result<CurrentSession> {
+    reject_untrusted_runtime_dirs(repo_root, true)?;
+    let sessions_dir = repo_root
+        .join(".stateful_core")
+        .join("runtime")
+        .join("sessions");
+    let mut paths = fs::read_dir(&sessions_dir)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "current session directory {} could not be read: {error}",
+                sessions_dir.display()
+            )
+        })?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.sort();
+
+    let mut matched = None;
+    for path in paths {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let contents = read_plain_file_to_string(&path, "current session file")?;
+        let session: CurrentSession = serde_json::from_str(&contents)?;
+        if session.session_id != codex_thread_id {
+            continue;
+        }
+        match matched.as_ref() {
+            Some(existing) if existing != &session => {
+                anyhow::bail!(
+                    "{CODEX_THREAD_ID_ENV} `{codex_thread_id}` matches multiple current stateful sessions"
+                );
+            }
+            Some(_) => {}
+            None => matched = Some(session),
+        }
+    }
+
+    matched.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{CODEX_THREAD_ID_ENV} `{codex_thread_id}` has no run-bound current stateful session"
+        )
+    })
 }
 
 fn read_plain_file_to_string(path: &Path, label: &str) -> anyhow::Result<String> {
@@ -708,6 +763,15 @@ fn current_codex_run_id() -> anyhow::Result<Option<String>> {
     Ok(Some(codex_run_id))
 }
 
+fn current_codex_thread_id() -> anyhow::Result<Option<String>> {
+    let Some(codex_thread_id) = std::env::var_os(CODEX_THREAD_ID_ENV) else {
+        return Ok(None);
+    };
+    let codex_thread_id = codex_thread_id.to_string_lossy().into_owned();
+    validate_codex_thread_id(&codex_thread_id)?;
+    Ok(Some(codex_thread_id))
+}
+
 fn validate_codex_run_id(codex_run_id: &str) -> anyhow::Result<()> {
     if codex_run_id.is_empty() {
         anyhow::bail!("{STATEFUL_CODEX_RUN_ID_ENV} is set but empty");
@@ -717,6 +781,19 @@ fn validate_codex_run_id(codex_run_id: &str) -> anyhow::Result<()> {
         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     {
         anyhow::bail!("{STATEFUL_CODEX_RUN_ID_ENV} contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn validate_codex_thread_id(codex_thread_id: &str) -> anyhow::Result<()> {
+    if codex_thread_id.is_empty() {
+        anyhow::bail!("{CODEX_THREAD_ID_ENV} is set but empty");
+    }
+    if !codex_thread_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        anyhow::bail!("{CODEX_THREAD_ID_ENV} contains unsupported characters");
     }
     Ok(())
 }
@@ -734,7 +811,9 @@ pub fn runtime_identity_matches_pid(runtime: &ServerRuntime) -> anyhow::Result<b
     let Some(identity) = fetch_runtime_identity(runtime)? else {
         return Ok(false);
     };
-    Ok(runtime_identity_matches_runtime(runtime, &identity))
+    Ok(identity.status == "ok"
+        && identity.protocol_version == runtime.protocol_version
+        && identity.pid == runtime.pid)
 }
 
 fn runtime_from_env() -> anyhow::Result<Option<ServerRuntime>> {
@@ -766,6 +845,24 @@ pub fn runtime_env_override_is_configured() -> bool {
         && std::env::var_os("STATEFUL_SERVER_TOKEN").is_some()
 }
 
+pub fn runtime_from_remote(
+    base_url: impl Into<String>,
+    token: impl Into<String>,
+    workspace_id: impl Into<String>,
+) -> anyhow::Result<ServerRuntime> {
+    let runtime = ServerRuntime::new(base_url, token, workspace_id, 0);
+    let Some(identity) = fetch_runtime_identity(&runtime)? else {
+        anyhow::bail!("LAN server did not return a valid stateful runtime identity");
+    };
+    if !runtime_identity_has_required_capabilities(&runtime, &identity) {
+        anyhow::bail!(
+            "LAN server does not support required runtime capabilities: {}",
+            REQUIRED_RUNTIME_CAPABILITIES.join(", ")
+        );
+    }
+    Ok(runtime)
+}
+
 fn fetch_runtime_identity(runtime: &ServerRuntime) -> anyhow::Result<Option<RuntimeIdentity>> {
     let response = get_json(runtime, "/v1/runtime/identity")?;
     if response.status_code != 200 {
@@ -778,7 +875,7 @@ fn fetch_runtime_identity(runtime: &ServerRuntime) -> anyhow::Result<Option<Runt
 fn runtime_identity_matches_runtime(runtime: &ServerRuntime, identity: &RuntimeIdentity) -> bool {
     identity.status == "ok"
         && identity.protocol_version == runtime.protocol_version
-        && identity.pid == runtime.pid
+        && (runtime.pid == 0 || identity.pid == runtime.pid)
 }
 
 fn runtime_identity_has_required_capabilities(

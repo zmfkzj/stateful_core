@@ -272,6 +272,7 @@ fn handle_user_prompt_submit_with_runtime(
         "/v1/context/render",
         &json!({
             "session_id": input.session_id,
+            "workspace_id": runtime.workspace_id,
             "mode": "brief"
         }),
     )?;

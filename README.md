@@ -180,6 +180,38 @@ Run Codex through the stateful wrapper:
 stateful codex
 ```
 
+### LAN Runtime Sharing
+
+Use LAN mode when one Mac should host the stateful HTTP runtime for another Mac
+on the same trusted local network. The MCP adapter still runs locally inside
+each Codex process.
+
+On the host Mac:
+
+```bash
+stateful lan serve
+```
+
+The command prints one or more join commands. Run one on the remote Mac:
+
+```bash
+stateful lan join http://192.168.0.23:43873 --token <token>
+```
+
+This installs global stateful/Codex MCP configuration and writes remote runtime
+discovery under `$STATEFUL_HOME/runtime/server.json`. It does not enable the
+current repo. To enable the current repo on the remote Mac, pass:
+
+```bash
+stateful lan join http://192.168.0.23:43873 --token <token> --enable-repo
+```
+
+LAN mode uses bearer token auth over `http://` as a local trust guard. Use SSH
+tunneling instead of LAN mode on untrusted networks.
+
+If the host uses `stateful lan serve --workspace-id <id>`, run the printed join
+command as-is; it includes the matching workspace id.
+
 ## Useful Next Steps
 
 The commands in this section are optional diagnostics and manual coordination
@@ -248,6 +280,9 @@ stateful enable --repo-local-codex
   default. Use `stateful server start --foreground`, `stateful server status`,
   and `stateful server stop` for lifecycle control. Bare `stateful server`
   remains a foreground compatibility form.
+- `stateful lan serve` shares a runtime over a trusted LAN. `stateful lan join`
+  installs global MCP config and writes remote runtime discovery, enabling the
+  current repo only when `--enable-repo` is supplied.
 - `stateful status` and `stateful doctor` report setup health, including global
   install fields and repo-enabled status.
 - `stateful current` prints current-state summary counts.
@@ -319,9 +354,10 @@ used by CLI and MCP calls. `UserPromptSubmit` renders brief current-state
 context. `PreToolUse` authorizes supported tool actions. `PostToolUse` records
 activity or heartbeats. `Stop` finalizes activity and releases leases.
 
-The `stateful codex` wrapper sets a run-specific `STATEFUL_CODEX_RUN_ID`, so
-session files are bound to that Codex run instead of a stale legacy
-`.stateful_core/runtime/session.json` file.
+The `stateful codex` wrapper sets a run-specific `STATEFUL_CODEX_RUN_ID`, and
+installed MCP config whitelists that value plus `CODEX_THREAD_ID`. Session-bound
+MCP tools resolve only run-bound files under `.stateful_core/runtime/sessions/`
+instead of a stale legacy `.stateful_core/runtime/session.json` file.
 
 ## Write Authorization
 
@@ -515,6 +551,8 @@ bundled.
 - `STATEFUL_CODEX_RUN_ID` selects the run-bound current-session file under
   `.stateful_core/runtime/sessions/`. The `stateful codex` wrapper sets it
   automatically.
+- `CODEX_THREAD_ID` lets session-bound MCP tools find a matching run-bound
+  current-session file when a run-specific id was not propagated.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
   authorize Bash. Bash authorization goes through a trusted
   `<absolute-stateful-binary> sandbox run` wrapper command.
