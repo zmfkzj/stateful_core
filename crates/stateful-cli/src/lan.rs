@@ -1,12 +1,12 @@
 use std::{
     net::{IpAddr, UdpSocket},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use clap::Subcommand;
 
 use crate::{
-    GlobalPaths, InstallOptions, ServerRuntime, apply_global_install, enable_repo,
+    GlobalPaths, InstallOptions, ServerRuntime, apply_global_install, detect_git_root, enable_repo,
     runtime_from_remote, write_global_runtime_file,
 };
 
@@ -79,11 +79,13 @@ pub fn join_lan_runtime(options: LanJoinOptions) -> anyhow::Result<LanJoinResult
         binary_path: options.binary_path,
     })?;
     write_global_runtime_file(&options.paths, &runtime)?;
-    let repo_enabled = if let Some(repo_root) = options.enable_repo_root {
-        enable_repo(&options.paths, repo_root, false)?;
-        true
-    } else {
-        false
+    let repo_enabled = match options.enable_repo_root {
+        Some(repo_root) => enable_lan_join_repo(
+            repo_root,
+            |repo_root| detect_git_root(repo_root),
+            |git_root| enable_repo(&options.paths, git_root, false).map(|_| ()),
+        )?,
+        None => false,
     };
 
     Ok(LanJoinResult {
@@ -91,6 +93,91 @@ pub fn join_lan_runtime(options: LanJoinOptions) -> anyhow::Result<LanJoinResult
         runtime,
         repo_enabled,
     })
+}
+
+fn enable_lan_join_repo<DetectGitRoot, EnableRepo>(
+    repo_root: PathBuf,
+    detect_git_root: DetectGitRoot,
+    enable_repo: EnableRepo,
+) -> anyhow::Result<bool>
+where
+    DetectGitRoot: FnOnce(&Path) -> anyhow::Result<PathBuf>,
+    EnableRepo: FnOnce(PathBuf) -> anyhow::Result<()>,
+{
+    match detect_git_root(&repo_root) {
+        Ok(git_root) => {
+            enable_repo(git_root)?;
+            Ok(true)
+        }
+        Err(error) if is_no_git_root_error(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn is_no_git_root_error(error: &anyhow::Error) -> bool {
+    error.to_string().starts_with("no git root found from ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::Cell, path::Path};
+
+    #[test]
+    fn lan_join_repo_enablement_skips_no_git_root_without_enabling() {
+        let enable_called = Cell::new(false);
+
+        let repo_enabled = enable_lan_join_repo(
+            PathBuf::from("outside-git"),
+            |_start| anyhow::bail!("no git root found from outside-git"),
+            |_git_root| {
+                enable_called.set(true);
+                Ok(())
+            },
+        )
+        .expect("no git root should skip repo enablement");
+
+        assert!(!repo_enabled);
+        assert!(!enable_called.get());
+    }
+
+    #[test]
+    fn lan_join_repo_enablement_propagates_unrelated_detection_error() {
+        let enable_called = Cell::new(false);
+
+        let error = enable_lan_join_repo(
+            PathBuf::from("missing"),
+            |_start| anyhow::bail!("failed to canonicalize missing"),
+            |_git_root| {
+                enable_called.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("unrelated detection errors should propagate");
+
+        assert!(error.to_string().contains("failed to canonicalize"));
+        assert!(!enable_called.get());
+    }
+
+    #[test]
+    fn lan_join_repo_enablement_enables_detected_git_root() {
+        let detected_root = PathBuf::from("/repo");
+        let enable_called = Cell::new(false);
+
+        let repo_enabled = enable_lan_join_repo(
+            PathBuf::from("/repo/nested"),
+            |_start: &Path| Ok(detected_root.clone()),
+            |git_root| {
+                assert_eq!(git_root, detected_root);
+                enable_called.set(true);
+                Ok(())
+            },
+        )
+        .expect("detected git root should enable repo");
+
+        assert!(repo_enabled);
+        assert!(enable_called.get());
+    }
 }
 
 pub fn lan_join_commands(addresses: &[IpAddr], port: u16, token: &str) -> Vec<String> {

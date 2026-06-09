@@ -15,7 +15,9 @@ use policy_service::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stateful_core::{ContextPackage, ReconciliationDecision, RenderMode, render_prompt_text};
-use stateful_store::{Event, OutboxEntry, Store, StoreError, WaitRecord};
+use stateful_store::{
+    CurrentStateIdentityFilter, Event, OutboxEntry, Store, StoreError, WaitRecord,
+};
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
@@ -463,6 +465,10 @@ fn non_empty_identity(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+fn non_empty_str(value: &str) -> Option<&str> {
+    (!value.is_empty()).then_some(value)
+}
+
 fn missing_purpose_response() -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
@@ -675,8 +681,17 @@ async fn context_render(
         .lock()
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
+            let identity_filter = CurrentStateIdentityFilter {
+                repo_id: input.repo_id.as_deref().and_then(non_empty_str),
+                worktree_id: input.worktree_id.as_deref().and_then(non_empty_str),
+                root: input.root.as_deref().and_then(non_empty_str),
+            };
             store
-                .live_current_state_for_workspace(workspace_id, input.resource.as_deref())
+                .live_current_state_for_workspace_identity(
+                    workspace_id,
+                    identity_filter,
+                    input.resource.as_deref(),
+                )
                 .map_err(|error| error.to_string())
         });
 
@@ -1273,6 +1288,12 @@ struct ContextRenderRequest {
     mode: Option<String>,
     resource: Option<String>,
     workspace_id: Option<String>,
+    #[serde(default)]
+    repo_id: Option<String>,
+    #[serde(default)]
+    worktree_id: Option<String>,
+    #[serde(default)]
+    root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

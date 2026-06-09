@@ -3837,6 +3837,69 @@ async fn context_render_filters_items_to_requested_workspace() {
 }
 
 #[tokio::test]
+async fn context_render_filters_items_to_requested_repo_identity() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare_repo_1 = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "shared",
+            serde_json::json!({
+                "purpose": "Fix stateful core LAN behavior.",
+                "files_planned": ["crates/stateful-cli/src/lan.rs"]
+            }),
+        ))
+        .await
+        .expect("repo-1 intent declaration should complete");
+    assert_eq!(declare_repo_1.status(), StatusCode::OK);
+
+    let mut repo_2_body = protocol_body(
+        "s2",
+        "shared",
+        serde_json::json!({
+            "purpose": "Investigate edge camera framedrops.",
+            "files_planned": ["record/hw/vision_module.py"]
+        }),
+    );
+    repo_2_body["workspace"]["root"] = serde_json::json!("/Users/arthur/Code/edge/core");
+    repo_2_body["workspace"]["repo_id"] = serde_json::json!("repo-2");
+    repo_2_body["workspace"]["worktree_id"] = serde_json::json!("worktree-2");
+    repo_2_body["workspace"]["branch"] = serde_json::json!("frame-drops");
+
+    let declare_repo_2 = app
+        .clone()
+        .oneshot(json_request("/v1/intent/declare", repo_2_body))
+        .await
+        .expect("repo-2 intent declaration should complete");
+    assert_eq!(declare_repo_2.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "shared",
+                "repo_id": "repo-1",
+                "worktree_id": "worktree-1",
+                "root": "/repo"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["purpose"], "Fix stateful core LAN behavior.");
+    let prompt_text = json["prompt_text"].as_str().unwrap_or_default();
+    assert!(prompt_text.contains("Fix stateful core LAN behavior"));
+    assert!(!prompt_text.contains("Investigate edge camera framedrops"));
+}
+
+#[tokio::test]
 async fn reconcile_ack_records_acknowledgement() {
     let app = build_router(ServerConfig::new("secret-token"));
 

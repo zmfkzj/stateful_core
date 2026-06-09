@@ -42,6 +42,19 @@ pub enum StoreError {
 
 pub type StoreResult<T> = Result<T, StoreError>;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CurrentStateIdentityFilter<'a> {
+    pub repo_id: Option<&'a str>,
+    pub worktree_id: Option<&'a str>,
+    pub root: Option<&'a str>,
+}
+
+impl CurrentStateIdentityFilter<'_> {
+    fn is_empty(self) -> bool {
+        self.repo_id.is_none() && self.worktree_id.is_none() && self.root.is_none()
+    }
+}
+
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
@@ -139,21 +152,28 @@ impl Store {
     }
 
     pub fn current_summary(&self) -> StoreResult<CurrentSummary> {
-        self.current_summary_filtered(None)
+        self.current_summary_filtered(None, CurrentStateIdentityFilter::default())
     }
 
     pub fn current_summary_for_workspace(
         &self,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<CurrentSummary> {
-        self.current_summary_filtered(Some(workspace_id.as_ref()))
+        self.current_summary_filtered(
+            Some(workspace_id.as_ref()),
+            CurrentStateIdentityFilter::default(),
+        )
     }
 
     fn current_summary_filtered(
         &self,
         workspace_filter: Option<&str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
     ) -> StoreResult<CurrentSummary> {
         self.expire_stale()?;
+        if !identity_filter.is_empty() {
+            return self.current_summary_for_identity(workspace_filter, identity_filter);
+        }
         let session_count = match workspace_filter {
             Some(workspace_id) => self.conn.query_row(
                 "SELECT COUNT(*) FROM sessions WHERE workspace_id = ?1",
@@ -194,11 +214,87 @@ impl Store {
         })
     }
 
+    fn current_summary_for_identity(
+        &self,
+        workspace_filter: Option<&str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
+    ) -> StoreResult<CurrentSummary> {
+        let mut event_statement = self.conn.prepare(
+            "SELECT session_id, workspace_id, repo_id, worktree_id, root
+             FROM events",
+        )?;
+        let event_rows = event_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        let event_rows = event_rows.collect::<Result<Vec<_>, _>>()?;
+        let mut sessions = std::collections::BTreeSet::new();
+        let mut event_count = 0u64;
+        for (session_id, workspace_id, repo_id, worktree_id, root) in event_rows {
+            if workspace_filter.is_some_and(|filter| workspace_id != filter) {
+                continue;
+            }
+            if !identity_filter_matches(
+                identity_filter,
+                repo_id.as_deref(),
+                worktree_id.as_deref(),
+                root.as_deref(),
+            ) {
+                continue;
+            }
+            event_count += 1;
+            sessions.insert(session_id);
+        }
+
+        let mut intent_statement = self.conn.prepare(
+            "SELECT i.workspace_id, e.repo_id, e.worktree_id, e.root
+             FROM intents i
+             LEFT JOIN events e ON e.event_id = i.intent_id
+             WHERE i.status = 'active'",
+        )?;
+        let intent_rows = intent_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        let intent_rows = intent_rows.collect::<Result<Vec<_>, _>>()?;
+        let active_intent_count = intent_rows
+            .into_iter()
+            .filter(|(workspace_id, repo_id, worktree_id, root)| {
+                !workspace_filter.is_some_and(|filter| workspace_id != filter)
+                    && identity_filter_matches(
+                        identity_filter,
+                        repo_id.as_deref(),
+                        worktree_id.as_deref(),
+                        root.as_deref(),
+                    )
+            })
+            .count() as u64;
+
+        Ok(CurrentSummary {
+            session_count: sessions.len() as u64,
+            active_intent_count,
+            event_count,
+        })
+    }
+
     pub fn live_current_state(
         &self,
         resource_filter: Option<&str>,
     ) -> StoreResult<LiveCurrentState> {
-        self.live_current_state_filtered(None, resource_filter)
+        self.live_current_state_filtered(
+            None,
+            CurrentStateIdentityFilter::default(),
+            resource_filter,
+        )
     }
 
     pub fn live_current_state_for_workspace(
@@ -206,35 +302,76 @@ impl Store {
         workspace_id: impl AsRef<str>,
         resource_filter: Option<&str>,
     ) -> StoreResult<LiveCurrentState> {
-        self.live_current_state_filtered(Some(workspace_id.as_ref()), resource_filter)
+        self.live_current_state_filtered(
+            Some(workspace_id.as_ref()),
+            CurrentStateIdentityFilter::default(),
+            resource_filter,
+        )
+    }
+
+    pub fn live_current_state_for_workspace_identity(
+        &self,
+        workspace_id: impl AsRef<str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
+        resource_filter: Option<&str>,
+    ) -> StoreResult<LiveCurrentState> {
+        self.live_current_state_filtered(
+            Some(workspace_id.as_ref()),
+            identity_filter,
+            resource_filter,
+        )
     }
 
     fn live_current_state_filtered(
         &self,
         workspace_filter: Option<&str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
         resource_filter: Option<&str>,
     ) -> StoreResult<LiveCurrentState> {
         self.expire_stale()?;
-        let summary = self.current_summary_filtered(workspace_filter)?;
+        let summary = self.current_summary_filtered(workspace_filter, identity_filter)?;
         let resource_filter = resource_filter.map(normalize_relative_path);
         let mut items = Vec::new();
 
-        items.extend(self.live_intent_items(workspace_filter, resource_filter.as_deref())?);
-        items.extend(self.live_lease_items(workspace_filter, resource_filter.as_deref())?);
-        items.extend(self.live_wait_queue_items(workspace_filter, resource_filter.as_deref())?);
+        items.extend(self.live_intent_items(
+            workspace_filter,
+            identity_filter,
+            resource_filter.as_deref(),
+        )?);
+        items.extend(self.live_lease_items(
+            workspace_filter,
+            identity_filter,
+            resource_filter.as_deref(),
+        )?);
+        items.extend(self.live_wait_queue_items(
+            workspace_filter,
+            identity_filter,
+            resource_filter.as_deref(),
+        )?);
 
         Ok(LiveCurrentState { summary, items })
     }
     fn live_intent_items(
         &self,
         workspace_filter: Option<&str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
         resource_filter: Option<&str>,
     ) -> StoreResult<Vec<CurrentItem>> {
         let mut statement = self.conn.prepare(
-            "SELECT session_id, workspace_id, scopes_json, purpose, declared_at, expires_at
-             FROM intents
-             WHERE status = 'active'
-             ORDER BY declared_at DESC",
+            "SELECT
+                i.session_id,
+                i.workspace_id,
+                i.scopes_json,
+                i.purpose,
+                i.declared_at,
+                i.expires_at,
+                e.repo_id,
+                e.worktree_id,
+                e.root
+             FROM intents i
+             LEFT JOIN events e ON e.event_id = i.intent_id
+             WHERE i.status = 'active'
+             ORDER BY i.declared_at DESC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
@@ -244,13 +381,35 @@ impl Store {
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         })?;
         let rows = rows.collect::<Result<Vec<_>, _>>()?;
         let mut items = Vec::new();
 
-        for (session_id, workspace_id, scopes_json, purpose, declared_at, expires_at) in rows {
+        for (
+            session_id,
+            workspace_id,
+            scopes_json,
+            purpose,
+            declared_at,
+            expires_at,
+            repo_id,
+            worktree_id,
+            root,
+        ) in rows
+        {
             if workspace_filter.is_some_and(|filter| workspace_id != filter) {
+                continue;
+            }
+            if !identity_filter_matches(
+                identity_filter,
+                repo_id.as_deref(),
+                worktree_id.as_deref(),
+                root.as_deref(),
+            ) {
                 continue;
             }
             let scopes: Vec<IntentScope> = serde_json::from_str(&scopes_json).map_err(|err| {
@@ -333,6 +492,7 @@ impl Store {
     fn live_lease_items(
         &self,
         workspace_filter: Option<&str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
         resource_filter: Option<&str>,
     ) -> StoreResult<Vec<CurrentItem>> {
         let mut statement = self.conn.prepare(
@@ -357,6 +517,18 @@ impl Store {
         for (session_id, workspace_id, relative_path, action, purpose, expires_at) in rows {
             if workspace_filter.is_some_and(|filter| workspace_id != filter) {
                 continue;
+            }
+            if !identity_filter.is_empty() {
+                let Some(session_id) = session_id.as_deref() else {
+                    continue;
+                };
+                if !self.session_active_intent_matches_identity(
+                    session_id,
+                    &workspace_id,
+                    identity_filter,
+                )? {
+                    continue;
+                }
             }
             if !resource_matches_filter(&relative_path, resource_filter) {
                 continue;
@@ -396,6 +568,7 @@ impl Store {
     fn live_wait_queue_items(
         &self,
         workspace_filter: Option<&str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
         resource_filter: Option<&str>,
     ) -> StoreResult<Vec<CurrentItem>> {
         let mut statement = self.conn.prepare(
@@ -447,6 +620,9 @@ impl Store {
             if workspace_filter.is_some_and(|filter| workspace_id != filter) {
                 continue;
             }
+            if !identity_filter.is_empty() {
+                continue;
+            }
             if !resource_matches_filter(&relative_path, resource_filter) {
                 continue;
             }
@@ -495,6 +671,44 @@ impl Store {
         }
 
         Ok(items)
+    }
+
+    fn session_active_intent_matches_identity(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        identity_filter: CurrentStateIdentityFilter<'_>,
+    ) -> StoreResult<bool> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT e.repo_id, e.worktree_id, e.root
+                 FROM intents i
+                 LEFT JOIN events e ON e.event_id = i.intent_id
+                 WHERE i.session_id = ?1 AND i.workspace_id = ?2 AND i.status = 'active'
+                 ORDER BY i.declared_at DESC
+                 LIMIT 1",
+                params![session_id, workspace_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        Ok(row
+            .map(|(repo_id, worktree_id, root)| {
+                identity_filter_matches(
+                    identity_filter,
+                    repo_id.as_deref(),
+                    worktree_id.as_deref(),
+                    root.as_deref(),
+                )
+            })
+            .unwrap_or(false))
     }
 
     pub fn recent_events(&self, limit: u64) -> StoreResult<Vec<EventRecord>> {
@@ -2351,6 +2565,33 @@ fn resource_matches_filter(resource: &str, filter: Option<&str>) -> bool {
         || filter
             .strip_prefix(&format!("{resource}/"))
             .is_some_and(|rest| !rest.is_empty())
+}
+
+fn identity_filter_matches(
+    filter: CurrentStateIdentityFilter<'_>,
+    repo_id: Option<&str>,
+    worktree_id: Option<&str>,
+    root: Option<&str>,
+) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    if let Some(expected) = filter.repo_id
+        && repo_id != Some(expected)
+    {
+        return false;
+    }
+    if let Some(expected) = filter.worktree_id
+        && worktree_id != Some(expected)
+    {
+        return false;
+    }
+    if let Some(expected) = filter.root
+        && root != Some(expected)
+    {
+        return false;
+    }
+    true
 }
 
 fn now_timestamp() -> String {

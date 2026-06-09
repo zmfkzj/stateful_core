@@ -594,6 +594,8 @@ fn mcp_context_render_defaults_to_current_session_workspace() {
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
+    let identity = stateful_cli::repo_identity_for_enabled_repo(&paths, &repo_root)
+        .expect("repo identity should resolve");
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok","prompt_text":""}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
     write_current_session_file_for_codex_run(&repo_root, "run-a", &CurrentSession::new("s1", "w1"))
@@ -625,6 +627,9 @@ fn mcp_context_render_defaults_to_current_session_workspace() {
     assert_eq!(body["workspace_id"], "w1");
     assert_eq!(body["mode"], "brief");
     assert_eq!(body["resource"], "src/auth.ts");
+    assert_eq!(body["repo_id"], identity.repo_id);
+    assert_eq!(body["worktree_id"], identity.worktree_id);
+    assert_eq!(body["root"], identity.root);
 
     let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
     assert_eq!(json["jsonrpc"], "2.0");

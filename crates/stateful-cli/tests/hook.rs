@@ -1769,6 +1769,9 @@ fn user_prompt_submit_posts_context_render() {
     assert!(request.contains("POST /v1/context/render HTTP/1.1"));
     assert!(request.contains("\"mode\":\"brief\""));
     assert!(request.contains("\"workspace_id\":\"w1\""));
+    assert!(request.contains("\"repo_id\""));
+    assert!(request.contains("\"worktree_id\""));
+    assert!(request.contains("\"root\""));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

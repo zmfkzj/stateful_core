@@ -394,6 +394,7 @@ fn enrich_arguments(
             | "state.intent.request"
             | "state.intent.claim"
             | "state.intent.cancel"
+            | "state.context.render"
     ) {
         object
             .entry("workspace_id")

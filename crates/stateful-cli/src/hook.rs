@@ -206,7 +206,8 @@ pub fn handle_user_prompt_submit_in_repo(
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     remember_current_session(&repo_root, &runtime, input)?;
-    handle_user_prompt_submit_with_runtime(input, &runtime)
+    let identity = repo_identity(&paths, &repo_root)?;
+    handle_user_prompt_submit_with_runtime(input, &runtime, Some(&identity))
 }
 
 pub fn handle_stop_in_repo(input: &str, repo_root: impl AsRef<Path>) -> anyhow::Result<()> {
@@ -265,17 +266,23 @@ fn handle_post_tool_use_with_runtime(
 fn handle_user_prompt_submit_with_runtime(
     input: &str,
     runtime: &ServerRuntime,
+    identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<String> {
     let input: UserPromptSubmitInput = serde_json::from_str(input)?;
-    let response = post_json(
-        runtime,
-        "/v1/context/render",
-        &json!({
-            "session_id": input.session_id,
-            "workspace_id": runtime.workspace_id,
-            "mode": "brief"
-        }),
-    )?;
+    let mut body = json!({
+        "session_id": input.session_id,
+        "workspace_id": runtime.workspace_id,
+        "mode": "brief"
+    });
+    if let Some(identity) = identity
+        && let Some(object) = body.as_object_mut()
+    {
+        object.insert("repo_id".to_string(), json!(&identity.repo_id));
+        object.insert("worktree_id".to_string(), json!(&identity.worktree_id));
+        object.insert("root".to_string(), json!(&identity.root));
+        object.insert("branch".to_string(), json!(&identity.branch));
+    }
+    let response = post_json(runtime, "/v1/context/render", &body)?;
 
     if !(200..300).contains(&response.status_code) {
         anyhow::bail!(
