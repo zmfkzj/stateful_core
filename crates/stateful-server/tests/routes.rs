@@ -2028,7 +2028,7 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
     assert_eq!(blocked_a.status(), StatusCode::OK);
     let json = response_json(blocked_a, 2048).await;
     assert_eq!(json["decision"], "deny");
-    assert_eq!(json["reason_code"], "active_lease_conflict");
+    assert_eq!(json["reason_code"], "missing_intent");
 
     let finalize_b = app
         .clone()
@@ -2640,6 +2640,55 @@ async fn activity_finalize_releases_leases_and_notifications_poll_returns_resume
         json["notifications"][0]["payload"]["relative_path"],
         "src/auth.ts"
     );
+}
+
+#[tokio::test]
+async fn activity_finalize_clears_active_intent_for_session() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    ensure_test_intent_via_http(&app, "s1", "w1", "src/auth.ts").await;
+
+    let before = app
+        .clone()
+        .oneshot(authorized_get("/v1/current?resource=src/auth.ts"))
+        .await
+        .expect("current request should complete");
+    assert_eq!(before.status(), StatusCode::OK);
+    let json = response_json(before, 4096).await;
+    assert!(json["items"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["kind"] == "intent" && item["session_id"] == "s1")
+    }));
+
+    let finalize = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/activity/finalize",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("finalize should complete");
+    assert_eq!(finalize.status(), StatusCode::OK);
+    let json = response_json(finalize, 2048).await;
+    assert_eq!(json["released_leases"], 0);
+    assert_eq!(json["completed_intents"], 1);
+
+    let after = app
+        .oneshot(authorized_get("/v1/current?resource=src/auth.ts"))
+        .await
+        .expect("current request should complete");
+    assert_eq!(after.status(), StatusCode::OK);
+    let json = response_json(after, 4096).await;
+    assert!(json["items"].as_array().is_some_and(|items| {
+        !items
+            .iter()
+            .any(|item| item["kind"] == "intent" && item["session_id"] == "s1")
+    }));
+    assert_eq!(json["current"]["active_intent_count"], 0);
 }
 
 #[tokio::test]

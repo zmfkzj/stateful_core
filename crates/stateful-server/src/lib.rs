@@ -646,15 +646,19 @@ async fn activity_finalize(
             let released = store
                 .release_session_leases(&input.session_id, &input.workspace_id)
                 .map_err(|error| error.to_string())?;
-            Ok(released)
+            let completed = store
+                .complete_session_intents(&input.session_id, &input.workspace_id)
+                .map_err(|error| error.to_string())?;
+            Ok((released, completed))
         });
 
     match result {
-        Ok(released_leases) => (
+        Ok((released_leases, completed_intents)) => (
             StatusCode::OK,
             Json(json!({
                 "status": "ok",
-                "released_leases": released_leases
+                "released_leases": released_leases,
+                "completed_intents": completed_intents
             })),
         ),
         Err(message) => (
