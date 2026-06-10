@@ -1029,6 +1029,21 @@ impl Store {
         Ok(released)
     }
 
+    pub fn complete_session_intents(
+        &self,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+    ) -> StoreResult<u64> {
+        self.expire_stale()?;
+        let completed = self.conn.execute(
+            "UPDATE intents
+             SET status = 'completed'
+             WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'",
+            params![session_id.as_ref(), workspace_id.as_ref()],
+        )?;
+        Ok(completed as u64)
+    }
+
     pub fn lease_count(&self) -> StoreResult<u64> {
         self.conn
             .query_row("SELECT COUNT(*) FROM leases", [], |row| {
