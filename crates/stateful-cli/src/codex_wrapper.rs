@@ -6,8 +6,6 @@ use std::{
 
 use clap::ValueEnum;
 
-use crate::runtime::STATEFUL_CODEX_RUN_ID_ENV;
-
 const READ_ONLY_TMP_PROFILE: &str = "stateful-read-only-tmp";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -61,10 +59,7 @@ fn build_passthrough_invocation(options: CodexWrapperOptions) -> anyhow::Result<
     Ok(CodexInvocation {
         program: options.codex_bin,
         args,
-        env: vec![(
-            STATEFUL_CODEX_RUN_ID_ENV.to_string(),
-            uuid::Uuid::new_v4().to_string(),
-        )],
+        env: Vec::new(),
     })
 }
 
@@ -115,10 +110,7 @@ fn build_read_only_tmp_invocation(options: CodexWrapperOptions) -> anyhow::Resul
     Ok(CodexInvocation {
         program: options.codex_bin,
         args,
-        env: vec![(
-            STATEFUL_CODEX_RUN_ID_ENV.to_string(),
-            uuid::Uuid::new_v4().to_string(),
-        )],
+        env: Vec::new(),
     })
 }
 

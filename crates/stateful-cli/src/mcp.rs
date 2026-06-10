@@ -6,7 +6,7 @@ use std::{
 use serde_json::Value;
 use stateful_mcp::{ToolCall, map_tool_to_http, protocol_tool_name, tool_descriptors};
 
-use crate::runtime::read_codex_run_bound_current_session;
+use crate::runtime::read_current_session_file_for_mcp;
 use crate::{
     CurrentSession, GlobalPaths, HttpResponse, IntentCancelArgs, IntentClaimArgs,
     IntentDeclareArgs, IntentRequestArgs, RepoGate, RepoIdentity, ServerRuntime,
@@ -125,7 +125,7 @@ fn current_session_for_mcp_tool(
         return Ok(None);
     }
 
-    read_codex_run_bound_current_session(repo_root)
+    read_current_session_file_for_mcp(repo_root)
         .map(Some)
         .map_err(|error| current_session_resolution_response(protocol_name, error.to_string()))
 }

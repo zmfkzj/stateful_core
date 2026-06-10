@@ -24,10 +24,10 @@ avoidable conflicts before the write occurs.
 
 This repository is an early Rust implementation and local-first, macOS-first
 prototype. The current implementation is Codex-first and includes a CLI,
-global user-level installation with repo allowlist gating, a repo-local
-compatibility mode, a local HTTP state server, MCP adapter, Codex hook adapter, SQLite-backed state
-store, sandboxed test execution, structured commit/push wrappers, outbox sync,
-and benchmark tooling.
+global user-level installation with repo allowlist gating, a local HTTP state
+server, MCP adapter, Codex hook adapter, SQLite-backed state store, sandboxed
+test execution, structured commit/push wrappers, outbox sync, and benchmark
+tooling.
 
 APIs, configuration files, and command behavior may change while the project is
 pre-release. The current security and support scope is documented in
@@ -115,7 +115,7 @@ Resume signals are available through:
 - Codex lifecycle hook integration for observing and gating important actions.
 - An MCP adapter exposing the current-state protocol to compatible tools.
 - A Codex integration path, including lifecycle hooks, MCP, and an optional
-  wrapper that binds Codex runs without forcing a session sandbox by default.
+  wrapper that starts Codex without forcing a session sandbox by default.
 - Sandboxed test and check execution through explicit artifact write
   directories.
 - Benchmark tooling for SWE-bench pair runs, reports, comparisons, and
@@ -229,8 +229,8 @@ stateful server status
 
 For manual CLI use outside the default Codex workflow, declare what you plan to
 edit and inspect the active current state. In `stateful codex`, lifecycle hooks
-bind the current Codex session to the wrapper run and use that run-bound session
-by default. Outside hooks, pass session and workspace IDs explicitly.
+bind the current Codex session id as the Stateful session id by default. Outside
+hooks, pass session and workspace IDs explicitly.
 
 ```bash
 stateful intent declare --purpose "Update README content requested by the user." README.md
@@ -259,23 +259,14 @@ stateful sandbox run --fs write-targets --network enabled --write-dir target --c
 stateful doctor
 ```
 
-Repo-local compatibility setup is still available when global Codex config is
-not desired:
-
-```bash
-stateful init --binary target/debug/stateful
-stateful enable --repo-local-codex
-```
-
 ## CLI Overview
 
 - `stateful install [--yes] [--codex-config <path>] [--binary <path>]`
-  installs global stateful files and merges Codex config. It is a dry run
+  installs global stateful files, installs the global
+  `stateful-command-policy` skill, and merges Codex config. It is a dry run
   unless `--yes` is passed.
-- `stateful enable [--repo <path>] [--repo-local-codex]`, `stateful disable`,
-  and `stateful repos list` manage the repo allowlist used by global hooks.
-- `stateful init` writes repo-local `.codex/config.toml`, `.stateful/`
-  configuration, and the repo-local `stateful-command-policy` skill.
+- `stateful enable [--repo <path>]`, `stateful disable`, and
+  `stateful repos list` manage the repo allowlist used by global hooks.
 - `stateful server start` starts the local HTTP state server detached by
   default. Use `stateful server start --foreground`, `stateful server status`,
   and `stateful server stop` for lifecycle control. Bare `stateful server`
@@ -316,10 +307,10 @@ stateful enable --repo-local-codex
   requires both remote and branch, requires the branch to match the current
   branch, requires a clean worktree, and rejects force-like target values.
 - `stateful codex [--codex-bin <path>] [--sandbox passthrough|read-only-tmp] [--no-stateful] -- <args...>`
-  runs Codex with pass-through session configuration by default while setting a
-  run-bound session id. `--sandbox read-only-tmp` remains available as a Codex
-  filesystem profile, not as a Bash authorization signal, and `--no-stateful`
-  disables Codex lifecycle hooks for that run.
+  runs Codex with pass-through session configuration by default.
+  `--sandbox read-only-tmp` remains available as a Codex filesystem profile,
+  not as a Bash authorization signal, and `--no-stateful` disables Codex
+  lifecycle hooks for that run.
 - `stateful mcp serve` exposes the MCP adapter over stdio.
 - `stateful mcp call <tool> [arguments_json]` calls an MCP tool. Most tools map
   to the local HTTP server. Stale `state_file_write` / `state.file.write` and
@@ -354,10 +345,14 @@ used by CLI and MCP calls. `UserPromptSubmit` renders brief current-state
 context. `PreToolUse` authorizes supported tool actions. `PostToolUse` records
 activity or heartbeats. `Stop` finalizes activity and releases leases.
 
-The `stateful codex` wrapper sets a run-specific `STATEFUL_CODEX_RUN_ID`, and
-installed MCP config whitelists that value plus `CODEX_THREAD_ID`. Session-bound
-MCP tools resolve only run-bound files under `.stateful_core/runtime/sessions/`
-instead of a stale legacy `.stateful_core/runtime/session.json` file.
+`SessionStart` uses the Codex hook `session_id` as the Stateful session id and
+writes `.stateful_core/runtime/sessions/<session_id>.json` plus the current
+session alias `.stateful_core/runtime/session.json`. Session-bound MCP tools use
+`STATEFUL_CODEX_RUN_ID` or `CODEX_THREAD_ID` when Codex forwards one of those
+variables. If the MCP server was started without those per-session variables,
+the tools fall back to `.stateful_core/runtime/session.json` only after
+verifying that its `session_id` has a matching session-bound file with identical
+contents.
 
 ## Write Authorization
 
@@ -531,10 +526,10 @@ when `STATEFUL_HOME` is unset. That directory can contain `config.yml`,
 `state.db`, `runtime/server.json`, `runtime/server.lock`, `runtime/server.log`,
 and repo metadata under `repos/`.
 
-Repo-local compatibility and hook runtime state live under `.stateful_core/`.
-That directory can contain `runtime/server.json`, `runtime/session.json`,
-run-bound `runtime/sessions/*.json` files, repo-local `state.db`, and outbox
-JSONL files under `outbox/`.
+Repo hook runtime state lives under `.stateful_core/`. That directory can
+contain `runtime/server.json`, `runtime/session.json`, session-bound
+`runtime/sessions/*.json` files, local `state.db`, and outbox JSONL files
+under `outbox/`.
 
 Commit reusable documentation and source code, not local generated state. For
 public source archives, prefer `git archive` or a clean clone instead of a
@@ -548,11 +543,14 @@ bundled.
 - `STATEFUL_SERVER_URL` and `STATEFUL_SERVER_TOKEN` override runtime discovery
   when both are set. The referenced server must expose the current runtime
   capabilities, including sandbox write-directory authorization.
-- `STATEFUL_CODEX_RUN_ID` selects the run-bound current-session file under
-  `.stateful_core/runtime/sessions/`. The `stateful codex` wrapper sets it
-  automatically.
-- `CODEX_THREAD_ID` lets session-bound MCP tools find a matching run-bound
-  current-session file when a run-specific id was not propagated.
+- `STATEFUL_CODEX_RUN_ID` is the Stateful/Codex session id when present. It
+  selects `.stateful_core/runtime/sessions/<session_id>.json` and must match
+  `CODEX_THREAD_ID` if both variables are set.
+- `CODEX_THREAD_ID` is the Codex session/thread id fallback used by
+  session-bound tools when `STATEFUL_CODEX_RUN_ID` is not present. Some Codex
+  MCP launches do not forward this per-session value; in that case stateful MCP
+  tools use the hook-written current session alias only if it verifies against
+  the matching session-bound file.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
   authorize Bash. Bash authorization goes through a trusted
   `<absolute-stateful-binary> sandbox run` wrapper command.

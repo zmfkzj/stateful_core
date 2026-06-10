@@ -1148,7 +1148,7 @@ pub fn run_pairs(options: RunOptions) -> Result<RunMetadata> {
         pairs.truncate(max_pairs);
     }
 
-    let run_dir = options.output_dir.join(&options.run_id);
+    let run_dir = absolute_path(&options.output_dir)?.join(&options.run_id);
     fs::create_dir_all(&run_dir)?;
     let metadata = RunMetadata {
         run_id: options.run_id.clone(),
@@ -1380,6 +1380,9 @@ fn run_pair_inner(
         }
 
         let agent_records = wait_for_agents(&mut agents, timeout, abort)?;
+        if let Some(error) = detect_agent_infrastructure_failure(&agents) {
+            return Err(error.into());
+        }
         let wall_time_ms = elapsed_ms(started.elapsed());
 
         observer_events.extend(agent_records.iter().map(|agent| {
@@ -1721,6 +1724,27 @@ impl fmt::Display for FatalAgentAbortError {
 
 impl std::error::Error for FatalAgentAbortError {}
 
+#[derive(Debug, Clone)]
+struct AgentInfrastructureFailureError {
+    agent_id: String,
+    log_path: PathBuf,
+    excerpt: String,
+}
+
+impl fmt::Display for AgentInfrastructureFailureError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "agent infrastructure failure detected for {} in {}: {}",
+            self.agent_id,
+            self.log_path.display(),
+            self.excerpt
+        )
+    }
+}
+
+impl std::error::Error for AgentInfrastructureFailureError {}
+
 fn is_fatal_agent_stop_error(error: &anyhow::Error) -> bool {
     is_detected_fatal_agent_error(error) || is_fatal_agent_abort_error(error)
 }
@@ -1830,6 +1854,43 @@ fn detect_fatal_agent_failure(logs: &[AgentLogPaths]) -> Option<FatalAgentFailur
             })
         })
     })
+}
+
+fn detect_agent_infrastructure_failure(
+    agents: &[RunningAgent],
+) -> Option<AgentInfrastructureFailureError> {
+    agents.iter().find_map(|agent| {
+        [&agent.stdout, &agent.stderr].into_iter().find_map(|path| {
+            agent_infrastructure_failure_excerpt(path).map(|excerpt| {
+                AgentInfrastructureFailureError {
+                    agent_id: agent.agent_id.clone(),
+                    log_path: path.to_path_buf(),
+                    excerpt,
+                }
+            })
+        })
+    })
+}
+
+fn agent_infrastructure_failure_excerpt(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    text.lines()
+        .find(|line| contains_agent_infrastructure_failure_text(line))
+        .map(trim_log_excerpt)
+}
+
+fn contains_agent_infrastructure_failure_text(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    [
+        "failed to initialize in-process app-server client",
+        "sandbox_apply: operation not permitted",
+        "user cancelled mcp tool call",
+        "i couldn't complete the edit",
+        "i could not complete the edit",
+    ]
+    .iter()
+    .any(|pattern| line.contains(pattern))
 }
 
 fn fatal_agent_failure_excerpt(path: &Path) -> Option<(FatalAgentFailureKind, String)> {
@@ -2136,6 +2197,15 @@ fn render_run_template(template: &str, options: &RunOptions) -> String {
         .replace("{run_id}", &options.run_id)
         .replace("{mode}", options.mode.as_str())
         .replace("{output_dir}", &options.output_dir.to_string_lossy())
+}
+
+fn absolute_path(path: impl AsRef<Path>) -> Result<PathBuf> {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
 }
 
 fn elapsed_ms(duration: Duration) -> u64 {

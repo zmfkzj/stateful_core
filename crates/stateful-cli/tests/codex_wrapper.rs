@@ -1,6 +1,4 @@
-use stateful_cli::{
-    CodexSandboxMode, CodexWrapperOptions, STATEFUL_CODEX_RUN_ID_ENV, build_codex_invocation,
-};
+use stateful_cli::{CodexSandboxMode, CodexWrapperOptions, build_codex_invocation};
 
 const LEGACY_TRUSTED_SANDBOX_ENV: &str = "STATEFUL_HOOK_TRUSTED_SANDBOX";
 
@@ -23,9 +21,8 @@ fn codex_wrapper_defaults_to_passthrough_session_configuration() {
         invocation
             .env
             .iter()
-            .any(|(key, value)| key == STATEFUL_CODEX_RUN_ID_ENV
-                && uuid::Uuid::parse_str(value).is_ok()),
-        "stateful codex should still bind generated Codex run IDs to sessions"
+            .all(|(key, _)| key != "STATEFUL_CODEX_RUN_ID"),
+        "stateful codex must let Codex session_id be the Stateful run/session id"
     );
     assert!(
         invocation

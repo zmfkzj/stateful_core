@@ -52,6 +52,15 @@ fn current_session_file_child_probe() {
     );
 
     match child_case.as_str() {
+        "roundtrip_no_codex_env" => {
+            write_current_session_file(&repo_root, &CurrentSession::new("s1", "w1"))
+                .expect("current session file should write");
+
+            let session =
+                read_current_session_file(&repo_root).expect("current session should read");
+            assert_eq!(session.session_id, "s1");
+            assert_eq!(session.workspace_id, "w1");
+        }
         "read_symlink_error" => {
             let error =
                 read_current_session_file(&repo_root).expect_err("symlinked session should fail");
@@ -123,7 +132,7 @@ fn global_runtime_file_round_trips_server_discovery() {
 }
 
 #[test]
-fn runtime_discovery_keeps_repo_local_compatibility_fallback() {
+fn runtime_discovery_keeps_local_runtime_compatibility_fallback() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-runtime-compat-test-{}",
         std::process::id()
@@ -149,7 +158,7 @@ fn runtime_discovery_keeps_repo_local_compatibility_fallback() {
 }
 
 #[test]
-fn cli_current_uses_repo_local_runtime_when_global_paths_are_unavailable() {
+fn cli_current_uses_local_runtime_when_global_paths_are_unavailable() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-runtime-no-home-test-{}",
         std::process::id()
@@ -356,12 +365,7 @@ fn current_session_file_round_trips_for_mcp_enrichment() {
     }
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
 
-    write_current_session_file(&temp_root, &CurrentSession::new("s1", "w1"))
-        .expect("current session file should write");
-
-    let session = read_current_session_file(&temp_root).expect("current session should read");
-    assert_eq!(session.session_id, "s1");
-    assert_eq!(session.workspace_id, "w1");
+    run_current_session_child(&temp_root, "roundtrip_no_codex_env");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -456,13 +460,13 @@ fn codex_run_session_file_is_isolated_from_legacy_current_session() {
         .expect("legacy current session should write");
     write_current_session_file_for_codex_run(
         &temp_root,
-        "run-a",
+        "s-run-a",
         &CurrentSession::new("s-run-a", "w1"),
     )
-    .expect("run-bound current session should write");
+    .expect("session-bound current session should write");
 
     let session =
-        read_current_session_file_for_codex_run(&temp_root, "run-a").expect("run session reads");
+        read_current_session_file_for_codex_run(&temp_root, "s-run-a").expect("run session reads");
 
     assert_eq!(session.session_id, "s-run-a");
     assert_eq!(session.workspace_id, "w1");
@@ -483,15 +487,15 @@ fn codex_run_session_file_refuses_to_rebind_to_different_codex_session() {
 
     write_current_session_file_for_codex_run(
         &temp_root,
-        "run-a",
+        "s-run-a",
         &CurrentSession::new("s-run-a", "w1"),
     )
-    .expect("run-bound current session should write");
+    .expect("session-bound current session should write");
 
     let error = write_current_session_file_for_codex_run(
         &temp_root,
-        "run-a",
-        &CurrentSession::new("s-run-b", "w1"),
+        "s-run-a",
+        &CurrentSession::new("s-run-a", "w2"),
     )
     .expect_err("same codex run should not rebind to a different Codex session");
 
@@ -708,7 +712,7 @@ fn request_intent_via_http_posts_expected_payload() {
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
 
-    request_intent_via_http(
+    let response = request_intent_via_http(
         &runtime,
         IntentRequestArgs {
             session_id: "s1".to_string(),
@@ -721,6 +725,8 @@ fn request_intent_via_http_posts_expected_payload() {
         },
     )
     .expect("intent request should post");
+    assert_eq!(response.status_code, 200);
+    assert_eq!(response.body, "{\"status\":\"ok\"}");
 
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/intent/request HTTP/1.1"));

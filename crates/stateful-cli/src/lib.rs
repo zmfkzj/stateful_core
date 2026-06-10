@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
 use std::{
-    fs,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -45,8 +44,8 @@ pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio
 pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime};
 pub use push::{PushRequest, PushResult, run_structured_push};
 pub use repo_registry::{
-    CodexMode, RepoEntry, RepoGate, RepoIdentity, RepoRegistry, detect_git_root, disable_repo,
-    enable_repo, repo_gate, repo_identity_for_enabled_repo,
+    RepoEntry, RepoGate, RepoIdentity, RepoRegistry, detect_git_root, disable_repo, enable_repo,
+    repo_gate, repo_identity_for_enabled_repo,
 };
 pub use runtime::{
     CODEX_THREAD_ID_ENV, CurrentSession, HttpResponse, IntentCancelArgs, IntentClaimArgs,
@@ -58,7 +57,8 @@ pub use runtime::{
     read_current_session_file, read_current_session_file_for_codex_run, request_intent_via_http,
     runtime_env_override_is_configured, runtime_from_remote, runtime_has_required_identity,
     runtime_identity_matches_pid, write_current_session_file,
-    write_current_session_file_for_codex_run, write_global_runtime_file, write_runtime_file,
+    write_current_session_file_for_codex_run, write_current_session_file_for_codex_session,
+    write_global_runtime_file, write_runtime_file,
 };
 pub use sandbox::{SandboxFsProfile, SandboxNetworkPolicy};
 pub use server_lifecycle::{
@@ -76,10 +76,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    Init {
-        #[arg(long, default_value = "target/debug/stateful")]
-        binary: String,
-    },
     Install {
         #[arg(long)]
         yes: bool,
@@ -134,8 +130,6 @@ pub enum Command {
     Enable {
         #[arg(long)]
         repo: Option<PathBuf>,
-        #[arg(long)]
-        repo_local_codex: bool,
     },
     Disable {
         #[arg(long)]
@@ -215,6 +209,18 @@ pub enum SandboxCommand {
         create_targets: Vec<String>,
         #[arg(long = "write-dir")]
         write_dirs: Vec<String>,
+        #[arg(long)]
+        command: String,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+    },
+    RunNestedCodexBenchmark {
+        #[arg(long)]
+        purpose: String,
+        #[arg(long = "write-dir")]
+        write_dir: String,
+        #[arg(long = "codex-home-root")]
+        codex_home_root: String,
         #[arg(long)]
         command: String,
         #[arg(long)]
@@ -312,10 +318,6 @@ pub enum HookCommand {
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { binary } => {
-            install_repo_local_avoiding_global_hook_duplicates(std::env::current_dir()?, binary)?;
-            println!("installed stateful repo-local configuration");
-        }
         Command::Install {
             yes,
             codex_config,
@@ -618,23 +620,46 @@ pub fn run() -> anyhow::Result<()> {
                 std::process::exit(exit_code);
             }
         }
-        Command::Enable {
-            repo,
-            repo_local_codex,
-        } => {
+        Command::Sandbox(SandboxCommand::RunNestedCodexBenchmark {
+            purpose,
+            write_dir,
+            codex_home_root,
+            command,
+            timeout_seconds,
+        }) => {
+            let paths = GlobalPaths::from_env()?;
+            let repo_root = current_repo_root_or_current_dir()?;
+            let output = match sandbox::run_nested_codex_benchmark_sandbox_in_repo(
+                &repo_root,
+                &paths,
+                sandbox::NestedCodexBenchmarkSandboxRequest {
+                    purpose,
+                    write_dir,
+                    codex_home_root,
+                    command,
+                    timeout_seconds,
+                },
+            ) {
+                Ok(output) => output,
+                Err(error) => {
+                    if let Some(denied) =
+                        error.downcast_ref::<sandbox::SandboxAuthorizationDenied>()
+                    {
+                        println!("{}", denied.body());
+                        std::process::exit(1);
+                    }
+                    return Err(error);
+                }
+            };
+            println!("{}", serde_json::to_string(&output)?);
+            if let Some(exit_code) = sandbox::sandbox_run_cli_exit_code(&output) {
+                std::process::exit(exit_code);
+            }
+        }
+        Command::Enable { repo } => {
             let paths = GlobalPaths::from_env()?;
             let repo = repo.unwrap_or(std::env::current_dir()?);
-            let global_codex_config = if repo_local_codex {
-                default_codex_config_path().ok()
-            } else {
-                None
-            };
-            let entry = repo_registry::enable_repo_with_global_codex_config(
-                &paths,
-                repo,
-                repo_local_codex,
-                global_codex_config.as_deref(),
-            )?;
+            let entry = enable_repo(&paths, repo)?;
             println!("{}", serde_json::to_string(&entry)?);
         }
         Command::Disable { repo } => {
@@ -733,7 +758,7 @@ pub fn run() -> anyhow::Result<()> {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let (session_id, workspace_id) =
                 resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
-            request_intent_via_http(
+            let response = request_intent_via_http(
                 &runtime,
                 IntentRequestArgs {
                     session_id,
@@ -747,7 +772,7 @@ pub fn run() -> anyhow::Result<()> {
                         .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
                 },
             )?;
-            println!("requested stateful intent");
+            print_http_response(response)?;
         }
         Command::Intent(IntentCommand::Claim {
             session_id,
@@ -1000,396 +1025,6 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
     }
 }
 
-pub fn install_repo_local(
-    repo_root: impl AsRef<Path>,
-    binary_path: impl AsRef<str>,
-) -> anyhow::Result<()> {
-    install_repo_local_with_hooks(repo_root, binary_path, true)
-}
-
-pub fn install_repo_local_avoiding_global_hook_duplicates(
-    repo_root: impl AsRef<Path>,
-    binary_path: impl AsRef<str>,
-) -> anyhow::Result<()> {
-    let global_codex_config = default_codex_config_path().ok();
-    install_repo_local_with_global_codex_config(
-        repo_root,
-        binary_path,
-        global_codex_config.as_deref(),
-    )
-}
-
-pub fn install_repo_local_with_global_codex_config(
-    repo_root: impl AsRef<Path>,
-    binary_path: impl AsRef<str>,
-    global_codex_config: Option<&Path>,
-) -> anyhow::Result<()> {
-    let include_hooks = match global_codex_config {
-        Some(path) => !global_codex_config_has_stateful_hooks(path)?,
-        None => true,
-    };
-    install_repo_local_with_hooks(repo_root, binary_path, include_hooks)
-}
-
-fn install_repo_local_with_hooks(
-    repo_root: impl AsRef<Path>,
-    binary_path: impl AsRef<str>,
-    include_hooks: bool,
-) -> anyhow::Result<()> {
-    let repo_root = repo_root.as_ref();
-    let binary_path = binary_path.as_ref();
-
-    ensure_repo_local_install_can_write(repo_root)?;
-
-    fs::create_dir_all(repo_root.join(".codex"))?;
-    fs::create_dir_all(repo_root.join(".codex/skills/stateful-command-policy"))?;
-    fs::create_dir_all(repo_root.join(".stateful"))?;
-
-    let hooks_json = repo_root.join(".codex/hooks.json");
-    if hooks_json.exists() {
-        fs::remove_file(&hooks_json)?;
-    }
-    fs::write(
-        repo_root.join(".codex/config.toml"),
-        repo_local_codex_config_toml(binary_path, include_hooks),
-    )?;
-    fs::write(
-        repo_root.join(".codex/skills/stateful-command-policy/SKILL.md"),
-        stateful_command_policy_skill(),
-    )?;
-    fs::write(repo_root.join(".stateful/config.yml"), default_config_yml())?;
-
-    Ok(())
-}
-
-const STATEFUL_GLOBAL_CODEX_BLOCK_START: &str = "# stateful-core-global-install";
-const STATEFUL_GLOBAL_CODEX_BLOCK_END: &str = "# /stateful-core-global-install";
-
-fn global_codex_config_has_stateful_hooks(path: &Path) -> anyhow::Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    let contents = fs::read_to_string(path)?;
-    let Some(start) = contents.find(STATEFUL_GLOBAL_CODEX_BLOCK_START) else {
-        return Ok(false);
-    };
-    let block = &contents[start..];
-    let block = match block.find(STATEFUL_GLOBAL_CODEX_BLOCK_END) {
-        Some(end) => &block[..end],
-        None => block,
-    };
-
-    Ok(block.contains("[[hooks.SessionStart]]")
-        || block.contains("[[hooks.UserPromptSubmit]]")
-        || block.contains("[[hooks.PreToolUse]]")
-        || block.contains("[[hooks.PostToolUse]]")
-        || block.contains("[[hooks.Stop]]"))
-}
-
-const STATEFUL_CODEX_JSON_MARKER: &str = "stateful_core_owned";
-const STATEFUL_CODEX_TOML_MARKER: &str = "# stateful-core-owned";
-
-pub(crate) fn ensure_repo_local_install_can_write(repo_root: &Path) -> anyhow::Result<()> {
-    let hooks_json = repo_root.join(".codex/hooks.json");
-    let config_toml = repo_root.join(".codex/config.toml");
-    let has_legacy_stateful_hooks =
-        hooks_json.exists() && is_legacy_stateful_hooks_file(&hooks_json)?;
-
-    if hooks_json.exists()
-        && !is_stateful_owned_codex_file(&hooks_json)?
-        && !has_legacy_stateful_hooks
-    {
-        anyhow::bail!(
-            "repo-local Codex install would overwrite existing Codex config {}",
-            hooks_json.display()
-        );
-    }
-
-    if config_toml.exists()
-        && !is_stateful_owned_codex_file(&config_toml)?
-        && !(has_legacy_stateful_hooks && is_legacy_stateful_codex_toml_file(&config_toml)?)
-    {
-        anyhow::bail!(
-            "repo-local Codex install would overwrite existing Codex config {}",
-            config_toml.display()
-        );
-    }
-
-    Ok(())
-}
-
-fn is_stateful_owned_codex_file(path: &Path) -> anyhow::Result<bool> {
-    let contents = fs::read_to_string(path)?;
-
-    match path.file_name().and_then(|name| name.to_str()) {
-        Some("hooks.json") => {
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
-                return Ok(false);
-            };
-            Ok(value
-                .get(STATEFUL_CODEX_JSON_MARKER)
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false))
-        }
-        Some("config.toml") => Ok(contents
-            .lines()
-            .any(|line| line.trim() == STATEFUL_CODEX_TOML_MARKER)),
-        _ => Ok(false),
-    }
-}
-
-fn is_legacy_stateful_hooks_file(path: &Path) -> anyhow::Result<bool> {
-    let contents = fs::read_to_string(path)?;
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return Ok(false);
-    };
-
-    Ok(is_legacy_stateful_hooks_json(&value))
-}
-
-fn is_legacy_stateful_codex_toml_file(path: &Path) -> anyhow::Result<bool> {
-    let contents = fs::read_to_string(path)?;
-    Ok(is_legacy_stateful_codex_toml(&contents))
-}
-
-const LEGACY_STATEFUL_HOOKS: &[(&str, &str)] = &[
-    ("SessionStart", "session-start"),
-    ("UserPromptSubmit", "user-prompt-submit"),
-    ("PreToolUse", "pre-tool-use"),
-    ("PostToolUse", "post-tool-use"),
-    ("Stop", "stop"),
-];
-
-fn is_legacy_stateful_hooks_json(value: &serde_json::Value) -> bool {
-    let Some(root) = value.as_object() else {
-        return false;
-    };
-    if root.keys().any(|key| key != "hooks") {
-        return false;
-    }
-
-    let Some(hooks) = root.get("hooks").and_then(serde_json::Value::as_object) else {
-        return false;
-    };
-    if hooks.len() != LEGACY_STATEFUL_HOOKS.len() {
-        return false;
-    }
-
-    LEGACY_STATEFUL_HOOKS.iter().all(|(event, action)| {
-        let Some(entries) = hooks.get(*event).and_then(serde_json::Value::as_array) else {
-            return false;
-        };
-        if entries.is_empty() {
-            return false;
-        }
-
-        entries.iter().all(|entry| {
-            let Some(commands) = entry.get("hooks").and_then(serde_json::Value::as_array) else {
-                return false;
-            };
-            if commands.is_empty() {
-                return false;
-            }
-
-            commands.iter().all(|command_hook| {
-                let hook_type = command_hook
-                    .get("type")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
-                let command = command_hook
-                    .get("command")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
-
-                hook_type == "command" && command_invokes_stateful_hook(command, action)
-            })
-        })
-    })
-}
-
-fn command_invokes_stateful_hook(command: &str, action: &str) -> bool {
-    let suffix = format!(" hook {action}");
-    let Some(binary) = command.trim().strip_suffix(&suffix) else {
-        return false;
-    };
-
-    is_stateful_binary_reference(binary.trim())
-}
-
-fn is_stateful_binary_reference(binary: &str) -> bool {
-    let binary = strip_matching_double_quotes(binary.trim());
-    binary == "stateful" || binary.ends_with("/stateful")
-}
-
-fn strip_matching_double_quotes(value: &str) -> &str {
-    value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap_or(value)
-}
-
-fn is_legacy_stateful_codex_toml(contents: &str) -> bool {
-    let mut saw_section = false;
-    let mut current_section_is_stateful_mcp = false;
-    let mut saw_stateful_mcp_server = false;
-    let mut saw_stateful_command = false;
-
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        if trimmed.starts_with('[') {
-            let Some(section) = simple_toml_table_name(trimmed) else {
-                return false;
-            };
-            if !is_legacy_stateful_codex_toml_section(section) {
-                return false;
-            }
-
-            saw_stateful_mcp_server |= section == "mcp_servers.stateful";
-            current_section_is_stateful_mcp = section == "mcp_servers.stateful";
-            saw_section = true;
-            continue;
-        }
-
-        if !saw_section {
-            return false;
-        }
-
-        if current_section_is_stateful_mcp {
-            if let Some(command) = simple_toml_string_assignment(trimmed, "command") {
-                saw_stateful_command = is_stateful_binary_reference(&command);
-            }
-        }
-    }
-
-    saw_stateful_mcp_server && saw_stateful_command
-}
-
-fn simple_toml_table_name(line: &str) -> Option<&str> {
-    let body = line.strip_prefix('[')?.strip_suffix(']')?;
-    if body.starts_with('[') || body.ends_with(']') || body.is_empty() {
-        return None;
-    }
-
-    if body.split('.').all(|segment| {
-        !segment.is_empty()
-            && segment.chars().all(|character| {
-                character.is_ascii_alphanumeric() || character == '_' || character == '-'
-            })
-    }) {
-        Some(body)
-    } else {
-        None
-    }
-}
-
-fn is_legacy_stateful_codex_toml_section(section: &str) -> bool {
-    section == "mcp_servers.stateful" || section.starts_with("mcp_servers.stateful.tools.")
-}
-
-fn simple_toml_string_assignment(line: &str, key: &str) -> Option<String> {
-    let (left, right) = line.split_once('=')?;
-    if left.trim() != key {
-        return None;
-    }
-
-    serde_json::from_str(right.trim()).ok()
-}
-
-fn repo_local_codex_config_toml(binary_path: &str, include_hooks: bool) -> String {
-    let mcp_command = if Path::new(binary_path).is_absolute() {
-        binary_path.to_string()
-    } else if binary_path.contains('/') {
-        format!("./{binary_path}")
-    } else {
-        binary_path.to_string()
-    };
-    let mcp_config = format!(
-        r#"{STATEFUL_CODEX_TOML_MARKER}
-[mcp_servers.stateful]
-command = "{}"
-args = ["mcp", "serve"]
-env_vars = ["STATEFUL_CODEX_RUN_ID", "CODEX_THREAD_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
-startup_timeout_sec = 20
-"#,
-        escape_toml_string(&mcp_command),
-    );
-    if !include_hooks {
-        return mcp_config;
-    }
-
-    let hook_binary = if Path::new(binary_path).is_absolute() {
-        binary_path.to_string()
-    } else {
-        format!("$(git rev-parse --show-toplevel)/{binary_path}")
-    };
-    let hook_prefix = format!("\"{hook_binary}\" hook");
-
-    format!(
-        r#"{STATEFUL_CODEX_TOML_MARKER}
-[features]
-hooks = true
-
-[mcp_servers.stateful]
-command = "{}"
-args = ["mcp", "serve"]
-env_vars = ["STATEFUL_CODEX_RUN_ID", "CODEX_THREAD_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
-startup_timeout_sec = 20
-
-[[hooks.SessionStart]]
-matcher = "startup|resume|clear|compact"
-
-[[hooks.SessionStart.hooks]]
-type = "command"
-command = "{} session-start"
-statusMessage = "Loading stateful current state"
-
-[[hooks.UserPromptSubmit]]
-
-[[hooks.UserPromptSubmit.hooks]]
-type = "command"
-command = "{} user-prompt-submit"
-statusMessage = "Checking stateful intent context"
-
-[[hooks.PreToolUse]]
-matcher = "Bash|apply_patch|Edit|Write|file_change|mcp__filesystem__.*"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "{} pre-tool-use"
-statusMessage = "Authorizing stateful tool use"
-
-[[hooks.PostToolUse]]
-matcher = "Bash|apply_patch|Edit|Write|file_change|mcp__filesystem__.*"
-
-[[hooks.PostToolUse.hooks]]
-type = "command"
-command = "{} post-tool-use"
-statusMessage = "Recording stateful activity"
-
-[[hooks.Stop]]
-
-[[hooks.Stop.hooks]]
-type = "command"
-command = "{} stop"
-statusMessage = "Finalizing stateful activity"
-"#,
-        escape_toml_string(&mcp_command),
-        escape_toml_string(&hook_prefix),
-        escape_toml_string(&hook_prefix),
-        escape_toml_string(&hook_prefix),
-        escape_toml_string(&hook_prefix),
-        escape_toml_string(&hook_prefix)
-    )
-}
-
-fn escape_toml_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 fn default_config_yml() -> &'static str {
     r#"protocol_version: stateful.v1
 intent_ttl_seconds: 900
@@ -1399,9 +1034,5 @@ delete_requires_exact_file_scope: true
 rename_requires_exact_file_scope: true
 default_write_policy: deny
 event_retention_days: 14
-"#
-}
-
-fn stateful_command_policy_skill() -> &'static str {
-    include_str!("../assets/stateful-command-policy/SKILL.md")
+    "#
 }

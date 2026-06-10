@@ -11,7 +11,7 @@ use crate::{
     CurrentSession, GlobalPaths, HookCommand, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
     ServerRuntime, discover_runtime_with_global, ensure_server, get_json, post_json,
     protocol_envelope, repo_gate, repo_identity_for_enabled_repo,
-    runtime_env_override_is_configured, write_current_session_file,
+    runtime_env_override_is_configured, write_current_session_file_for_codex_session,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +28,15 @@ struct SandboxRunInvocation {
     write_targets: Vec<String>,
     create_targets: Vec<String>,
     write_dirs: Vec<String>,
+    command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NestedCodexBenchmarkSandboxInvocation {
+    executable: String,
+    purpose: String,
+    write_dir: String,
+    codex_home_root: String,
     command: String,
 }
 
@@ -234,7 +243,7 @@ fn remember_current_session(
     input: &str,
 ) -> anyhow::Result<()> {
     let input: SessionEventInput = serde_json::from_str(input)?;
-    write_current_session_file(
+    write_current_session_file_for_codex_session(
         repo_root,
         &CurrentSession::new(input.session_id, runtime.workspace_id.clone()),
     )
@@ -406,6 +415,15 @@ fn authorize_bash(input: &PreToolUseInput) -> anyhow::Result<HookOutcome> {
 }
 
 fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
+    if split_simple_command_words(command)
+        .ok()
+        .is_some_and(|words| {
+            words.len() >= 3 && words[1] == "sandbox" && words[2] == "run-nested-codex-benchmark"
+        })
+    {
+        return authorize_nested_codex_benchmark_sandbox_bash(command);
+    }
+
     let invocation = match parse_sandbox_run_invocation(command) {
         Ok(invocation) => invocation,
         Err(reason) => return bash_policy_deny(reason),
@@ -443,6 +461,39 @@ fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
     {
         return bash_policy_deny(
             "write-targets sandbox run requires at least one write target, create target, or write dir",
+        );
+    }
+
+    HookOutcome::Allow
+}
+
+fn authorize_nested_codex_benchmark_sandbox_bash(command: &str) -> HookOutcome {
+    let invocation = match parse_nested_codex_benchmark_sandbox_invocation(command) {
+        Ok(invocation) => invocation,
+        Err(reason) => return bash_policy_deny(reason),
+    };
+
+    if !is_trusted_stateful_executable(&invocation.executable) {
+        return bash_policy_deny(
+            "stateful sandbox run-nested-codex-benchmark requires the trusted absolute stateful binary",
+        );
+    }
+    if invocation.purpose.trim().is_empty() {
+        return bash_policy_deny("stateful sandbox run-nested-codex-benchmark requires --purpose");
+    }
+    if invocation.write_dir != "target" {
+        return bash_policy_deny(
+            "stateful sandbox run-nested-codex-benchmark requires --write-dir target",
+        );
+    }
+    if !hook_path_is_under_target(&invocation.codex_home_root) {
+        return bash_policy_deny(
+            "stateful sandbox run-nested-codex-benchmark requires --codex-home-root under target",
+        );
+    }
+    if invocation.command.trim().is_empty() {
+        return bash_policy_deny(
+            "stateful sandbox run-nested-codex-benchmark requires a non-empty --command",
         );
     }
 
@@ -592,6 +643,112 @@ fn parse_sandbox_run_invocation(command: &str) -> Result<SandboxRunInvocation, S
         write_targets,
         create_targets,
         write_dirs,
+        command,
+    })
+}
+
+fn parse_nested_codex_benchmark_sandbox_invocation(
+    command: &str,
+) -> Result<NestedCodexBenchmarkSandboxInvocation, String> {
+    reject_outer_shell_syntax(
+        command,
+        "Bash wrapper must be a single stateful sandbox run-nested-codex-benchmark command",
+    )?;
+    let words = split_simple_command_words(command)?;
+    if words.is_empty() {
+        return Err("Bash commands must use stateful sandbox run".to_string());
+    }
+    if first_word_is_env_assignment(&words[0]) {
+        return Err("Bash wrapper must not use outer environment assignments".to_string());
+    }
+    if words.len() < 3 || words[1] != "sandbox" || words[2] != "run-nested-codex-benchmark" {
+        return Err("Bash commands must use stateful sandbox run".to_string());
+    }
+
+    let mut purpose = None;
+    let mut write_dir = None;
+    let mut codex_home_root = None;
+    let mut inner_command = None;
+    let mut index = 3;
+    while index < words.len() {
+        let arg = &words[index];
+        match arg.as_str() {
+            "--" => {
+                return Err(
+                    "stateful sandbox run-nested-codex-benchmark does not support argv mode"
+                        .to_string(),
+                );
+            }
+            "--purpose" => {
+                index += 1;
+                purpose = Some(parse_sandbox_run_arg_value(&words, index, "--purpose")?);
+            }
+            "--write-dir" => {
+                index += 1;
+                write_dir = Some(parse_sandbox_run_arg_value(&words, index, "--write-dir")?);
+            }
+            "--codex-home-root" => {
+                index += 1;
+                codex_home_root = Some(parse_sandbox_run_arg_value(
+                    &words,
+                    index,
+                    "--codex-home-root",
+                )?);
+            }
+            "--command" => {
+                if inner_command.is_some() {
+                    return Err(
+                        "stateful sandbox run-nested-codex-benchmark requires exactly one --command"
+                            .to_string(),
+                    );
+                }
+                index += 1;
+                inner_command = Some(parse_sandbox_run_arg_value(&words, index, "--command")?);
+            }
+            "--timeout-seconds" => {
+                index += 1;
+                let timeout = parse_sandbox_run_arg_value(&words, index, "--timeout-seconds")?;
+                if timeout.parse::<u64>().is_err() {
+                    return Err(
+                        "stateful sandbox run-nested-codex-benchmark --timeout-seconds requires an integer value"
+                            .to_string(),
+                    );
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "unsupported stateful sandbox run-nested-codex-benchmark argument `{arg}`"
+                ));
+            }
+        }
+        index += 1;
+    }
+
+    let Some(purpose) = purpose else {
+        return Err("stateful sandbox run-nested-codex-benchmark requires --purpose".to_string());
+    };
+    let Some(write_dir) = write_dir else {
+        return Err(
+            "stateful sandbox run-nested-codex-benchmark requires --write-dir target".to_string(),
+        );
+    };
+    let Some(codex_home_root) = codex_home_root else {
+        return Err(
+            "stateful sandbox run-nested-codex-benchmark requires --codex-home-root".to_string(),
+        );
+    };
+    let Some(command) = inner_command else {
+        return Err(
+            "stateful sandbox run-nested-codex-benchmark requires exactly one --command"
+                .to_string(),
+        );
+    };
+
+    Ok(NestedCodexBenchmarkSandboxInvocation {
+        executable: words[0].clone(),
+        purpose,
+        write_dir,
+        codex_home_root,
         command,
     })
 }
@@ -773,6 +930,27 @@ fn first_word_is_env_assignment(word: &str) -> bool {
     !name.is_empty()
         && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
         && !name.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+fn hook_path_is_under_target(path: &str) -> bool {
+    let trimmed = path.trim().replace('\\', "/");
+    if trimmed.is_empty() || trimmed.starts_with('/') {
+        return false;
+    }
+    let mut segments = Vec::new();
+    for segment in trimmed.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." || segment.eq_ignore_ascii_case(".git") {
+            return false;
+        }
+        if segment.chars().any(char::is_control) {
+            return false;
+        }
+        segments.push(segment);
+    }
+    segments.len() >= 2 && segments[0] == "target"
 }
 
 fn is_trusted_stateful_executable(executable: &str) -> bool {

@@ -68,6 +68,32 @@ fn install_yes_creates_global_files_and_database() {
 }
 
 #[test]
+fn install_yes_creates_global_command_policy_skill() {
+    let fixture = TestFixture::new("skill");
+
+    apply_global_install(fixture.options(true)).expect("install should apply");
+
+    let skill_path = fixture
+        .codex_config_parent()
+        .join("skills/stateful-command-policy/SKILL.md");
+    let command_policy_skill =
+        fs::read_to_string(&skill_path).expect("global command policy skill should exist");
+    let source_command_policy_skill = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/stateful-command-policy/SKILL.md"),
+    )
+    .expect("source stateful command policy skill should exist");
+    assert_eq!(command_policy_skill, source_command_policy_skill);
+    assert!(command_policy_skill.contains("name: stateful-command-policy"));
+
+    let plan = apply_global_install(fixture.options(true)).expect("install should be idempotent");
+    assert!(plan.files.contains(&skill_path));
+    assert_eq!(
+        fs::read_to_string(&skill_path).expect("global command policy skill should reread"),
+        command_policy_skill
+    );
+}
+
+#[test]
 fn install_yes_backs_up_existing_codex_config_before_merge() {
     let fixture = TestFixture::new("backup");
     let existing = "[tools]\ncustom = true\n";
