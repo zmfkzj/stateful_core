@@ -83,7 +83,7 @@ pub fn join_lan_runtime(options: LanJoinOptions) -> anyhow::Result<LanJoinResult
         Some(repo_root) => enable_lan_join_repo(
             repo_root,
             |repo_root| detect_git_root(repo_root),
-            |git_root| enable_repo(&options.paths, git_root, false).map(|_| ()),
+            |git_root| enable_repo(&options.paths, git_root).map(|_| ()),
         )?,
         None => false,
     };

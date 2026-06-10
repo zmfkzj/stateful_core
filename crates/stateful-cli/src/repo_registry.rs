@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::Context;
 
-use crate::{GlobalPaths, default_config_yml, install_repo_local_with_global_codex_config};
+use crate::{GlobalPaths, default_config_yml};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RepoRegistry {
@@ -86,7 +86,6 @@ pub struct RepoEntry {
     pub enabled: bool,
     pub enabled_at: String,
     pub policy_config_path: PathBuf,
-    pub codex_mode: CodexMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,14 +94,6 @@ pub struct RepoIdentity {
     pub worktree_id: String,
     pub root: String,
     pub branch: String,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CodexMode {
-    #[default]
-    Global,
-    RepoLocal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,36 +135,9 @@ pub fn repo_identity_for_enabled_repo(
     })
 }
 
-pub fn enable_repo(
-    paths: &GlobalPaths,
-    repo: impl AsRef<Path>,
-    repo_local_codex: bool,
-) -> anyhow::Result<RepoEntry> {
-    enable_repo_with_global_codex_config(paths, repo, repo_local_codex, None)
-}
-
-pub(crate) fn enable_repo_with_global_codex_config(
-    paths: &GlobalPaths,
-    repo: impl AsRef<Path>,
-    repo_local_codex: bool,
-    global_codex_config: Option<&Path>,
-) -> anyhow::Result<RepoEntry> {
+pub fn enable_repo(paths: &GlobalPaths, repo: impl AsRef<Path>) -> anyhow::Result<RepoEntry> {
     let root = detect_git_root(repo)?;
-    if repo_local_codex {
-        crate::ensure_repo_local_install_can_write(&root)?;
-    }
-
     ensure_repo_configs(&root)?;
-    if repo_local_codex {
-        let policy_config = root.join(".stateful/config.yml");
-        let policy_contents = fs::read(&policy_config)
-            .with_context(|| format!("failed to read {}", policy_config.display()))?;
-        let binary_path = current_stateful_binary_path()?;
-
-        install_repo_local_with_global_codex_config(&root, &binary_path, global_codex_config)?;
-        fs::write(&policy_config, policy_contents)
-            .with_context(|| format!("failed to restore {}", policy_config.display()))?;
-    }
 
     let entry = RepoEntry {
         repo_id: repo_id_for_root(&root),
@@ -181,11 +145,6 @@ pub(crate) fn enable_repo_with_global_codex_config(
         enabled: true,
         enabled_at: current_unix_timestamp()?,
         policy_config_path: root.join(".stateful/config.yml"),
-        codex_mode: if repo_local_codex {
-            CodexMode::RepoLocal
-        } else {
-            CodexMode::Global
-        },
     };
 
     let mut registry = RepoRegistry::load(paths)?;
@@ -273,24 +232,6 @@ fn write_repo_metadata(paths: &GlobalPaths, entry: &RepoEntry) -> anyhow::Result
         .with_context(|| format!("failed to write {}", metadata_path.display()))?;
 
     Ok(())
-}
-
-fn current_stateful_binary_path() -> anyhow::Result<String> {
-    let binary_path =
-        std::env::current_exe().context("failed to resolve current executable path")?;
-    let binary_path = binary_path.canonicalize().unwrap_or(binary_path);
-
-    if !binary_path.is_absolute() {
-        anyhow::bail!(
-            "current executable path is not absolute: {}",
-            binary_path.display()
-        );
-    }
-
-    binary_path
-        .to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("current executable path is not valid UTF-8"))
 }
 
 fn current_unix_timestamp() -> anyhow::Result<String> {

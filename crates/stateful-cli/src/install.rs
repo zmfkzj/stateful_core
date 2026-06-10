@@ -47,6 +47,7 @@ pub fn plan_global_install(options: &InstallOptions) -> anyhow::Result<InstallPl
             options.paths.config_yml.clone(),
             options.paths.state_db.clone(),
             options.codex_config_path.clone(),
+            global_command_policy_skill_path(&options.codex_config_path),
         ],
     })
 }
@@ -89,6 +90,7 @@ pub fn apply_global_install(options: InstallOptions) -> anyhow::Result<InstallPl
     })?;
 
     write_codex_config_update(&options.codex_config_path, codex_update)?;
+    write_global_command_policy_skill(&options.codex_config_path)?;
     plan.summary = format!(
         "apply: installed stateful global files under {} and merged Codex config {}",
         options.paths.home.display(),
@@ -191,6 +193,26 @@ fn write_codex_config_update(config_path: &Path, update: CodexConfigUpdate) -> a
     })?;
 
     Ok(())
+}
+
+fn write_global_command_policy_skill(codex_config_path: &Path) -> anyhow::Result<()> {
+    let path = global_command_policy_skill_path(codex_config_path);
+    let parent = containing_dir(&path);
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create Codex skills directory {}",
+            parent.display()
+        )
+    })?;
+    fs::write(&path, stateful_command_policy_skill())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn global_command_policy_skill_path(codex_config_path: &Path) -> PathBuf {
+    containing_dir(codex_config_path)
+        .join("skills")
+        .join("stateful-command-policy")
+        .join("SKILL.md")
 }
 
 fn merge_codex_config_contents(existing: &str, binary_path: &str) -> anyhow::Result<String> {
@@ -793,6 +815,10 @@ fn validate_no_control_chars(value: &str) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn stateful_command_policy_skill() -> &'static str {
+    include_str!("../assets/stateful-command-policy/SKILL.md")
 }
 
 fn toml_string(value: &str) -> String {

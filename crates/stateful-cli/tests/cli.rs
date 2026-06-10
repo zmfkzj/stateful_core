@@ -304,21 +304,12 @@ fn structured_commit_command_requires_path_separator() {
 
 #[test]
 fn parses_enable_command() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "enable",
-        "--repo",
-        "/work/repo",
-        "--repo-local-codex",
-    ])
-    .expect("enable command should parse");
+    let cli = Cli::try_parse_from(["stateful", "enable", "--repo", "/work/repo"])
+        .expect("enable command should parse");
 
     assert!(matches!(
         cli.command,
-        Command::Enable {
-            ref repo,
-            repo_local_codex: true
-        } if repo == &Some(PathBuf::from("/work/repo"))
+        Command::Enable { ref repo } if repo == &Some(PathBuf::from("/work/repo"))
     ));
 }
 

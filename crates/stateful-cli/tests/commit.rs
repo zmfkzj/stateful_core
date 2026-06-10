@@ -1086,10 +1086,10 @@ fn structured_commit_command_uses_codex_run_session_when_legacy_current_session_
         .expect("legacy current session should write");
     write_current_session_file_for_codex_run(
         root.path(),
-        "run-a",
+        "s-run",
         &CurrentSession::new("s-run", "w-session"),
     )
-    .expect("run-bound current session should write");
+    .expect("session-bound current session should write");
     let (runtime, rx) = spawn_fake_authorize_server();
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -1098,7 +1098,7 @@ fn structured_commit_command_uses_codex_run_session_when_legacy_current_session_
         &paths,
         &["commit", "-m", "docs: add plan", "--", "docs/plan.md"],
     )
-    .env(STATEFUL_CODEX_RUN_ID_ENV, "run-a")
+    .env(STATEFUL_CODEX_RUN_ID_ENV, "s-run")
     .output()
     .expect("stateful commit should run");
 

@@ -11,7 +11,7 @@ use crate::{
     CurrentSession, GlobalPaths, HookCommand, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
     ServerRuntime, discover_runtime_with_global, ensure_server, get_json, post_json,
     protocol_envelope, repo_gate, repo_identity_for_enabled_repo,
-    runtime_env_override_is_configured, write_current_session_file,
+    runtime_env_override_is_configured, write_current_session_file_for_codex_session,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,7 +243,7 @@ fn remember_current_session(
     input: &str,
 ) -> anyhow::Result<()> {
     let input: SessionEventInput = serde_json::from_str(input)?;
-    write_current_session_file(
+    write_current_session_file_for_codex_session(
         repo_root,
         &CurrentSession::new(input.session_id, runtime.workspace_id.clone()),
     )

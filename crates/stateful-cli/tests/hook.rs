@@ -51,6 +51,46 @@ fn read_legacy_current_session_file(repo_root: &Path) -> CurrentSession {
 }
 
 #[test]
+fn session_start_records_current_session_under_codex_session_id() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-session-start-session-id-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = r#"{
+      "session_id": "codex-session-1",
+      "cwd": "/repo",
+      "hook_event_name": "SessionStart"
+    }"#;
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "session-start"], input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx.recv().expect("session register request should arrive");
+    assert!(request.contains("POST /v1/session/register HTTP/1.1"));
+    assert!(request.contains("\"session_id\":\"codex-session-1\""));
+    let session = read_current_session_file_for_codex_run(&repo_root, "codex-session-1")
+        .expect("current session should be keyed by Codex session id");
+    assert_eq!(session.session_id, "codex-session-1");
+    assert_eq!(session.workspace_id, "w1");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn pre_tool_use_denies_raw_read_only_bash_after_sandbox_runner_migration() {
     let input = r#"{
       "session_id": "s1",
@@ -685,7 +725,7 @@ fn pre_tool_use_records_current_session_for_codex_run() {
         &paths,
         &["hook", "pre-tool-use"],
         input,
-        &[(STATEFUL_CODEX_RUN_ID_ENV, "run-a")],
+        &[(STATEFUL_CODEX_RUN_ID_ENV, "s-current")],
     );
 
     assert!(
@@ -693,8 +733,8 @@ fn pre_tool_use_records_current_session_for_codex_run() {
         "stateful hook failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let session = read_current_session_file_for_codex_run(&repo_root, "run-a")
-        .expect("run-bound current session should read");
+    let session = read_current_session_file_for_codex_run(&repo_root, "s-current")
+        .expect("session-bound current session should read");
     assert_eq!(session.session_id, "s-current");
     assert_eq!(session.workspace_id, "w1");
 
@@ -1954,7 +1994,7 @@ fn request_json_body(request: &str) -> serde_json::Value {
 
 fn enable_test_repo(paths: &GlobalPaths, repo_root: &std::path::Path) {
     fs::create_dir_all(repo_root.join(".git")).expect("git marker should write");
-    enable_repo(paths, repo_root, false).expect("repo should enable");
+    enable_repo(paths, repo_root).expect("repo should enable");
 }
 
 fn fake_current_response(request: &str) -> String {

@@ -1882,7 +1882,15 @@ fn agent_infrastructure_failure_excerpt(path: &Path) -> Option<String> {
 
 fn contains_agent_infrastructure_failure_text(line: &str) -> bool {
     let line = line.to_ascii_lowercase();
-    line.contains("failed to initialize in-process app-server client")
+    [
+        "failed to initialize in-process app-server client",
+        "sandbox_apply: operation not permitted",
+        "user cancelled mcp tool call",
+        "i couldn't complete the edit",
+        "i could not complete the edit",
+    ]
+    .iter()
+    .any(|pattern| line.contains(pattern))
 }
 
 fn fatal_agent_failure_excerpt(path: &Path) -> Option<(FatalAgentFailureKind, String)> {
