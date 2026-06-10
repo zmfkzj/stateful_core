@@ -38,20 +38,20 @@ Read-only inspection:
 Run a command-shaped write after declaring exact intent and acquiring the matching same-session lease:
 
 ```bash
-<absolute-stateful-binary> sandbox run --fs write-targets --network enabled --write-target target/report.txt --command 'printf "%s\n" updated > target/report.txt'
+<absolute-stateful-binary> sandbox run --fs write-targets --write-target target/report.txt --command 'printf "%s\n" updated > target/report.txt'
 ```
 
 Create a command-generated file after declaring exact intent and acquiring the matching same-session file lease:
 
 ```bash
-<absolute-stateful-binary> sandbox run --fs write-targets --network enabled --create-target target/generated.txt --command 'printf "%s\n" notes > target/generated.txt'
+<absolute-stateful-binary> sandbox run --fs write-targets --create-target target/generated.txt --command 'printf "%s\n" notes > target/generated.txt'
 ```
 
 Run tests after declaring directory intent such as `target/` and acquiring the matching directory lease:
 
+Use MCP tools such as `state_intent_declare` and `state_lease_acquire` to prepare the `target/` directory intent and lease before invoking Bash. The `intent declare` and `mcp call` CLI forms are not hook-approved raw Bash commands in Codex sessions.
+
 ```bash
-<absolute-stateful-binary> intent declare --session-id <session> --workspace-id <workspace> --purpose "<purpose inferred from the user or agent instruction>" target/
-<absolute-stateful-binary> mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
 <absolute-stateful-binary> sandbox run --fs write-targets --network enabled --write-dir target --command 'cargo test --workspace'
 ```
 

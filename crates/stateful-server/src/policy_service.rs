@@ -1,5 +1,5 @@
 use stateful_core::{AuthorizationInput, Decision, DecisionKind, SourceKind};
-use stateful_store::{Event, IntentRequestInput, Store, WaitRecord};
+use stateful_store::{Event, IntentRequestInput, Store, WaitRecord, WorkspaceIdentity};
 
 #[derive(Debug, Clone)]
 pub struct AuthorizationOutcome {
@@ -18,6 +18,10 @@ pub struct WaitQueueInfo {
 pub struct AuthorizeWriteInput {
     pub session_id: String,
     pub workspace_id: Option<String>,
+    pub repo_id: Option<String>,
+    pub worktree_id: Option<String>,
+    pub root: Option<String>,
+    pub branch: Option<String>,
     pub source_kind: Option<SourceKind>,
     pub source_tool_name: Option<String>,
     pub queue_on_conflict: bool,
@@ -33,6 +37,10 @@ pub struct ClaimIntentInput {
     pub session_id: String,
     pub workspace_id: String,
     pub wait_id: String,
+    pub repo_id: Option<String>,
+    pub worktree_id: Option<String>,
+    pub root: Option<String>,
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +53,10 @@ pub struct RequestIntentInput {
     pub session_id: String,
     pub workspace_id: String,
     pub request_id: String,
+    pub repo_id: Option<String>,
+    pub worktree_id: Option<String>,
+    pub root: Option<String>,
+    pub branch: Option<String>,
     pub action: String,
     pub path: String,
     pub purpose: String,
@@ -69,6 +81,20 @@ pub struct CancelIntentInput {
 pub struct CancelIntentOutcome {
     pub request_id: String,
     pub wait: WaitRecord,
+}
+
+fn workspace_identity<'a>(
+    repo_id: &'a Option<String>,
+    worktree_id: &'a Option<String>,
+    root: &'a Option<String>,
+    branch: &'a Option<String>,
+) -> WorkspaceIdentity<'a> {
+    WorkspaceIdentity {
+        repo_id: repo_id.as_deref(),
+        worktree_id: worktree_id.as_deref(),
+        root: root.as_deref(),
+        branch: branch.as_deref(),
+    }
 }
 
 pub struct PolicyService<'a> {
@@ -234,13 +260,19 @@ impl<'a> PolicyService<'a> {
                     .ok_or_else(|| "queue purpose is required".to_string())?;
                 let waiter = self
                     .store
-                    .enqueue_waiter(
+                    .enqueue_waiter_with_identity(
                         &input.session_id,
                         workspace_id,
                         &path,
                         &input.action,
                         purpose,
                         Some(&owner),
+                        workspace_identity(
+                            &input.repo_id,
+                            &input.worktree_id,
+                            &input.root,
+                            &input.branch,
+                        ),
                     )
                     .map_err(|error| error.to_string())?;
                 let queue_position = self
@@ -519,13 +551,24 @@ impl<'a> PolicyService<'a> {
             reservation.relative_path.clone()
         };
         let lease_path = scope.clone();
+        let mut event = Event::intent_declared(
+            &input.session_id,
+            &input.workspace_id,
+            reservation.purpose.clone(),
+            [scope],
+        );
+        event.repo_id = input
+            .repo_id
+            .clone()
+            .or_else(|| reservation.repo_id.clone());
+        event.worktree_id = input
+            .worktree_id
+            .clone()
+            .or_else(|| reservation.worktree_id.clone());
+        event.root = input.root.clone().or_else(|| reservation.root.clone());
+        event.branch = input.branch.clone().or_else(|| reservation.branch.clone());
         self.store
-            .append(Event::intent_declared(
-                &input.session_id,
-                &input.workspace_id,
-                reservation.purpose.clone(),
-                [scope],
-            ))
+            .append(event)
             .map_err(|error| error.to_string())?;
         self.store
             .acquire_lease(&input.session_id, &input.workspace_id, &lease_path)
@@ -608,15 +651,23 @@ impl<'a> PolicyService<'a> {
 
         let waiter = self
             .store
-            .enqueue_intent_request(IntentRequestInput {
-                request_id: &input.request_id,
-                session_id: &input.session_id,
-                workspace_id: &input.workspace_id,
-                relative_path: &input.path,
-                action: &input.action,
-                purpose: &input.purpose,
-                blocking_session_id,
-            })
+            .enqueue_intent_request_with_identity(
+                IntentRequestInput {
+                    request_id: &input.request_id,
+                    session_id: &input.session_id,
+                    workspace_id: &input.workspace_id,
+                    relative_path: &input.path,
+                    action: &input.action,
+                    purpose: &input.purpose,
+                    blocking_session_id,
+                },
+                workspace_identity(
+                    &input.repo_id,
+                    &input.worktree_id,
+                    &input.root,
+                    &input.branch,
+                ),
+            )
             .map_err(|error| error.to_string())?;
 
         if reservation_conflict.is_none() && lease_owner.is_none() {

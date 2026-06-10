@@ -55,6 +55,23 @@ impl CurrentStateIdentityFilter<'_> {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkspaceIdentity<'a> {
+    pub repo_id: Option<&'a str>,
+    pub worktree_id: Option<&'a str>,
+    pub root: Option<&'a str>,
+    pub branch: Option<&'a str>,
+}
+
+impl WorkspaceIdentity<'_> {
+    fn is_empty(self) -> bool {
+        self.repo_id.is_none()
+            && self.worktree_id.is_none()
+            && self.root.is_none()
+            && self.branch.is_none()
+    }
+}
+
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
@@ -576,6 +593,10 @@ impl Store {
                 wait_id,
                 session_id,
                 workspace_id,
+                repo_id,
+                worktree_id,
+                root,
+                branch,
                 relative_path,
                 action,
                 status,
@@ -592,13 +613,17 @@ impl Store {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
                 row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, String>(13)?,
             ))
         })?;
         let rows = rows.collect::<Result<Vec<_>, _>>()?;
@@ -608,6 +633,10 @@ impl Store {
             wait_id,
             session_id,
             workspace_id,
+            repo_id,
+            worktree_id,
+            root,
+            _branch,
             relative_path,
             action,
             status,
@@ -620,7 +649,12 @@ impl Store {
             if workspace_filter.is_some_and(|filter| workspace_id != filter) {
                 continue;
             }
-            if !identity_filter.is_empty() {
+            if !identity_filter_matches(
+                identity_filter,
+                repo_id.as_deref(),
+                worktree_id.as_deref(),
+                root.as_deref(),
+            ) {
                 continue;
             }
             if !resource_matches_filter(&relative_path, resource_filter) {
@@ -1174,6 +1208,27 @@ impl Store {
         purpose: impl AsRef<str>,
         blocking_session_id: Option<&str>,
     ) -> StoreResult<WaitRecord> {
+        self.enqueue_waiter_with_identity(
+            session_id,
+            workspace_id,
+            relative_path,
+            action,
+            purpose,
+            blocking_session_id,
+            WorkspaceIdentity::default(),
+        )
+    }
+
+    pub fn enqueue_waiter_with_identity(
+        &self,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        action: impl AsRef<str>,
+        purpose: impl AsRef<str>,
+        blocking_session_id: Option<&str>,
+        identity: WorkspaceIdentity<'_>,
+    ) -> StoreResult<WaitRecord> {
         self.expire_stale()?;
         let relative_path = normalize_relative_path(relative_path.as_ref());
         if relative_path.is_empty() {
@@ -1201,6 +1256,7 @@ impl Store {
             )
             .optional()?;
         if let Some(wait_id) = existing {
+            self.update_waiter_identity_if_missing(&wait_id, identity)?;
             return self
                 .waiter(&wait_id)
                 .map(|waiter| waiter.expect("existing waiter should load"));
@@ -1212,6 +1268,10 @@ impl Store {
                 wait_id,
                 session_id,
                 workspace_id,
+                repo_id,
+                worktree_id,
+                root,
+                branch,
                 relative_path,
                 action,
                 status,
@@ -1219,11 +1279,15 @@ impl Store {
                 reservation_expires_at,
                 blocking_session_id,
                 purpose
-            ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, NULL, ?7, ?8)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, NULL, ?11, ?12)",
             params![
                 wait_id,
                 session_id.as_ref(),
                 workspace_id.as_ref(),
+                identity.repo_id,
+                identity.worktree_id,
+                identity.root,
+                identity.branch,
                 relative_path,
                 action.as_ref(),
                 now_timestamp(),
@@ -1237,9 +1301,21 @@ impl Store {
     }
 
     pub fn enqueue_intent_request(&self, input: IntentRequestInput<'_>) -> StoreResult<WaitRecord> {
+        self.enqueue_intent_request_with_identity(input, WorkspaceIdentity::default())
+    }
+
+    pub fn enqueue_intent_request_with_identity(
+        &self,
+        input: IntentRequestInput<'_>,
+        identity: WorkspaceIdentity<'_>,
+    ) -> StoreResult<WaitRecord> {
         self.expire_stale()?;
         let purpose = required_purpose(input.purpose)?;
         if let Some(waiter) = self.waiter_by_request_id(input.request_id)? {
+            self.update_waiter_identity_if_missing(&waiter.wait_id, identity)?;
+            let waiter = self
+                .waiter(&waiter.wait_id)?
+                .expect("existing waiter should load");
             return Ok(waiter);
         }
 
@@ -1254,6 +1330,10 @@ impl Store {
                 request_id,
                 session_id,
                 workspace_id,
+                repo_id,
+                worktree_id,
+                root,
+                branch,
                 relative_path,
                 action,
                 status,
@@ -1261,12 +1341,16 @@ impl Store {
                 reservation_expires_at,
                 blocking_session_id,
                 purpose
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, NULL, ?8, ?9)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'queued', ?11, NULL, ?12, ?13)",
             params![
                 wait_id,
                 input.request_id,
                 input.session_id,
                 input.workspace_id,
+                identity.repo_id,
+                identity.worktree_id,
+                identity.root,
+                identity.branch,
                 relative_path,
                 input.action,
                 now_timestamp(),
@@ -1421,6 +1505,10 @@ impl Store {
                     wait_id,
                     session_id,
                     workspace_id,
+                    repo_id,
+                    worktree_id,
+                    root,
+                    branch,
                     relative_path,
                     action,
                     status,
@@ -1454,6 +1542,10 @@ impl Store {
                     wait_id,
                     session_id,
                     workspace_id,
+                    repo_id,
+                    worktree_id,
+                    root,
+                    branch,
                     relative_path,
                     action,
                     status,
@@ -2036,6 +2128,10 @@ impl Store {
                 request_id TEXT,
                 session_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
+                repo_id TEXT,
+                worktree_id TEXT,
+                root TEXT,
+                branch TEXT,
                 relative_path TEXT NOT NULL,
                 action TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -2130,6 +2226,26 @@ impl Store {
             "ALTER TABLE wait_queue ADD COLUMN request_id TEXT;",
         )?;
         self.add_column_if_missing(
+            "wait_queue",
+            "repo_id",
+            "ALTER TABLE wait_queue ADD COLUMN repo_id TEXT;",
+        )?;
+        self.add_column_if_missing(
+            "wait_queue",
+            "worktree_id",
+            "ALTER TABLE wait_queue ADD COLUMN worktree_id TEXT;",
+        )?;
+        self.add_column_if_missing(
+            "wait_queue",
+            "root",
+            "ALTER TABLE wait_queue ADD COLUMN root TEXT;",
+        )?;
+        self.add_column_if_missing(
+            "wait_queue",
+            "branch",
+            "ALTER TABLE wait_queue ADD COLUMN branch TEXT;",
+        )?;
+        self.add_column_if_missing(
             "intents",
             "purpose",
             "ALTER TABLE intents ADD COLUMN purpose TEXT;",
@@ -2201,7 +2317,11 @@ impl Store {
             && matches!(column, "repo_id" | "worktree_id" | "root" | "branch"))
             || (table == "intents" && column == "purpose")
             || (table == "leases" && matches!(column, "purpose" | "action"))
-            || (table == "wait_queue" && matches!(column, "request_id" | "purpose"));
+            || (table == "wait_queue"
+                && matches!(
+                    column,
+                    "request_id" | "purpose" | "repo_id" | "worktree_id" | "root" | "branch"
+                ));
         if !supported {
             return Ok(());
         }
@@ -2359,6 +2479,10 @@ impl Store {
                     wait_id,
                     session_id,
                     workspace_id,
+                    repo_id,
+                    worktree_id,
+                    root,
+                    branch,
                     relative_path,
                     action,
                     status,
@@ -2431,6 +2555,32 @@ impl Store {
         }
 
         Ok(None)
+    }
+
+    fn update_waiter_identity_if_missing(
+        &self,
+        wait_id: &str,
+        identity: WorkspaceIdentity<'_>,
+    ) -> StoreResult<()> {
+        if identity.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "UPDATE wait_queue
+             SET repo_id = COALESCE(repo_id, ?2),
+                 worktree_id = COALESCE(worktree_id, ?3),
+                 root = COALESCE(root, ?4),
+                 branch = COALESCE(branch, ?5)
+             WHERE wait_id = ?1",
+            params![
+                wait_id,
+                identity.repo_id,
+                identity.worktree_id,
+                identity.root,
+                identity.branch,
+            ],
+        )?;
+        Ok(())
     }
 
     fn waiter_has_active_conflict(&self, waiter: &WaitRecord) -> StoreResult<bool> {
@@ -2642,17 +2792,40 @@ fn format_timestamp(timestamp: OffsetDateTime) -> String {
 }
 
 fn wait_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WaitRecord> {
+    if row.as_ref().column_count() == 10 {
+        return Ok(WaitRecord {
+            wait_id: row.get(0)?,
+            session_id: row.get(1)?,
+            workspace_id: row.get(2)?,
+            repo_id: None,
+            worktree_id: None,
+            root: None,
+            branch: None,
+            relative_path: row.get(3)?,
+            action: row.get(4)?,
+            status: row.get(5)?,
+            requested_at: row.get(6)?,
+            reservation_expires_at: row.get(7)?,
+            blocking_session_id: row.get(8)?,
+            purpose: row.get(9)?,
+        });
+    }
+
     Ok(WaitRecord {
         wait_id: row.get(0)?,
         session_id: row.get(1)?,
         workspace_id: row.get(2)?,
-        relative_path: row.get(3)?,
-        action: row.get(4)?,
-        status: row.get(5)?,
-        requested_at: row.get(6)?,
-        reservation_expires_at: row.get(7)?,
-        blocking_session_id: row.get(8)?,
-        purpose: row.get(9)?,
+        repo_id: row.get(3)?,
+        worktree_id: row.get(4)?,
+        root: row.get(5)?,
+        branch: row.get(6)?,
+        relative_path: row.get(7)?,
+        action: row.get(8)?,
+        status: row.get(9)?,
+        requested_at: row.get(10)?,
+        reservation_expires_at: row.get(11)?,
+        blocking_session_id: row.get(12)?,
+        purpose: row.get(13)?,
     })
 }
 
@@ -2869,6 +3042,10 @@ pub struct WaitRecord {
     pub wait_id: String,
     pub session_id: String,
     pub workspace_id: String,
+    pub repo_id: Option<String>,
+    pub worktree_id: Option<String>,
+    pub root: Option<String>,
+    pub branch: Option<String>,
     pub relative_path: String,
     pub action: String,
     pub status: String,

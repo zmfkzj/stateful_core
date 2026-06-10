@@ -261,6 +261,10 @@ async fn authorize(
     let input = AuthorizeWriteInput {
         session_id: session.session_id,
         workspace_id: Some(workspace.workspace_id),
+        repo_id: non_empty_identity(workspace.repo_id),
+        worktree_id: non_empty_identity(workspace.worktree_id),
+        root: non_empty_identity(workspace.root),
+        branch: non_empty_identity(workspace.branch),
         source_kind: Some(source.kind),
         source_tool_name: source.tool_name,
         queue_on_conflict: payload.queue_on_conflict,
@@ -369,6 +373,10 @@ async fn intent_request(
         session_id: envelope.request.session.session_id,
         workspace_id: envelope.request.workspace.workspace_id,
         request_id: payload.request_id,
+        repo_id: non_empty_identity(envelope.request.workspace.repo_id),
+        worktree_id: non_empty_identity(envelope.request.workspace.worktree_id),
+        root: non_empty_identity(envelope.request.workspace.root),
+        branch: non_empty_identity(envelope.request.workspace.branch),
         action: payload.action,
         path,
         purpose,
@@ -409,6 +417,10 @@ async fn intent_claim(
         session_id: envelope.request.session.session_id,
         workspace_id: envelope.request.workspace.workspace_id,
         wait_id: payload.wait_id,
+        repo_id: non_empty_identity(envelope.request.workspace.repo_id),
+        worktree_id: non_empty_identity(envelope.request.workspace.worktree_id),
+        root: non_empty_identity(envelope.request.workspace.root),
+        branch: non_empty_identity(envelope.request.workspace.branch),
     };
 
     match claim_intent_with_policy(&config.store, input) {
@@ -737,6 +749,10 @@ async fn conflicts_check(
     let input = AuthorizeWriteInput {
         session_id: input.session_id,
         workspace_id: input.workspace_id,
+        repo_id: None,
+        worktree_id: None,
+        root: None,
+        branch: None,
         source_kind: None,
         source_tool_name: None,
         queue_on_conflict: input.queue_on_conflict,

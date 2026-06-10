@@ -3900,6 +3900,94 @@ async fn context_render_filters_items_to_requested_repo_identity() {
 }
 
 #[tokio::test]
+async fn context_render_keeps_identity_filtered_queued_workflow_state_visible() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let request = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s1",
+            "shared",
+            serde_json::json!({
+                "request_id": "request-1",
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "purpose": "Claim queued auth update."
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(request.status(), StatusCode::OK);
+    let json = response_json(request, 4096).await;
+    assert_eq!(json["request_state"], "reserved");
+    let wait_id = json["reservation"]["wait_id"]
+        .as_str()
+        .expect("reservation should include wait_id")
+        .to_string();
+
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "shared",
+                "repo_id": "repo-1",
+                "worktree_id": "worktree-1",
+                "root": "/repo"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(items.iter().any(|item| {
+        item["kind"] == "reservation" && item["purpose"] == "Claim queued auth update."
+    }));
+
+    let claim = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/claim",
+            "s1",
+            "shared",
+            serde_json::json!({
+                "wait_id": wait_id
+            }),
+        ))
+        .await
+        .expect("intent claim should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "shared",
+                "repo_id": "repo-1",
+                "worktree_id": "worktree-1",
+                "root": "/repo"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response, 8192).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(items.iter().any(|item| {
+        item["kind"] == "intent" && item["purpose"] == "Claim queued auth update."
+    }));
+    assert!(
+        items
+            .iter()
+            .any(|item| item["kind"] == "lease" && item["purpose"] == "Claim queued auth update.")
+    );
+}
+
+#[tokio::test]
 async fn reconcile_ack_records_acknowledgement() {
     let app = build_router(ServerConfig::new("secret-token"));
 
