@@ -89,6 +89,11 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(command_policy_skill.contains("`/dev/null` is writable inside the sandbox"));
     assert!(command_policy_skill.contains("macOS-first"));
     assert!(command_policy_skill.contains("Linux bubblewrap support"));
+    assert!(command_policy_skill.contains("run-nested-codex-benchmark"));
+    assert!(command_policy_skill.contains("--codex-home-root target/"));
+    assert!(command_policy_skill.contains("not a general relaxed profile"));
+    assert!(command_policy_skill.contains("outermost sandbox command"));
+    assert!(command_policy_skill.contains("STATEFUL_NESTED_CODEX_HOME_ROOT"));
 
     assert!(!temp_root.join(".stateful/validation.yml").exists());
 

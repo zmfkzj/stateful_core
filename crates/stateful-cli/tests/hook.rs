@@ -147,6 +147,27 @@ fn pre_tool_use_allows_sandbox_run_write_dir() {
 }
 
 #[test]
+fn pre_tool_use_allows_nested_codex_benchmark_sandbox() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!(
+                "{stateful} sandbox run-nested-codex-benchmark --purpose 'run nested Codex chaos benchmark' --write-dir target --codex-home-root target/nested-codex-homes/run-1 --timeout-seconds 120 --command 'cargo run -p stateful-bench -- run'"
+            )
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
 fn pre_tool_use_allows_external_run_request() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
@@ -293,6 +314,72 @@ fn pre_tool_use_denies_sandbox_run_write_targets_without_target() {
         outcome,
         "requires at least one write target, create target, or write dir",
     );
+}
+
+#[test]
+fn pre_tool_use_denies_invalid_nested_codex_benchmark_sandbox_wrappers() {
+    let stateful = trusted_stateful_path();
+    let cases = [
+        (
+            "missing purpose",
+            format!(
+                "{stateful} sandbox run-nested-codex-benchmark --write-dir target --codex-home-root target/nested-codex-homes/run-1 --command 'cargo test'"
+            ),
+            "requires --purpose",
+        ),
+        (
+            "missing home root",
+            format!(
+                "{stateful} sandbox run-nested-codex-benchmark --purpose 'run nested Codex chaos benchmark' --write-dir target --command 'cargo test'"
+            ),
+            "requires --codex-home-root",
+        ),
+        (
+            "source write dir",
+            format!(
+                "{stateful} sandbox run-nested-codex-benchmark --purpose 'run nested Codex chaos benchmark' --write-dir crates --codex-home-root target/nested-codex-homes/run-1 --command 'cargo test'"
+            ),
+            "requires --write-dir target",
+        ),
+        (
+            "home outside target",
+            format!(
+                "{stateful} sandbox run-nested-codex-benchmark --purpose 'run nested Codex chaos benchmark' --write-dir target --codex-home-root /Users/me/.codex --command 'cargo test'"
+            ),
+            "requires --codex-home-root under target",
+        ),
+        (
+            "unsupported write target",
+            format!(
+                "{stateful} sandbox run-nested-codex-benchmark --purpose 'run nested Codex chaos benchmark' --write-dir target --codex-home-root target/nested-codex-homes/run-1 --write-target README.md --command 'cargo test'"
+            ),
+            "unsupported stateful sandbox run-nested-codex-benchmark argument",
+        ),
+        (
+            "generic relaxed profile",
+            format!(
+                "{stateful} sandbox run --fs relaxed --network enabled --write-dir target --command 'cargo test'"
+            ),
+            "supports only read-only and write-targets profiles",
+        ),
+    ];
+
+    for (name, command, expected) in cases {
+        let input = serde_json::json!({
+            "session_id": "s1",
+            "cwd": "/repo",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": command
+            }
+        })
+        .to_string();
+
+        let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+        assert_bash_denial_mentions(outcome, expected);
+        let _ = name;
+    }
 }
 
 #[test]

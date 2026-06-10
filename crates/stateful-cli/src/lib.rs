@@ -220,6 +220,18 @@ pub enum SandboxCommand {
         #[arg(long)]
         timeout_seconds: Option<u64>,
     },
+    RunNestedCodexBenchmark {
+        #[arg(long)]
+        purpose: String,
+        #[arg(long = "write-dir")]
+        write_dir: String,
+        #[arg(long = "codex-home-root")]
+        codex_home_root: String,
+        #[arg(long)]
+        command: String,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -598,6 +610,42 @@ pub fn run() -> anyhow::Result<()> {
                     write_targets,
                     create_targets,
                     write_dirs,
+                    command,
+                    timeout_seconds,
+                },
+            ) {
+                Ok(output) => output,
+                Err(error) => {
+                    if let Some(denied) =
+                        error.downcast_ref::<sandbox::SandboxAuthorizationDenied>()
+                    {
+                        println!("{}", denied.body());
+                        std::process::exit(1);
+                    }
+                    return Err(error);
+                }
+            };
+            println!("{}", serde_json::to_string(&output)?);
+            if let Some(exit_code) = sandbox::sandbox_run_cli_exit_code(&output) {
+                std::process::exit(exit_code);
+            }
+        }
+        Command::Sandbox(SandboxCommand::RunNestedCodexBenchmark {
+            purpose,
+            write_dir,
+            codex_home_root,
+            command,
+            timeout_seconds,
+        }) => {
+            let paths = GlobalPaths::from_env()?;
+            let repo_root = current_repo_root_or_current_dir()?;
+            let output = match sandbox::run_nested_codex_benchmark_sandbox_in_repo(
+                &repo_root,
+                &paths,
+                sandbox::NestedCodexBenchmarkSandboxRequest {
+                    purpose,
+                    write_dir,
+                    codex_home_root,
                     command,
                     timeout_seconds,
                 },

@@ -87,6 +87,90 @@ fn sandbox_run_rejects_missing_command() {
 }
 
 #[test]
+fn parses_nested_codex_benchmark_sandbox_command() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "run-nested-codex-benchmark",
+        "--purpose",
+        "run nested Codex chaos benchmark",
+        "--write-dir",
+        "target",
+        "--codex-home-root",
+        "target/nested-codex-homes/run-1",
+        "--timeout-seconds",
+        "120",
+        "--command",
+        "cargo run -p stateful-bench -- run",
+    ])
+    .expect("nested Codex benchmark sandbox command should parse");
+
+    match cli.command {
+        Command::Sandbox(SandboxCommand::RunNestedCodexBenchmark {
+            purpose,
+            write_dir,
+            codex_home_root,
+            command,
+            timeout_seconds,
+        }) => {
+            assert_eq!(purpose, "run nested Codex chaos benchmark");
+            assert_eq!(write_dir, "target");
+            assert_eq!(codex_home_root, "target/nested-codex-homes/run-1");
+            assert_eq!(command, "cargo run -p stateful-bench -- run");
+            assert_eq!(timeout_seconds, Some(120));
+        }
+        other => panic!("expected nested Codex benchmark sandbox command, got {other:?}"),
+    }
+}
+
+#[test]
+fn nested_codex_benchmark_sandbox_requires_purpose_home_root_and_command() {
+    for args in [
+        vec![
+            "stateful",
+            "sandbox",
+            "run-nested-codex-benchmark",
+            "--write-dir",
+            "target",
+            "--codex-home-root",
+            "target/nested-codex-homes/run-1",
+            "--command",
+            "cargo test",
+        ],
+        vec![
+            "stateful",
+            "sandbox",
+            "run-nested-codex-benchmark",
+            "--purpose",
+            "run nested Codex chaos benchmark",
+            "--write-dir",
+            "target",
+            "--command",
+            "cargo test",
+        ],
+        vec![
+            "stateful",
+            "sandbox",
+            "run-nested-codex-benchmark",
+            "--purpose",
+            "run nested Codex chaos benchmark",
+            "--write-dir",
+            "target",
+            "--codex-home-root",
+            "target/nested-codex-homes/run-1",
+        ],
+    ] {
+        let error = Cli::try_parse_from(args)
+            .expect_err("nested Codex benchmark command should require explicit scope");
+        let message = error.to_string();
+        assert!(
+            message.contains("required") || message.contains("Usage:"),
+            "unexpected parse error: {message}"
+        );
+    }
+}
+
+#[test]
 fn parses_external_run_request_command() {
     let cli = Cli::try_parse_from([
         "stateful",

@@ -93,6 +93,69 @@ fn run_pairs_executes_manifest_agents_in_one_workspace_and_reports_harness_resul
 }
 
 #[test]
+fn run_pairs_templates_use_absolute_paths_when_output_dir_is_relative() {
+    let root = temp_root("stateful-bench-run-relative-output");
+    let pairs_path = root.join("pairs.jsonl");
+    let output_dir = PathBuf::from(format!(
+        "../../target/stateful-bench-run-relative-output-{}/runs",
+        std::process::id()
+    ));
+    let output_root = std::env::current_dir()
+        .expect("current dir should resolve")
+        .join(format!(
+            "../../target/stateful-bench-run-relative-output-{}",
+            std::process::id()
+        ));
+    if output_root.exists() {
+        fs::remove_dir_all(&output_root).expect("old relative output root should clean up");
+    }
+    write_jsonl(&pairs_path, &[pair()]).expect("pair manifest should write");
+
+    run_pairs(RunOptions {
+        pairs: pairs_path,
+        mode: RunMode::NoState,
+        run_id: "synthetic-relative-output".to_string(),
+        agent_cmd_template:
+            "test -f {task_json} && printf changed-{agent_id} > {workspace}/{agent_id}.txt"
+                .to_string(),
+        output_dir: output_dir.clone(),
+        timeout_seconds: 10,
+        max_pairs: None,
+        pair_ids: Vec::new(),
+        jobs: 1,
+        auth_check_cmd_template: None,
+        budget_check_cmd_template: None,
+        setup_cmd_template: Some(
+            "test -f {pair_json} && test -d {workspace} && git init {workspace} && git -C {workspace} config user.email test@example.invalid && git -C {workspace} config user.name test && printf initial > {workspace}/agent-a.txt && printf initial > {workspace}/agent-b.txt && git -C {workspace} add . && git -C {workspace} commit -m initial"
+                .to_string(),
+        ),
+        harness_cmd_template: Some(
+            "test -f {combined_patch} && printf '%s\n' '{\"task_results\":[{\"status\":\"passed\"},{\"status\":\"passed\"}]}'"
+                .to_string(),
+        ),
+        stateful_binary: "stateful".to_string(),
+    })
+    .expect("relative output dir run should complete");
+
+    let run_dir = output_dir.join("synthetic-relative-output");
+    let pair_run: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("pair-1-pair-2/pair-run.json"))
+            .expect("pair run should exist"),
+    )
+    .expect("pair run should parse");
+    assert_eq!(pair_run["agent_a"]["outcome"], "succeeded");
+    assert_eq!(pair_run["agent_b"]["outcome"], "succeeded");
+    assert!(pair_run.get("error").is_none() || pair_run["error"].is_null());
+
+    let report = build_report(&run_dir).expect("report should build");
+    assert_eq!(report.summary.setup_errors, 0);
+    assert_eq!(report.summary.pairs_scored, 1);
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+    fs::remove_dir_all(output_root).expect("relative output root should clean up");
+}
+
+#[test]
 fn run_pairs_filters_to_explicit_pair_ids_before_execution() {
     let root = temp_root("stateful-bench-run-pair-id-filter");
     let pairs_path = root.join("pairs.jsonl");
@@ -240,6 +303,58 @@ fn run_pairs_records_pair_errors_and_continues() {
     assert_eq!(report.summary.pairs_scored, 1);
     assert_eq!(report.summary.task_passed, 2);
     assert_eq!(report.summary.setup_errors, 2);
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn run_pairs_records_agent_infra_startup_failures_as_setup_errors() {
+    let root = temp_root("stateful-bench-run-agent-infra-failure");
+    let pairs_path = root.join("pairs.jsonl");
+    let output_dir = root.join("runs");
+    write_jsonl(&pairs_path, &[pair()]).expect("pair manifest should write");
+
+    run_pairs(RunOptions {
+        pairs: pairs_path,
+        mode: RunMode::NoState,
+        run_id: "synthetic-agent-infra-failure".to_string(),
+        agent_cmd_template:
+            "printf '%s\n' 'Error: failed to initialize in-process app-server client: Operation not permitted (os error 1)' >&2; exit 1"
+                .to_string(),
+        output_dir: output_dir.clone(),
+        timeout_seconds: 10,
+        max_pairs: None,
+        pair_ids: Vec::new(),
+        jobs: 1,
+        auth_check_cmd_template: None,
+        budget_check_cmd_template: None,
+        setup_cmd_template: Some("mkdir -p {workspace}".to_string()),
+        harness_cmd_template: Some(
+            "printf '%s\n' '{\"task_results\":[{\"status\":\"passed\"},{\"status\":\"passed\"}]}'"
+                .to_string(),
+        ),
+        stateful_binary: "stateful".to_string(),
+    })
+    .expect("nonfatal agent infra failures should be recorded as pair errors");
+
+    let run_dir = output_dir.join("synthetic-agent-infra-failure");
+    let pair_run: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("pair-1-pair-2/pair-run.json"))
+            .expect("pair run should exist"),
+    )
+    .expect("pair run should parse");
+    assert!(
+        pair_run["error"]
+            .as_str()
+            .expect("infra error should be recorded")
+            .contains("agent infrastructure failure")
+    );
+
+    let report = build_report(&run_dir).expect("report should build");
+    assert_eq!(report.summary.pairs_scored, 0);
+    assert_eq!(report.summary.setup_errors, 2);
+    assert_eq!(report.summary.task_passed, 0);
+    assert_eq!(report.summary.task_failed, 0);
 
     fs::remove_dir_all(root).expect("temp root should clean up");
 }
