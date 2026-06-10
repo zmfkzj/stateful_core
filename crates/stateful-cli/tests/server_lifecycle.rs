@@ -40,6 +40,59 @@ fn ensure_server_returns_existing_runtime_when_health_is_ok() {
 }
 
 #[test]
+fn ensure_server_reuses_remote_pid_zero_runtime_when_health_is_ok() {
+    let home = temp_home("stateful-server-remote-runtime");
+    let paths = GlobalPaths::new(&home);
+    let fake = FakeHttpServer::start(vec![
+        fake_response(200, r#"{"status":"ok"}"#),
+        fake_response(200, r#"{"status":"ok","current":{}}"#),
+        fake_response(
+            200,
+            r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+        ),
+    ]);
+    let runtime = ServerRuntime::new(fake.base_url(), "secret-token", "shared", 0);
+    stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
+
+    let discovered = ensure_server_with(&paths, runtime_is_healthy, || {
+        panic!("remote runtime should be reused without starting a local server")
+    })
+    .expect("remote runtime should be accepted");
+
+    assert_eq!(discovered.pid, 0);
+    assert_eq!(discovered.workspace_id, "shared");
+}
+
+#[test]
+fn ensure_server_with_options_preserves_unreachable_remote_pid_zero_runtime() {
+    let home = temp_home("stateful-server-remote-runtime-unreachable");
+    let paths = GlobalPaths::new(&home);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+    let remote_url = format!(
+        "http://{}",
+        listener
+            .local_addr()
+            .expect("test listener address should be known")
+    );
+    drop(listener);
+    let runtime = ServerRuntime::new(&remote_url, "secret-token", "shared", 0);
+    stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
+
+    let error = ensure_server_with_options(&paths, ServerStartOptions::default())
+        .expect_err("unreachable remote runtime should not be replaced");
+
+    assert!(
+        error.to_string().contains("preserving runtime file"),
+        "unexpected error: {error}"
+    );
+    let contents = fs::read_to_string(&paths.server_json).expect("runtime should remain readable");
+    let preserved: ServerRuntime =
+        serde_json::from_str(&contents).expect("runtime should remain valid JSON");
+    assert_eq!(preserved.pid, 0);
+    assert_eq!(preserved.base_url, remote_url);
+}
+
+#[test]
 fn ensure_server_starts_when_runtime_is_missing() {
     let home = temp_home("stateful-server-missing");
     let paths = GlobalPaths::new(&home);
@@ -310,6 +363,10 @@ fn ensure_server_with_options_rejects_healthy_runtime_on_different_port() {
         error
             .to_string()
             .contains("does not match requested server options"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.to_string().contains("stateful server stop"),
         "unexpected error: {error}"
     );
 }

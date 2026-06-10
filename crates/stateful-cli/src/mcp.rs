@@ -211,6 +211,7 @@ fn is_session_bound_mcp_tool(protocol_name: &str) -> bool {
             | "state.lease.release"
             | "state.activity.observe"
             | "state.activity.finalize"
+            | "state.context.render"
             | "state.conflicts.check"
             | "state.reconcile.ack"
             | "state.notifications.poll"
@@ -393,6 +394,7 @@ fn enrich_arguments(
             | "state.intent.request"
             | "state.intent.claim"
             | "state.intent.cancel"
+            | "state.context.render"
     ) {
         object
             .entry("workspace_id")

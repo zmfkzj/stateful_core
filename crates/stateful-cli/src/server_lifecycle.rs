@@ -162,6 +162,12 @@ pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
 
 fn retire_incompatible_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> anyhow::Result<()> {
     if !runtime_is_basic_healthy(runtime) {
+        if runtime.pid == 0 {
+            anyhow::bail!(
+                "remote stateful runtime at {} is unreachable or unavailable; preserving runtime file and not starting a local server",
+                runtime.base_url
+            );
+        }
         let _ = fs::remove_file(&paths.server_json);
         return Ok(());
     }
@@ -278,7 +284,7 @@ fn ensure_runtime_matches_options(
     }
 
     anyhow::bail!(
-        "existing stateful server runtime does not match requested server options: existing {} workspace {} pid {}, requested {} workspace {}",
+        "existing stateful server runtime does not match requested server options: existing {} workspace {} pid {}, requested {} workspace {}; stop the existing server with `stateful server stop`, then retry the requested command",
         runtime.base_url,
         runtime.workspace_id,
         runtime.pid,

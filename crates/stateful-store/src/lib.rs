@@ -42,6 +42,36 @@ pub enum StoreError {
 
 pub type StoreResult<T> = Result<T, StoreError>;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CurrentStateIdentityFilter<'a> {
+    pub repo_id: Option<&'a str>,
+    pub worktree_id: Option<&'a str>,
+    pub root: Option<&'a str>,
+}
+
+impl CurrentStateIdentityFilter<'_> {
+    fn is_empty(self) -> bool {
+        self.repo_id.is_none() && self.worktree_id.is_none() && self.root.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkspaceIdentity<'a> {
+    pub repo_id: Option<&'a str>,
+    pub worktree_id: Option<&'a str>,
+    pub root: Option<&'a str>,
+    pub branch: Option<&'a str>,
+}
+
+impl WorkspaceIdentity<'_> {
+    fn is_empty(self) -> bool {
+        self.repo_id.is_none()
+            && self.worktree_id.is_none()
+            && self.root.is_none()
+            && self.branch.is_none()
+    }
+}
+
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
@@ -139,21 +169,135 @@ impl Store {
     }
 
     pub fn current_summary(&self) -> StoreResult<CurrentSummary> {
+        self.current_summary_filtered(None, CurrentStateIdentityFilter::default())
+    }
+
+    pub fn current_summary_for_workspace(
+        &self,
+        workspace_id: impl AsRef<str>,
+    ) -> StoreResult<CurrentSummary> {
+        self.current_summary_filtered(
+            Some(workspace_id.as_ref()),
+            CurrentStateIdentityFilter::default(),
+        )
+    }
+
+    fn current_summary_filtered(
+        &self,
+        workspace_filter: Option<&str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
+    ) -> StoreResult<CurrentSummary> {
         self.expire_stale()?;
-        let session_count = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| {
-                row.get::<_, u64>(0)
-            })?;
-        let active_intent_count = self.conn.query_row(
-            "SELECT COUNT(*) FROM intents WHERE status = 'active'",
-            [],
-            |row| row.get::<_, u64>(0),
-        )?;
-        let event_count = self.event_count()?;
+        if !identity_filter.is_empty() {
+            return self.current_summary_for_identity(workspace_filter, identity_filter);
+        }
+        let session_count = match workspace_filter {
+            Some(workspace_id) => self.conn.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| row.get::<_, u64>(0),
+            )?,
+            None => self
+                .conn
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| {
+                    row.get::<_, u64>(0)
+                })?,
+        };
+        let active_intent_count = match workspace_filter {
+            Some(workspace_id) => self.conn.query_row(
+                "SELECT COUNT(*) FROM intents WHERE status = 'active' AND workspace_id = ?1",
+                [workspace_id],
+                |row| row.get::<_, u64>(0),
+            )?,
+            None => self.conn.query_row(
+                "SELECT COUNT(*) FROM intents WHERE status = 'active'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )?,
+        };
+        let event_count = match workspace_filter {
+            Some(workspace_id) => self.conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| row.get::<_, u64>(0),
+            )?,
+            None => self.event_count()?,
+        };
 
         Ok(CurrentSummary {
             session_count,
+            active_intent_count,
+            event_count,
+        })
+    }
+
+    fn current_summary_for_identity(
+        &self,
+        workspace_filter: Option<&str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
+    ) -> StoreResult<CurrentSummary> {
+        let mut event_statement = self.conn.prepare(
+            "SELECT session_id, workspace_id, repo_id, worktree_id, root
+             FROM events",
+        )?;
+        let event_rows = event_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        let event_rows = event_rows.collect::<Result<Vec<_>, _>>()?;
+        let mut sessions = std::collections::BTreeSet::new();
+        let mut event_count = 0u64;
+        for (session_id, workspace_id, repo_id, worktree_id, root) in event_rows {
+            if workspace_filter.is_some_and(|filter| workspace_id != filter) {
+                continue;
+            }
+            if !identity_filter_matches(
+                identity_filter,
+                repo_id.as_deref(),
+                worktree_id.as_deref(),
+                root.as_deref(),
+            ) {
+                continue;
+            }
+            event_count += 1;
+            sessions.insert(session_id);
+        }
+
+        let mut intent_statement = self.conn.prepare(
+            "SELECT i.workspace_id, e.repo_id, e.worktree_id, e.root
+             FROM intents i
+             LEFT JOIN events e ON e.event_id = i.intent_id
+             WHERE i.status = 'active'",
+        )?;
+        let intent_rows = intent_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        let intent_rows = intent_rows.collect::<Result<Vec<_>, _>>()?;
+        let active_intent_count = intent_rows
+            .into_iter()
+            .filter(|(workspace_id, repo_id, worktree_id, root)| {
+                !workspace_filter.is_some_and(|filter| workspace_id != filter)
+                    && identity_filter_matches(
+                        identity_filter,
+                        repo_id.as_deref(),
+                        worktree_id.as_deref(),
+                        root.as_deref(),
+                    )
+            })
+            .count() as u64;
+
+        Ok(CurrentSummary {
+            session_count: sessions.len() as u64,
             active_intent_count,
             event_count,
         })
@@ -163,23 +307,88 @@ impl Store {
         &self,
         resource_filter: Option<&str>,
     ) -> StoreResult<LiveCurrentState> {
+        self.live_current_state_filtered(
+            None,
+            CurrentStateIdentityFilter::default(),
+            resource_filter,
+        )
+    }
+
+    pub fn live_current_state_for_workspace(
+        &self,
+        workspace_id: impl AsRef<str>,
+        resource_filter: Option<&str>,
+    ) -> StoreResult<LiveCurrentState> {
+        self.live_current_state_filtered(
+            Some(workspace_id.as_ref()),
+            CurrentStateIdentityFilter::default(),
+            resource_filter,
+        )
+    }
+
+    pub fn live_current_state_for_workspace_identity(
+        &self,
+        workspace_id: impl AsRef<str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
+        resource_filter: Option<&str>,
+    ) -> StoreResult<LiveCurrentState> {
+        self.live_current_state_filtered(
+            Some(workspace_id.as_ref()),
+            identity_filter,
+            resource_filter,
+        )
+    }
+
+    fn live_current_state_filtered(
+        &self,
+        workspace_filter: Option<&str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
+        resource_filter: Option<&str>,
+    ) -> StoreResult<LiveCurrentState> {
         self.expire_stale()?;
-        let summary = self.current_summary()?;
+        let summary = self.current_summary_filtered(workspace_filter, identity_filter)?;
         let resource_filter = resource_filter.map(normalize_relative_path);
         let mut items = Vec::new();
 
-        items.extend(self.live_intent_items(resource_filter.as_deref())?);
-        items.extend(self.live_lease_items(resource_filter.as_deref())?);
-        items.extend(self.live_wait_queue_items(resource_filter.as_deref())?);
+        items.extend(self.live_intent_items(
+            workspace_filter,
+            identity_filter,
+            resource_filter.as_deref(),
+        )?);
+        items.extend(self.live_lease_items(
+            workspace_filter,
+            identity_filter,
+            resource_filter.as_deref(),
+        )?);
+        items.extend(self.live_wait_queue_items(
+            workspace_filter,
+            identity_filter,
+            resource_filter.as_deref(),
+        )?);
 
         Ok(LiveCurrentState { summary, items })
     }
-    fn live_intent_items(&self, resource_filter: Option<&str>) -> StoreResult<Vec<CurrentItem>> {
+    fn live_intent_items(
+        &self,
+        workspace_filter: Option<&str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
+        resource_filter: Option<&str>,
+    ) -> StoreResult<Vec<CurrentItem>> {
         let mut statement = self.conn.prepare(
-            "SELECT session_id, workspace_id, scopes_json, purpose, declared_at, expires_at
-             FROM intents
-             WHERE status = 'active'
-             ORDER BY declared_at DESC",
+            "SELECT
+                i.session_id,
+                i.workspace_id,
+                i.scopes_json,
+                i.purpose,
+                i.declared_at,
+                i.expires_at,
+                e.repo_id,
+                e.worktree_id,
+                e.root
+             FROM intents i
+             LEFT JOIN events e ON e.event_id = i.intent_id
+             WHERE i.status = 'active'
+             ORDER BY i.declared_at DESC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
@@ -189,12 +398,37 @@ impl Store {
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         })?;
         let rows = rows.collect::<Result<Vec<_>, _>>()?;
         let mut items = Vec::new();
 
-        for (session_id, workspace_id, scopes_json, purpose, declared_at, expires_at) in rows {
+        for (
+            session_id,
+            workspace_id,
+            scopes_json,
+            purpose,
+            declared_at,
+            expires_at,
+            repo_id,
+            worktree_id,
+            root,
+        ) in rows
+        {
+            if workspace_filter.is_some_and(|filter| workspace_id != filter) {
+                continue;
+            }
+            if !identity_filter_matches(
+                identity_filter,
+                repo_id.as_deref(),
+                worktree_id.as_deref(),
+                root.as_deref(),
+            ) {
+                continue;
+            }
             let scopes: Vec<IntentScope> = serde_json::from_str(&scopes_json).map_err(|err| {
                 rusqlite::Error::FromSqlConversionFailure(
                     0,
@@ -272,7 +506,12 @@ impl Store {
         }
     }
 
-    fn live_lease_items(&self, resource_filter: Option<&str>) -> StoreResult<Vec<CurrentItem>> {
+    fn live_lease_items(
+        &self,
+        workspace_filter: Option<&str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
+        resource_filter: Option<&str>,
+    ) -> StoreResult<Vec<CurrentItem>> {
         let mut statement = self.conn.prepare(
             "SELECT session_id, workspace_id, relative_path, action, purpose, expires_at
              FROM leases
@@ -293,6 +532,21 @@ impl Store {
         let mut items = Vec::new();
 
         for (session_id, workspace_id, relative_path, action, purpose, expires_at) in rows {
+            if workspace_filter.is_some_and(|filter| workspace_id != filter) {
+                continue;
+            }
+            if !identity_filter.is_empty() {
+                let Some(session_id) = session_id.as_deref() else {
+                    continue;
+                };
+                if !self.session_active_intent_matches_identity(
+                    session_id,
+                    &workspace_id,
+                    identity_filter,
+                )? {
+                    continue;
+                }
+            }
             if !resource_matches_filter(&relative_path, resource_filter) {
                 continue;
             }
@@ -330,6 +584,8 @@ impl Store {
 
     fn live_wait_queue_items(
         &self,
+        workspace_filter: Option<&str>,
+        identity_filter: CurrentStateIdentityFilter<'_>,
         resource_filter: Option<&str>,
     ) -> StoreResult<Vec<CurrentItem>> {
         let mut statement = self.conn.prepare(
@@ -337,6 +593,10 @@ impl Store {
                 wait_id,
                 session_id,
                 workspace_id,
+                repo_id,
+                worktree_id,
+                root,
+                branch,
                 relative_path,
                 action,
                 status,
@@ -353,13 +613,17 @@ impl Store {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
                 row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, String>(13)?,
             ))
         })?;
         let rows = rows.collect::<Result<Vec<_>, _>>()?;
@@ -369,6 +633,10 @@ impl Store {
             wait_id,
             session_id,
             workspace_id,
+            repo_id,
+            worktree_id,
+            root,
+            _branch,
             relative_path,
             action,
             status,
@@ -378,6 +646,17 @@ impl Store {
             purpose,
         ) in rows
         {
+            if workspace_filter.is_some_and(|filter| workspace_id != filter) {
+                continue;
+            }
+            if !identity_filter_matches(
+                identity_filter,
+                repo_id.as_deref(),
+                worktree_id.as_deref(),
+                root.as_deref(),
+            ) {
+                continue;
+            }
             if !resource_matches_filter(&relative_path, resource_filter) {
                 continue;
             }
@@ -426,6 +705,44 @@ impl Store {
         }
 
         Ok(items)
+    }
+
+    fn session_active_intent_matches_identity(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        identity_filter: CurrentStateIdentityFilter<'_>,
+    ) -> StoreResult<bool> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT e.repo_id, e.worktree_id, e.root
+                 FROM intents i
+                 LEFT JOIN events e ON e.event_id = i.intent_id
+                 WHERE i.session_id = ?1 AND i.workspace_id = ?2 AND i.status = 'active'
+                 ORDER BY i.declared_at DESC
+                 LIMIT 1",
+                params![session_id, workspace_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        Ok(row
+            .map(|(repo_id, worktree_id, root)| {
+                identity_filter_matches(
+                    identity_filter,
+                    repo_id.as_deref(),
+                    worktree_id.as_deref(),
+                    root.as_deref(),
+                )
+            })
+            .unwrap_or(false))
     }
 
     pub fn recent_events(&self, limit: u64) -> StoreResult<Vec<EventRecord>> {
@@ -891,6 +1208,27 @@ impl Store {
         purpose: impl AsRef<str>,
         blocking_session_id: Option<&str>,
     ) -> StoreResult<WaitRecord> {
+        self.enqueue_waiter_with_identity(
+            session_id,
+            workspace_id,
+            relative_path,
+            action,
+            purpose,
+            blocking_session_id,
+            WorkspaceIdentity::default(),
+        )
+    }
+
+    pub fn enqueue_waiter_with_identity(
+        &self,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        action: impl AsRef<str>,
+        purpose: impl AsRef<str>,
+        blocking_session_id: Option<&str>,
+        identity: WorkspaceIdentity<'_>,
+    ) -> StoreResult<WaitRecord> {
         self.expire_stale()?;
         let relative_path = normalize_relative_path(relative_path.as_ref());
         if relative_path.is_empty() {
@@ -918,6 +1256,7 @@ impl Store {
             )
             .optional()?;
         if let Some(wait_id) = existing {
+            self.update_waiter_identity_if_missing(&wait_id, identity)?;
             return self
                 .waiter(&wait_id)
                 .map(|waiter| waiter.expect("existing waiter should load"));
@@ -929,6 +1268,10 @@ impl Store {
                 wait_id,
                 session_id,
                 workspace_id,
+                repo_id,
+                worktree_id,
+                root,
+                branch,
                 relative_path,
                 action,
                 status,
@@ -936,11 +1279,15 @@ impl Store {
                 reservation_expires_at,
                 blocking_session_id,
                 purpose
-            ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, NULL, ?7, ?8)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, NULL, ?11, ?12)",
             params![
                 wait_id,
                 session_id.as_ref(),
                 workspace_id.as_ref(),
+                identity.repo_id,
+                identity.worktree_id,
+                identity.root,
+                identity.branch,
                 relative_path,
                 action.as_ref(),
                 now_timestamp(),
@@ -954,9 +1301,21 @@ impl Store {
     }
 
     pub fn enqueue_intent_request(&self, input: IntentRequestInput<'_>) -> StoreResult<WaitRecord> {
+        self.enqueue_intent_request_with_identity(input, WorkspaceIdentity::default())
+    }
+
+    pub fn enqueue_intent_request_with_identity(
+        &self,
+        input: IntentRequestInput<'_>,
+        identity: WorkspaceIdentity<'_>,
+    ) -> StoreResult<WaitRecord> {
         self.expire_stale()?;
         let purpose = required_purpose(input.purpose)?;
         if let Some(waiter) = self.waiter_by_request_id(input.request_id)? {
+            self.update_waiter_identity_if_missing(&waiter.wait_id, identity)?;
+            let waiter = self
+                .waiter(&waiter.wait_id)?
+                .expect("existing waiter should load");
             return Ok(waiter);
         }
 
@@ -971,6 +1330,10 @@ impl Store {
                 request_id,
                 session_id,
                 workspace_id,
+                repo_id,
+                worktree_id,
+                root,
+                branch,
                 relative_path,
                 action,
                 status,
@@ -978,12 +1341,16 @@ impl Store {
                 reservation_expires_at,
                 blocking_session_id,
                 purpose
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, NULL, ?8, ?9)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'queued', ?11, NULL, ?12, ?13)",
             params![
                 wait_id,
                 input.request_id,
                 input.session_id,
                 input.workspace_id,
+                identity.repo_id,
+                identity.worktree_id,
+                identity.root,
+                identity.branch,
                 relative_path,
                 input.action,
                 now_timestamp(),
@@ -1016,6 +1383,17 @@ impl Store {
             Some(wait_id) => self.waiter(&wait_id),
             None => Ok(None),
         }
+    }
+
+    pub fn backfill_waiter_identity_if_missing(
+        &self,
+        wait_id: impl AsRef<str>,
+        identity: WorkspaceIdentity<'_>,
+    ) -> StoreResult<WaitRecord> {
+        let wait_id = wait_id.as_ref();
+        self.update_waiter_identity_if_missing(wait_id, identity)?;
+        self.waiter(wait_id)?
+            .ok_or(StoreError::IntentRequestNotFound)
     }
 
     pub fn cancel_intent_request(
@@ -1138,6 +1516,10 @@ impl Store {
                     wait_id,
                     session_id,
                     workspace_id,
+                    repo_id,
+                    worktree_id,
+                    root,
+                    branch,
                     relative_path,
                     action,
                     status,
@@ -1171,6 +1553,10 @@ impl Store {
                     wait_id,
                     session_id,
                     workspace_id,
+                    repo_id,
+                    worktree_id,
+                    root,
+                    branch,
                     relative_path,
                     action,
                     status,
@@ -1753,6 +2139,10 @@ impl Store {
                 request_id TEXT,
                 session_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
+                repo_id TEXT,
+                worktree_id TEXT,
+                root TEXT,
+                branch TEXT,
                 relative_path TEXT NOT NULL,
                 action TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -1847,6 +2237,26 @@ impl Store {
             "ALTER TABLE wait_queue ADD COLUMN request_id TEXT;",
         )?;
         self.add_column_if_missing(
+            "wait_queue",
+            "repo_id",
+            "ALTER TABLE wait_queue ADD COLUMN repo_id TEXT;",
+        )?;
+        self.add_column_if_missing(
+            "wait_queue",
+            "worktree_id",
+            "ALTER TABLE wait_queue ADD COLUMN worktree_id TEXT;",
+        )?;
+        self.add_column_if_missing(
+            "wait_queue",
+            "root",
+            "ALTER TABLE wait_queue ADD COLUMN root TEXT;",
+        )?;
+        self.add_column_if_missing(
+            "wait_queue",
+            "branch",
+            "ALTER TABLE wait_queue ADD COLUMN branch TEXT;",
+        )?;
+        self.add_column_if_missing(
             "intents",
             "purpose",
             "ALTER TABLE intents ADD COLUMN purpose TEXT;",
@@ -1918,7 +2328,11 @@ impl Store {
             && matches!(column, "repo_id" | "worktree_id" | "root" | "branch"))
             || (table == "intents" && column == "purpose")
             || (table == "leases" && matches!(column, "purpose" | "action"))
-            || (table == "wait_queue" && matches!(column, "request_id" | "purpose"));
+            || (table == "wait_queue"
+                && matches!(
+                    column,
+                    "request_id" | "purpose" | "repo_id" | "worktree_id" | "root" | "branch"
+                ));
         if !supported {
             return Ok(());
         }
@@ -2076,6 +2490,10 @@ impl Store {
                     wait_id,
                     session_id,
                     workspace_id,
+                    repo_id,
+                    worktree_id,
+                    root,
+                    branch,
                     relative_path,
                     action,
                     status,
@@ -2148,6 +2566,32 @@ impl Store {
         }
 
         Ok(None)
+    }
+
+    fn update_waiter_identity_if_missing(
+        &self,
+        wait_id: &str,
+        identity: WorkspaceIdentity<'_>,
+    ) -> StoreResult<()> {
+        if identity.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "UPDATE wait_queue
+             SET repo_id = COALESCE(repo_id, ?2),
+                 worktree_id = COALESCE(worktree_id, ?3),
+                 root = COALESCE(root, ?4),
+                 branch = COALESCE(branch, ?5)
+             WHERE wait_id = ?1",
+            params![
+                wait_id,
+                identity.repo_id,
+                identity.worktree_id,
+                identity.root,
+                identity.branch,
+            ],
+        )?;
+        Ok(())
     }
 
     fn waiter_has_active_conflict(&self, waiter: &WaitRecord) -> StoreResult<bool> {
@@ -2284,6 +2728,33 @@ fn resource_matches_filter(resource: &str, filter: Option<&str>) -> bool {
             .is_some_and(|rest| !rest.is_empty())
 }
 
+fn identity_filter_matches(
+    filter: CurrentStateIdentityFilter<'_>,
+    repo_id: Option<&str>,
+    worktree_id: Option<&str>,
+    root: Option<&str>,
+) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    if let Some(expected) = filter.repo_id
+        && repo_id != Some(expected)
+    {
+        return false;
+    }
+    if let Some(expected) = filter.worktree_id
+        && worktree_id != Some(expected)
+    {
+        return false;
+    }
+    if let Some(expected) = filter.root
+        && root != Some(expected)
+    {
+        return false;
+    }
+    true
+}
+
 fn now_timestamp() -> String {
     format_timestamp(OffsetDateTime::now_utc())
 }
@@ -2332,17 +2803,40 @@ fn format_timestamp(timestamp: OffsetDateTime) -> String {
 }
 
 fn wait_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WaitRecord> {
+    if row.as_ref().column_count() == 10 {
+        return Ok(WaitRecord {
+            wait_id: row.get(0)?,
+            session_id: row.get(1)?,
+            workspace_id: row.get(2)?,
+            repo_id: None,
+            worktree_id: None,
+            root: None,
+            branch: None,
+            relative_path: row.get(3)?,
+            action: row.get(4)?,
+            status: row.get(5)?,
+            requested_at: row.get(6)?,
+            reservation_expires_at: row.get(7)?,
+            blocking_session_id: row.get(8)?,
+            purpose: row.get(9)?,
+        });
+    }
+
     Ok(WaitRecord {
         wait_id: row.get(0)?,
         session_id: row.get(1)?,
         workspace_id: row.get(2)?,
-        relative_path: row.get(3)?,
-        action: row.get(4)?,
-        status: row.get(5)?,
-        requested_at: row.get(6)?,
-        reservation_expires_at: row.get(7)?,
-        blocking_session_id: row.get(8)?,
-        purpose: row.get(9)?,
+        repo_id: row.get(3)?,
+        worktree_id: row.get(4)?,
+        root: row.get(5)?,
+        branch: row.get(6)?,
+        relative_path: row.get(7)?,
+        action: row.get(8)?,
+        status: row.get(9)?,
+        requested_at: row.get(10)?,
+        reservation_expires_at: row.get(11)?,
+        blocking_session_id: row.get(12)?,
+        purpose: row.get(13)?,
     })
 }
 
@@ -2559,6 +3053,10 @@ pub struct WaitRecord {
     pub wait_id: String,
     pub session_id: String,
     pub workspace_id: String,
+    pub repo_id: Option<String>,
+    pub worktree_id: Option<String>,
+    pub root: Option<String>,
+    pub branch: Option<String>,
     pub relative_path: String,
     pub action: String,
     pub status: String,

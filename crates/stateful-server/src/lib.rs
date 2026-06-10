@@ -15,7 +15,9 @@ use policy_service::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stateful_core::{ContextPackage, ReconciliationDecision, RenderMode, render_prompt_text};
-use stateful_store::{Event, OutboxEntry, Store, StoreError, WaitRecord};
+use stateful_store::{
+    CurrentStateIdentityFilter, Event, OutboxEntry, Store, StoreError, WaitRecord,
+};
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
@@ -259,6 +261,10 @@ async fn authorize(
     let input = AuthorizeWriteInput {
         session_id: session.session_id,
         workspace_id: Some(workspace.workspace_id),
+        repo_id: non_empty_identity(workspace.repo_id),
+        worktree_id: non_empty_identity(workspace.worktree_id),
+        root: non_empty_identity(workspace.root),
+        branch: non_empty_identity(workspace.branch),
         source_kind: Some(source.kind),
         source_tool_name: source.tool_name,
         queue_on_conflict: payload.queue_on_conflict,
@@ -367,6 +373,10 @@ async fn intent_request(
         session_id: envelope.request.session.session_id,
         workspace_id: envelope.request.workspace.workspace_id,
         request_id: payload.request_id,
+        repo_id: non_empty_identity(envelope.request.workspace.repo_id),
+        worktree_id: non_empty_identity(envelope.request.workspace.worktree_id),
+        root: non_empty_identity(envelope.request.workspace.root),
+        branch: non_empty_identity(envelope.request.workspace.branch),
         action: payload.action,
         path,
         purpose,
@@ -407,6 +417,10 @@ async fn intent_claim(
         session_id: envelope.request.session.session_id,
         workspace_id: envelope.request.workspace.workspace_id,
         wait_id: payload.wait_id,
+        repo_id: non_empty_identity(envelope.request.workspace.repo_id),
+        worktree_id: non_empty_identity(envelope.request.workspace.worktree_id),
+        root: non_empty_identity(envelope.request.workspace.root),
+        branch: non_empty_identity(envelope.request.workspace.branch),
     };
 
     match claim_intent_with_policy(&config.store, input) {
@@ -460,6 +474,10 @@ async fn intent_cancel(
 }
 
 fn non_empty_identity(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
+}
+
+fn non_empty_str(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
@@ -661,13 +679,31 @@ async fn context_render(
         Some("detailed") => RenderMode::Detailed,
         _ => RenderMode::Brief,
     };
+    let Some(workspace_id) = input.workspace_id.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error",
+                "message": "workspace_id is required"
+            })),
+        );
+    };
     let result = config
         .store
         .lock()
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
+            let identity_filter = CurrentStateIdentityFilter {
+                repo_id: input.repo_id.as_deref().and_then(non_empty_str),
+                worktree_id: input.worktree_id.as_deref().and_then(non_empty_str),
+                root: input.root.as_deref().and_then(non_empty_str),
+            };
             store
-                .live_current_state(input.resource.as_deref())
+                .live_current_state_for_workspace_identity(
+                    workspace_id,
+                    identity_filter,
+                    input.resource.as_deref(),
+                )
                 .map_err(|error| error.to_string())
         });
 
@@ -713,6 +749,10 @@ async fn conflicts_check(
     let input = AuthorizeWriteInput {
         session_id: input.session_id,
         workspace_id: input.workspace_id,
+        repo_id: None,
+        worktree_id: None,
+        root: None,
+        branch: None,
         source_kind: None,
         source_tool_name: None,
         queue_on_conflict: input.queue_on_conflict,
@@ -1263,6 +1303,13 @@ struct AuthorizeRequest {
 struct ContextRenderRequest {
     mode: Option<String>,
     resource: Option<String>,
+    workspace_id: Option<String>,
+    #[serde(default)]
+    repo_id: Option<String>,
+    #[serde(default)]
+    worktree_id: Option<String>,
+    #[serde(default)]
+    root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -191,6 +191,66 @@ fn cli_current_uses_repo_local_runtime_when_global_paths_are_unavailable() {
 }
 
 #[test]
+fn remote_runtime_with_pid_zero_accepts_matching_identity_capabilities() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request_without_body(&mut stream);
+        assert!(request.contains("GET /v1/runtime/identity HTTP/1.1"));
+        write_http_response(
+            &mut stream,
+            r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+        );
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "shared", 0);
+
+    assert!(stateful_cli::runtime_has_required_identity(&runtime));
+}
+
+#[test]
+fn runtime_identity_matches_pid_requires_exact_pid_for_pid_zero_runtime() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request_without_body(&mut stream);
+        assert!(request.contains("GET /v1/runtime/identity HTTP/1.1"));
+        write_http_response(
+            &mut stream,
+            r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+        );
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "shared", 0);
+
+    assert!(
+        !stateful_cli::runtime_identity_matches_pid(&runtime)
+            .expect("identity check should succeed")
+    );
+}
+
+#[test]
+fn runtime_has_required_identity_rejects_mismatched_nonzero_pid() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request_without_body(&mut stream);
+        assert!(request.contains("GET /v1/runtime/identity HTTP/1.1"));
+        write_http_response(
+            &mut stream,
+            r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+        );
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "shared", 42);
+
+    assert!(!stateful_cli::runtime_has_required_identity(&runtime));
+}
+
+#[test]
 fn cli_current_rejects_env_runtime_without_required_capabilities() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-runtime-env-old-server-test-{}",

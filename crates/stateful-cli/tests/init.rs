@@ -27,6 +27,9 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(codex_config.contains("# stateful-core-owned"));
     assert!(codex_config.contains("hooks = true"));
     assert!(codex_config.contains("[mcp_servers.stateful]"));
+    assert!(codex_config.contains(
+        "env_vars = [\"STATEFUL_CODEX_RUN_ID\", \"CODEX_THREAD_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
+    ));
     assert!(codex_config.contains("[[hooks.PreToolUse]]"));
     assert!(codex_config.contains("$(git rev-parse --show-toplevel)/target/debug/stateful"));
     assert!(codex_config.contains("hook pre-tool-use"));
@@ -64,9 +67,8 @@ fn install_repo_local_writes_config_toml_hooks_and_stateful_config() {
     assert!(!command_policy_skill.contains("state_file_write"));
     assert!(command_policy_skill.contains("Raw test commands"));
     assert!(command_policy_skill.contains("Examples assume `<absolute-stateful-binary>`"));
-    assert!(command_policy_skill.contains(
-        "<absolute-stateful-binary> intent declare --session-id <session> --workspace-id <workspace> --purpose \"<purpose inferred from the user or agent instruction>\" target/"
-    ));
+    assert!(command_policy_skill.contains("state_lease_acquire"));
+    assert!(command_policy_skill.contains("not hook-approved raw Bash commands"));
     assert!(command_policy_skill.contains("--create-target target/generated.txt"));
     assert!(!command_policy_skill.contains("--create-target docs/new.md"));
     assert!(!command_policy_skill.contains("--write-target README.md"));

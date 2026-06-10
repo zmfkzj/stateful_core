@@ -51,6 +51,9 @@ fn install_yes_creates_global_files_and_database() {
     assert!(first_config.contains("# stateful-core-global-install"));
     assert!(first_config.contains("[mcp_servers.stateful]"));
     assert!(first_config.contains("command = \"/opt/stateful/bin/stateful\""));
+    assert!(first_config.contains(
+        "env_vars = [\"STATEFUL_CODEX_RUN_ID\", \"CODEX_THREAD_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
+    ));
     assert!(first_config.contains("hook pre-tool-use"));
     assert_eq!(count(&first_config, "[features]"), 1);
 

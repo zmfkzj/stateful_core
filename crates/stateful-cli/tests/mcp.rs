@@ -588,6 +588,58 @@ fn mcp_tool_call_in_disabled_repo_returns_repo_not_enabled() {
 }
 
 #[test]
+fn mcp_context_render_defaults_to_current_session_workspace() {
+    let temp_root = temp_root("stateful-mcp-context-render-session");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let identity = stateful_cli::repo_identity_for_enabled_repo(&paths, &repo_root)
+        .expect("repo identity should resolve");
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok","prompt_text":""}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    write_current_session_file_for_codex_run(&repo_root, "run-a", &CurrentSession::new("s1", "w1"))
+        .expect("run-bound current session should write");
+
+    let response = run_mcp_jsonrpc_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[("STATEFUL_CODEX_RUN_ID", "run-a")],
+        r#"{
+          "jsonrpc":"2.0",
+          "id":2,
+          "method":"tools/call",
+          "params":{
+            "name":"state_context_render",
+            "arguments":{
+              "mode":"brief",
+              "resource":"src/auth.ts"
+            }
+          }
+        }"#,
+    );
+
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("POST /v1/context/render HTTP/1.1"));
+    assert!(request.contains("Authorization: Bearer secret-token"));
+    let body = request_json_body(&request);
+    assert_eq!(body["session_id"], "s1");
+    assert_eq!(body["workspace_id"], "w1");
+    assert_eq!(body["mode"], "brief");
+    assert_eq!(body["resource"], "src/auth.ts");
+    assert_eq!(body["repo_id"], identity.repo_id);
+    assert_eq!(body["worktree_id"], identity.worktree_id);
+    assert_eq!(body["root"], identity.root);
+
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 2);
+    assert_eq!(json["result"]["isError"], false);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
     let temp_root = temp_root("stateful-mcp-intent-declare");
     let paths = GlobalPaths::new(temp_root.join("home"));
@@ -1011,7 +1063,57 @@ fn mcp_lease_acquire_with_codex_run_requires_run_bound_session_file() {
 }
 
 #[test]
-fn mcp_lease_acquire_without_codex_run_rejects_legacy_current_session_before_http() {
+fn mcp_lease_acquire_without_stateful_run_id_uses_codex_thread_bound_session() {
+    let temp_root = temp_root("stateful-mcp-codex-thread-session");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    write_current_session_file_for_codex_run(
+        &repo_root,
+        "run-a",
+        &CurrentSession::new("thread-a", "workspace-a"),
+    )
+    .expect("run-bound current session should write");
+
+    let response = run_mcp_jsonrpc_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[("CODEX_THREAD_ID", "thread-a")],
+        r#"{
+          "jsonrpc":"2.0",
+          "id":12,
+          "method":"tools/call",
+          "params":{
+            "name":"state_lease_acquire",
+            "arguments":{
+              "path":"src/auth.ts"
+            }
+          }
+        }"#,
+    );
+
+    let request = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("lease acquire request should arrive");
+    assert!(request.contains("POST /v1/lease/acquire HTTP/1.1"));
+    let body = request_json_body(&request);
+    assert_eq!(body["session_id"], "thread-a");
+    assert_eq!(body["workspace_id"], "workspace-a");
+    assert_eq!(body["path"], "src/auth.ts");
+
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 12);
+    assert_eq!(json["result"]["isError"], false);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_lease_acquire_without_codex_identifiers_rejects_legacy_current_session_before_http() {
     let temp_root = temp_root("stateful-mcp-codex-run-required");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
@@ -1029,7 +1131,7 @@ fn mcp_lease_acquire_without_codex_run_rejects_legacy_current_session_before_htt
         &paths,
         r#"{
           "jsonrpc":"2.0",
-          "id":12,
+          "id":13,
           "method":"tools/call",
           "params":{
             "name":"state_lease_acquire",
@@ -1042,17 +1144,17 @@ fn mcp_lease_acquire_without_codex_run_rejects_legacy_current_session_before_htt
 
     let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
     assert_eq!(json["jsonrpc"], "2.0");
-    assert_eq!(json["id"], 12);
+    assert_eq!(json["id"], 13);
     assert_eq!(json["result"]["isError"], true);
     assert!(
         json["result"]["content"][0]["text"]
             .as_str()
             .unwrap_or_default()
-            .contains("STATEFUL_CODEX_RUN_ID is required")
+            .contains("STATEFUL_CODEX_RUN_ID or CODEX_THREAD_ID is required")
     );
     assert!(
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
-        "missing Codex run id should fail before HTTP"
+        "missing Codex identifiers should fail before HTTP"
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");

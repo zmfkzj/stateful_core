@@ -3694,7 +3694,8 @@ async fn context_render_returns_empty_prompt_when_no_blocking_state_exists() {
             "/v1/context/render",
             serde_json::json!({
                 "mode": "detailed",
-                "resource": "src/auth.ts"
+                "resource": "src/auth.ts",
+                "workspace_id": "w1"
             }),
         ))
         .await
@@ -3707,6 +3708,27 @@ async fn context_render_returns_empty_prompt_when_no_blocking_state_exists() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["status"], "ok");
     assert_eq!(json["prompt_text"], "");
+}
+
+#[tokio::test]
+async fn context_render_rejects_missing_workspace_id() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "resource": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["message"], "workspace_id is required");
 }
 
 #[tokio::test]
@@ -3733,7 +3755,8 @@ async fn context_render_includes_live_current_state_purpose() {
             "/v1/context/render",
             serde_json::json!({
                 "mode": "detailed",
-                "resource": "src/auth.ts"
+                "resource": "src/auth.ts",
+                "workspace_id": "w1"
             }),
         ))
         .await
@@ -3751,6 +3774,312 @@ async fn context_render_includes_live_current_state_purpose() {
             .unwrap_or_default()
             .contains("purpose: Fix auth validation behavior")
     );
+}
+
+#[tokio::test]
+async fn context_render_filters_items_to_requested_workspace() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare_w1 = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "Fix auth validation behavior.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("w1 intent declaration should complete");
+    assert_eq!(declare_w1.status(), StatusCode::OK);
+
+    let declare_w2 = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s2",
+            "w2",
+            serde_json::json!({
+                "purpose": "Update public docs from a separate workspace.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("w2 intent declaration should complete");
+    assert_eq!(declare_w2.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "resource": "src/auth.ts",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["workspace_id"], "w1");
+    assert_eq!(items[0]["purpose"], "Fix auth validation behavior.");
+    assert_eq!(json["current"]["session_count"], 0);
+    assert_eq!(json["current"]["active_intent_count"], 1);
+    assert_eq!(json["current"]["event_count"], 1);
+    let prompt_text = json["prompt_text"].as_str().unwrap_or_default();
+    assert!(prompt_text.contains("purpose: Fix auth validation behavior"));
+    assert!(!prompt_text.contains("Update public docs from a separate workspace"));
+}
+
+#[tokio::test]
+async fn context_render_filters_items_to_requested_repo_identity() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare_repo_1 = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "shared",
+            serde_json::json!({
+                "purpose": "Fix stateful core LAN behavior.",
+                "files_planned": ["crates/stateful-cli/src/lan.rs"]
+            }),
+        ))
+        .await
+        .expect("repo-1 intent declaration should complete");
+    assert_eq!(declare_repo_1.status(), StatusCode::OK);
+
+    let mut repo_2_body = protocol_body(
+        "s2",
+        "shared",
+        serde_json::json!({
+            "purpose": "Investigate edge camera framedrops.",
+            "files_planned": ["record/hw/vision_module.py"]
+        }),
+    );
+    repo_2_body["workspace"]["root"] = serde_json::json!("/Users/arthur/Code/edge/core");
+    repo_2_body["workspace"]["repo_id"] = serde_json::json!("repo-2");
+    repo_2_body["workspace"]["worktree_id"] = serde_json::json!("worktree-2");
+    repo_2_body["workspace"]["branch"] = serde_json::json!("frame-drops");
+
+    let declare_repo_2 = app
+        .clone()
+        .oneshot(json_request("/v1/intent/declare", repo_2_body))
+        .await
+        .expect("repo-2 intent declaration should complete");
+    assert_eq!(declare_repo_2.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "shared",
+                "repo_id": "repo-1",
+                "worktree_id": "worktree-1",
+                "root": "/repo"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["purpose"], "Fix stateful core LAN behavior.");
+    let prompt_text = json["prompt_text"].as_str().unwrap_or_default();
+    assert!(prompt_text.contains("Fix stateful core LAN behavior"));
+    assert!(!prompt_text.contains("Investigate edge camera framedrops"));
+}
+
+#[tokio::test]
+async fn context_render_keeps_identity_filtered_queued_workflow_state_visible() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let request = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s1",
+            "shared",
+            serde_json::json!({
+                "request_id": "request-1",
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "purpose": "Claim queued auth update."
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(request.status(), StatusCode::OK);
+    let json = response_json(request, 4096).await;
+    assert_eq!(json["request_state"], "reserved");
+    let wait_id = json["reservation"]["wait_id"]
+        .as_str()
+        .expect("reservation should include wait_id")
+        .to_string();
+
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "shared",
+                "repo_id": "repo-1",
+                "worktree_id": "worktree-1",
+                "root": "/repo"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(items.iter().any(|item| {
+        item["kind"] == "reservation" && item["purpose"] == "Claim queued auth update."
+    }));
+
+    let claim = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/claim",
+            "s1",
+            "shared",
+            serde_json::json!({
+                "wait_id": wait_id
+            }),
+        ))
+        .await
+        .expect("intent claim should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "shared",
+                "repo_id": "repo-1",
+                "worktree_id": "worktree-1",
+                "root": "/repo"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response, 8192).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(items.iter().any(|item| {
+        item["kind"] == "intent" && item["purpose"] == "Claim queued auth update."
+    }));
+    assert!(
+        items
+            .iter()
+            .any(|item| item["kind"] == "lease" && item["purpose"] == "Claim queued auth update.")
+    );
+}
+
+#[tokio::test]
+async fn intent_request_retry_backfills_identity_for_filtered_context_render() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let mut missing_identity = protocol_body(
+        "s1",
+        "shared",
+        serde_json::json!({
+            "request_id": "request-backfill",
+            "action": "write_file",
+            "path": "src/auth.ts",
+            "purpose": "Backfill queued auth identity."
+        }),
+    );
+    missing_identity["workspace"]["repo_id"] = serde_json::json!("");
+    missing_identity["workspace"]["worktree_id"] = serde_json::json!("");
+    missing_identity["workspace"]["root"] = serde_json::json!("");
+    missing_identity["workspace"]["branch"] = serde_json::json!("");
+
+    let request = app
+        .clone()
+        .oneshot(json_request("/v1/intent/request", missing_identity))
+        .await
+        .expect("initial intent request should complete");
+    assert_eq!(request.status(), StatusCode::OK);
+    let json = response_json(request, 4096).await;
+    assert_eq!(json["request_state"], "reserved");
+
+    let filtered = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "shared",
+                "repo_id": "repo-1",
+                "worktree_id": "worktree-1",
+                "root": "/repo"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(filtered.status(), StatusCode::OK);
+    let json = response_json(filtered, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(
+        !items
+            .iter()
+            .any(|item| item["purpose"] == "Backfill queued auth identity.")
+    );
+
+    let retry = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s1",
+            "shared",
+            serde_json::json!({
+                "request_id": "request-backfill",
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "purpose": "Retry keeps original purpose."
+            }),
+        ))
+        .await
+        .expect("retry intent request should complete");
+    assert_eq!(retry.status(), StatusCode::OK);
+    let json = response_json(retry, 4096).await;
+    assert_eq!(json["request_state"], "reserved");
+    assert_eq!(
+        json["reservation"]["purpose"],
+        "Backfill queued auth identity."
+    );
+
+    let filtered = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "shared",
+                "repo_id": "repo-1",
+                "worktree_id": "worktree-1",
+                "root": "/repo"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(filtered.status(), StatusCode::OK);
+    let json = response_json(filtered, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(items.iter().any(|item| {
+        item["kind"] == "reservation" && item["purpose"] == "Backfill queued auth identity."
+    }));
 }
 
 #[tokio::test]
