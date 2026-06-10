@@ -602,6 +602,18 @@ impl<'a> PolicyService<'a> {
             {
                 return Err("intent request owner mismatch".to_string());
             }
+            let existing = self
+                .store
+                .backfill_waiter_identity_if_missing(
+                    &existing.wait_id,
+                    workspace_identity(
+                        &input.repo_id,
+                        &input.worktree_id,
+                        &input.root,
+                        &input.branch,
+                    ),
+                )
+                .map_err(|error| error.to_string())?;
             return self.request_outcome(input.request_id, existing);
         }
 

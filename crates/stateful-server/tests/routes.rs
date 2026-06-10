@@ -3988,6 +3988,101 @@ async fn context_render_keeps_identity_filtered_queued_workflow_state_visible() 
 }
 
 #[tokio::test]
+async fn intent_request_retry_backfills_identity_for_filtered_context_render() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let mut missing_identity = protocol_body(
+        "s1",
+        "shared",
+        serde_json::json!({
+            "request_id": "request-backfill",
+            "action": "write_file",
+            "path": "src/auth.ts",
+            "purpose": "Backfill queued auth identity."
+        }),
+    );
+    missing_identity["workspace"]["repo_id"] = serde_json::json!("");
+    missing_identity["workspace"]["worktree_id"] = serde_json::json!("");
+    missing_identity["workspace"]["root"] = serde_json::json!("");
+    missing_identity["workspace"]["branch"] = serde_json::json!("");
+
+    let request = app
+        .clone()
+        .oneshot(json_request("/v1/intent/request", missing_identity))
+        .await
+        .expect("initial intent request should complete");
+    assert_eq!(request.status(), StatusCode::OK);
+    let json = response_json(request, 4096).await;
+    assert_eq!(json["request_state"], "reserved");
+
+    let filtered = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "shared",
+                "repo_id": "repo-1",
+                "worktree_id": "worktree-1",
+                "root": "/repo"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(filtered.status(), StatusCode::OK);
+    let json = response_json(filtered, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(
+        !items
+            .iter()
+            .any(|item| item["purpose"] == "Backfill queued auth identity.")
+    );
+
+    let retry = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s1",
+            "shared",
+            serde_json::json!({
+                "request_id": "request-backfill",
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "purpose": "Retry keeps original purpose."
+            }),
+        ))
+        .await
+        .expect("retry intent request should complete");
+    assert_eq!(retry.status(), StatusCode::OK);
+    let json = response_json(retry, 4096).await;
+    assert_eq!(json["request_state"], "reserved");
+    assert_eq!(
+        json["reservation"]["purpose"],
+        "Backfill queued auth identity."
+    );
+
+    let filtered = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "shared",
+                "repo_id": "repo-1",
+                "worktree_id": "worktree-1",
+                "root": "/repo"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(filtered.status(), StatusCode::OK);
+    let json = response_json(filtered, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(items.iter().any(|item| {
+        item["kind"] == "reservation" && item["purpose"] == "Backfill queued auth identity."
+    }));
+}
+
+#[tokio::test]
 async fn reconcile_ack_records_acknowledgement() {
     let app = build_router(ServerConfig::new("secret-token"));
 

@@ -363,12 +363,21 @@ fn handle_pre_tool_use_with_runtime(
     cwd: Option<&Path>,
 ) -> anyhow::Result<HookOutcome> {
     let input: PreToolUseInput = serde_json::from_str(input)?;
+    let identity = repo_root.and_then(|repo_root| {
+        GlobalPaths::from_env()
+            .ok()
+            .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok())
+    });
 
     match input.tool_name.as_str() {
         "Bash" => authorize_bash(&input),
-        "apply_patch" => authorize_apply_patch(&input, runtime, repo_root, cwd),
-        "file_change" => authorize_file_change_tool(&input, runtime, repo_root, cwd),
-        "Edit" | "Write" => authorize_file_write_tool(&input, runtime, repo_root, cwd),
+        "apply_patch" => authorize_apply_patch(&input, runtime, repo_root, cwd, identity.as_ref()),
+        "file_change" => {
+            authorize_file_change_tool(&input, runtime, repo_root, cwd, identity.as_ref())
+        }
+        "Edit" | "Write" => {
+            authorize_file_write_tool(&input, runtime, repo_root, cwd, identity.as_ref())
+        }
         tool_name if tool_name.starts_with("mcp__filesystem__") => Ok(HookOutcome::Deny {
             reason: "filesystem MCP writes require stateful authorization; read-only MCP calls are not yet classified".to_string(),
         }),
@@ -786,6 +795,7 @@ fn authorize_apply_patch(
     runtime: Option<&ServerRuntime>,
     repo_root: Option<&Path>,
     cwd: Option<&Path>,
+    identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<HookOutcome> {
     let Some(patch) = input.patch_text() else {
         return Ok(HookOutcome::Deny {
@@ -807,7 +817,7 @@ fn authorize_apply_patch(
             reason: "apply_patch target is outside the enabled repo".to_string(),
         });
     };
-    authorize_targets(input, runtime, targets)
+    authorize_targets(input, runtime, targets, identity)
 }
 
 fn authorize_file_change_tool(
@@ -815,6 +825,7 @@ fn authorize_file_change_tool(
     runtime: Option<&ServerRuntime>,
     repo_root: Option<&Path>,
     cwd: Option<&Path>,
+    identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<HookOutcome> {
     let targets = extract_file_change_targets(&input.tool_input);
     if targets.is_empty() {
@@ -828,7 +839,7 @@ fn authorize_file_change_tool(
             reason: "file_change target is outside the enabled repo".to_string(),
         });
     };
-    authorize_targets(input, runtime, targets)
+    authorize_targets(input, runtime, targets, identity)
 }
 
 fn authorize_file_write_tool(
@@ -836,6 +847,7 @@ fn authorize_file_write_tool(
     runtime: Option<&ServerRuntime>,
     repo_root: Option<&Path>,
     cwd: Option<&Path>,
+    identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<HookOutcome> {
     let Some(path) = input
         .tool_input
@@ -859,7 +871,7 @@ fn authorize_file_write_tool(
         });
     };
 
-    authorize_targets(input, runtime, vec![PatchTarget::write(&target)])
+    authorize_targets(input, runtime, vec![PatchTarget::write(&target)], identity)
 }
 
 fn normalize_targets(
@@ -940,6 +952,7 @@ fn authorize_targets(
     input: &PreToolUseInput,
     runtime: Option<&ServerRuntime>,
     targets: Vec<PatchTarget>,
+    identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<HookOutcome> {
     let Some(runtime) = runtime else {
         return Ok(HookOutcome::Deny {
@@ -973,7 +986,7 @@ fn authorize_targets(
             request_id: uuid::Uuid::new_v4().to_string(),
             session_id: input.session_id.clone(),
             workspace_id: runtime.workspace_id.clone(),
-            identity: None,
+            identity: identity.cloned(),
             source_kind: "hook",
             event: "pre_tool_use",
             source_ref: "hook:pre_tool_use",

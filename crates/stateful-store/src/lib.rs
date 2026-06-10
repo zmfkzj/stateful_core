@@ -1385,6 +1385,17 @@ impl Store {
         }
     }
 
+    pub fn backfill_waiter_identity_if_missing(
+        &self,
+        wait_id: impl AsRef<str>,
+        identity: WorkspaceIdentity<'_>,
+    ) -> StoreResult<WaitRecord> {
+        let wait_id = wait_id.as_ref();
+        self.update_waiter_identity_if_missing(wait_id, identity)?;
+        self.waiter(wait_id)?
+            .ok_or(StoreError::IntentRequestNotFound)
+    }
+
     pub fn cancel_intent_request(
         &self,
         request_id: impl AsRef<str>,

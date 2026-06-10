@@ -1280,6 +1280,26 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     assert_eq!(body["protocol_version"], "stateful.v1");
     assert_eq!(body["session"]["session_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
+    assert!(
+        body["workspace"]["repo_id"]
+            .as_str()
+            .expect("repo_id should be a string")
+            .starts_with("repo-")
+    );
+    assert_eq!(
+        body["workspace"]["worktree_id"],
+        body["workspace"]["repo_id"]
+    );
+    assert_eq!(
+        body["workspace"]["root"],
+        repo_root.to_string_lossy().as_ref()
+    );
+    assert!(
+        !body["workspace"]["branch"]
+            .as_str()
+            .expect("branch should be a string")
+            .is_empty()
+    );
     assert_eq!(body["source"]["kind"], "hook");
     assert_eq!(body["source"]["event"], "pre_tool_use");
     assert_eq!(body["payload"]["action"], "write_file");
