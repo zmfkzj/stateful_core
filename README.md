@@ -26,7 +26,7 @@ This repository is an early Rust implementation and local-first, macOS-first
 prototype. The current implementation is Codex-first and includes a CLI,
 global user-level installation with repo allowlist gating, a local HTTP state
 server, MCP adapter, Codex hook adapter, SQLite-backed state store, sandboxed
-test execution, structured commit/push wrappers, outbox sync, and benchmark
+test execution, sandboxed git operations, outbox sync, and benchmark
 tooling.
 
 APIs, configuration files, and command behavior may change while the project is
@@ -108,8 +108,8 @@ Resume signals are available through:
 ## What It Provides
 
 - A `stateful` CLI for installation, repo enablement, status, current-state
-  inspection, intent declaration, MCP, hooks, structured commit and push
-  wrappers, outbox sync, and server lifecycle management.
+  inspection, intent declaration, MCP, hooks, sandboxed git operations, outbox
+  sync, and server lifecycle management.
 - A local HTTP state server with token-protected non-health endpoints.
 - A SQLite event store and materialized current-state summary.
 - Codex lifecycle hook integration for observing and gating important actions.
@@ -157,11 +157,18 @@ The benchmark binary is built as `target/debug/stateful-bench`.
 
 ## Quick Start
 
-Install the user-level Codex integration. Without `--yes`, this command prints
-a dry-run plan.
+Install the user-level stateful files. Without `--yes`, this command prints a
+dry-run plan.
 
 ```bash
 stateful install --yes
+```
+
+Install the Codex integration when you want global Codex hooks, MCP, and the
+stateful command-policy skill:
+
+```bash
+stateful install --agent codex --yes
 ```
 
 Opt the current git repository into stateful enforcement:
@@ -261,10 +268,11 @@ stateful doctor
 
 ## CLI Overview
 
-- `stateful install [--yes] [--codex-config <path>] [--binary <path>]`
-  installs global stateful files, installs the global
-  `stateful-command-policy` skill, and merges Codex config. It is a dry run
+- `stateful install [--yes]` installs global stateful files. It is a dry run
   unless `--yes` is passed.
+- `stateful install --agent codex [--yes] [--codex-config <path>] [--binary <path>]`
+  installs global stateful files, installs the global
+  `stateful-command-policy` skill, and merges Codex config.
 - `stateful enable [--repo <path>]`, `stateful disable`, and
   `stateful repos list` manage the repo allowlist used by global hooks.
 - `stateful server start` starts the HTTP state server detached by default and
@@ -301,12 +309,9 @@ stateful doctor
 - `stateful sandbox run --fs write-targets --write-dir target --command <cmd>`
   runs command-shaped tests or checks with artifact writes limited to `target/`
   after exact directory intent and a successful same-session directory lease.
-- `stateful commit -m <message> -- <paths...>` creates a structured commit for
-  explicit file paths. The `--` separator is required.
-- `stateful push [remote branch]` pushes the current branch through a structured
-  wrapper. With no arguments it uses the configured upstream; with arguments it
-  requires both remote and branch, requires the branch to match the current
-  branch, requires a clean worktree, and rejects force-like target values.
+- `stateful sandbox run --fs git --network enabled --command 'git <args>'`
+  runs a single git command with the repo worktree and Git internals writable
+  inside the OS sandbox. Use `--network disabled` for local-only git operations.
 - `stateful codex [--codex-bin <path>] [--sandbox passthrough|read-only-tmp] [--no-stateful] -- <args...>`
   runs Codex with pass-through session configuration by default.
   `--sandbox read-only-tmp` remains available as a Codex filesystem profile,
@@ -346,13 +351,11 @@ used by CLI and MCP calls. `UserPromptSubmit` renders brief current-state
 context. `PreToolUse` authorizes supported tool actions. `PostToolUse` records
 activity or heartbeats. `Stop` finalizes activity and releases leases.
 
-`SessionStart` uses the Codex hook `thread_id` as the Stateful session id when
-Codex provides it, falling back to the hook `session_id` for older payloads. It
-writes `.stateful_core/runtime/sessions/<thread_id>.json` plus the current
+Hooks use the runtime payload `session_id` as the Stateful session id. They
+write `.stateful_core/runtime/sessions/<session_id>.json` plus the current
 session alias `.stateful_core/runtime/session.json`. Session-bound MCP tools use
-`CODEX_THREAD_ID` when Codex forwards it, falling back to
-`STATEFUL_CODEX_RUN_ID`. If the MCP server was started without those
-per-session variables, the tools fall back to
+`STATEFUL_SESSION_ID` to select the matching session-bound file. If that
+variable is not present, the tools fall back to
 `.stateful_core/runtime/session.json` only after verifying that its `session_id`
 has a matching session-bound file with identical contents.
 
@@ -390,7 +393,9 @@ absolute `stateful` binary running
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
 --command <cmd>` for Bash-hook command-shaped read-only inspection that needs a
 shell, and use `--fs write-targets` with explicit targets for Bash-hook
-command-shaped writes.
+command-shaped writes. Git operations use `--fs git`, which accepts a single
+`git ...` command, rejects explicit write targets, and opens the repo worktree
+and Git internals as the writable sandbox scope.
 
 Command-shaped writes should use
 `stateful sandbox run --fs write-targets --write-target <path> ... --command <cmd>`,
@@ -466,7 +471,8 @@ Most MCP tools map directly to HTTP routes. `state_file_write` /
 Use native Codex edit tools for file edits after exact intent declaration and a
 successful same-session file lease, and use
 `stateful sandbox run --fs write-targets ... --command ...` for command-shaped
-writes.
+writes. Use `stateful sandbox run --fs git ... --command 'git <args>'` for git
+operations.
 
 The `/v1/authorize` endpoint and the intent declare/request/claim/cancel
 endpoints require the `stateful.v1` request envelope with `payload`. Flat
@@ -545,12 +551,9 @@ bundled.
 - `STATEFUL_SERVER_URL` and `STATEFUL_SERVER_TOKEN` override runtime discovery
   when both are set. The referenced server must expose the current runtime
   capabilities, including sandbox write-directory authorization.
-- `CODEX_THREAD_ID` is the Codex thread id used by session-bound tools when
-  present. It selects `.stateful_core/runtime/sessions/<thread_id>.json`.
-- `STATEFUL_CODEX_RUN_ID` is a compatibility fallback when `CODEX_THREAD_ID` is
-  not present. Some Codex MCP launches do not forward a per-thread value; in
-  that case stateful MCP tools use the hook-written current session alias only
-  if it verifies against the matching session-bound file.
+- `STATEFUL_SESSION_ID` selects the session-bound current-session file at
+  `.stateful_core/runtime/sessions/<session_id>.json` for MCP tools and other
+  session-bound callers. Codex-specific session env aliases are ignored.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
   authorize Bash. Bash authorization goes through a trusted
   `<absolute-stateful-binary> sandbox run` wrapper command.
@@ -562,8 +565,8 @@ bundled.
 - `crates/stateful-store`: SQLite event store and current-state persistence.
 - `crates/stateful-server`: local HTTP API over the shared policy and store.
 - `crates/stateful-cli`: user-facing CLI, hook adapter, runtime discovery,
-  repo registry, structured commit/push wrappers, outbox sync, and sandbox
-  wrappers.
+  repo registry, outbox sync, and sandbox wrappers for command-shaped writes and
+  git operations.
 - `crates/stateful-mcp`: MCP tool surface.
 - `crates/stateful-bench`: benchmark tooling for fetching datasets, preparing
   pairs, sampling, running paired agents, reporting, comparing, and synthetic

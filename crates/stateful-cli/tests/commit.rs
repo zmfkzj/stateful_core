@@ -1,17 +1,10 @@
 use std::{
     fs,
-    io::{Read, Write},
-    net::TcpListener,
     process::Command,
-    sync::{Arc, Mutex, mpsc},
-    thread,
+    sync::{Arc, Mutex},
 };
 
-use stateful_cli::{
-    CommitRequest, CurrentSession, GlobalPaths, STATEFUL_CODEX_RUN_ID_ENV, ServerRuntime,
-    run_structured_commit, write_current_session_file, write_current_session_file_for_codex_run,
-    write_global_runtime_file,
-};
+use stateful_cli::{CommitRequest, run_structured_commit};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -246,125 +239,6 @@ fn structured_commit_rejects_unrelated_staged_changes() {
             .expect_err("unrelated staged changes should be rejected")
             .to_string()
             .contains("unrelated staged changes")
-    );
-}
-
-#[test]
-fn structured_commit_command_ignores_ambient_git_index_file() {
-    let root = git_repo("stateful-commit-ambient-git-index");
-    let paths = GlobalPaths::new(root.path().join("home"));
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "base\n").expect("plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::write(root.path().join("docs/plan.md"), "updated\n").expect("plan should update");
-    fs::write(root.path().join("docs/other.md"), "other\n").expect("other should write");
-    let alternate_index = root.path().join("alternate.index");
-    fs::copy(root.path().join(".git/index"), &alternate_index).expect("index should copy");
-    let add_other = Command::new("git")
-        .args(["add", "docs/other.md"])
-        .current_dir(root.path())
-        .env("GIT_INDEX_FILE", &alternate_index)
-        .status()
-        .expect("git with alternate index should run");
-    assert!(
-        add_other.success(),
-        "alternate index git add should succeed"
-    );
-    write_current_session_file(root.path(), &CurrentSession::new("s-env", "w-session"))
-        .expect("current session should write");
-    let (runtime, rx) = spawn_fake_authorize_server();
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let output = stateful_command(
-        root.path(),
-        &paths,
-        &["commit", "-m", "docs: update plan", "--", "docs/plan.md"],
-    )
-    .env("GIT_INDEX_FILE", &alternate_index)
-    .output()
-    .expect("stateful commit should run");
-
-    assert!(
-        output.status.success(),
-        "stateful commit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("\"path\":\"docs/plan.md\""));
-    let show = git_output(root.path(), &["show", "--name-only", "--format=", "HEAD"]);
-    assert!(show.lines().any(|line| line == "docs/plan.md"));
-    assert!(!show.lines().any(|line| line == "docs/other.md"));
-}
-
-#[test]
-fn structured_commit_command_ignores_ambient_git_namespace() {
-    let root = git_repo("stateful-commit-ambient-git-namespace");
-    let paths = GlobalPaths::new(root.path().join("home"));
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "base\n").expect("plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::write(root.path().join("docs/plan.md"), "updated\n").expect("plan should update");
-    write_current_session_file(root.path(), &CurrentSession::new("s-env", "w-session"))
-        .expect("current session should write");
-    let (runtime, rx) = spawn_fake_authorize_server();
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let output = stateful_command(
-        root.path(),
-        &paths,
-        &["commit", "-m", "docs: update plan", "--", "docs/plan.md"],
-    )
-    .env("GIT_NAMESPACE", "shadow")
-    .output()
-    .expect("stateful commit should run");
-
-    assert!(
-        output.status.success(),
-        "stateful commit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("\"path\":\"docs/plan.md\""));
-    let contents = git_output(root.path(), &["show", "HEAD:docs/plan.md"]);
-    assert_eq!(contents, "updated\n");
-}
-
-#[test]
-fn structured_commit_command_ignores_ambient_git_trace_file() {
-    let root = git_repo("stateful-commit-ambient-git-trace");
-    let paths = GlobalPaths::new(root.path().join("home"));
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "base\n").expect("plan should write");
-    fs::write(root.path().join("docs/other.md"), "keep\n").expect("other should write");
-    git(root.path(), &["add", "docs/plan.md", "docs/other.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::write(root.path().join("docs/plan.md"), "updated\n").expect("plan should update");
-    write_current_session_file(root.path(), &CurrentSession::new("s-env", "w-session"))
-        .expect("current session should write");
-    let (runtime, rx) = spawn_fake_authorize_server();
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let output = stateful_command(
-        root.path(),
-        &paths,
-        &["commit", "-m", "docs: update plan", "--", "docs/plan.md"],
-    )
-    .env("GIT_TRACE", root.path().join("docs/other.md"))
-    .output()
-    .expect("stateful commit should run");
-
-    assert!(
-        output.status.success(),
-        "stateful commit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("\"path\":\"docs/plan.md\""));
-    assert_eq!(
-        fs::read_to_string(root.path().join("docs/other.md")).expect("other should read"),
-        "keep\n"
     );
 }
 
@@ -973,148 +847,6 @@ fn structured_commit_allows_independent_delete_and_add_across_explicit_paths() {
 }
 
 #[test]
-fn structured_commit_command_from_subdir_uses_git_root_session_and_paths() {
-    let root = git_repo("stateful-commit-subdir");
-    let paths = GlobalPaths::new(root.path().join("home"));
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    write_current_session_file(root.path(), &CurrentSession::new("s-subdir", "w-session"))
-        .expect("current session should write");
-    let (runtime, rx) = spawn_fake_authorize_server();
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let output = stateful_command(
-        &root.path().join("docs"),
-        &paths,
-        &["commit", "-m", "docs: add plan", "--", "./plan.md"],
-    )
-    .output()
-    .expect("stateful commit should run");
-
-    assert!(
-        output.status.success(),
-        "stateful commit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("\"session_id\":\"s-subdir\""));
-    assert!(request.contains("\"workspace_id\":\"w-session\""));
-    assert!(request.contains("\"path\":\"docs/plan.md\""));
-    let show = git_output(root.path(), &["show", "--name-only", "--format=", "HEAD"]);
-    assert!(show.lines().any(|line| line == "docs/plan.md"));
-}
-
-#[test]
-fn structured_commit_command_from_subdir_preserves_whitespace_file_paths() {
-    let root = git_repo("stateful-commit-subdir-whitespace-path");
-    let paths = GlobalPaths::new(root.path().join("home"));
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/report.md"), "normal\n").expect("normal report should write");
-    fs::write(root.path().join("docs/report.md "), "spaced\n").expect("spaced report should write");
-    write_current_session_file(root.path(), &CurrentSession::new("s-subdir", "w-session"))
-        .expect("current session should write");
-    let (runtime, rx) = spawn_fake_authorize_server();
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let output = stateful_command(
-        &root.path().join("docs"),
-        &paths,
-        &[
-            "commit",
-            "-m",
-            "docs: add spaced report",
-            "--",
-            "./report.md ",
-        ],
-    )
-    .output()
-    .expect("stateful commit should run");
-
-    assert!(
-        output.status.success(),
-        "stateful commit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("\"path\":\"docs/report.md \""));
-    let tree = git_output(root.path(), &["ls-tree", "-rz", "--name-only", "HEAD"]);
-    assert!(tree.split('\0').any(|line| line == "docs/report.md "));
-    assert!(!tree.split('\0').any(|line| line == "docs/report.md"));
-    assert_eq!(
-        git_output(root.path(), &["show", "HEAD:docs/report.md "]),
-        "spaced\n"
-    );
-}
-
-#[test]
-fn structured_commit_command_from_subdir_normalizes_parent_file_paths() {
-    let root = git_repo("stateful-commit-subdir-parent-path");
-    let paths = GlobalPaths::new(root.path().join("home"));
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("README.md"), "readme\n").expect("readme should write");
-    write_current_session_file(root.path(), &CurrentSession::new("s-subdir", "w-session"))
-        .expect("current session should write");
-    let (runtime, rx) = spawn_fake_authorize_server();
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let output = stateful_command(
-        &root.path().join("docs"),
-        &paths,
-        &["commit", "-m", "docs: add readme", "--", "../README.md"],
-    )
-    .output()
-    .expect("stateful commit should run");
-
-    assert!(
-        output.status.success(),
-        "stateful commit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("\"path\":\"README.md\""));
-    let show = git_output(root.path(), &["show", "--name-only", "--format=", "HEAD"]);
-    assert!(show.lines().any(|line| line == "README.md"));
-}
-
-#[test]
-fn structured_commit_command_uses_codex_run_session_when_legacy_current_session_changed() {
-    let root = git_repo("stateful-commit-codex-run-session");
-    let paths = GlobalPaths::new(root.path().join("home"));
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    write_current_session_file(root.path(), &CurrentSession::new("s-other", "w-session"))
-        .expect("legacy current session should write");
-    write_current_session_file_for_codex_run(
-        root.path(),
-        "s-run",
-        &CurrentSession::new("s-run", "w-session"),
-    )
-    .expect("session-bound current session should write");
-    let (runtime, rx) = spawn_fake_authorize_server();
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let output = stateful_command(
-        root.path(),
-        &paths,
-        &["commit", "-m", "docs: add plan", "--", "docs/plan.md"],
-    )
-    .env(STATEFUL_CODEX_RUN_ID_ENV, "s-run")
-    .output()
-    .expect("stateful commit should run");
-
-    assert!(
-        output.status.success(),
-        "stateful commit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let request = rx.recv().expect("captured request should arrive");
-    let body = request_json_body(&request);
-    assert_eq!(body["session"]["session_id"], "s-run");
-    assert_eq!(body["workspace"]["workspace_id"], "w-session");
-    assert_eq!(body["payload"]["path"], "docs/plan.md");
-}
-
-#[test]
 fn structured_commit_stages_only_explicit_paths_and_commits() {
     let root = git_repo("stateful-commit-success");
     fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
@@ -1336,75 +1068,6 @@ fn structured_commit_restores_unrelated_index_entries_added_by_failed_hook() {
     assert!(root.path().join("generated.txt").exists());
 }
 
-#[test]
-fn structured_commit_command_discovers_global_runtime_for_authorization() {
-    let root = git_repo("stateful-commit-global-runtime");
-    let paths = GlobalPaths::new(root.path().join("home"));
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    write_current_session_file(root.path(), &CurrentSession::new("s-global", "w-session"))
-        .expect("current session should write");
-
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let addr = listener.local_addr().expect("listener addr should load");
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request(&mut stream);
-        tx.send(request).expect("request should send to test");
-        write_json_response(
-            &mut stream,
-            r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        );
-    });
-    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "global-w", 42);
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let output = stateful_command(
-        root.path(),
-        &paths,
-        &["commit", "-m", "docs: add plan", "--", "docs/plan.md"],
-    )
-    .output()
-    .expect("stateful commit should run");
-
-    assert!(
-        output.status.success(),
-        "stateful commit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let request = rx.recv().expect("captured request should arrive");
-    let body = request_json_body(&request);
-    assert!(request.contains("POST /v1/authorize HTTP/1.1"));
-    assert!(request.contains("Authorization: Bearer secret-token"));
-    assert_eq!(body["protocol_version"], "stateful.v1");
-    assert_eq!(body["session"]["session_id"], "s-global");
-    assert_eq!(body["workspace"]["workspace_id"], "w-session");
-    assert_eq!(body["source"]["kind"], "cli");
-    assert_eq!(body["source"]["event"], "commit_authorize");
-    assert_eq!(body["source"]["source_ref"], "stateful-commit");
-    assert_eq!(body["payload"]["action"], "write_file");
-    assert_eq!(body["payload"]["path"], "docs/plan.md");
-    assert!(body.get("action").is_none());
-}
-
-fn spawn_fake_authorize_server() -> (ServerRuntime, mpsc::Receiver<String>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let addr = listener.local_addr().expect("listener addr should load");
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request(&mut stream);
-        tx.send(request).expect("request should send to test");
-        write_json_response(
-            &mut stream,
-            r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        );
-    });
-    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "global-w", 42);
-    (runtime, rx)
-}
-
 fn git_repo(name: &str) -> tempfile_root::TempRoot {
     let root = tempfile_root::TempRoot::new(name);
     git(root.path(), &["init"]);
@@ -1414,22 +1077,6 @@ fn git_repo(name: &str) -> tempfile_root::TempRoot {
         &["config", "user.email", "stateful@example.invalid"],
     );
     root
-}
-
-fn stateful_command(cwd: &std::path::Path, paths: &GlobalPaths, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_stateful"));
-    command
-        .args(args)
-        .current_dir(cwd)
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("STATEFUL_HOME", &paths.home);
-    for key in ["TMPDIR", "TEMP", "TMP", "STATEFUL_SANDBOX_RUN_ACTIVE"] {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
-        }
-    }
-    command
 }
 
 fn git(root: &std::path::Path, args: &[&str]) {
@@ -1449,51 +1096,6 @@ fn git_output(root: &std::path::Path, args: &[&str]) -> String {
         .expect("git should run");
     assert!(output.status.success(), "git {args:?} should succeed");
     String::from_utf8(output.stdout).expect("git output should be utf8")
-}
-
-fn read_http_request(stream: &mut std::net::TcpStream) -> String {
-    let mut buffer = Vec::new();
-    let mut byte = [0_u8; 1];
-    while !buffer.ends_with(b"\r\n\r\n") {
-        stream
-            .read_exact(&mut byte)
-            .expect("request header byte should read");
-        buffer.push(byte[0]);
-    }
-
-    let headers = String::from_utf8(buffer.clone()).expect("headers should be utf8");
-    let content_length = headers
-        .lines()
-        .find_map(|line| line.strip_prefix("Content-Length: "))
-        .expect("content length should exist")
-        .parse::<usize>()
-        .expect("content length should parse");
-
-    let mut body = vec![0_u8; content_length];
-    stream
-        .read_exact(&mut body)
-        .expect("request body should read");
-    buffer.extend_from_slice(&body);
-
-    String::from_utf8(buffer).expect("request should be utf8")
-}
-
-fn request_json_body(request: &str) -> serde_json::Value {
-    let (_headers, body) = request
-        .split_once("\r\n\r\n")
-        .expect("request should contain body delimiter");
-    serde_json::from_str(body).expect("request body should be json")
-}
-
-fn write_json_response(stream: &mut std::net::TcpStream, body: &str) {
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream
-        .write_all(response.as_bytes())
-        .expect("response should write");
 }
 
 mod tempfile_root {

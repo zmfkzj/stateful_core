@@ -312,21 +312,13 @@ fn approval_required_guidance(request: &StoredExternalRunRequest) -> anyhow::Res
         "\
 External run approval required.
 
-Purpose:
-  {purpose}
-
-Write scope:
-{scope}
-
-Command:
-  {command}
+External run request details:
+{details}
 
 Copy and paste this command in a trusted terminal to approve and run:
   {binary} external-run approve {request_id} --run
 ",
-        purpose = request.purpose,
-        scope = format_scope(request),
-        command = request.command,
+        details = format_request_details(request),
         binary = shell_quote(&current_binary()),
         request_id = request.request_id,
     ))
@@ -345,18 +337,29 @@ Copy and paste this command to run it:
     ))
 }
 
-fn format_scope(request: &StoredExternalRunRequest) -> String {
-    let mut lines = Vec::new();
+fn format_request_details(request: &StoredExternalRunRequest) -> String {
+    let mut lines = vec![format!(
+        "  --purpose: {}",
+        approval_detail(&request.purpose)
+    )];
     for path in &request.write_targets {
-        lines.push(format!("  write-target: {path}"));
+        lines.push(format!("  --write-target: {path}"));
     }
     for path in &request.create_targets {
-        lines.push(format!("  create-target: {path}"));
+        lines.push(format!("  --create-target: {path}"));
     }
     for path in &request.write_dirs {
-        lines.push(format!("  write-dir: {path}"));
+        lines.push(format!("  --write-dir: {path}"));
     }
+    lines.push(format!(
+        "  --command: {}",
+        approval_detail(&request.command)
+    ));
     lines.join("\n")
+}
+
+fn approval_detail(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}"))
 }
 
 fn paths_from_strings(paths: &[String]) -> Vec<PathBuf> {

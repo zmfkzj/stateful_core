@@ -4,8 +4,8 @@ use std::{
 };
 
 use crate::{
-    GlobalPaths, InstallOptions, ServerRuntime, apply_global_install, detect_git_root, enable_repo,
-    runtime_from_remote, write_global_runtime_file,
+    CodexInstallOptions, GlobalPaths, ServerRuntime, apply_codex_install, detect_git_root,
+    enable_repo, runtime_from_remote, write_global_runtime_file,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +43,7 @@ pub struct ServerStartRuntimeResult {
 
 pub fn join_server_runtime(options: ServerJoinOptions) -> anyhow::Result<ServerJoinResult> {
     let runtime = runtime_from_remote(&options.base_url, &options.token, &options.workspace_id)?;
-    apply_global_install(InstallOptions {
+    apply_codex_install(CodexInstallOptions {
         yes: true,
         paths: options.paths.clone(),
         codex_config_path: options.codex_config_path,

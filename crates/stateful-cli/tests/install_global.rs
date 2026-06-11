@@ -4,7 +4,8 @@ use std::{
 };
 
 use stateful_cli::{
-    GlobalPaths, InstallOptions, RepoRegistry, apply_global_install, plan_global_install,
+    CodexInstallOptions, GlobalPaths, InstallOptions, RepoRegistry, apply_codex_install,
+    apply_global_install, plan_codex_install, plan_global_install,
 };
 
 #[cfg(unix)]
@@ -22,7 +23,28 @@ fn install_dry_run_does_not_write_files() {
     assert!(applied.summary.contains("dry-run"));
     assert!(plan.files.contains(&fixture.paths.home));
     assert!(plan.files.contains(&fixture.paths.state_db));
+    assert!(!plan.files.contains(&fixture.codex_config));
+    assert!(!fixture.paths.home.exists());
+    assert!(!fixture.codex_config.exists());
+}
+
+#[test]
+fn install_codex_dry_run_plans_codex_config_without_writing() {
+    let fixture = TestFixture::new("codex-dry-run");
+    let options = fixture.codex_options(false);
+
+    let plan = plan_codex_install(&options).expect("codex install should plan");
+    let applied = apply_codex_install(options).expect("dry-run codex install should succeed");
+    let skill_path = fixture
+        .codex_config_parent()
+        .join("skills/stateful-command-policy/SKILL.md");
+
+    assert!(plan.summary.contains("dry-run"));
+    assert!(applied.summary.contains("dry-run"));
+    assert!(plan.files.contains(&fixture.paths.home));
+    assert!(plan.files.contains(&fixture.paths.state_db));
     assert!(plan.files.contains(&fixture.codex_config));
+    assert!(plan.files.contains(&skill_path));
     assert!(!fixture.paths.home.exists());
     assert!(!fixture.codex_config.exists());
 }
@@ -32,6 +54,27 @@ fn install_yes_creates_global_files_and_database() {
     let fixture = TestFixture::new("yes");
 
     apply_global_install(fixture.options(true)).expect("install should apply");
+
+    assert!(fixture.paths.home.is_dir());
+    assert!(fixture.paths.runtime_dir.is_dir());
+    assert!(fixture.paths.repos_dir.is_dir());
+    assert!(fixture.paths.config_yml.is_file());
+    assert!(fixture.paths.state_db.is_file());
+    assert!(!fixture.codex_config.exists());
+    assert!(!fixture.codex_config_parent().join("hooks.json").exists());
+
+    let registry = RepoRegistry::load(&fixture.paths).expect("registry should load");
+    assert_eq!(registry, RepoRegistry::default());
+
+    let store = stateful_store::Store::open(&fixture.paths.state_db).expect("store should open");
+    assert_eq!(store.event_count().expect("event count should load"), 0);
+}
+
+#[test]
+fn install_codex_yes_creates_global_files_and_merges_codex_config() {
+    let fixture = TestFixture::new("codex-yes");
+
+    apply_codex_install(fixture.codex_options(true)).expect("install should apply");
 
     assert!(fixture.paths.home.is_dir());
     assert!(fixture.paths.runtime_dir.is_dir());
@@ -52,12 +95,12 @@ fn install_yes_creates_global_files_and_database() {
     assert!(first_config.contains("[mcp_servers.stateful]"));
     assert!(first_config.contains("command = \"/opt/stateful/bin/stateful\""));
     assert!(first_config.contains(
-        "env_vars = [\"STATEFUL_CODEX_RUN_ID\", \"CODEX_THREAD_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
+        "env_vars = [\"STATEFUL_SESSION_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
     ));
     assert!(first_config.contains("hook pre-tool-use"));
     assert_eq!(count(&first_config, "[features]"), 1);
 
-    apply_global_install(fixture.options(true)).expect("install should be idempotent");
+    apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");
 
     let second_config =
         fs::read_to_string(&fixture.codex_config).expect("codex config should reread");
@@ -68,10 +111,10 @@ fn install_yes_creates_global_files_and_database() {
 }
 
 #[test]
-fn install_yes_creates_global_command_policy_skill() {
+fn install_codex_yes_creates_global_command_policy_skill() {
     let fixture = TestFixture::new("skill");
 
-    apply_global_install(fixture.options(true)).expect("install should apply");
+    apply_codex_install(fixture.codex_options(true)).expect("install should apply");
 
     let skill_path = fixture
         .codex_config_parent()
@@ -85,7 +128,8 @@ fn install_yes_creates_global_command_policy_skill() {
     assert_eq!(command_policy_skill, source_command_policy_skill);
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
 
-    let plan = apply_global_install(fixture.options(true)).expect("install should be idempotent");
+    let plan =
+        apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");
     assert!(plan.files.contains(&skill_path));
     assert_eq!(
         fs::read_to_string(&skill_path).expect("global command policy skill should reread"),
@@ -100,7 +144,7 @@ fn install_yes_backs_up_existing_codex_config_before_merge() {
     fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
-    apply_global_install(fixture.options(true)).expect("install should apply");
+    apply_codex_install(fixture.codex_options(true)).expect("install should apply");
 
     let merged = fs::read_to_string(&fixture.codex_config).expect("merged config should read");
     assert!(merged.contains(existing));
@@ -118,7 +162,7 @@ fn install_yes_preserves_existing_features_and_enables_hooks() {
     fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
-    apply_global_install(fixture.options(true)).expect("install should apply");
+    apply_codex_install(fixture.codex_options(true)).expect("install should apply");
 
     let merged = fs::read_to_string(&fixture.codex_config).expect("merged config should read");
     assert_eq!(count(&merged, "[features]"), 1);
@@ -137,7 +181,7 @@ fn install_yes_preserves_quoted_project_tables() {
     fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
-    apply_global_install(fixture.options(true)).expect("install should apply");
+    apply_codex_install(fixture.codex_options(true)).expect("install should apply");
 
     let merged = fs::read_to_string(&fixture.codex_config).expect("merged config should read");
     assert!(merged.contains("[projects.\"/workspace/project\"]"));
@@ -153,7 +197,7 @@ fn install_yes_rejects_existing_unmarked_stateful_mcp_server() {
     fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
-    let error = apply_global_install(fixture.options(true))
+    let error = apply_codex_install(fixture.codex_options(true))
         .expect_err("unmarked stateful mcp config should conflict");
 
     assert!(error.to_string().contains("mcp_servers.stateful"));
@@ -171,7 +215,7 @@ fn install_yes_rejects_quoted_stateful_mcp_table_header() {
     fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
-    let error = apply_global_install(fixture.options(true))
+    let error = apply_codex_install(fixture.codex_options(true))
         .expect_err("quoted stateful mcp config should conflict");
 
     assert!(error.to_string().contains("unsupported"));
@@ -189,7 +233,7 @@ fn install_yes_rejects_quoted_stateful_mcp_table_header_with_escape() {
     fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
-    let error = apply_global_install(fixture.options(true))
+    let error = apply_codex_install(fixture.codex_options(true))
         .expect_err("quoted escaped stateful mcp config should conflict");
 
     assert!(error.to_string().contains("unsupported"));
@@ -207,7 +251,7 @@ fn install_yes_rejects_quoted_features_table_header_with_escape() {
     fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
-    let error = apply_global_install(fixture.options(true))
+    let error = apply_codex_install(fixture.codex_options(true))
         .expect_err("quoted escaped features config should conflict");
 
     assert!(error.to_string().contains("unsupported"));
@@ -225,7 +269,7 @@ fn install_yes_rejects_malformed_marker_block_without_writing() {
     fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
-    let error = apply_global_install(fixture.options(true))
+    let error = apply_codex_install(fixture.codex_options(true))
         .expect_err("unterminated stateful block should fail");
 
     assert!(error.to_string().contains("missing end marker"));
@@ -243,11 +287,11 @@ fn install_yes_idempotent_rerun_does_not_create_extra_backup() {
     fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
     fs::write(&fixture.codex_config, existing).expect("existing config should write");
 
-    apply_global_install(fixture.options(true)).expect("first install should apply");
+    apply_codex_install(fixture.codex_options(true)).expect("first install should apply");
     let first_merged = fs::read_to_string(&fixture.codex_config).expect("config should read");
     assert_eq!(backup_paths_for(&fixture.codex_config).len(), 1);
 
-    apply_global_install(fixture.options(true)).expect("second install should be idempotent");
+    apply_codex_install(fixture.codex_options(true)).expect("second install should be idempotent");
 
     let second_merged = fs::read_to_string(&fixture.codex_config).expect("config should reread");
     assert_eq!(second_merged, first_merged);
@@ -257,10 +301,10 @@ fn install_yes_idempotent_rerun_does_not_create_extra_backup() {
 #[test]
 fn install_yes_shell_quotes_dangerous_binary_path() {
     let fixture = TestFixture::new("dangerous-binary");
-    let mut options = fixture.options(true);
+    let mut options = fixture.codex_options(true);
     options.binary_path = "/opt/stateful dir/$(touch x)`cmd`/foo'bar/stateful".to_string();
 
-    apply_global_install(options).expect("install should quote dangerous shell chars");
+    apply_codex_install(options).expect("install should quote dangerous shell chars");
 
     let config = fs::read_to_string(&fixture.codex_config).expect("codex config should read");
     assert!(config.contains(r##"command = "/opt/stateful dir/$(touch x)`cmd`/foo'bar/stateful""##));
@@ -273,10 +317,10 @@ fn install_yes_shell_quotes_dangerous_binary_path() {
 #[test]
 fn install_yes_rejects_binary_path_with_control_character() {
     let fixture = TestFixture::new("control-binary");
-    let mut options = fixture.options(true);
+    let mut options = fixture.codex_options(true);
     options.binary_path = "/opt/stateful\nbin/stateful".to_string();
 
-    let error = apply_global_install(options).expect_err("control chars should be rejected");
+    let error = apply_codex_install(options).expect_err("control chars should be rejected");
 
     assert!(error.to_string().contains("control character"));
     assert!(!fixture.paths.home.exists());
@@ -296,7 +340,7 @@ fn install_yes_preserves_existing_codex_config_file_mode() {
     permissions.set_mode(0o600);
     fs::set_permissions(&fixture.codex_config, permissions).expect("config mode should set");
 
-    apply_global_install(fixture.options(true)).expect("install should apply");
+    apply_codex_install(fixture.codex_options(true)).expect("install should apply");
 
     let config_mode = fs::metadata(&fixture.codex_config)
         .expect("config metadata should reread")
@@ -377,6 +421,13 @@ impl TestFixture {
 
     fn options(&self, yes: bool) -> InstallOptions {
         InstallOptions {
+            yes,
+            paths: self.paths.clone(),
+        }
+    }
+
+    fn codex_options(&self, yes: bool) -> CodexInstallOptions {
+        CodexInstallOptions {
             yes,
             paths: self.paths.clone(),
             codex_config_path: self.codex_config.clone(),

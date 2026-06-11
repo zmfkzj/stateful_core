@@ -1,6 +1,6 @@
 use clap::Parser;
 use stateful_cli::{
-    Cli, CodexSandboxMode, Command, ExternalRunCommand, HookCommand, McpCommand,
+    Cli, CodexSandboxMode, Command, ExternalRunCommand, HookCommand, InstallAgent, McpCommand,
     NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand, SandboxFsProfile,
     SandboxNetworkPolicy, ServerCommand,
 };
@@ -73,6 +73,45 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             assert_eq!(write_dirs, vec!["target"]);
             assert_eq!(command, "printf x > README.md");
             assert_eq!(timeout_seconds, Some(12));
+        }
+        other => panic!("expected sandbox run command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_sandbox_run_git_profile() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "run",
+        "--fs",
+        "git",
+        "--network",
+        "enabled",
+        "--timeout-seconds",
+        "30",
+        "--command",
+        "git fetch --all",
+    ])
+    .expect("sandbox git profile should parse");
+
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Run {
+            fs,
+            network,
+            write_targets,
+            create_targets,
+            write_dirs,
+            command,
+            timeout_seconds,
+        }) => {
+            assert_eq!(fs, SandboxFsProfile::Git);
+            assert_eq!(network, SandboxNetworkPolicy::Enabled);
+            assert!(write_targets.is_empty());
+            assert!(create_targets.is_empty());
+            assert!(write_dirs.is_empty());
+            assert_eq!(command, "git fetch --all");
+            assert_eq!(timeout_seconds, Some(30));
         }
         other => panic!("expected sandbox run command, got {other:?}"),
     }
@@ -239,67 +278,16 @@ fn parses_external_run_approve_and_run_command() {
 }
 
 #[test]
-fn parses_structured_commit_command() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "commit",
-        "-m",
-        "docs: add plan",
-        "--",
-        "docs/plan.md",
-    ])
-    .expect("commit command should parse");
+fn git_related_stateful_subcommands_are_removed() {
+    for command in ["commit", "pull", "push"] {
+        let error = Cli::try_parse_from(["stateful", command])
+            .expect_err("git-related stateful subcommands should be removed");
 
-    match cli.command {
-        Command::Commit { message, paths } => {
-            assert_eq!(message, "docs: add plan");
-            assert_eq!(paths, vec!["docs/plan.md"]);
-        }
-        other => panic!("expected commit command, got {other:?}"),
+        assert!(
+            error.to_string().contains("unrecognized subcommand"),
+            "unexpected parse error for {command}: {error}"
+        );
     }
-}
-
-#[test]
-fn parses_structured_push_command_with_explicit_remote_and_branch() {
-    let cli = Cli::try_parse_from(["stateful", "push", "origin", "main"])
-        .expect("push command should parse");
-
-    match cli.command {
-        Command::Push { remote, branch } => {
-            assert_eq!(remote.as_deref(), Some("origin"));
-            assert_eq!(branch.as_deref(), Some("main"));
-        }
-        other => panic!("expected push command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_structured_push_command_without_explicit_target() {
-    let cli = Cli::try_parse_from(["stateful", "push"]).expect("push command should parse");
-
-    match cli.command {
-        Command::Push { remote, branch } => {
-            assert_eq!(remote, None);
-            assert_eq!(branch, None);
-        }
-        other => panic!("expected push command, got {other:?}"),
-    }
-}
-
-#[test]
-fn structured_push_rejects_partial_explicit_target() {
-    let error =
-        Cli::try_parse_from(["stateful", "push", "origin"]).expect_err("push target is a pair");
-
-    assert!(error.to_string().contains("<BRANCH>"));
-}
-
-#[test]
-fn structured_commit_command_requires_path_separator() {
-    let error = Cli::try_parse_from(["stateful", "commit", "-m", "docs: add plan", "docs/plan.md"])
-        .expect_err("commit paths should require -- separator");
-
-    assert!(error.to_string().contains("--"));
 }
 
 #[test]
@@ -393,26 +381,52 @@ fn parses_codex_wrapper_no_stateful_command() {
 
 #[test]
 fn parses_install_yes_command() {
+    let cli = Cli::try_parse_from(["stateful", "install", "--yes"])
+        .expect("install command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Install {
+            yes: true,
+            ref agents,
+            codex_config: None,
+            binary: None,
+        }
+        if agents.is_empty()
+    ));
+}
+
+#[test]
+fn parses_install_agent_codex_command() {
     let cli = Cli::try_parse_from([
         "stateful",
         "install",
+        "--agent",
+        "codex",
         "--yes",
         "--codex-config",
         "/home/me/.codex/config.toml",
         "--binary",
         "/opt/stateful/bin/stateful",
     ])
-    .expect("install command should parse");
+    .expect("install --agent codex command should parse");
 
     assert!(matches!(
         cli.command,
         Command::Install {
             yes: true,
+            ref agents,
             ref codex_config,
-            ref binary
+            ref binary,
         } if codex_config == &Some(PathBuf::from("/home/me/.codex/config.toml"))
             && binary.as_deref() == Some("/opt/stateful/bin/stateful")
+            && agents == &vec![InstallAgent::Codex]
     ));
+}
+
+#[test]
+fn rejects_install_codex_subcommand() {
+    assert!(Cli::try_parse_from(["stateful", "install", "codex", "--yes"]).is_err());
 }
 
 #[test]

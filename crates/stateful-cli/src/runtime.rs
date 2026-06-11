@@ -13,8 +13,7 @@ use crate::global_paths::GlobalPaths;
 use crate::repo_registry::RepoIdentity;
 use serde::{Deserialize, Serialize};
 
-pub const STATEFUL_CODEX_RUN_ID_ENV: &str = "STATEFUL_CODEX_RUN_ID";
-pub const CODEX_THREAD_ID_ENV: &str = "CODEX_THREAD_ID";
+pub const STATEFUL_SESSION_ID_ENV: &str = "STATEFUL_SESSION_ID";
 const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,16 +177,16 @@ pub fn write_current_session_file(
     Ok(())
 }
 
-pub fn write_current_session_file_for_codex_session(
+pub fn write_current_session_file_for_current_stateful_session(
     repo_root: impl AsRef<Path>,
     session: &CurrentSession,
 ) -> anyhow::Result<()> {
     let repo_root = repo_root.as_ref();
-    validate_codex_session_id(&session.session_id, "hook session_id")?;
-    if let Some(codex_session_id) = current_codex_session_id()? {
-        ensure_current_session_matches_codex_session(&codex_session_id, session)?;
+    validate_session_id(&session.session_id, "hook session_id")?;
+    if let Some(session_id) = current_stateful_session_id()? {
+        ensure_current_session_matches_env_session(&session_id, session)?;
     }
-    write_current_session_file_for_codex_run(repo_root, &session.session_id, session)?;
+    write_current_session_file_for_session(repo_root, &session.session_id, session)?;
     if current_session_file_is_untrusted(&current_session_file_path(repo_root))? {
         return Ok(());
     }
@@ -211,8 +210,8 @@ fn write_legacy_current_session_file(
 
 pub fn read_current_session_file(repo_root: impl AsRef<Path>) -> anyhow::Result<CurrentSession> {
     let repo_root = repo_root.as_ref();
-    if let Some(codex_session_id) = current_codex_session_id()? {
-        return read_current_session_file_for_codex_run(repo_root, &codex_session_id);
+    if let Some(session_id) = current_stateful_session_id()? {
+        return read_current_session_file_for_session(repo_root, &session_id);
     }
 
     read_legacy_current_session_file(repo_root)
@@ -231,16 +230,16 @@ pub fn read_current_session_file_for_mcp(
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<CurrentSession> {
     let repo_root = repo_root.as_ref();
-    if let Some(codex_session_id) = current_codex_session_id()? {
-        return read_current_session_file_for_codex_run(repo_root, &codex_session_id);
+    if let Some(session_id) = current_stateful_session_id()? {
+        return read_current_session_file_for_session(repo_root, &session_id);
     }
 
     let legacy_session = read_legacy_current_session_file(repo_root)?;
-    validate_codex_session_id(
+    validate_session_id(
         &legacy_session.session_id,
         "current session file session_id",
     )?;
-    let session_bound = read_current_session_file_for_codex_run(
+    let session_bound = read_current_session_file_for_session(
         repo_root,
         &legacy_session.session_id,
     )
@@ -260,19 +259,19 @@ pub fn read_current_session_file_for_mcp(
     Ok(legacy_session)
 }
 
-pub fn write_current_session_file_for_codex_run(
+pub fn write_current_session_file_for_session(
     repo_root: impl AsRef<Path>,
-    codex_run_id: &str,
+    session_file_id: &str,
     session: &CurrentSession,
 ) -> anyhow::Result<()> {
     let repo_root = repo_root.as_ref();
-    if codex_run_id != session.session_id {
+    if session_file_id != session.session_id {
         anyhow::bail!(
-            "Codex run/thread file id `{codex_run_id}` must match session_id `{}`",
+            "session file id `{session_file_id}` must match session_id `{}`",
             session.session_id
         );
     }
-    let path = current_session_file_path_for_codex_run(repo_root, codex_run_id)?;
+    let path = current_session_file_path_for_session(repo_root, session_file_id)?;
     let runtime_dir = ensure_runtime_dir(repo_root)?;
     ensure_plain_directory(&runtime_dir.join("sessions"), "current session directory")?;
     match read_plain_file_to_string(&path, "current session file") {
@@ -280,7 +279,7 @@ pub fn write_current_session_file_for_codex_run(
             let existing: CurrentSession = serde_json::from_str(&contents)?;
             if existing != *session {
                 anyhow::bail!(
-                    "Codex run/thread `{codex_run_id}` is already bound to session `{}`",
+                    "session file `{session_file_id}` is already bound to session `{}`",
                     existing.session_id
                 );
             }
@@ -297,20 +296,20 @@ pub fn write_current_session_file_for_codex_run(
     Ok(())
 }
 
-pub fn read_current_session_file_for_codex_run(
+pub fn read_current_session_file_for_session(
     repo_root: impl AsRef<Path>,
-    codex_run_id: &str,
+    session_file_id: &str,
 ) -> anyhow::Result<CurrentSession> {
     let repo_root = repo_root.as_ref();
     reject_untrusted_runtime_dirs(repo_root, true)?;
     let contents = read_plain_file_to_string(
-        &current_session_file_path_for_codex_run(repo_root, codex_run_id)?,
+        &current_session_file_path_for_session(repo_root, session_file_id)?,
         "current session file",
     )?;
     let session: CurrentSession = serde_json::from_str(&contents)?;
-    if session.session_id != codex_run_id {
+    if session.session_id != session_file_id {
         anyhow::bail!(
-            "current session file for Codex run/thread `{codex_run_id}` contains session_id `{}`",
+            "current session file for session `{session_file_id}` contains session_id `{}`",
             session.session_id
         );
     }
@@ -738,69 +737,42 @@ fn current_session_file_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf 
         .join("session.json")
 }
 
-fn current_session_file_path_for_codex_run(
+fn current_session_file_path_for_session(
     repo_root: impl AsRef<Path>,
-    codex_run_id: &str,
+    session_file_id: &str,
 ) -> anyhow::Result<std::path::PathBuf> {
-    validate_codex_run_id(codex_run_id)?;
+    validate_session_id(session_file_id, "session file id")?;
     Ok(repo_root
         .as_ref()
         .join(".stateful_core")
         .join("runtime")
         .join("sessions")
-        .join(format!("{codex_run_id}.json")))
+        .join(format!("{session_file_id}.json")))
 }
 
-fn current_codex_run_id() -> anyhow::Result<Option<String>> {
-    let Some(codex_run_id) = std::env::var_os(STATEFUL_CODEX_RUN_ID_ENV) else {
+fn current_stateful_session_id() -> anyhow::Result<Option<String>> {
+    let Some(session_id) = std::env::var_os(STATEFUL_SESSION_ID_ENV) else {
         return Ok(None);
     };
-    let codex_run_id = codex_run_id.to_string_lossy().into_owned();
-    validate_codex_run_id(&codex_run_id)?;
-    Ok(Some(codex_run_id))
+    let session_id = session_id.to_string_lossy().into_owned();
+    validate_session_id(&session_id, STATEFUL_SESSION_ID_ENV)?;
+    Ok(Some(session_id))
 }
 
-fn current_codex_thread_id() -> anyhow::Result<Option<String>> {
-    let Some(codex_thread_id) = std::env::var_os(CODEX_THREAD_ID_ENV) else {
-        return Ok(None);
-    };
-    let codex_thread_id = codex_thread_id.to_string_lossy().into_owned();
-    validate_codex_thread_id(&codex_thread_id)?;
-    Ok(Some(codex_thread_id))
-}
-
-fn current_codex_session_id() -> anyhow::Result<Option<String>> {
-    let codex_run_id = current_codex_run_id()?;
-    let codex_thread_id = current_codex_thread_id()?;
-    match (codex_thread_id, codex_run_id) {
-        (Some(thread_id), _) => Ok(Some(thread_id)),
-        (None, Some(run_id)) => Ok(Some(run_id)),
-        (None, None) => Ok(None),
-    }
-}
-
-fn ensure_current_session_matches_codex_session(
-    codex_session_id: &str,
+fn ensure_current_session_matches_env_session(
+    env_session_id: &str,
     session: &CurrentSession,
 ) -> anyhow::Result<()> {
-    if codex_session_id != session.session_id {
+    if env_session_id != session.session_id {
         anyhow::bail!(
-            "current Codex run/thread id `{codex_session_id}` must match session_id `{}`",
+            "current Stateful session id `{env_session_id}` must match session_id `{}`",
             session.session_id
         );
     }
     Ok(())
 }
 
-fn validate_codex_run_id(codex_run_id: &str) -> anyhow::Result<()> {
-    validate_codex_session_id(codex_run_id, STATEFUL_CODEX_RUN_ID_ENV)
-}
-
-fn validate_codex_thread_id(codex_thread_id: &str) -> anyhow::Result<()> {
-    validate_codex_session_id(codex_thread_id, CODEX_THREAD_ID_ENV)
-}
-
-fn validate_codex_session_id(session_id: &str, label: &str) -> anyhow::Result<()> {
+fn validate_session_id(session_id: &str, label: &str) -> anyhow::Result<()> {
     if session_id.is_empty() {
         anyhow::bail!("{label} is set but empty");
     }
