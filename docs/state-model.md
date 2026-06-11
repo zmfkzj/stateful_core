@@ -32,8 +32,8 @@ session identity plus active intent.
 
 `intent` is the write-authorization unit. A write-authorizing intent belongs to
 one session, expires, and must include matching file or directory scope. Agents
-should redeclare intent when the active turn moves to a different file or
-directory scope, even if the broader goal is unchanged.
+should declare each additional file or directory scope before acquiring its
+lease, even if the broader goal is unchanged.
 
 The practical hierarchy is:
 
@@ -68,7 +68,7 @@ repo_id
 worktree_id
 branch
 goal
-phase: exploring | editing | testing | blocked | done | failed | idle | expired
+phase: exploring | editing | testing | blocked | done | failed
 files_read
 files_editing
 files_planned
@@ -81,6 +81,11 @@ expires_at
 confidence
 source_refs
 ```
+
+The shipped phase vocabulary matches the policy enum above. Expiration is
+represented by `expires_at`, record freshness, and status fields rather than a
+separate `phase = expired`; `idle` is target vocabulary for future activity
+summaries.
 
 `next_intent` is part of the core model because planned work is often the best
 early signal for avoiding conflicts.
@@ -168,22 +173,42 @@ relative_path
 absolute_path
 ```
 
-The hard conflict domain is the same `workspace_id` and same normalized
-`absolute_path`. This represents two actors touching the same physical file in
-the same working tree.
+The shipped hard conflict domain is the same `workspace_id` and same normalized
+`relative_path`. This approximates two actors touching the same file inside the
+same enabled workspace. The target physical-file domain also records and compares
+same normalized `absolute_path`.
 
-The soft conflict domain is the same `repo_id` and same `relative_path` across
-different workspaces, worktrees, or branches. This does not block by default in
-v1, but it should produce warning context because later merge or integration
-work may conflict.
+The target soft conflict domain is the same `repo_id` and same `relative_path`
+across different workspaces, worktrees, or branches. This should not block by
+default, but should produce warning context because later merge or integration
+work may conflict. The shipped authorization path does not yet emit this warn
+tier.
 
-If repository identity is unknown, only same normalized `absolute_path` should be
-treated as a hard conflict. Repo-relative matches with incomplete identity should
-be surfaced as unknown-confidence warnings, not denials.
+If repository identity is unknown, the target model should only hard-block on
+same normalized `absolute_path`; repo-relative matches with incomplete identity
+should be surfaced as unknown-confidence warnings, not denials.
 
 ### ID Derivation
 
-V1 derives identity conservatively:
+The shipped prototype derives enabled-repo identity conservatively from local
+repo metadata:
+
+```text
+workspace_id = explicit non-default runtime workspace id when configured,
+               otherwise "workspace-" + hash(canonical realpath of git
+               worktree root). Default runtime ids `local`, `shared`, and
+               `unknown` are treated as placeholders when repo identity is
+               available.
+repo_id = "repo-" + hash(canonical realpath of git worktree root)
+worktree_id = repo_id
+branch = symbolic branch name, or "unknown"
+relative_path = normalized POSIX path relative to the git worktree root
+absolute_path = canonical realpath when the target exists; otherwise canonical
+                parent realpath + target basename
+```
+
+The target model should derive identity from machine/worktree and repository
+identity rather than local path alone:
 
 ```text
 workspace_id = hash(machine_id + canonical realpath of git worktree root)
@@ -225,7 +250,7 @@ declared_at
 updated_at
 expires_at
 max_expires_at
-status: active | superseded | finalized | expired
+status: active | superseded | completed | expired
 ```
 
 Hooks must require an active intent before allowing supported write tool paths.
@@ -238,9 +263,15 @@ explicit; the server does not generate a fallback purpose. Abstract resources in
 `task`, `test`, `port`, or `migration`, can provide context but cannot authorize
 writes.
 
-Intent declarations replace the session's active scope in that workspace; they
-do not append. When a caller adds or changes targets, it must redeclare the
-complete intended file set for that session and workspace.
+`phase`, `goal`, `resources_planned`, `next_intent`, and `max_expires_at` are
+target model fields. Shipped authorization is based on active, unexpired scope
+rows and same-session leases.
+
+Intent declarations add to the session's active scope in that workspace. This
+lets a session keep an edit scope and add a `tmp/` build/test scope without
+invalidating the edit lease path. If the same path is declared again, the latest
+matching active declaration supplies the purpose used for future lease
+acquisition.
 
 ## Intent Scope Matching
 
@@ -263,13 +294,18 @@ target: src/auth/auth.ts -> allow
 target: src/auth/codex/auth.ts -> deny
 ```
 
+That depth rule applies to `write_file` authorization. `write_directory` is a
+separate action: it requires exact directory scope, and the resulting directory
+lease fences the entire subtree because command-shaped `--write-dir` execution
+can write anywhere below that directory.
+
 Multi-file writes are allowed only when every target matches at least one file
 or directory scope. Delete and rename/move operations require exact file scope;
 directory scope does not authorize deletes, renames, or moves.
 
 ## Conflict Record
 
-A conflict record captures a policy decision.
+A conflict record is the target durable shape for a policy decision.
 
 ```text
 conflict_id
@@ -285,11 +321,14 @@ checked_at
 source_refs
 ```
 
-Conflict records are audit artifacts. They also help render useful context into
-later prompts.
+Conflict records are target audit artifacts. They also help render useful
+context into later prompts. The shipped authorization path currently appends
+`AuthorizationDenied` events for deny decisions instead of writing rows to the
+`conflicts` table, and it does not emit warn-tier conflict records.
 
-Write attempts without active intent should be recorded as denied conflict
-checks with `conflict_type: missing_intent`.
+Write attempts without active intent should be audited as missing-intent denials.
+In the shipped server this is an `AuthorizationDenied` event; the target conflict
+table representation would use `conflict_type: missing_intent`.
 
 ## Wait Queue Record
 
@@ -297,33 +336,38 @@ A wait queue record captures a hard-conflict intent request that cannot be
 reserved immediately.
 
 ```text
-queue_id
+wait_id
 request_id
 session_id
 workspace_id
+repo_id
+worktree_id
+root
+branch
 purpose
-resources
-queue_sequence
-queued_at
+relative_path
+action: write_file | write_directory
+requested_at
 status: queued | reserved | claimed | canceled | expired
-blocked_by_session_id
-blocked_by_lease_id
 reservation_expires_at
-grant_trigger: explicit_release | session_finalization | lease_expiry
+blocking_session_id
 ```
 
-The queue is FIFO by `queue_sequence`. A queued request can be promoted only
-when every requested resource is available. `purpose` is required and remains the
-caller-supplied purpose from the original request. V1 uses atomic all-or-nothing
-reservation: multi-resource requests are never partially reserved.
+The shipped queue is FIFO by insertion order (`rowid`). A queued request can be
+promoted only when its requested resource is available. `purpose` is required
+and remains the caller-supplied purpose from the original request.
 
-The current implementation handles one requested path per wait request.
-Multi-resource all-or-nothing scheduling is the target model for future
-hardening.
+The current implementation handles one requested path per wait request, and
+explicit intent requests accept only `write_file` and `write_directory`.
+`rename_file` and `move_file` conflicts do not enqueue wait records until the
+multi-resource scheduler is implemented.
+Multi-resource `resources[]`, explicit `queue_sequence`, `blocked_by_lease_id`,
+and recorded `grant_trigger` fields are target model for future hardening.
 
-Grant triggers are limited to explicit lease release, session or activity
-finalization, or lease expiry. Soft repo-relative conflicts do not create wait
-queue records in v1.
+Promotion is triggered by explicit lease release, session or activity
+finalization, or lease/reservation expiry, but the current row does not persist
+the trigger reason. Soft repo-relative conflicts do not create wait queue
+records in v1.
 
 Promotion creates a reservation, not active write authority. The waiting session
 must reread the target, then explicitly claim the reservation with
@@ -333,18 +377,27 @@ reservation TTL is 120 seconds. If the reservation is not claimed before
 `reservation_expires_at`, the reservation expires and the server may promote the
 next eligible FIFO waiter.
 
-For multi-resource requests, a request is eligible only when it is at the head of
-every resource queue it participates in and every requested resource has no
-active lease. A request that is first for one resource but blocked behind another
-request on a second resource stays queued.
+Reservation notifications are delivery hints, not the durable reservation
+record. `stateful notifications poll` / `state.notifications.poll` returns each
+pending notification once and marks it delivered. If the client misses that
+response, `stateful resume next` / `state.resume.next` can still rediscover the
+active reservation until it is claimed or expires.
+
+For target multi-resource requests, a request is eligible only when it is at the
+head of every resource queue it participates in and every requested resource has
+no active lease. A request that is first for one resource but blocked behind
+another request on a second resource stays queued.
 
 `request_id` is the idempotency key. Repeating an intent request with the same
 `request_id` must return the existing queue, reservation, claim, cancellation,
-or expiry state instead of creating a duplicate queue item.
+or expiry state instead of creating a duplicate queue item. Repeating an expired
+request requeues the same waiter in place, preserving its original FIFO row while
+requiring a new reservation and claim before writing.
 
 Queued or reserved requests can be canceled explicitly. Session or activity
-finalization cleanup for queued and reserved requests is target behavior; the
-current implementation releases active leases on finalization.
+finalization releases active leases, cancels that session's queued and reserved
+requests, and promotes the next eligible waiter for any released or canceled
+resource.
 
 ## Override Record
 
@@ -371,7 +424,7 @@ source_ref
 The user owns the judgment and responsibility for an override. An override must
 be scoped to a specific resource, current session, and current turn. Overrides
 apply only to active lease conflicts. They cannot bypass missing intent, expired
-intent, blocked/finalized state, file or directory scope matching, delete
+intent, target blocked/finalized state, file or directory scope matching, delete
 exact-scope rules, or rename/move exact-scope rules.
 Overrides do not reorder the wait queue, grant queue priority, or transfer a
 reservation from one session to another.
@@ -390,26 +443,35 @@ parent_session_id
 parent_actor_id
 ```
 
-Subagents may write only inside the parent session's active valid intent scope.
-Their activity and leases are still recorded under the subagent `actor_id`.
-Same-owner sessions do not receive automatic override authority.
+Subagent-specific `actor_type`, `parent_session_id`, and `parent_actor_id`
+fields are protocol vocabulary for future subagent hook adapters. The shipped
+Codex integration records session-level agent activity only. When subagent
+adapters are implemented, subagents may write only inside the parent session's
+active valid intent scope, and their activity and leases should be recorded
+under the subagent `actor_id`. Same-owner sessions do not receive automatic
+override authority.
 
 ## Sandboxed Test Execution
 
 Raw Bash test commands are denied by hooks. Agents run tests through the trusted
-wrapper after exact `target/` directory intent and a successful same-session
+wrapper after exact `tmp/` directory intent and a successful same-session
 directory lease, for example:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." target/
-stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
-stateful sandbox run --fs write-targets --network enabled --write-dir target --command 'cargo test --workspace'
+stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." tmp/
+stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"tmp/"}'
+stateful sandbox run --fs build --network enabled --command 'cargo test --workspace'
 ```
+
+The build profile sets standard temp variables under `tmp/.stateful-tmp` and
+sets `CARGO_TARGET_DIR` to `tmp/target`, keeping Cargo build output inside the
+authorized artifact tree. Other tool-specific build directories should be
+configured under `tmp/`.
 
 Source-tree edits should use native Codex edit tools such as `apply_patch` or
 Edit after exact intent declaration and a successful same-session file lease.
 Command-shaped source writes must use exact `--write-target` or `--create-target`
-entries, not the `target/` artifact directory scope.
+entries, not the `tmp/` artifact directory scope.
 
 ## Finalization Record
 
@@ -462,12 +524,27 @@ yet emit `HumanWriteObserved` events or enforce unreconciled-human-write blocks.
 
 ## Events
 
-The canonical event log should use explicit coordination events:
+The shipped event log is append-only audit evidence for coordination decisions
+and lifecycle mutations. Current-state tables remain the active coordination
+source for conflict checks. Event-backed materialization is used for accepted
+session and intent declaration events; other shipped lifecycle APIs update
+materialized tables directly and append audit events in the same transaction.
+
+The shipped server emits:
 
 - `SessionRegistered`
+- `SessionHeartbeat`
 - `IntentDeclared`
 - `LeaseAcquired`
 - `LeaseReleased`
+- `IntentRequested`
+- `IntentClaimed`
+- `IntentCanceled`
+- `ActivityFinalized`
+- `AuthorizationDenied`
+
+The target model also includes these explicit coordination events:
+
 - `HeartbeatObserved`
 - `ToolUseObserved`
 - `ConflictChecked`
@@ -483,10 +560,9 @@ The canonical event log should use explicit coordination events:
 - `OutboxEventSynced`
 - `StateExpired`
 
-Accepted events update the materialized current-state view. Expiration may be
-driven by background TTL processing or by reads that discover stale state.
-Some event kinds above are target model entries and are not emitted by the
-current implementation, including override and human save-gate events.
+Expiration may be driven by background TTL processing or by reads that discover
+stale state. Target events above are not yet emitted by the current
+implementation, including override and human save-gate events.
 
 ## Freshness Rules
 
@@ -498,10 +574,12 @@ Freshness is required for all active coordination records.
 - Default intent TTL is 15 minutes.
 - Heartbeats may extend active intent TTL, but never beyond 60 minutes from
   `declared_at`.
-- Intent is write-authorizing only when `status = active`, `expires_at > now`,
-  the session is not finalized, and `phase` is `exploring`, `editing`, or
-  `testing`.
-- `phase = blocked` keeps the activity visible but stops write authorization.
+- Shipped intent authorization is based on active, unexpired scope rows. Expired
+  rows are removed from the active policy state and deny as `missing_intent`.
+- Target phase-aware authorization also requires the session to not be finalized
+  and `phase` to be `exploring`, `editing`, or `testing`.
+- Target `phase = blocked` keeps the activity visible but stops write
+  authorization.
 - Directory intent scope permits writes only up to two path segments below that
   directory.
 - Delete operations require exact file scope.
@@ -511,23 +589,29 @@ Freshness is required for all active coordination records.
   implementation also refreshes active intent expiry during `SessionHeartbeat`
   materialization, capped at 60 minutes from `declared_at`.
 - Missing heartbeats do not imply success.
-- Finalization as `done`, `failed`, or `blocked` finalizes active intents.
+- Shipped finalization completes active intents. Target finalization as `done`,
+  `failed`, or `blocked` also drives phase-aware authorization and historical
+  context.
 - Turn end expires unused overrides.
 - Expired records remain historical evidence but stop blocking new work.
 - Reads should distinguish fresh, stale, and expired state.
 
 ## Retention Rules
 
-V1 retains event and audit history for 14 days by default. Retention affects
-historical evidence only; it does not extend live TTLs, leases, intents, or
-write authorization.
+The shipped V1 retention policy prunes event and audit history older than 14
+days. Retention affects historical evidence only; it does not extend live TTLs,
+leases, intents, or write authorization.
 
-The current implementation expires live coordination rows lazily when policy
-reads detect stale state. Configurable event-retention pruning is future work.
+The current implementation expires live coordination rows through the state
+server maintenance loop and lazily when policy reads detect stale state. The
+maintenance loop also prunes old events, reconciliations, conflicts, human
+observations, and expired notifications. It preserves active current-state rows,
+pending notifications, and outbox sync evidence.
 
-Projects may configure a longer retention window. Shorter retention should be
-allowed only when the system can still preserve required audit evidence for
-active conflicts, unreconciled human writes, and pending outbox sync.
+Projects may configure a longer retention window once runtime config loading for
+retention ships. Shorter retention should be allowed only when the system can
+still preserve required audit evidence for active conflicts, unreconciled human
+writes, and pending outbox sync.
 
 ## Availability Rules
 
@@ -613,7 +697,7 @@ Prompt context packages should support:
 ```text
 mode: brief | detailed
 resources: optional file or directory filter
-status: clear | warn | blocked
+status: ok | error
 prompt_text
 sections:
   Blocking
@@ -622,6 +706,10 @@ sections:
   Nearby Activity
   Stale/Expired
 ```
+
+The `status` field above is the shipped route response status. A separate
+context-level `clear | warn | blocked` status is target model vocabulary; current
+block/warn/info semantics live on individual items.
 
 Each item has structured fields:
 
@@ -637,10 +725,12 @@ source_refs
 `brief` mode is capped at 8 total bullets. `detailed` mode is capped at 20 total
 bullets. `next_action` is required for `block` and `warn`.
 
-Expired and finalized records may appear only under `Stale/Expired`. They are
-handoff evidence, not live blocking state. Brief mode includes at most 3
-resource-relevant stale/expired items. Detailed mode includes at most 10,
-resource-relevant first. Expired active records without finalization are shown
-for 24 hours as `final status unknown`. Finalized `done` records are shown only
-when resource-filtered or directly relevant. Finalized `failed` and `blocked`
+The renderer can place supplied expired and finalized records only under
+`Stale/Expired`, but the shipped store-backed route currently emits live
+intents, leases, and wait records only. Historical stale/finalized context
+windows are target model behavior: brief mode includes at most 3
+resource-relevant stale/expired items; detailed mode includes at most 10,
+resource-relevant first; expired active records without finalization are shown
+for 24 hours as `final status unknown`; finalized `done` records are shown only
+when resource-filtered or directly relevant; finalized `failed` and `blocked`
 records are shown for 7 days when resource-relevant.

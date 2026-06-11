@@ -64,7 +64,9 @@ fn mcp_call_discovers_global_runtime_file() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"ok\""));
-    let request = rx.recv().expect("captured request should arrive");
+    let request = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("captured request should arrive");
     assert!(request.contains("GET /v1/current HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
 
@@ -250,9 +252,9 @@ fn sandbox_run_write_dir_authorizes_directory_and_allows_artifact_write() {
             "--fs",
             "write-targets",
             "--write-dir",
-            "target",
+            "tmp",
             "--command",
-            "printf artifact > target/out.txt && printf tmp > \"$TMPDIR/out.tmp\"",
+            "printf artifact > tmp/out.txt && printf tmp > \"$TMPDIR/out.tmp\"",
         ],
     );
 
@@ -269,22 +271,142 @@ fn sandbox_run_write_dir_authorizes_directory_and_allows_artifact_write() {
         request_json_body(&request)["payload"]["action"],
         "write_directory"
     );
-    assert_eq!(request_json_body(&request)["payload"]["path"], "target/");
+    assert_eq!(request_json_body(&request)["payload"]["path"], "tmp/");
     assert_eq!(
         request_json_body(&request)["payload"]["purpose"],
-        "Run sandbox command for write directory `target/`."
+        "Run sandbox command for write directory `tmp/`."
     );
     assert_eq!(
-        fs::read_to_string(repo_root.join("target/out.txt")).expect("artifact should read"),
+        fs::read_to_string(repo_root.join("tmp/out.txt")).expect("artifact should read"),
         "artifact"
     );
     assert_eq!(
-        fs::read_to_string(repo_root.join("target/.stateful-tmp/out.tmp"))
+        fs::read_to_string(repo_root.join("tmp/.stateful-tmp/out.tmp"))
             .expect("temp artifact should read"),
         "tmp"
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("\"allowed_write_targets\":[\"target/\"]")
+        String::from_utf8_lossy(&output.stdout).contains("\"allowed_write_targets\":[\"tmp/\"]")
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn sandbox_run_build_profile_authorizes_tmp_and_allows_artifact_write() {
+    if macos_stateful_sandbox_is_active() {
+        return;
+    }
+
+    let temp_root = temp_root("stateful-sandbox-run-build-profile");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "build",
+            "--network",
+            "enabled",
+            "--command",
+            "printf artifact > tmp/build.out && printf tmp > \"$TMPDIR/build.tmp\"",
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "build profile sandbox run failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("authorize request should arrive");
+    assert_eq!(
+        request_json_body(&request)["payload"]["action"],
+        "write_directory"
+    );
+    assert_eq!(request_json_body(&request)["payload"]["path"], "tmp/");
+    assert_eq!(
+        request_json_body(&request)["payload"]["fs_profile"],
+        "build"
+    );
+    assert_eq!(
+        fs::read_to_string(repo_root.join("tmp/build.out")).expect("artifact should read"),
+        "artifact"
+    );
+    assert_eq!(
+        fs::read_to_string(repo_root.join("tmp/.stateful-tmp/build.tmp"))
+            .expect("temp artifact should read"),
+        "tmp"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("\"allowed_write_targets\":[\"tmp/\"]")
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn sandbox_run_build_profile_sets_cargo_target_dir_under_tmp() {
+    if macos_stateful_sandbox_is_active() {
+        return;
+    }
+
+    let temp_root = temp_root("stateful-sandbox-run-build-cargo-target");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+    let (runtime, _rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "build",
+            "--network",
+            "enabled",
+            "--command",
+            "printf '%s' \"$CARGO_TARGET_DIR\" > tmp/cargo-target-dir.txt",
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "build profile sandbox run failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cargo_target_dir = fs::read_to_string(repo_root.join("tmp/cargo-target-dir.txt"))
+        .expect("target dir should read");
+    assert_eq!(
+        cargo_target_dir,
+        repo_root
+            .canonicalize()
+            .expect("repo root should canonicalize")
+            .join("tmp/target")
+            .to_string_lossy()
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -442,6 +564,60 @@ fn sandbox_run_read_only_rejects_write_targets() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("read-only profile rejects write targets")
     );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn sandbox_run_read_only_does_not_require_reachable_runtime() {
+    let temp_root = temp_root("stateful-sandbox-run-readonly-no-runtime");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+
+    let output = run_stateful_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[
+            ("STATEFUL_SERVER_URL", "http://127.0.0.1:9"),
+            ("STATEFUL_SERVER_TOKEN", "unreachable-token"),
+        ],
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "read-only",
+            "--network",
+            "disabled",
+            "--command",
+            "printf ok",
+        ],
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout.contains("Connection refused") && !stderr.contains("Connection refused"),
+        "read-only sandbox must not try to contact runtime: stdout={stdout} stderr={stderr}"
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("sandbox output should be json");
+    if macos_stateful_sandbox_is_active()
+        && body["stderr"]
+            .as_str()
+            .is_some_and(|stderr| stderr.contains("sandbox-exec: sandbox_apply"))
+    {
+        assert_eq!(body["status"], "exited");
+        fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+        return;
+    }
+    assert!(
+        output.status.success(),
+        "read-only sandbox should run without runtime: stdout={stdout} stderr={stderr}"
+    );
+    assert_eq!(body["status"], "exited");
+    assert_eq!(body["stdout"], "ok");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -995,6 +1171,10 @@ fn mcp_lease_acquire_defaults_to_stateful_session_bound_file_over_legacy() {
     assert_eq!(body["session_id"], "session-a");
     assert_eq!(body["workspace_id"], "workspace-a");
     assert_eq!(body["path"], "src/auth.ts");
+    let canonical_repo_root = repo_root
+        .canonicalize()
+        .expect("repo root should canonicalize");
+    assert_eq!(body["root"], canonical_repo_root.to_string_lossy().as_ref());
 
     let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
     assert_eq!(json["jsonrpc"], "2.0");
@@ -1166,7 +1346,7 @@ fn mcp_lease_acquire_ignores_codex_env_aliases_without_stateful_session_id() {
         json["result"]["content"][0]["text"]
             .as_str()
             .unwrap_or_default()
-            .contains("has no matching session-bound file")
+            .contains("multiple session-bound current-session files")
     );
     assert!(
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
@@ -1225,6 +1405,66 @@ fn mcp_lease_acquire_without_stateful_session_id_uses_verified_legacy_session() 
     assert_eq!(json["jsonrpc"], "2.0");
     assert_eq!(json["id"], 13);
     assert_eq!(json["result"]["isError"], false);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_lease_acquire_without_stateful_session_id_rejects_ambiguous_session_bound_files() {
+    let temp_root = temp_root("stateful-mcp-session-ambiguous-fallback");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{\"status\":\"ok\"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    write_current_session_file_for_session(
+        &repo_root,
+        "session-a",
+        &CurrentSession::new("session-a", "workspace-a"),
+    )
+    .expect("first session-bound current session should write");
+    write_current_session_file_for_session(
+        &repo_root,
+        "session-b",
+        &CurrentSession::new("session-b", "workspace-b"),
+    )
+    .expect("second session-bound current session should write");
+    write_legacy_current_session_for_test(
+        &repo_root,
+        &CurrentSession::new("session-a", "workspace-a"),
+    );
+
+    let response = run_mcp_jsonrpc_in_repo(
+        &repo_root,
+        &paths,
+        r#"{
+          "jsonrpc":"2.0",
+          "id":13,
+          "method":"tools/call",
+          "params":{
+            "name":"state_lease_acquire",
+            "arguments":{
+              "path":"src/auth.ts"
+            }
+          }
+        }"#,
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 13);
+    assert_eq!(json["result"]["isError"], true);
+    assert!(
+        json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("multiple session-bound current-session files")
+    );
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "ambiguous session fallback should fail before HTTP"
+    );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

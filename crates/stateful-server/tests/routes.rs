@@ -3,8 +3,9 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, Response, StatusCode},
 };
-use stateful_server::{ServerConfig, build_router};
+use stateful_server::{ServerConfig, build_router, serve_listener};
 use stateful_store::{Event, Store};
+use std::{sync::Arc, time::Duration};
 use tower::ServiceExt;
 
 fn acquire_test_lease(store: &Store, session_id: &str, workspace_id: &str, path: &str) {
@@ -549,7 +550,7 @@ async fn authorize_uses_policy_service_and_preserves_scope_denial() {
         .expect("authorize should complete");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), 2048)
+    let body = to_bytes(response.into_body(), 65_536)
         .await
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
@@ -599,6 +600,44 @@ async fn session_register_and_heartbeat_update_current_summary() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["current"]["session_count"], 1);
     assert_eq!(json["current"]["event_count"], 2);
+}
+
+#[tokio::test]
+async fn authorize_records_implicit_session_heartbeat() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize request should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let events = app
+        .oneshot(authorized_get("/v1/events"))
+        .await
+        .expect("events request should complete");
+    assert_eq!(events.status(), StatusCode::OK);
+    let json = response_json(events, 4096).await;
+    let events = json["events"]
+        .as_array()
+        .expect("events should be an array");
+    assert!(
+        events.iter().any(|event| {
+            event["event_type"] == "SessionHeartbeat"
+                && event["session_id"] == "s1"
+                && event["workspace_id"] == "w1"
+        }),
+        "authorize should record implicit heartbeat: {events:?}"
+    );
 }
 
 #[tokio::test]
@@ -940,7 +979,7 @@ async fn hook_native_write_requires_exact_file_intent_even_when_directory_scope_
 }
 
 #[tokio::test]
-async fn hook_write_requires_tool_name_even_when_source_ref_names_native_tool() {
+async fn hook_file_write_without_tool_name_still_requires_exact_file_lease() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     let declare = app
@@ -998,7 +1037,7 @@ async fn hook_write_requires_tool_name_even_when_source_ref_names_native_tool() 
     );
     body["source"]["kind"] = serde_json::json!("hook");
     body["source"]["event"] = serde_json::json!("pre_tool_use");
-    body["source"]["source_ref"] = serde_json::json!("apply_patch");
+    body["source"]["source_ref"] = serde_json::json!("hook:req-1");
 
     let response = app
         .oneshot(json_request("/v1/authorize", body))
@@ -1011,7 +1050,19 @@ async fn hook_write_requires_tool_name_even_when_source_ref_names_native_tool() 
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "deny");
-    assert_eq!(json["reason_code"], "missing_tool_name");
+    assert_eq!(json["reason_code"], "missing_lease");
+    assert!(
+        json["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("exact active same-session file leases")
+    );
+    assert!(
+        json["required_next_action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("matching same-session file leases")
+    );
 }
 
 #[tokio::test]
@@ -1155,6 +1206,184 @@ async fn hook_native_write_allows_exact_file_intent_and_exact_file_lease() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "allow");
     assert_eq!(json["reason_code"], "authorized");
+}
+
+#[tokio::test]
+async fn hook_native_write_denies_when_file_changed_since_lease_acquired() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-lease-observation-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let repo_root = temp_root.join("repo");
+    std::fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    std::fs::write(repo_root.join("src/auth.ts"), "version one\n")
+        .expect("initial target should be writable");
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let mut declare_body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "purpose": "Edit auth.",
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    declare_body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
+    let declare = app
+        .clone()
+        .oneshot(json_request("/v1/intent/declare", declare_body))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let acquire = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts",
+                "root": repo_root.to_string_lossy()
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(acquire.status(), StatusCode::OK);
+
+    std::fs::write(repo_root.join("src/auth.ts"), "version two\n")
+        .expect("target should be externally writable");
+
+    let mut authorize_body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts"
+        }),
+    );
+    authorize_body["workspace"]["root"] =
+        serde_json::json!(repo_root.to_string_lossy().to_string());
+    authorize_body["source"]["kind"] = serde_json::json!("hook");
+    authorize_body["source"]["event"] = serde_json::json!("pre_tool_use");
+    authorize_body["source"]["source_ref"] = serde_json::json!("hook:s1:Edit");
+    authorize_body["source"]["tool_name"] = serde_json::json!("Edit");
+
+    let response = app
+        .oneshot(json_request("/v1/authorize", authorize_body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "stale_lease_observation");
+
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[tokio::test]
+async fn post_write_refresh_updates_lease_observation_for_next_same_session_write() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-lease-refresh-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let repo_root = temp_root.join("repo");
+    std::fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    std::fs::write(repo_root.join("src/auth.ts"), "version one\n")
+        .expect("initial target should be writable");
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let mut declare_body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "purpose": "Edit auth.",
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    declare_body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
+    let declare = app
+        .clone()
+        .oneshot(json_request("/v1/intent/declare", declare_body))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let acquire = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts",
+                "root": repo_root.to_string_lossy()
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(acquire.status(), StatusCode::OK);
+
+    std::fs::write(repo_root.join("src/auth.ts"), "version two\n")
+        .expect("completed write should update target");
+
+    let refresh = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/refresh-observation",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts",
+                "root": repo_root.to_string_lossy()
+            }),
+        ))
+        .await
+        .expect("lease observation refresh should complete");
+    assert_eq!(refresh.status(), StatusCode::OK);
+
+    let mut authorize_body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts"
+        }),
+    );
+    authorize_body["workspace"]["root"] =
+        serde_json::json!(repo_root.to_string_lossy().to_string());
+    authorize_body["source"]["kind"] = serde_json::json!("hook");
+    authorize_body["source"]["event"] = serde_json::json!("pre_tool_use");
+    authorize_body["source"]["source_ref"] = serde_json::json!("hook:s1:Edit");
+    authorize_body["source"]["tool_name"] = serde_json::json!("Edit");
+
+    let response = app
+        .oneshot(json_request("/v1/authorize", authorize_body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["decision"], "allow");
+
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -1560,7 +1789,7 @@ async fn authorize_denies_when_target_changed_since_base_observation() {
 }
 
 #[tokio::test]
-async fn queue_on_conflict_without_intent_denies_without_wait_record() {
+async fn queue_on_conflict_without_intent_enqueues_wait_record() {
     let store = Store::open_in_memory().expect("store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
 
@@ -1601,8 +1830,12 @@ async fn queue_on_conflict_without_intent_denies_without_wait_record() {
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "deny");
-    assert_eq!(json["reason_code"], "missing_intent");
-    assert!(json.get("wait").is_none());
+    assert_eq!(json["reason_code"], "active_lease_conflict");
+    assert_eq!(json["wait"]["status"], "queued");
+    let wait_id = json["wait"]["wait_id"]
+        .as_str()
+        .expect("wait_id should be present")
+        .to_string();
 
     let release = app
         .clone()
@@ -1634,8 +1867,8 @@ async fn queue_on_conflict_without_intent_denies_without_wait_record() {
         .await
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-    assert_eq!(json["resume_available"], false);
-    assert!(json["reservation"].is_null());
+    assert_eq!(json["resume_available"], true);
+    assert_eq!(json["reservation"]["wait_id"], wait_id);
 }
 
 #[tokio::test]
@@ -1667,7 +1900,7 @@ async fn queue_on_conflict_rejects_missing_purpose() {
 }
 
 #[tokio::test]
-async fn queue_on_conflict_out_of_scope_denies_without_wait_record() {
+async fn queue_on_conflict_out_of_scope_enqueues_wait_record() {
     let store = Store::open_in_memory().expect("store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
 
@@ -1723,8 +1956,12 @@ async fn queue_on_conflict_out_of_scope_denies_without_wait_record() {
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "deny");
-    assert_eq!(json["reason_code"], "scope_mismatch");
-    assert!(json.get("wait").is_none());
+    assert_eq!(json["reason_code"], "active_lease_conflict");
+    assert_eq!(json["wait"]["status"], "queued");
+    let wait_id = json["wait"]["wait_id"]
+        .as_str()
+        .expect("wait_id should be present")
+        .to_string();
 
     let release = app
         .clone()
@@ -1756,8 +1993,52 @@ async fn queue_on_conflict_out_of_scope_denies_without_wait_record() {
         .await
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-    assert_eq!(json["resume_available"], false);
-    assert!(json["reservation"].is_null());
+    assert_eq!(json["resume_available"], true);
+    assert_eq!(json["reservation"]["wait_id"], wait_id);
+}
+
+#[tokio::test]
+async fn reserved_session_without_active_intent_denies_missing_intent_before_claim_guidance() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let request = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-auth",
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "purpose": "Reserve auth changes before claiming."
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(request.status(), StatusCode::OK);
+    let json = response_json(request, 2048).await;
+    assert_eq!(json["request_state"], "reserved");
+
+    let authorize = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(authorize.status(), StatusCode::OK);
+
+    let json = response_json(authorize, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_intent");
+    assert!(json.get("reservation").is_none());
 }
 
 #[tokio::test]
@@ -1861,6 +2142,27 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
         .await
         .expect("lease release should complete");
     assert_eq!(release.status(), StatusCode::OK);
+
+    let intentless_probe = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s4",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    let body = to_bytes(intentless_probe.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_intent");
+    assert!(json["reservation"].is_null());
 
     let blocked_c = app
         .clone()
@@ -2016,6 +2318,9 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
     let json = response_json(allowed_a, 2048).await;
     assert_eq!(json["decision"], "allow");
     assert_eq!(json["reason_code"], "authorized");
+
+    ensure_test_intent_via_http(&app, "codex-b", "w1", "src/auth.ts").await;
+    ensure_test_intent_via_http(&app, "codex-c", "w1", "src/auth.ts").await;
 
     let request_b = app
         .clone()
@@ -2240,10 +2545,120 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
     assert_eq!(json["reason_code"], "authorized");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_intent_requests_reserve_exactly_one_file_backed_waiter() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-concurrent-intent-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file-backed store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+    let session_count = 12;
+
+    for index in 0..session_count {
+        let declare = app
+            .clone()
+            .oneshot(protocol_request(
+                "/v1/intent/declare",
+                &format!("stress-{index}"),
+                "w1",
+                serde_json::json!({
+                    "purpose": format!("Prepare stress request {index}."),
+                    "files_planned": ["src/concurrent.ts"]
+                }),
+            ))
+            .await
+            .expect("intent declaration should complete");
+        assert_eq!(declare.status(), StatusCode::OK);
+    }
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(session_count));
+    let handles = (0..session_count)
+        .map(|index| {
+            let app = app.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                let response = app
+                    .oneshot(protocol_request(
+                        "/v1/intent/request",
+                        &format!("stress-{index}"),
+                        "w1",
+                        serde_json::json!({
+                            "request_id": format!("request-stress-{index}"),
+                            "action": "write_file",
+                            "path": "src/concurrent.ts",
+                            "purpose": format!("Stress request {index}.")
+                        }),
+                    ))
+                    .await
+                    .expect("intent request should complete");
+                assert_eq!(response.status(), StatusCode::OK);
+                response_json(response, 16 * 1024 * 1024).await
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut states = Vec::new();
+    for handle in handles {
+        let json = handle.await.expect("request task should not panic");
+        states.push(
+            json["request_state"]
+                .as_str()
+                .expect("request state should be present")
+                .to_string(),
+        );
+    }
+
+    assert_eq!(
+        states
+            .iter()
+            .filter(|state| state.as_str() == "reserved")
+            .count(),
+        1
+    );
+    assert_eq!(
+        states
+            .iter()
+            .filter(|state| state.as_str() == "queued")
+            .count(),
+        session_count - 1
+    );
+
+    let reopened = Store::open(&db_path).expect("file-backed store should reopen");
+    let mut persisted_reserved = 0;
+    let mut persisted_queued = 0;
+    for index in 0..session_count {
+        let waiter = reopened
+            .waiter_by_request_id(format!("request-stress-{index}"))
+            .expect("waiter lookup should succeed")
+            .expect("waiter should persist");
+        match waiter.status.as_str() {
+            "reserved" => persisted_reserved += 1,
+            "queued" => persisted_queued += 1,
+            status => panic!("unexpected waiter status {status}"),
+        }
+    }
+    assert_eq!(persisted_reserved, 1);
+    assert_eq!(persisted_queued, session_count - 1);
+
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
 #[tokio::test]
 async fn intent_request_reserves_available_target_but_still_requires_claim() {
     let store = Store::open_in_memory().expect("store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    ensure_test_intent_via_http(&app, "s1", "w1", "src/auth.ts").await;
 
     let requested = app
         .clone()
@@ -2303,6 +2718,96 @@ async fn intent_request_reserves_available_target_but_still_requires_claim() {
 }
 
 #[tokio::test]
+async fn intent_claim_preserves_existing_session_intent_scope() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let declare_existing = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "purpose": "Continue parser refactor.",
+                "files_planned": ["src/parser.ts"]
+            }),
+        ))
+        .await
+        .expect("existing intent declaration should complete");
+    assert_eq!(declare_existing.status(), StatusCode::OK);
+
+    let existing_lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s2",
+                "workspace_id": "w1",
+                "path": "src/parser.ts"
+            }),
+        ))
+        .await
+        .expect("existing lease acquisition should complete");
+    assert_eq!(existing_lease.status(), StatusCode::OK);
+
+    let request = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-auth-claim",
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "purpose": "Claim auth update while parser refactor remains active."
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(request.status(), StatusCode::OK);
+    let json = response_json(request, 4096).await;
+    assert_eq!(json["request_state"], "reserved");
+    let wait_id = json["reservation"]["wait_id"]
+        .as_str()
+        .expect("reservation should include wait id")
+        .to_string();
+
+    let claim = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/claim",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "wait_id": wait_id
+            }),
+        ))
+        .await
+        .expect("intent claim should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let existing_scope = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/parser.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    let json = response_json(existing_scope, 2048).await;
+    assert_eq!(
+        json["decision"], "allow",
+        "unexpected authorization response: {json}"
+    );
+}
+
+#[tokio::test]
 async fn lease_acquire_returns_conflict_for_active_lease_conflict() {
     let store = Store::open_in_memory().expect("store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -2339,6 +2844,13 @@ async fn lease_acquire_returns_conflict_for_active_lease_conflict() {
     let json = response_json(conflict, 2048).await;
     assert_eq!(json["status"], "error");
     assert_eq!(json["reason_code"], "lease_conflict");
+    let required_next_action = json["required_next_action"]
+        .as_str()
+        .expect("lease conflict should include recovery guidance");
+    assert!(required_next_action.contains("state.intent.request"));
+    assert!(required_next_action.contains("state.notifications.poll"));
+    assert!(required_next_action.contains("state.resume.next"));
+    assert!(required_next_action.contains("state.intent.claim"));
 }
 
 #[tokio::test]
@@ -2400,6 +2912,83 @@ async fn lease_acquire_rejects_active_reservation_conflict_without_breaking_clai
     assert_eq!(claim.status(), StatusCode::OK);
     let json = response_json(claim, 2048).await;
     assert_eq!(json["reservation"]["status"], "claimed");
+}
+
+#[tokio::test]
+async fn intent_claim_rolls_back_reservation_when_intent_event_append_fails() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-claim-rollback-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let wait = store
+        .enqueue_waiter(
+            "s1",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Claim reserved auth changes.",
+            Some("s0"),
+        )
+        .expect("waiter should enqueue");
+    store
+        .promote_next_waiter("w1", "src/auth.ts")
+        .expect("waiter should reserve");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let trigger_conn =
+        rusqlite::Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_claim_intent_event
+             BEFORE INSERT ON events
+             WHEN NEW.event_type = 'IntentDeclared'
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated intent event append failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let claim = app
+        .oneshot(protocol_request(
+            "/v1/intent/claim",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "wait_id": wait.wait_id
+            }),
+        ))
+        .await
+        .expect("intent claim should complete");
+    assert_eq!(claim.status(), StatusCode::CONFLICT);
+    let json = response_json(claim, 2048).await;
+    assert_eq!(json["reason_code"], "claim_failed");
+    assert!(
+        json["message"]
+            .as_str()
+            .expect("message should be string")
+            .contains("simulated intent event append failure")
+    );
+
+    let status: String = trigger_conn
+        .query_row(
+            "SELECT status FROM wait_queue WHERE wait_id = ?1",
+            [&wait.wait_id],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("waiter status should load");
+    assert_eq!(status, "reserved");
+
+    drop(trigger_conn);
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -2766,6 +3355,7 @@ async fn activity_finalize_releases_leases_and_notifications_poll_returns_resume
     assert_eq!(finalize.status(), StatusCode::OK);
 
     let poll = app
+        .clone()
         .oneshot(json_request(
             "/v1/notifications/poll",
             serde_json::json!({
@@ -2786,6 +3376,30 @@ async fn activity_finalize_releases_leases_and_notifications_poll_returns_resume
     assert_eq!(
         json["notifications"][0]["payload"]["relative_path"],
         "src/auth.ts"
+    );
+
+    let second_poll = app
+        .oneshot(json_request(
+            "/v1/notifications/poll",
+            serde_json::json!({
+                "session_id": "s2",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("second notification poll should complete");
+    assert_eq!(second_poll.status(), StatusCode::OK);
+    let body = to_bytes(second_poll.into_body(), 2048)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(
+        json["notifications"]
+            .as_array()
+            .expect("notifications array")
+            .len(),
+        0
     );
 }
 
@@ -2836,6 +3450,110 @@ async fn activity_finalize_clears_active_intent_for_session() {
             .any(|item| item["kind"] == "intent" && item["session_id"] == "s1")
     }));
     assert_eq!(json["current"]["active_intent_count"], 0);
+}
+
+#[tokio::test]
+async fn activity_finalize_rolls_back_activity_and_lease_release_when_intent_completion_fails() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-finalize-rollback-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    ensure_test_intent_via_http(&app, "s1", "w1", "src/auth.ts").await;
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let trigger_conn =
+        rusqlite::Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_finalize_intent_completion
+             BEFORE UPDATE OF status ON intents
+             WHEN NEW.status = 'completed'
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated intent completion failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let finalize = app
+        .oneshot(json_request(
+            "/v1/activity/finalize",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("finalize should complete");
+    assert_eq!(finalize.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let json = response_json(finalize, 2048).await;
+    assert!(
+        json["error"]
+            .as_str()
+            .expect("error should be string")
+            .contains("simulated intent completion failure")
+    );
+
+    let activity_count: u64 = trigger_conn
+        .query_row(
+            "SELECT COUNT(*) FROM activities
+             WHERE session_id = 's1'
+               AND workspace_id = 'w1'",
+            [],
+            |row| row.get::<_, u64>(0),
+        )
+        .expect("activity count should load");
+    assert_eq!(activity_count, 0);
+
+    let active_lease_count: u64 = trigger_conn
+        .query_row(
+            "SELECT COUNT(*) FROM leases
+             WHERE workspace_id = 'w1'
+               AND session_id = 's1'
+               AND relative_path = 'src/auth.ts'
+               AND status = 'active'",
+            [],
+            |row| row.get::<_, u64>(0),
+        )
+        .expect("active lease count should load");
+    assert_eq!(active_lease_count, 1);
+
+    let active_intent_count: u64 = trigger_conn
+        .query_row(
+            "SELECT COUNT(*) FROM intents
+             WHERE workspace_id = 'w1'
+               AND session_id = 's1'
+               AND status = 'active'",
+            [],
+            |row| row.get::<_, u64>(0),
+        )
+        .expect("active intent count should load");
+    assert_eq!(active_intent_count, 1);
+
+    drop(trigger_conn);
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -3808,6 +4526,289 @@ async fn current_returns_materialized_state_summary() {
 
 #[tokio::test]
 async fn events_returns_recent_audit_events() {
+    let store = Store::open_in_memory().expect("store should open");
+    for index in 0..101 {
+        store
+            .append(
+                Event::session_registered(format!("old-session-{index}"), "w1")
+                    .with_event_id(format!("old-event-{index}")),
+            )
+            .expect("old event should append");
+    }
+    store
+        .append(Event::session_registered("new-session", "w1").with_event_id("new-event"))
+        .expect("new event should append");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let response = app
+        .oneshot(authorized_get("/v1/events"))
+        .await
+        .expect("events request should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), 1_048_576)
+        .await
+        .expect("body should read");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+    assert_eq!(json["status"], "ok");
+    let event_ids = json["events"]
+        .as_array()
+        .expect("events should be an array")
+        .iter()
+        .map(|event| event["event_id"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(event_ids.len(), 100);
+    assert_eq!(event_ids[0], "new-event");
+    assert!(!event_ids.contains(&"old-event-0"));
+}
+
+#[tokio::test]
+async fn lease_acquire_records_audit_event() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "Edit auth.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let acquire = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(acquire.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(authorized_get("/v1/events"))
+        .await
+        .expect("events request should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 4096).await;
+    let events = json["events"]
+        .as_array()
+        .expect("events should be an array");
+    assert!(
+        events.iter().any(|event| {
+            event["event_type"] == "LeaseAcquired"
+                && event["session_id"] == "s1"
+                && event["workspace_id"] == "w1"
+        }),
+        "lease acquisition should be present in audit events: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn lease_acquire_rolls_back_lease_when_audit_event_append_fails() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-lease-acquire-rollback-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "Edit auth.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let trigger_conn =
+        rusqlite::Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_lease_acquired_event
+             BEFORE INSERT ON events
+             WHEN NEW.event_type = 'LeaseAcquired'
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated lease audit event append failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let acquire = app
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(acquire.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let json = response_json(acquire, 2048).await;
+    assert!(
+        json["error"]
+            .as_str()
+            .expect("error should be string")
+            .contains("simulated lease audit event append failure")
+    );
+
+    let active_lease_count: u64 = trigger_conn
+        .query_row(
+            "SELECT COUNT(*) FROM leases
+             WHERE workspace_id = 'w1'
+               AND session_id = 's1'
+               AND relative_path = 'src/auth.ts'
+               AND status = 'active'",
+            [],
+            |row| row.get::<_, u64>(0),
+        )
+        .expect("active lease count should load");
+    assert_eq!(active_lease_count, 0);
+
+    drop(trigger_conn);
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[tokio::test]
+async fn intent_request_records_audit_event() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let request = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-1",
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "purpose": "Reserve auth file before writing."
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(request.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(authorized_get("/v1/events"))
+        .await
+        .expect("events request should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 4096).await;
+    let events = json["events"]
+        .as_array()
+        .expect("events should be an array");
+    assert!(
+        events.iter().any(|event| {
+            event["event_type"] == "IntentRequested"
+                && event["session_id"] == "s1"
+                && event["workspace_id"] == "w1"
+                && event["payload"]["request_id"] == "request-1"
+                && event["payload"]["relative_path"] == "src/auth.ts"
+                && event["payload"]["request_state"] == "reserved"
+        }),
+        "intent request should be present in audit events: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn intent_request_rolls_back_waiter_when_audit_event_append_fails() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-intent-request-rollback-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let trigger_conn =
+        rusqlite::Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_intent_requested_event
+             BEFORE INSERT ON events
+             WHEN NEW.event_type = 'IntentRequested'
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated intent request audit event append failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let request = app
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-1",
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "purpose": "Reserve auth file before writing."
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(request.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let json = response_json(request, 2048).await;
+    assert!(
+        json["message"]
+            .as_str()
+            .expect("message should be string")
+            .contains("simulated intent request audit event append failure")
+    );
+
+    let waiter_count: u64 = trigger_conn
+        .query_row(
+            "SELECT COUNT(*) FROM wait_queue WHERE request_id = 'request-1'",
+            [],
+            |row| row.get::<_, u64>(0),
+        )
+        .expect("waiter count should load");
+    assert_eq!(waiter_count, 0);
+
+    drop(trigger_conn);
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[tokio::test]
+async fn authorize_denial_records_audit_event() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     let declare = app
@@ -3822,8 +4823,26 @@ async fn events_returns_recent_audit_events() {
             }),
         ))
         .await
-        .expect("intent declaration should complete");
+        .expect("declare should complete");
     assert_eq!(declare.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/other.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "scope_mismatch");
 
     let response = app
         .oneshot(authorized_get("/v1/events"))
@@ -3831,12 +4850,426 @@ async fn events_returns_recent_audit_events() {
         .expect("events request should complete");
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), 2048)
+    let json = response_json(response, 4096).await;
+    let events = json["events"]
+        .as_array()
+        .expect("events should be an array");
+    assert!(
+        events.iter().any(|event| {
+            event["event_type"] == "AuthorizationDenied"
+                && event["session_id"] == "s1"
+                && event["workspace_id"] == "w1"
+                && event["payload"]["reason_code"] == "scope_mismatch"
+                && event["payload"]["action"] == "write_file"
+                && event["payload"]["path"] == "src/other.ts"
+        }),
+        "authorization denial should be present in audit events: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn authorize_denial_audit_event_includes_queued_wait_details() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    ensure_test_intent_via_http(&app, "s1", "w1", "src/auth.ts").await;
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
         .await
-        .expect("body should read");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-    assert_eq!(json["status"], "ok");
-    assert_eq!(json["events"][0]["event_type"], "IntentDeclared");
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    ensure_test_intent_via_http(&app, "s2", "w1", "src/auth.ts").await;
+    let queued = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "queue_on_conflict": true,
+                "purpose": "Queue requested write after blocker clears."
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(queued.status(), StatusCode::OK);
+    let json = response_json(queued, 4096).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "active_lease_conflict");
+    let wait_id = json["wait"]["wait_id"]
+        .as_str()
+        .expect("wait id should be present")
+        .to_string();
+
+    let response = app
+        .oneshot(authorized_get("/v1/events"))
+        .await
+        .expect("events request should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 8192).await;
+    let events = json["events"]
+        .as_array()
+        .expect("events should be an array");
+    assert!(
+        events.iter().any(|event| {
+            event["event_type"] == "AuthorizationDenied"
+                && event["session_id"] == "s2"
+                && event["workspace_id"] == "w1"
+                && event["payload"]["reason_code"] == "active_lease_conflict"
+                && event["payload"]["wait"]["wait_id"] == wait_id
+                && event["payload"]["wait"]["status"] == "queued"
+                && event["payload"]["wait"]["queue_position"] == 1
+                && event["payload"]["wait"]["blocking_session_id"] == "s1"
+        }),
+        "authorization denial audit event should include queued wait details: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn authorize_queue_rolls_back_waiter_when_audit_event_append_fails() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-authorize-queue-rollback-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    ensure_test_intent_via_http(&app, "s1", "w1", "src/auth.ts").await;
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "purpose": "Edit auth after blocker clears.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let trigger_conn =
+        rusqlite::Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_authorization_denied_event
+             BEFORE INSERT ON events
+             WHEN NEW.event_type = 'AuthorizationDenied'
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated authorization audit event append failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let response = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "queue_on_conflict": true,
+                "purpose": "Queue auth edit after blocker clears."
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let json = response_json(response, 2048).await;
+    assert!(
+        json["message"]
+            .as_str()
+            .expect("message should be string")
+            .contains("simulated authorization audit event append failure")
+    );
+
+    let waiter_count: u64 = trigger_conn
+        .query_row(
+            "SELECT COUNT(*) FROM wait_queue
+             WHERE session_id = 's2'
+               AND workspace_id = 'w1'
+               AND relative_path = 'src/auth.ts'",
+            [],
+            |row| row.get::<_, u64>(0),
+        )
+        .expect("waiter count should load");
+    assert_eq!(waiter_count, 0);
+
+    drop(trigger_conn);
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[tokio::test]
+async fn lifecycle_mutations_record_audit_events() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    ensure_test_intent_via_http(&app, "s1", "w1", "src/release.ts").await;
+    let acquire_release_path = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/release.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(acquire_release_path.status(), StatusCode::OK);
+
+    let release = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/release",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/release.ts"
+            }),
+        ))
+        .await
+        .expect("lease release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    ensure_test_intent_via_http(&app, "blocker", "w1", "src/claim.ts").await;
+    let blocker_lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "blocker",
+                "workspace_id": "w1",
+                "path": "src/claim.ts"
+            }),
+        ))
+        .await
+        .expect("blocker lease should complete");
+    assert_eq!(blocker_lease.status(), StatusCode::OK);
+
+    let claim_request = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "claimer",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-claim",
+                "action": "write_file",
+                "path": "src/claim.ts",
+                "purpose": "Claim queued work."
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(claim_request.status(), StatusCode::OK);
+    let claim_request_json = response_json(claim_request, 4096).await;
+    let claim_wait_id = claim_request_json["wait"]["wait_id"]
+        .as_str()
+        .expect("claim wait id should be present")
+        .to_string();
+
+    let release_blocker = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/release",
+            serde_json::json!({
+                "session_id": "blocker",
+                "workspace_id": "w1",
+                "path": "src/claim.ts"
+            }),
+        ))
+        .await
+        .expect("blocker release should complete");
+    assert_eq!(release_blocker.status(), StatusCode::OK);
+
+    let claim = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/claim",
+            "claimer",
+            "w1",
+            serde_json::json!({
+                "wait_id": claim_wait_id
+            }),
+        ))
+        .await
+        .expect("intent claim should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    ensure_test_intent_via_http(&app, "cancel-blocker", "w1", "src/cancel.ts").await;
+    let cancel_blocker_lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "cancel-blocker",
+                "workspace_id": "w1",
+                "path": "src/cancel.ts"
+            }),
+        ))
+        .await
+        .expect("cancel blocker lease should complete");
+    assert_eq!(cancel_blocker_lease.status(), StatusCode::OK);
+
+    let cancel_request = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "cancelable",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-cancel",
+                "action": "write_file",
+                "path": "src/cancel.ts",
+                "purpose": "Cancel queued work."
+            }),
+        ))
+        .await
+        .expect("cancel intent request should complete");
+    assert_eq!(cancel_request.status(), StatusCode::OK);
+
+    let release_cancel_blocker = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/release",
+            serde_json::json!({
+                "session_id": "cancel-blocker",
+                "workspace_id": "w1",
+                "path": "src/cancel.ts"
+            }),
+        ))
+        .await
+        .expect("cancel blocker release should complete");
+    assert_eq!(release_cancel_blocker.status(), StatusCode::OK);
+
+    let cancel = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/cancel",
+            "cancelable",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-cancel"
+            }),
+        ))
+        .await
+        .expect("intent cancel should complete");
+    assert_eq!(cancel.status(), StatusCode::OK);
+
+    ensure_test_intent_via_http(&app, "finalizer", "w1", "src/finalize.ts").await;
+    let finalize_lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "finalizer",
+                "workspace_id": "w1",
+                "path": "src/finalize.ts"
+            }),
+        ))
+        .await
+        .expect("finalize lease should complete");
+    assert_eq!(finalize_lease.status(), StatusCode::OK);
+
+    let finalize = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/activity/finalize",
+            serde_json::json!({
+                "session_id": "finalizer",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("activity finalize should complete");
+    assert_eq!(finalize.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(authorized_get("/v1/events"))
+        .await
+        .expect("events request should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response, 16384).await;
+    let events = json["events"]
+        .as_array()
+        .expect("events should be an array");
+
+    assert!(
+        events.iter().any(|event| {
+            event["event_type"] == "LeaseReleased"
+                && event["session_id"] == "s1"
+                && event["workspace_id"] == "w1"
+                && event["payload"]["path"] == "src/release.ts"
+        }),
+        "lease release should be present in audit events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event["event_type"] == "IntentClaimed"
+                && event["session_id"] == "claimer"
+                && event["workspace_id"] == "w1"
+                && event["payload"]["wait_id"] == claim_wait_id
+                && event["payload"]["relative_path"] == "src/claim.ts"
+        }),
+        "intent claim should be present in audit events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event["event_type"] == "IntentCanceled"
+                && event["session_id"] == "cancelable"
+                && event["workspace_id"] == "w1"
+                && event["payload"]["request_id"] == "request-cancel"
+                && event["payload"]["relative_path"] == "src/cancel.ts"
+        }),
+        "intent cancel should be present in audit events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event["event_type"] == "ActivityFinalized"
+                && event["session_id"] == "finalizer"
+                && event["workspace_id"] == "w1"
+                && event["payload"]["released_leases"] == 1
+                && event["payload"]["completed_intents"] == 1
+        }),
+        "activity finalization should be present in audit events: {events:?}"
+    );
 }
 
 #[tokio::test]
@@ -3879,6 +5312,147 @@ async fn authorize_uses_supplied_sqlite_store() {
     assert_eq!(json["decision"], "allow");
 
     std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[tokio::test]
+async fn serve_listener_expires_stale_reservations_without_request_activity() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-server-maintenance-worker-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let setup_store = Store::open(&db_path).expect("file store should open");
+    let first = setup_store
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("first waiter should enqueue");
+    let second = setup_store
+        .enqueue_waiter(
+            "s3",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("second waiter should enqueue");
+    setup_store
+        .promote_next_waiter("w1", "src/auth.ts")
+        .expect("first waiter should promote");
+    drop(setup_store);
+
+    let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
+    conn.execute(
+        "UPDATE wait_queue SET reservation_expires_at = '1970-01-01T00:00:00Z'
+         WHERE wait_id = ?1",
+        [&first.wait_id],
+    )
+    .expect("reservation should be made stale");
+    drop(conn);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let store = Store::open(&db_path).expect("server store should open");
+    let config = ServerConfig::with_store("secret-token", store)
+        .with_maintenance_interval(Duration::from_millis(20));
+    let server = tokio::spawn(async move { serve_listener(listener, config).await });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
+    let first_status: String = conn
+        .query_row(
+            "SELECT status FROM wait_queue WHERE wait_id = ?1",
+            [&first.wait_id],
+            |row| row.get(0),
+        )
+        .expect("first waiter status should load");
+    let second_status: String = conn
+        .query_row(
+            "SELECT status FROM wait_queue WHERE wait_id = ?1",
+            [&second.wait_id],
+            |row| row.get(0),
+        )
+        .expect("second waiter status should load");
+
+    server.abort();
+    let _ = server.await;
+    drop(conn);
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+
+    assert_eq!(first_status, "expired");
+    assert_eq!(second_status, "reserved");
+}
+
+#[tokio::test]
+async fn serve_listener_prunes_old_history_without_request_activity() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-server-retention-worker-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let setup_store = Store::open(&db_path).expect("file store should open");
+    let mut old_event = Event::session_registered("old-session", "w1").with_event_id("old-event");
+    old_event.created_at = "1970-01-01T00:00:00Z".to_string();
+    setup_store
+        .append(old_event)
+        .expect("old event should append");
+    let recent_event =
+        Event::session_registered("recent-session", "w1").with_event_id("recent-event");
+    setup_store
+        .append(recent_event)
+        .expect("recent event should append");
+    drop(setup_store);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let store = Store::open(&db_path).expect("server store should open");
+    let config = ServerConfig::with_store("secret-token", store)
+        .with_maintenance_interval(Duration::from_millis(20));
+    let server = tokio::spawn(async move { serve_listener(listener, config).await });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
+    let event_ids = {
+        let mut statement = conn
+            .prepare("SELECT event_id FROM events ORDER BY event_id ASC")
+            .expect("events query should prepare");
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("events query should execute")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("event ids should load")
+    };
+
+    server.abort();
+    let _ = server.await;
+    drop(conn);
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+
+    assert_eq!(event_ids, vec!["recent-event"]);
 }
 
 #[tokio::test]
@@ -3969,6 +5543,105 @@ async fn context_render_includes_live_current_state_purpose() {
             .as_str()
             .unwrap_or_default()
             .contains("purpose: Fix auth validation behavior")
+    );
+}
+
+#[tokio::test]
+async fn context_render_omits_current_session_lease_items() {
+    let store = Store::open_in_memory().expect("store should open");
+    acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
+    acquire_test_lease(&store, "s2", "w1", "src/session.ts");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "w1",
+                "session_id": "s1"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(
+        !items
+            .iter()
+            .any(|item| { item["kind"] == "lease" && item["session_id"] == "s1" }),
+        "current session lease should not be reported as blocking: {items:?}"
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item["kind"] == "lease" && item["session_id"] == "s2"),
+        "other session lease should remain visible: {items:?}"
+    );
+}
+
+#[tokio::test]
+async fn context_render_omits_current_session_intent_items() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let current_declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "Current session edits auth.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("current intent declaration should complete");
+    assert_eq!(current_declare.status(), StatusCode::OK);
+
+    let other_declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "purpose": "Other session edits session handling.",
+                "files_planned": ["src/session.ts"]
+            }),
+        ))
+        .await
+        .expect("other intent declaration should complete");
+    assert_eq!(other_declare.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "w1",
+                "session_id": "s1"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(
+        !items
+            .iter()
+            .any(|item| item["kind"] == "intent" && item["session_id"] == "s1"),
+        "current session intent should not be reported as nearby activity: {items:?}"
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item["kind"] == "intent" && item["session_id"] == "s2"),
+        "other session intent should remain visible: {items:?}"
     );
 }
 
@@ -4364,6 +6037,50 @@ async fn outbox_sync_accepts_idempotent_events() {
             .expect("outbox sync should complete");
         assert_eq!(response.status(), StatusCode::OK);
     }
+}
+
+#[tokio::test]
+async fn outbox_sync_persists_full_event_payload() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-outbox-sync-payload-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/outbox/sync",
+            serde_json::json!({
+                "outbox_id": "outbox-full",
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "sequence": 7,
+                "event_type": "HeartbeatObserved",
+                "payload": {"error": "server unavailable", "retry": true}
+            }),
+        ))
+        .await
+        .expect("outbox sync should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let reopened = Store::open(&db_path).expect("file store should reopen");
+    let stored = reopened
+        .outbox_entry("outbox-full")
+        .expect("outbox entry lookup should succeed")
+        .expect("outbox entry should exist");
+    assert_eq!(stored.workspace_id, "w1");
+    assert_eq!(stored.event_type, "HeartbeatObserved");
+    assert_eq!(
+        stored.payload,
+        serde_json::json!({"error": "server unavailable", "retry": true})
+    );
+
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 fn json_request(path: &str, body: serde_json::Value) -> Request<Body> {

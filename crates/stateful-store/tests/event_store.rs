@@ -1,7 +1,12 @@
+use rusqlite::Connection;
+use serde_json::json;
 use stateful_core::{AuthorizationInput, CurrentItemKind, DecisionKind};
 use stateful_store::{Event, IntentRequestInput, OutboxEntry, Store, StoreError};
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
+use time::{Duration as TimeDuration, OffsetDateTime};
 
 fn acquire_test_lease(store: &Store, session_id: &str, workspace_id: &str, path: &str) {
     let has_matching_intent = store
@@ -25,6 +30,29 @@ fn acquire_test_lease(store: &Store, session_id: &str, workspace_id: &str, path:
     store
         .acquire_lease(session_id, workspace_id, path)
         .expect("lease should acquire");
+}
+
+fn query_ids(conn: &Connection, sql: &str) -> Vec<String> {
+    let mut statement = conn.prepare(sql).expect("query should prepare");
+    let mut ids = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query should execute")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("ids should load");
+    ids.sort();
+    ids
+}
+
+fn test_timestamp(timestamp: OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        timestamp.year(),
+        u8::from(timestamp.month()),
+        timestamp.day(),
+        timestamp.hour(),
+        timestamp.minute(),
+        timestamp.second()
+    )
 }
 
 #[test]
@@ -71,6 +99,31 @@ fn outbox_entries_are_idempotent_by_outbox_id() {
         .expect("duplicate outbox append should be idempotent");
 
     assert_eq!(store.outbox_count().expect("outbox count should load"), 1);
+}
+
+#[test]
+fn outbox_entry_persists_full_sync_evidence() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    let entry = OutboxEntry::synced("outbox-1", "s1", 1)
+        .with_workspace_id("w1")
+        .with_event_type("HeartbeatObserved")
+        .with_payload(json!({"error":"server unavailable"}));
+
+    store
+        .append_outbox(entry)
+        .expect("outbox append should succeed");
+
+    let stored = store
+        .outbox_entry("outbox-1")
+        .expect("outbox entry lookup should succeed")
+        .expect("outbox entry should exist");
+    assert_eq!(stored.outbox_id, "outbox-1");
+    assert_eq!(stored.session_id, "s1");
+    assert_eq!(stored.workspace_id, "w1");
+    assert_eq!(stored.sequence, 1);
+    assert_eq!(stored.event_type, "HeartbeatObserved");
+    assert_eq!(stored.payload, json!({"error":"server unavailable"}));
+    assert_eq!(stored.sync_status, stateful_store::SyncStatus::Synced);
 }
 
 #[test]
@@ -155,7 +208,7 @@ fn intent_declared_rejects_raw_normalized_empty_scope_payloads() {
 }
 
 #[test]
-fn intent_declarations_replace_scope_only_in_same_workspace() {
+fn intent_declarations_preserve_existing_scope_in_same_workspace() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
@@ -207,8 +260,7 @@ fn intent_declarations_replace_scope_only_in_same_workspace() {
         &w1_state,
         AuthorizationInput::write_file("src/session.ts"),
     );
-    assert_eq!(old_w1_decision.decision, DecisionKind::Deny);
-    assert_eq!(old_w1_decision.reason_code, "scope_mismatch");
+    assert_eq!(old_w1_decision.decision, DecisionKind::Allow);
     assert_eq!(new_w1_decision.decision, DecisionKind::Allow);
 
     let w2_state = store
@@ -217,6 +269,48 @@ fn intent_declarations_replace_scope_only_in_same_workspace() {
     let w2_decision =
         stateful_core::authorize_action(&w2_state, AuthorizationInput::write_file("docs/guide.md"));
     assert_eq!(w2_decision.decision, DecisionKind::Allow);
+}
+
+#[test]
+fn intent_declarations_allow_edit_and_artifact_scopes_to_coexist() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    store
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            "Fix auth validation behavior.",
+            ["src/auth.ts"],
+        ))
+        .expect("edit intent should append");
+    store
+        .append(Event::intent_declared(
+            "s1",
+            "w1",
+            "Run the workspace test suite.",
+            ["tmp/"],
+        ))
+        .expect("artifact intent should append");
+
+    store
+        .acquire_lease("s1", "w1", "src/auth.ts")
+        .expect("edit lease should still be authorized");
+    store
+        .acquire_lease("s1", "w1", "tmp/")
+        .expect("artifact lease should be authorized");
+
+    let live = store
+        .live_current_state(None)
+        .expect("live current state should load");
+    assert!(
+        live.items.iter().any(|item| item.resource == "src/auth.ts"
+            && item.purpose == "Fix auth validation behavior.")
+    );
+    assert!(
+        live.items
+            .iter()
+            .any(|item| item.resource == "tmp/" && item.purpose == "Run the workspace test suite.")
+    );
 }
 
 #[test]
@@ -271,6 +365,133 @@ fn file_store_persists_events_and_materialized_views_across_reopen() {
         .expect("session lookup should succeed")
         .expect("session should be materialized");
     assert_eq!(session.workspace_id, "w1");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn file_store_enables_wal_journal_mode() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-wal-journal-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+
+    Store::open(&db_path).expect("file store should open");
+
+    let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
+    let journal_mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("journal mode should load");
+    assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn file_store_waits_for_short_sqlite_write_locks() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-busy-timeout-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+    let store = Store::open(&db_path).expect("initial file store should open");
+
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let lock_db_path = db_path.clone();
+    let lock_thread = thread::spawn(move || {
+        let conn = rusqlite::Connection::open(lock_db_path).expect("lock db should open");
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .expect("write lock should start");
+        locked_tx.send(()).expect("lock signal should send");
+        thread::sleep(StdDuration::from_millis(150));
+        conn.execute_batch("COMMIT").expect("write lock should end");
+    });
+
+    locked_rx.recv().expect("write lock should be active");
+    let append_result = store.append(Event::session_registered("s-waiter", "w1"));
+    lock_thread.join().expect("lock thread should finish");
+
+    append_result.expect("append should wait for short sqlite write lock");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn retention_pruning_removes_old_history_but_preserves_live_notification_state() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-retention-pruning-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+
+    let mut old_event = Event::session_registered("old-session", "w1").with_event_id("old-event");
+    old_event.created_at = "2026-05-01T00:00:00Z".to_string();
+    store.append(old_event).expect("old event should append");
+    let mut recent_event =
+        Event::session_registered("recent-session", "w1").with_event_id("recent-event");
+    recent_event.created_at = "2026-05-20T00:00:00Z".to_string();
+    store
+        .append(recent_event)
+        .expect("recent event should append");
+
+    let conn = Connection::open(&db_path).expect("db should reopen");
+    conn.execute_batch(
+        "
+        INSERT INTO reconciliations (reconciliation_id, session_id, created_at)
+        VALUES
+            ('old-reconciliation', 's1', '2026-05-01T00:00:00Z'),
+            ('recent-reconciliation', 's1', '2026-05-20T00:00:00Z');
+
+        INSERT INTO notifications (
+            notification_id,
+            target_session_id,
+            workspace_id,
+            kind,
+            payload_json,
+            status,
+            created_at,
+            expires_at
+        ) VALUES
+            ('old-expired-notification', 's1', 'w1', 'reservation_granted', '{}', 'expired', '2026-05-01T00:00:00Z', '2026-05-02T00:00:00Z'),
+            ('old-pending-notification', 's1', 'w1', 'reservation_granted', '{}', 'pending', '2026-05-01T00:00:00Z', '2026-05-30T00:00:00Z'),
+            ('recent-expired-notification', 's1', 'w1', 'reservation_granted', '{}', 'expired', '2026-05-20T00:00:00Z', '2026-05-21T00:00:00Z');
+        ",
+    )
+    .expect("history fixtures should insert");
+
+    store
+        .prune_retention_before("2026-05-15T00:00:00Z")
+        .expect("old history should prune");
+
+    let events = store.recent_events(10).expect("events should load");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_id, "recent-event");
+
+    let reconciliation_ids = query_ids(&conn, "SELECT reconciliation_id FROM reconciliations");
+    assert_eq!(reconciliation_ids, vec!["recent-reconciliation"]);
+
+    let notification_ids = query_ids(&conn, "SELECT notification_id FROM notifications");
+    assert_eq!(
+        notification_ids,
+        vec!["old-pending-notification", "recent-expired-notification"]
+    );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -339,15 +560,15 @@ fn migration_adds_repo_identity_columns_to_existing_events_table() {
     let events = store.recent_events(10).expect("events should read");
 
     assert_eq!(events.len(), 2);
-    assert_eq!(events[0].event_id, "legacy-event-1");
-    assert_eq!(events[0].repo_id, None);
-    assert_eq!(events[0].worktree_id, None);
-    assert_eq!(events[0].root, None);
-    assert_eq!(events[0].branch, None);
-    assert_eq!(events[1].repo_id.as_deref(), Some("repo-1"));
-    assert_eq!(events[1].worktree_id.as_deref(), Some("worktree-1"));
-    assert_eq!(events[1].root.as_deref(), Some("/repo"));
-    assert_eq!(events[1].branch.as_deref(), Some("main"));
+    assert_eq!(events[0].repo_id.as_deref(), Some("repo-1"));
+    assert_eq!(events[0].worktree_id.as_deref(), Some("worktree-1"));
+    assert_eq!(events[0].root.as_deref(), Some("/repo"));
+    assert_eq!(events[0].branch.as_deref(), Some("main"));
+    assert_eq!(events[1].event_id, "legacy-event-1");
+    assert_eq!(events[1].repo_id, None);
+    assert_eq!(events[1].worktree_id, None);
+    assert_eq!(events[1].root, None);
+    assert_eq!(events[1].branch, None);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -718,9 +939,9 @@ fn event_records_return_recent_audit_events() {
     let events = store.recent_events(10).expect("events should load");
 
     assert_eq!(events.len(), 2);
-    assert_eq!(events[0].event_id, "event-1");
-    assert_eq!(events[1].event_id, "event-2");
-    assert_eq!(events[1].event_type, "IntentDeclared");
+    assert_eq!(events[0].event_id, "event-2");
+    assert_eq!(events[0].event_type, "IntentDeclared");
+    assert_eq!(events[1].event_id, "event-1");
 }
 
 #[test]
@@ -889,6 +1110,89 @@ fn session_heartbeat_caps_active_intent_expiry_at_max_lifetime() {
 }
 
 #[test]
+fn session_heartbeat_fails_closed_for_malformed_intent_declared_at() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-heartbeat-malformed-intent-{unique}"
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let mut intent =
+        Event::intent_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
+    let now = OffsetDateTime::now_utc();
+    let heartbeat_at = test_timestamp(now - TimeDuration::minutes(5));
+    let current_expires_at = test_timestamp(now + TimeDuration::minutes(5));
+    intent.created_at = test_timestamp(now - TimeDuration::minutes(10));
+    store.append(intent).expect("intent should append");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
+    conn.execute(
+        "UPDATE intents SET declared_at = ?1, expires_at = ?2 WHERE session_id = ?3",
+        ["not-a-timestamp", current_expires_at.as_str(), "s1"],
+    )
+    .expect("intent timestamp should corrupt");
+    drop(conn);
+
+    let store = Store::open(&db_path).expect("file store should reopen");
+    let mut heartbeat = Event::session_heartbeat("s1", "w1");
+    heartbeat.created_at = heartbeat_at;
+    let error = store
+        .append(heartbeat)
+        .expect_err("heartbeat should fail closed for malformed intent timestamp");
+    assert!(
+        error.to_string().contains("invalid timestamp"),
+        "unexpected error: {error}"
+    );
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
+    let expires_at: String = conn
+        .query_row(
+            "SELECT expires_at FROM intents WHERE session_id = ?1",
+            ["s1"],
+            |row| row.get(0),
+        )
+        .expect("intent expiry should load");
+    assert_eq!(expires_at, current_expires_at);
+    let event_count: u64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .expect("event count should load");
+    assert_eq!(event_count, 1);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn intent_declared_fails_closed_for_malformed_created_at() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    let mut intent =
+        Event::intent_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
+    intent.created_at = "not-a-timestamp".to_string();
+
+    let error = store
+        .append(intent)
+        .expect_err("malformed intent timestamp should fail closed");
+
+    assert!(
+        error.to_string().contains("invalid timestamp"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(store.event_count().expect("event count should load"), 0);
+    assert!(
+        store
+            .live_current_state(Some("src/auth.ts"))
+            .expect("current state should load")
+            .items
+            .is_empty()
+    );
+}
+
+#[test]
 fn session_heartbeat_extends_active_lease_expiry() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -908,6 +1212,11 @@ fn session_heartbeat_extends_active_lease_expiry() {
         ["2999-01-01T00:11:00Z", "s1"],
     )
     .expect("lease expiry should update");
+    conn.execute(
+        "UPDATE intents SET declared_at = ?1, expires_at = ?2 WHERE session_id = ?3",
+        ["2999-01-01T00:00:00Z", "2999-01-01T00:20:00Z", "s1"],
+    )
+    .expect("intent expiry should update");
     drop(conn);
 
     let store = Store::open(&db_path).expect("file store should reopen");
@@ -925,6 +1234,50 @@ fn session_heartbeat_extends_active_lease_expiry() {
         .find(|item| item.kind == CurrentItemKind::Lease)
         .expect("lease item should exist");
     assert_eq!(lease.expires_at.as_deref(), Some("2999-01-01T00:15:00Z"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn session_heartbeat_does_not_extend_lease_without_matching_active_intent() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_nanos();
+    let temp_root =
+        std::env::temp_dir().join(format!("stateful-store-heartbeat-uncovered-lease-{unique}"));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
+    store
+        .complete_session_intents("s1", "w1")
+        .expect("intent should complete");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
+    conn.execute(
+        "UPDATE leases SET expires_at = ?1 WHERE session_id = ?2",
+        ["2999-01-01T00:11:00Z", "s1"],
+    )
+    .expect("lease expiry should update");
+    drop(conn);
+
+    let store = Store::open(&db_path).expect("file store should reopen");
+    let mut heartbeat = Event::session_heartbeat("s1", "w1");
+    heartbeat.created_at = "2999-01-01T00:10:00Z".to_string();
+    store
+        .append(heartbeat)
+        .expect("heartbeat should append without refreshing uncovered lease");
+
+    let lease = store
+        .live_current_state(Some("src/auth.ts"))
+        .expect("live current state should load")
+        .items
+        .into_iter()
+        .find(|item| item.kind == CurrentItemKind::Lease)
+        .expect("lease item should still exist");
+    assert_eq!(lease.expires_at.as_deref(), Some("2999-01-01T00:11:00Z"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -1634,6 +1987,92 @@ fn intent_request_id_is_idempotent_for_wait_queue_records() {
 }
 
 #[test]
+fn expired_intent_request_retry_requeues_same_waiter_with_original_fifo_position() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    let first = store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-1",
+            session_id: "s2",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "Fix auth validation behavior.",
+            blocking_session_id: Some("s1"),
+        })
+        .expect("first request should enqueue");
+    let second = store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-2",
+            session_id: "s3",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "Update session handling.",
+            blocking_session_id: Some("s1"),
+        })
+        .expect("second request should enqueue");
+    store
+        .promote_next_waiter("w1", "src/auth.ts")
+        .expect("first request should reserve");
+    store
+        .expire_reservation(&first.wait_id)
+        .expect("first reservation should expire");
+    store
+        .promote_next_waiter("w1", "src/auth.ts")
+        .expect("second request should reserve");
+
+    let retried = store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-1",
+            session_id: "s2",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "Retry should preserve the original purpose.",
+            blocking_session_id: Some("s3"),
+        })
+        .expect("expired request retry should requeue");
+    let third = store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-3",
+            session_id: "s4",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "Update auth docs.",
+            blocking_session_id: Some("s3"),
+        })
+        .expect("third request should enqueue");
+
+    assert_eq!(retried.wait_id, first.wait_id);
+    assert_eq!(retried.status, "queued");
+    assert_eq!(retried.purpose, "Fix auth validation behavior.");
+    assert_eq!(
+        store
+            .queue_position(&retried.wait_id)
+            .expect("retried queue position should load"),
+        Some(1)
+    );
+    assert_eq!(
+        store
+            .queue_position(&third.wait_id)
+            .expect("third queue position should load"),
+        Some(2)
+    );
+
+    store
+        .expire_reservation(&second.wait_id)
+        .expect("second reservation should expire");
+    let next = store
+        .promote_next_waiter("w1", "src/auth.ts")
+        .expect("next waiter should promote")
+        .expect("retried waiter should reserve");
+    assert_eq!(next.wait_id, first.wait_id);
+    assert_eq!(next.session_id, "s2");
+}
+
+#[test]
 fn canceling_reserved_intent_request_promotes_next_waiter() {
     let store = Store::open_in_memory().expect("in-memory store should open");
     let first = store
@@ -1677,6 +2116,226 @@ fn canceling_reserved_intent_request_promotes_next_waiter() {
 }
 
 #[test]
+fn finalizing_session_cancels_queued_and_reserved_waiters_and_promotes_next() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    let reserved = store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-reserved",
+            session_id: "s2",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "Fix auth validation behavior.",
+            blocking_session_id: Some("s1"),
+        })
+        .expect("reserved session request should enqueue");
+    let next = store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-next",
+            session_id: "s3",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "Update session handling.",
+            blocking_session_id: Some("s1"),
+        })
+        .expect("next request should enqueue");
+    let queued = store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-queued",
+            session_id: "s2",
+            workspace_id: "w1",
+            relative_path: "docs/notes.md",
+            action: "write_file",
+            purpose: "Update docs.",
+            blocking_session_id: Some("s1"),
+        })
+        .expect("queued session request should enqueue");
+    store
+        .promote_next_waiter("w1", "src/auth.ts")
+        .expect("reserved waiter should promote");
+
+    store
+        .finalize_session_activity("s2", "w1")
+        .expect("session finalize should cancel waits");
+
+    assert_eq!(
+        store
+            .waiter_by_request_id("request-reserved")
+            .expect("reserved waiter should load")
+            .expect("reserved waiter should exist")
+            .status,
+        "canceled"
+    );
+    assert_eq!(
+        store
+            .waiter_by_request_id("request-queued")
+            .expect("queued waiter should load")
+            .expect("queued waiter should exist")
+            .status,
+        "canceled"
+    );
+    let promoted = store
+        .active_reservation("w1", "src/auth.ts")
+        .expect("reservation lookup should succeed")
+        .expect("next waiter should be reserved");
+    assert_eq!(promoted.wait_id, next.wait_id);
+    assert_eq!(promoted.session_id, "s3");
+    assert_ne!(reserved.wait_id, promoted.wait_id);
+    assert_ne!(queued.wait_id, promoted.wait_id);
+}
+
+#[test]
+fn cancel_intent_request_rolls_back_when_next_reservation_notification_fails() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-cancel-rollback-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+
+    let first = store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-1",
+            session_id: "s2",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "Fix auth validation behavior.",
+            blocking_session_id: Some("s1"),
+        })
+        .expect("first request should enqueue");
+    let second = store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-2",
+            session_id: "s3",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "Update session handling.",
+            blocking_session_id: Some("s1"),
+        })
+        .expect("second request should enqueue");
+    store
+        .promote_next_waiter("w1", "src/auth.ts")
+        .expect("first waiter should promote");
+
+    let trigger_conn = Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_cancel_notification
+             BEFORE INSERT ON notifications
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated cancel notification failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let error = store
+        .cancel_intent_request("request-1", "s2", "w1")
+        .expect_err("cancel should surface notification failure");
+    assert!(
+        error
+            .to_string()
+            .contains("simulated cancel notification failure"),
+        "error should report trigger failure: {error}"
+    );
+
+    assert_eq!(
+        store
+            .waiter_status(&first.wait_id)
+            .expect("first waiter status should load")
+            .as_deref(),
+        Some("reserved")
+    );
+    assert_eq!(
+        store
+            .waiter_status(&second.wait_id)
+            .expect("second waiter status should load")
+            .as_deref(),
+        Some("queued")
+    );
+    let reservation = store
+        .active_reservation("w1", "src/auth.ts")
+        .expect("reservation lookup should succeed")
+        .expect("first reservation should remain active");
+    assert_eq!(reservation.wait_id, first.wait_id);
+
+    drop(trigger_conn);
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn promote_next_waiter_for_path_rolls_back_when_notification_fails() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-promote-rollback-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+
+    let wait = store
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("waiter should enqueue");
+
+    let trigger_conn = Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_promote_notification
+             BEFORE INSERT ON notifications
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated promote notification failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let error = store
+        .promote_next_waiter_for_path("w1", "src/auth.ts")
+        .expect_err("promotion should surface notification failure");
+    assert!(
+        error
+            .to_string()
+            .contains("simulated promote notification failure"),
+        "error should report trigger failure: {error}"
+    );
+
+    assert_eq!(
+        store
+            .waiter_status(&wait.wait_id)
+            .expect("waiter status should load")
+            .as_deref(),
+        Some("queued")
+    );
+    assert!(
+        store
+            .active_reservation("w1", "src/auth.ts")
+            .expect("reservation lookup should succeed")
+            .is_none(),
+        "failed promotion should not leave a reservation"
+    );
+
+    drop(trigger_conn);
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn released_child_lease_promotes_directory_waiter_to_reservation() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
@@ -1710,6 +2369,144 @@ fn released_child_lease_promotes_directory_waiter_to_reservation() {
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].kind, "reservation_granted");
     assert_eq!(notifications[0].payload["relative_path"], "target");
+}
+
+#[test]
+fn release_lease_rolls_back_when_reservation_notification_fails() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-release-rollback-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+
+    acquire_test_lease(&store, "s1", "w1", "target/out.txt");
+    let wait = store
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target/out.txt",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("waiter should enqueue");
+
+    let trigger_conn = Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_reservation_notification
+             BEFORE INSERT ON notifications
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated notification failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let error = store
+        .release_lease("s1", "w1", "target/out.txt")
+        .expect_err("release should surface notification failure");
+    assert!(
+        error.to_string().contains("simulated notification failure"),
+        "error should report trigger failure: {error}"
+    );
+
+    let owner = store
+        .active_lease_conflict_owner_for_path("w1", "target/out.txt", "s2")
+        .expect("active lease owner lookup should succeed");
+    assert_eq!(owner.as_deref(), Some("s1"));
+    assert_eq!(
+        store
+            .waiter_status(&wait.wait_id)
+            .expect("waiter status should load")
+            .as_deref(),
+        Some("queued")
+    );
+    assert!(
+        store
+            .active_reservation("w1", "target/out.txt")
+            .expect("active reservation lookup should succeed")
+            .is_none(),
+        "failed release should not leave a promoted reservation"
+    );
+
+    drop(trigger_conn);
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn release_session_leases_rolls_back_when_reservation_notification_fails() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-session-release-rollback-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+
+    acquire_test_lease(&store, "s1", "w1", "target/out.txt");
+    let wait = store
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target/out.txt",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("waiter should enqueue");
+
+    let trigger_conn = Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_session_release_notification
+             BEFORE INSERT ON notifications
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated session release notification failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let error = store
+        .release_session_leases("s1", "w1")
+        .expect_err("session release should surface notification failure");
+    assert!(
+        error
+            .to_string()
+            .contains("simulated session release notification failure"),
+        "error should report trigger failure: {error}"
+    );
+
+    let owner = store
+        .active_lease_conflict_owner_for_path("w1", "target/out.txt", "s2")
+        .expect("active lease owner lookup should succeed");
+    assert_eq!(owner.as_deref(), Some("s1"));
+    assert_eq!(
+        store
+            .waiter_status(&wait.wait_id)
+            .expect("waiter status should load")
+            .as_deref(),
+        Some("queued")
+    );
+    assert!(
+        store
+            .active_reservation("w1", "target/out.txt")
+            .expect("active reservation lookup should succeed")
+            .is_none(),
+        "failed session release should not leave a promoted reservation"
+    );
+
+    drop(trigger_conn);
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -1892,6 +2689,38 @@ fn reservation_promotion_creates_pending_notification_for_waiter() {
 }
 
 #[test]
+fn pending_notifications_are_delivered_once() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    store
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("waiter should enqueue");
+    store
+        .promote_next_waiter("w1", "src/auth.ts")
+        .expect("waiter should promote");
+
+    let first_poll = store
+        .pending_notifications("s2")
+        .expect("first poll should load notification");
+    let second_poll = store
+        .pending_notifications("s2")
+        .expect("second poll should not redeliver notification");
+
+    assert_eq!(first_poll.len(), 1);
+    assert!(
+        second_poll.is_empty(),
+        "delivered notifications should not be returned again"
+    );
+}
+
+#[test]
 fn reservation_blocks_other_sessions_until_claimed_or_expired() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
@@ -1930,6 +2759,73 @@ fn reservation_blocks_other_sessions_until_claimed_or_expired() {
             .waiter_status(&wait.wait_id)
             .expect("waiter status should load"),
         Some("claimed".to_string())
+    );
+}
+
+#[test]
+fn active_waiter_by_session_matches_queued_and_reserved_standing() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    let file_wait = store
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target/out.txt",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("file waiter should enqueue");
+    assert_eq!(
+        store
+            .active_waiter_for_path_by_session("w1", "target/out.txt", "s2")
+            .expect("path waiter should load")
+            .expect("queued file waiter should match")
+            .wait_id,
+        file_wait.wait_id
+    );
+    assert_eq!(
+        store
+            .active_waiter_for_directory_by_session("w1", "target", "s2")
+            .expect("directory waiter should load")
+            .expect("queued child file waiter should match parent directory")
+            .wait_id,
+        file_wait.wait_id
+    );
+    assert!(
+        store
+            .active_waiter_for_path_by_session("w1", "target/out.txt", "s1")
+            .expect("other-session waiter lookup should load")
+            .is_none()
+    );
+
+    store
+        .promote_next_waiter("w1", "target/out.txt")
+        .expect("file waiter should promote");
+    let reserved = store
+        .active_waiter_for_path_by_session("w1", "target/out.txt", "s2")
+        .expect("reserved waiter should load")
+        .expect("reserved file waiter should match");
+    assert_eq!(reserved.wait_id, file_wait.wait_id);
+    assert_eq!(reserved.status, "reserved");
+
+    let directory_wait = store
+        .enqueue_waiter(
+            "s3",
+            "w1",
+            "target",
+            "write_directory",
+            "Queue requested directory write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("directory waiter should enqueue");
+    assert_eq!(
+        store
+            .active_waiter_for_path_by_session("w1", "target/out.txt", "s3")
+            .expect("ancestor directory waiter should load")
+            .expect("queued ancestor directory waiter should match child path")
+            .wait_id,
+        directory_wait.wait_id
     );
 }
 
@@ -2186,6 +3082,95 @@ fn stale_reservation_expiry_promotes_next_waiter() {
     assert_eq!(reservation.wait_id, second.wait_id);
     assert_eq!(reservation.session_id, "s3");
 
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn expire_stale_rolls_back_reservation_expiry_when_next_notification_fails() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-expire-reservation-rollback-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+
+    let first = store
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("first waiter should enqueue");
+    let second = store
+        .enqueue_waiter(
+            "s3",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue requested file write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("second waiter should enqueue");
+    store
+        .promote_next_waiter("w1", "src/auth.ts")
+        .expect("first waiter should promote");
+    drop(store);
+
+    let conn = Connection::open(&db_path).expect("db should reopen");
+    conn.execute(
+        "UPDATE wait_queue SET reservation_expires_at = '1970-01-01T00:00:00Z'
+         WHERE wait_id = ?1",
+        [&first.wait_id],
+    )
+    .expect("reservation should be made stale");
+    drop(conn);
+
+    let store = Store::open(&db_path).expect("file store should reopen");
+    let trigger_conn = Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_expire_reservation_notification
+             BEFORE INSERT ON notifications
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated stale reservation notification failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let error = store
+        .expire_stale_at("1970-01-01T00:00:01Z")
+        .expect_err("stale expiration should surface notification failure");
+    assert!(
+        error
+            .to_string()
+            .contains("simulated stale reservation notification failure"),
+        "error should report trigger failure: {error}"
+    );
+
+    assert_eq!(
+        store
+            .waiter_status(&first.wait_id)
+            .expect("first waiter status should load")
+            .as_deref(),
+        Some("reserved")
+    );
+    assert_eq!(
+        store
+            .waiter_status(&second.wait_id)
+            .expect("second waiter status should load")
+            .as_deref(),
+        Some("queued")
+    );
+
+    drop(trigger_conn);
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 

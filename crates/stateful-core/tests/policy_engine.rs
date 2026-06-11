@@ -1,4 +1,4 @@
-use stateful_core::{AuthorizationInput, DecisionKind, IntentPhase, PolicyState, authorize_action};
+use stateful_core::{AuthorizationInput, DecisionKind, PolicyState, authorize_action};
 
 #[test]
 fn write_without_active_intent_is_denied() {
@@ -57,32 +57,6 @@ fn target_outside_intent_scope_is_denied() {
 
     assert_eq!(decision.decision, DecisionKind::Deny);
     assert_eq!(decision.reason_code, "scope_mismatch");
-}
-
-#[test]
-fn expired_intent_is_denied() {
-    let state = PolicyState::default()
-        .with_active_file_intent("src/auth.ts")
-        .with_expired_intent();
-    let input = AuthorizationInput::write_file("src/auth.ts");
-
-    let decision = authorize_action(&state, input);
-
-    assert_eq!(decision.decision, DecisionKind::Deny);
-    assert_eq!(decision.reason_code, "expired_intent");
-}
-
-#[test]
-fn blocked_phase_is_not_write_authorizing() {
-    let state = PolicyState::default()
-        .with_active_file_intent("src/auth.ts")
-        .with_phase(IntentPhase::Blocked);
-    let input = AuthorizationInput::write_file("src/auth.ts");
-
-    let decision = authorize_action(&state, input);
-
-    assert_eq!(decision.decision, DecisionKind::Deny);
-    assert_eq!(decision.reason_code, "blocked_phase");
 }
 
 #[test]

@@ -71,6 +71,21 @@ fn install_yes_creates_global_files_and_database() {
 }
 
 #[test]
+fn install_yes_does_not_open_existing_state_database() {
+    let fixture = TestFixture::new("existing-db");
+    fs::create_dir_all(&fixture.paths.home).expect("stateful home should be creatable");
+    fs::write(&fixture.paths.state_db, b"owned by stateful server")
+        .expect("existing state db should be writable");
+
+    apply_global_install(fixture.options(true)).expect("install should apply");
+
+    assert_eq!(
+        fs::read(&fixture.paths.state_db).expect("existing state db should reread"),
+        b"owned by stateful server"
+    );
+}
+
+#[test]
 fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     let fixture = TestFixture::new("codex-yes");
 
@@ -98,6 +113,10 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
         "env_vars = [\"STATEFUL_SESSION_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
     ));
     assert!(first_config.contains("hook pre-tool-use"));
+    assert!(first_config.contains("[[hooks.PreToolUse]]\nmatcher = \".*\""));
+    assert!(first_config.contains(
+        "[[hooks.PostToolUse]]\nmatcher = \"Bash|apply_patch|Edit|Write|file_change|mcp__filesystem__.*\""
+    ));
     assert_eq!(count(&first_config, "[features]"), 1);
 
     apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");
@@ -127,6 +146,17 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     .expect("source stateful command policy skill should exist");
     assert_eq!(command_policy_skill, source_command_policy_skill);
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
+    assert!(command_policy_skill.contains("Intent declarations add"));
+    assert!(command_policy_skill.contains("--fs build --network enabled"));
+    assert!(command_policy_skill.contains("--write-dir tmp"));
+    assert!(command_policy_skill.contains("state.intent.request"));
+    assert!(command_policy_skill.contains("state.notifications.poll"));
+    assert!(command_policy_skill.contains("state.resume.next"));
+    assert!(command_policy_skill.contains("state.intent.claim"));
+    assert!(!command_policy_skill.contains("Intent declarations replace"));
+    assert!(
+        !command_policy_skill.contains("--fs write-targets --network enabled --write-dir target")
+    );
 
     let plan =
         apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");

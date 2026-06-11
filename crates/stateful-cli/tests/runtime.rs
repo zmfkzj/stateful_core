@@ -8,6 +8,9 @@ use std::{
     thread,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use stateful_cli::{
     CurrentSession, GlobalPaths, IntentCancelArgs, IntentClaimArgs, IntentDeclareArgs,
     IntentRequestArgs, ServerRuntime, cancel_intent_via_http, claim_intent_via_http,
@@ -17,6 +20,7 @@ use stateful_cli::{
     write_current_session_file, write_current_session_file_for_session, write_global_runtime_file,
     write_runtime_file,
 };
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const CURRENT_SESSION_CHILD_CASE: &str = "STATEFUL_RUNTIME_CURRENT_SESSION_CHILD_CASE";
 const CURRENT_SESSION_CHILD_ROOT: &str = "STATEFUL_RUNTIME_CURRENT_SESSION_CHILD_ROOT";
@@ -72,6 +76,24 @@ fn current_session_file_child_probe() {
                 read_current_session_file(&repo_root).expect("current session should read");
             assert_eq!(session.session_id, "legacy-session");
             assert_eq!(session.workspace_id, "w1");
+        }
+        "read_rejects_ambiguous_legacy_session" => {
+            let error = read_current_session_file(&repo_root)
+                .expect_err("ambiguous legacy session should fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("multiple session-bound current-session files")
+            );
+        }
+        "read_rejects_unverified_legacy_session" => {
+            let error = read_current_session_file(&repo_root)
+                .expect_err("unverified legacy session should fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("has no matching session-bound file")
+            );
         }
         "read_uses_stateful_session_id" => {
             let session =
@@ -167,16 +189,10 @@ fn current_session_file_ignores_codex_aliases_without_stateful_session_id() {
         .expect("legacy current session should write");
     write_current_session_file_for_session(
         &temp_root,
-        "thread-child",
-        &CurrentSession::new("thread-child", "w1"),
+        "legacy-session",
+        &CurrentSession::new("legacy-session", "w1"),
     )
-    .expect("thread-bound current session should write");
-    write_current_session_file_for_session(
-        &temp_root,
-        "root-session",
-        &CurrentSession::new("root-session", "w1"),
-    )
-    .expect("root-bound current session should write");
+    .expect("matching session-bound current session should write");
 
     let output = Command::new(std::env::current_exe().expect("current test binary path"))
         .arg("current_session_file_child_probe")
@@ -188,6 +204,100 @@ fn current_session_file_ignores_codex_aliases_without_stateful_session_id() {
         .env(CURRENT_SESSION_CHILD_ROOT, &temp_root)
         .env("STATEFUL_CODEX_RUN_ID", "root-session")
         .env("CODEX_THREAD_ID", "thread-child")
+        .output()
+        .expect("current session child test should run");
+
+    assert!(
+        output.status.success(),
+        "current session child failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn current_session_file_rejects_ambiguous_legacy_alias_without_stateful_session_id() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-current-session-ambiguous-legacy-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    write_current_session_file(&temp_root, &CurrentSession::new("legacy-session", "w1"))
+        .expect("legacy current session should write");
+    write_current_session_file_for_session(
+        &temp_root,
+        "legacy-session",
+        &CurrentSession::new("legacy-session", "w1"),
+    )
+    .expect("matching session-bound current session should write");
+    write_current_session_file_for_session(
+        &temp_root,
+        "other-session",
+        &CurrentSession::new("other-session", "w1"),
+    )
+    .expect("second session-bound current session should write");
+
+    let output = Command::new(std::env::current_exe().expect("current test binary path"))
+        .arg("current_session_file_child_probe")
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env_clear()
+        .env(
+            CURRENT_SESSION_CHILD_CASE,
+            "read_rejects_ambiguous_legacy_session",
+        )
+        .env(CURRENT_SESSION_CHILD_ROOT, &temp_root)
+        .output()
+        .expect("current session child test should run");
+
+    assert!(
+        output.status.success(),
+        "current session child failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn current_session_file_rejects_unverified_legacy_alias_without_stateful_session_id() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-current-session-unverified-legacy-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    write_current_session_file(&temp_root, &CurrentSession::new("legacy-session", "w1"))
+        .expect("legacy current session should write");
+    write_current_session_file_for_session(
+        &temp_root,
+        "other-session",
+        &CurrentSession::new("other-session", "w1"),
+    )
+    .expect("other session-bound current session should write");
+
+    let output = Command::new(std::env::current_exe().expect("current test binary path"))
+        .arg("current_session_file_child_probe")
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env_clear()
+        .env(
+            CURRENT_SESSION_CHILD_CASE,
+            "read_rejects_unverified_legacy_session",
+        )
+        .env(CURRENT_SESSION_CHILD_ROOT, &temp_root)
         .output()
         .expect("current session child test should run");
 
@@ -312,6 +422,78 @@ fn cli_current_uses_local_runtime_when_global_paths_are_unavailable() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"ok\""));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_files_are_owner_read_write_only() {
+    let temp_root =
+        std::env::temp_dir().join(format!("stateful-runtime-mode-test-{}", std::process::id()));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let runtime = ServerRuntime::new("http://127.0.0.1:43875", "secret-token", "w1", 44);
+
+    write_runtime_file(&temp_root, &runtime).expect("repo runtime file should write");
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let repo_mode = fs::metadata(temp_root.join(".stateful_core/runtime/server.json"))
+        .expect("repo runtime metadata should read")
+        .permissions()
+        .mode()
+        & 0o777;
+    let global_mode = fs::metadata(&paths.server_json)
+        .expect("global runtime metadata should read")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(repo_mode, 0o600);
+    assert_eq!(global_mode, 0o600);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[cfg(unix)]
+#[test]
+fn current_session_files_are_owner_read_write_only() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-current-session-mode-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    write_current_session_file(&temp_root, &CurrentSession::new("legacy", "w1"))
+        .expect("legacy session file should write");
+    write_current_session_file_for_session(
+        &temp_root,
+        "session-1",
+        &CurrentSession::new("session-1", "w1"),
+    )
+    .expect("session-bound session file should write");
+
+    let legacy_mode = fs::metadata(temp_root.join(".stateful_core/runtime/session.json"))
+        .expect("legacy session metadata should read")
+        .permissions()
+        .mode()
+        & 0o777;
+    let session_mode = fs::metadata(
+        temp_root
+            .join(".stateful_core/runtime/sessions")
+            .join("session-1.json"),
+    )
+    .expect("session-bound metadata should read")
+    .permissions()
+    .mode()
+        & 0o777;
+    assert_eq!(legacy_mode, 0o600);
+    assert_eq!(session_mode, 0o600);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -721,6 +903,7 @@ fn declare_intent_via_http_posts_expected_payload() {
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
 
+    let before_request = OffsetDateTime::now_utc();
     declare_intent_via_http(
         &runtime,
         IntentDeclareArgs {
@@ -742,7 +925,18 @@ fn declare_intent_via_http_posts_expected_payload() {
             .as_str()
             .is_some_and(|value| !value.is_empty())
     );
-    assert_eq!(body["observed_at"], "2026-05-31T00:00:00Z");
+    let observed_at = body["observed_at"]
+        .as_str()
+        .expect("observed_at should be a string");
+    assert_ne!(
+        observed_at, runtime.started_at,
+        "observed_at should describe the request, not the runtime start"
+    );
+    let observed_at = OffsetDateTime::parse(observed_at, &Rfc3339)
+        .expect("observed_at should be an RFC3339 timestamp");
+    let after_request = OffsetDateTime::now_utc();
+    assert!(observed_at >= before_request);
+    assert!(observed_at <= after_request);
     assert_eq!(body["session"]["session_id"], "s1");
     assert_eq!(body["session"]["actor_id"], "stateful-cli:42");
     assert_eq!(body["session"]["actor_type"], "agent");

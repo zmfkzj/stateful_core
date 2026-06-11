@@ -106,6 +106,10 @@ fn compare_runs_uses_paired_valid_denominator_and_reports_missing_invalid_pairs(
     .expect("comparison should build");
 
     assert_eq!(report.manifest_pairs, 5);
+    assert!(report.empirical_claim_allowed);
+    assert!(report.evidence_notes.iter().any(|note| {
+        note.contains("executed agent pairs") && note.contains("overhead reporting")
+    }));
     assert_eq!(report.paired.paired_valid_pairs, 1);
     assert_eq!(report.paired.stateful_functional_score, Some(1.0));
     assert_eq!(report.paired.no_state_functional_score, Some(0.5));
@@ -312,6 +316,96 @@ fn compare_runs_aggregates_discriminating_harness_metrics() {
     fs::remove_dir_all(root).expect("temp root should clean up");
 }
 
+#[test]
+fn compare_runs_reports_coordination_effect_and_friction_deltas() {
+    let root = temp_root("stateful-bench-compare-coordination-effects");
+    let manifest_path = root.join("pairs.jsonl");
+    let stateful_dir = root.join("runs/stateful");
+    let no_state_dir = root.join("runs/no-state");
+    fs::create_dir_all(&stateful_dir).expect("stateful run dir should exist");
+    fs::create_dir_all(&no_state_dir).expect("no-state run dir should exist");
+    fs::write(
+        stateful_dir.join("run.json"),
+        r#"{"run_id":"stateful","mode":"stateful"}"#,
+    )
+    .expect("stateful metadata should write");
+    fs::write(
+        no_state_dir.join("run.json"),
+        r#"{"run_id":"no-state","mode":"no-state"}"#,
+    )
+    .expect("no-state metadata should write");
+
+    write_jsonl(&manifest_path, &[exact_overlap_pair("pair-1")]).expect("manifest should write");
+    write_pair(
+        &stateful_dir,
+        RunMode::Stateful,
+        "pair-1",
+        "passed",
+        "passed",
+    );
+    write_pair(
+        &no_state_dir,
+        RunMode::NoState,
+        "pair-1",
+        "passed",
+        "passed",
+    );
+    write_observer_events(
+        &stateful_dir,
+        "pair-1",
+        &[
+            serde_json::json!({"event_type":"coordinated_block","path":"src/lib.rs"}),
+            serde_json::json!({"event_type":"denied_write","path":"src/lib.rs"}),
+            serde_json::json!({"event_type":"denied_write","path":"src/lib.rs"}),
+            serde_json::json!({"event_type":"stale_intent","path":"src/lib.rs"}),
+        ],
+    );
+    write_observer_events(
+        &no_state_dir,
+        "pair-1",
+        &[
+            serde_json::json!({"event_type":"uncoordinated_same_file_write_collision","path":"src/lib.rs"}),
+            serde_json::json!({"event_type":"uncoordinated_same_file_write_collision","path":"src/lib.rs"}),
+            serde_json::json!({"event_type":"lost_edit_event","path":"src/lib.rs"}),
+        ],
+    );
+
+    let report = compare_runs(CompareOptions {
+        stateful_run_dir: vec![stateful_dir],
+        no_state_run_dir: vec![no_state_dir],
+        manifest: manifest_path,
+        max_pairs: None,
+    })
+    .expect("comparison should build");
+
+    let value = serde_json::to_value(&report).expect("comparison report should serialize");
+    assert_eq!(
+        value["coordination_effects"]["prevented_uncoordinated_same_file_collisions"],
+        2
+    );
+    assert_eq!(
+        value["coordination_effects"]["prevented_lost_edit_events"],
+        1
+    );
+    assert_eq!(
+        value["coordination_effects"]["additional_coordinated_blocks"],
+        1
+    );
+    assert_eq!(value["coordination_effects"]["additional_denied_writes"], 2);
+    assert_eq!(
+        value["coordination_effects"]["additional_coordination_friction_events"],
+        4
+    );
+
+    let markdown = report.render_markdown();
+    assert!(markdown.contains("## Coordination Effects"));
+    assert!(markdown.contains("| Prevented uncoordinated same-file collisions | 2 |"));
+    assert!(markdown.contains("| Prevented lost edit events | 1 |"));
+    assert!(markdown.contains("| Additional coordination friction events | 4 |"));
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
 fn write_pair(run_dir: &Path, mode: RunMode, pair_id: &str, task_a: &str, task_b: &str) {
     write_pair_with_metrics(
         run_dir,
@@ -366,6 +460,11 @@ fn write_pair_with_metrics(
     .expect("harness result should write");
 }
 
+fn write_observer_events(run_dir: &Path, pair_id: &str, events: &[serde_json::Value]) {
+    write_jsonl(run_dir.join(pair_id).join("observer-events.jsonl"), events)
+        .expect("observer events should write");
+}
+
 fn write_pair_with_empty_harness(run_dir: &Path, mode: RunMode, pair_id: &str) {
     let pair_dir = run_dir.join(pair_id);
     fs::create_dir_all(&pair_dir).expect("pair dir should exist");
@@ -403,6 +502,14 @@ fn pair(pair_id: &str) -> PairManifestEntry {
         task_b_files: vec!["b.py".to_string()],
         task_a: instance(&format!("{pair_id}-a")),
         task_b: instance(&format!("{pair_id}-b")),
+    }
+}
+
+fn exact_overlap_pair(pair_id: &str) -> PairManifestEntry {
+    PairManifestEntry {
+        class: PairClass::ExactFileOverlap,
+        task_b_files: vec!["a.py".to_string()],
+        ..pair(pair_id)
     }
 }
 

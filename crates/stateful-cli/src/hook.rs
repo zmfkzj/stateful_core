@@ -1,17 +1,23 @@
 use std::{
+    collections::BTreeSet,
+    fs,
     io::{self, Read},
     path::{Component, Path, PathBuf},
 };
 
 use serde::Deserialize;
 use serde_json::json;
+use stateful_core::normalize_relative_path;
 
 use crate::outbox::queue_session_heartbeat_outbox;
-use crate::sandbox::parse_git_profile_command;
+use crate::sandbox::{parse_sandbox_run_bash_invocation, validate_sandbox_run_request_shape};
+use crate::shell_command::{
+    first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
+};
 use crate::{
     CurrentSession, GlobalPaths, HookCommand, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
-    ServerRuntime, discover_runtime_with_global, ensure_server, get_json, post_json,
-    protocol_envelope, repo_gate, repo_identity_for_enabled_repo,
+    ServerRuntime, discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server,
+    get_json, post_json, protocol_envelope, repo_gate, repo_identity_for_enabled_repo,
     runtime_env_override_is_configured, write_current_session_file_for_current_stateful_session,
 };
 
@@ -21,17 +27,7 @@ pub enum HookOutcome {
     Deny { reason: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SandboxRunInvocation {
-    executable: String,
-    fs: String,
-    network: String,
-    write_targets: Vec<String>,
-    create_targets: Vec<String>,
-    write_dirs: Vec<String>,
-    command: String,
-}
-
+#[cfg(feature = "codex-benchmark")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NestedCodexBenchmarkSandboxInvocation {
     executable: String,
@@ -44,37 +40,12 @@ struct NestedCodexBenchmarkSandboxInvocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StatefulExternalRunInvocation {
     executable: String,
+    subcommand: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StatefulControlInvocation {
     executable: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QuoteState {
-    None,
-    Single,
-    Double,
-}
-
-trait RuntimeAdapter {
-    fn stateful_session_id<'a>(&self, input: &'a RuntimeHookInput) -> &'a str;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ClaudeCodeRuntimeAdapter;
-
-static CLAUDE_CODE_RUNTIME_ADAPTER: ClaudeCodeRuntimeAdapter = ClaudeCodeRuntimeAdapter;
-
-impl RuntimeAdapter for ClaudeCodeRuntimeAdapter {
-    fn stateful_session_id<'a>(&self, input: &'a RuntimeHookInput) -> &'a str {
-        &input.session_id
-    }
-}
-
-fn runtime_adapter() -> &'static dyn RuntimeAdapter {
-    &CLAUDE_CODE_RUNTIME_ADAPTER
 }
 
 impl HookOutcome {
@@ -148,22 +119,29 @@ pub fn handle_pre_tool_use_in_repo(
     let start = hook_start_dir_or(input, repo_root.as_ref());
     let paths = GlobalPaths::from_env()?;
     let repo_root = match repo_gate(&paths, &start)? {
-        RepoGate::Enabled { repo_root } => {
-            if !runtime_env_override_is_configured() {
-                ensure_server(&paths)?;
-            }
-            repo_root
-        }
+        RepoGate::Enabled { repo_root } => repo_root,
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(HookOutcome::Allow),
     };
-    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
-    remember_current_session(&repo_root, &runtime, input)?;
+    let runtime = prepare_pre_tool_use_runtime(&repo_root, &paths, input).ok();
     handle_pre_tool_use_with_runtime(
         input,
-        Some(&runtime),
+        runtime.as_ref(),
         Some(&repo_root),
         Some(start.as_path()),
     )
+}
+
+fn prepare_pre_tool_use_runtime(
+    repo_root: &Path,
+    paths: &GlobalPaths,
+    input: &str,
+) -> anyhow::Result<ServerRuntime> {
+    if !runtime_env_override_is_configured() {
+        ensure_server(paths)?;
+    }
+    let runtime = discover_runtime_with_global(repo_root, paths)?;
+    remember_current_session(repo_root, &runtime, input)?;
+    Ok(runtime)
 }
 
 pub fn handle_session_start_in_repo(
@@ -205,11 +183,14 @@ pub fn handle_post_tool_use_in_repo(
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     remember_current_session(&repo_root, &runtime, input)?;
     let identity = repo_identity(&paths, &repo_root)?;
-    if let Err(error) = handle_post_tool_use_with_runtime(input, &runtime, Some(&identity)) {
+    if let Err(error) =
+        handle_post_tool_use_with_runtime(input, &runtime, Some(&repo_root), Some(&identity))
+    {
         let input: SessionEventInput = serde_json::from_str(input)?;
+        let workspace_id = effective_workspace_id(&runtime, Some(&identity));
         queue_session_heartbeat_outbox(
             &repo_root,
-            &runtime.workspace_id,
+            &workspace_id,
             input.stateful_session_id(),
             &error.to_string(),
         )?;
@@ -263,9 +244,13 @@ fn remember_current_session(
     input: &str,
 ) -> anyhow::Result<()> {
     let input: SessionEventInput = serde_json::from_str(input)?;
+    let identity = GlobalPaths::from_env()
+        .ok()
+        .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok());
+    let workspace_id = effective_workspace_id(runtime, identity.as_ref());
     write_current_session_file_for_current_stateful_session(
         repo_root,
-        &CurrentSession::new(input.stateful_session_id(), runtime.workspace_id.clone()),
+        &CurrentSession::new(input.stateful_session_id(), workspace_id),
     )
 }
 
@@ -286,6 +271,7 @@ fn handle_session_start_with_runtime(
 fn handle_post_tool_use_with_runtime(
     input: &str,
     runtime: &ServerRuntime,
+    repo_root: Option<&Path>,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
     let input: SessionEventInput = serde_json::from_str(input)?;
@@ -294,7 +280,9 @@ fn handle_post_tool_use_with_runtime(
         "/v1/session/heartbeat",
         input.stateful_session_id(),
         identity,
-    )
+    )?;
+    refresh_post_tool_lease_observations(&input, runtime, repo_root, identity);
+    Ok(())
 }
 
 fn handle_user_prompt_submit_with_runtime(
@@ -303,9 +291,10 @@ fn handle_user_prompt_submit_with_runtime(
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<String> {
     let input: UserPromptSubmitInput = serde_json::from_str(input)?;
+    let workspace_id = effective_workspace_id(runtime, identity);
     let mut body = json!({
         "session_id": input.stateful_session_id(),
-        "workspace_id": runtime.workspace_id,
+        "workspace_id": workspace_id,
         "mode": "brief"
     });
     if let Some(identity) = identity
@@ -342,7 +331,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 fn stateful_command_policy_reminder() -> String {
     let binary = trusted_stateful_binary_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- Before using Bash, use the `stateful-command-policy` skill.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For git operations, use `{binary} sandbox run --fs git --network enabled --command 'git <args>'`.\n- For file edits, declare exact intent, acquire the same-session file lease successfully, then use native Codex edit tools such as `apply_patch` or Edit.\n- For command-shaped writes, declare exact intent, acquire the matching file or directory lease successfully, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`, `{binary} sandbox run --fs write-targets --create-target <file> --command '<cmd>'`, or `{binary} sandbox run --fs write-targets --write-dir target --command '<cmd>'` for target/ artifacts."
+        "Stateful command policy reminder:\n- Before using Bash, use the `stateful-command-policy` skill.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For build or test commands, declare intent and acquire a same-session directory lease for `tmp/`, then use `{binary} sandbox run --fs write-targets --network enabled --write-dir tmp --command '<cmd>'`.\n- For git operations, use `{binary} sandbox run --fs git --network enabled --command 'git <args>'`.\n- For file edits, declare exact intent, acquire the same-session file lease successfully, then use native Codex edit tools such as `apply_patch` or Edit.\n- For command-shaped writes, declare exact intent, acquire the matching file or directory lease successfully, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`, `{binary} sandbox run --fs write-targets --create-target <file> --command '<cmd>'`, or `{binary} sandbox run --fs write-targets --write-dir tmp --command '<cmd>'` for tmp artifacts."
     )
 }
 
@@ -354,7 +343,7 @@ fn handle_stop_with_runtime(
     let input: SessionEventInput = serde_json::from_str(input)?;
     post_session_event(
         runtime,
-        "/v1/activity/finalize",
+        "/v1/activity/observe",
         input.stateful_session_id(),
         identity,
     )
@@ -366,9 +355,10 @@ fn post_session_event(
     session_id: &str,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
+    let workspace_id = effective_workspace_id(runtime, identity);
     let mut body = json!({
         "session_id": session_id,
-        "workspace_id": runtime.workspace_id,
+        "workspace_id": workspace_id,
     });
     if let Some(identity) = identity {
         body["repo_id"] = json!(&identity.repo_id);
@@ -388,6 +378,80 @@ fn post_session_event(
     }
 
     Ok(())
+}
+
+fn refresh_post_tool_lease_observations(
+    input: &SessionEventInput,
+    runtime: &ServerRuntime,
+    repo_root: Option<&Path>,
+    identity: Option<&RepoIdentity>,
+) {
+    let Some(identity) = identity else {
+        return;
+    };
+    let Some(repo_root) = repo_root else {
+        return;
+    };
+    let Ok(targets) = post_tool_refresh_targets(input, repo_root) else {
+        return;
+    };
+    let workspace_id = effective_workspace_id(runtime, Some(identity));
+    let mut paths = BTreeSet::new();
+    for target in targets {
+        paths.insert(target.path);
+        if let Some(new_path) = target.new_path {
+            paths.insert(new_path);
+        }
+    }
+
+    for path in paths {
+        let body = json!({
+            "session_id": input.stateful_session_id(),
+            "workspace_id": workspace_id,
+            "path": path,
+            "root": identity.root,
+        });
+        let Ok(response) = post_json(runtime, "/v1/lease/refresh-observation", &body) else {
+            continue;
+        };
+        if !(200..300).contains(&response.status_code) {
+            continue;
+        }
+    }
+}
+
+fn post_tool_refresh_targets(
+    input: &SessionEventInput,
+    repo_root: &Path,
+) -> anyhow::Result<Vec<PatchTarget>> {
+    let cwd = input.cwd.as_deref();
+    let targets = match input.tool_name.as_deref() {
+        Some("apply_patch") => input
+            .patch_text()
+            .map(extract_apply_patch_write_targets)
+            .unwrap_or_default(),
+        Some("file_change") => extract_file_change_targets(&input.tool_input),
+        Some("Edit") | Some("Write") => {
+            let Some(path) = input
+                .tool_input
+                .get("file_path")
+                .or_else(|| input.tool_input.get("path"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            else {
+                return Ok(Vec::new());
+            };
+            vec![PatchTarget::write(path)]
+        }
+        _ => Vec::new(),
+    };
+
+    normalize_targets(targets, Some(repo_root), cwd).map(|targets| targets.unwrap_or_default())
+}
+
+fn effective_workspace_id(runtime: &ServerRuntime, identity: Option<&RepoIdentity>) -> String {
+    effective_workspace_id_for_repo(&runtime.workspace_id, identity)
 }
 
 fn handle_pre_tool_use_with_runtime(
@@ -415,8 +479,20 @@ fn handle_pre_tool_use_with_runtime(
         tool_name if tool_name.starts_with("mcp__filesystem__") => Ok(HookOutcome::Deny {
             reason: "filesystem MCP writes require stateful authorization; read-only MCP calls are not yet classified".to_string(),
         }),
-        _ => Ok(HookOutcome::Allow),
+        tool_name if is_safe_without_repo_write_authorization(tool_name) => Ok(HookOutcome::Allow),
+        tool_name => Ok(HookOutcome::Deny {
+            reason: format!(
+                "unclassified tool {tool_name} may write or execute and requires explicit stateful classification before it can run in an enabled repository"
+            ),
+        }),
     }
+}
+
+fn is_safe_without_repo_write_authorization(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "Read" | "Grep" | "Glob" | "LS" | "NotebookRead" | "WebFetch" | "WebSearch" | "TodoWrite"
+    )
 }
 
 fn authorize_bash(input: &PreToolUseInput) -> anyhow::Result<HookOutcome> {
@@ -446,10 +522,17 @@ fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
             words.len() >= 3 && words[1] == "sandbox" && words[2] == "run-nested-codex-benchmark"
         })
     {
+        #[cfg(not(feature = "codex-benchmark"))]
+        {
+            return bash_policy_deny(
+                "stateful sandbox run-nested-codex-benchmark hook authorization requires the codex-benchmark feature",
+            );
+        }
+        #[cfg(feature = "codex-benchmark")]
         return authorize_nested_codex_benchmark_sandbox_bash(command);
     }
 
-    let invocation = match parse_sandbox_run_invocation(command) {
+    let invocation = match parse_sandbox_run_bash_invocation(command) {
         Ok(invocation) => invocation,
         Err(reason) => return bash_policy_deny(reason),
     };
@@ -459,55 +542,14 @@ fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
             "stateful sandbox run requires the trusted absolute stateful binary",
         );
     }
-    if !matches!(
-        invocation.fs.as_str(),
-        "read-only" | "write-targets" | "git"
-    ) {
-        return bash_policy_deny(
-            "stateful sandbox run supports only read-only, write-targets, and git profiles",
-        );
-    }
-    if !matches!(invocation.network.as_str(), "disabled" | "enabled") {
-        return bash_policy_deny("stateful sandbox run network must be disabled or enabled");
-    }
-    if invocation.command.trim().is_empty() {
-        return bash_policy_deny("stateful sandbox run requires a non-empty --command");
-    }
-    if invocation.fs == "read-only"
-        && (!invocation.write_targets.is_empty()
-            || !invocation.create_targets.is_empty()
-            || !invocation.write_dirs.is_empty())
-    {
-        return bash_policy_deny(
-            "read-only sandbox run rejects write targets, create targets, and write dirs",
-        );
-    }
-    if invocation.fs == "write-targets"
-        && invocation.write_targets.is_empty()
-        && invocation.create_targets.is_empty()
-        && invocation.write_dirs.is_empty()
-    {
-        return bash_policy_deny(
-            "write-targets sandbox run requires at least one write target, create target, or write dir",
-        );
-    }
-    if invocation.fs == "git" {
-        if !invocation.write_targets.is_empty()
-            || !invocation.create_targets.is_empty()
-            || !invocation.write_dirs.is_empty()
-        {
-            return bash_policy_deny(
-                "git profile manages repo writes automatically and rejects explicit write targets, create targets, and write dirs",
-            );
-        }
-        if let Err(reason) = validate_git_profile_inner_command(&invocation.command) {
-            return bash_policy_deny(reason);
-        }
+    if let Err(error) = validate_sandbox_run_request_shape(&invocation.request) {
+        return bash_policy_deny(error.to_string());
     }
 
     HookOutcome::Allow
 }
 
+#[cfg(feature = "codex-benchmark")]
 fn authorize_nested_codex_benchmark_sandbox_bash(command: &str) -> HookOutcome {
     let invocation = match parse_nested_codex_benchmark_sandbox_invocation(command) {
         Ok(invocation) => invocation,
@@ -552,6 +594,9 @@ fn authorize_external_run_bash(command: &str) -> HookOutcome {
             "stateful external-run requires the trusted absolute stateful binary",
         );
     }
+    if matches!(invocation.subcommand.as_str(), "approve" | "run") {
+        return bash_policy_deny("external-run approvals must be performed outside hooks");
+    }
 
     HookOutcome::Allow
 }
@@ -579,7 +624,8 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 
 fn bash_policy_guidance() -> String {
     format!(
-        "Use the `stateful-command-policy` skill before Bash. Raw Bash is denied; for read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`; for git operations use `{} sandbox run --fs git --network enabled --command 'git <args>'`; for approved repo-external writes use `{} external-run request --purpose '<purpose>' --write-dir <dir> --command '<cmd>'`.",
+        "Use the `stateful-command-policy` skill before Bash. Raw Bash is denied; for read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`; for build or test commands use `{} sandbox run --fs write-targets --network enabled --write-dir tmp --command '<cmd>'` after declaring and leasing `tmp/`; for git operations use `{} sandbox run --fs git --network enabled --command 'git <args>'`; for approved repo-external writes use `{} external-run request --purpose '<purpose>' --write-dir <dir> --command '<cmd>'`.",
+        trusted_stateful_binary_for_guidance(),
         trusted_stateful_binary_for_guidance(),
         trusted_stateful_binary_for_guidance(),
         trusted_stateful_binary_for_guidance()
@@ -593,102 +639,7 @@ fn trusted_stateful_binary_for_guidance() -> String {
         .unwrap_or_else(|| "<absolute-stateful-binary>".to_string())
 }
 
-fn parse_sandbox_run_invocation(command: &str) -> Result<SandboxRunInvocation, String> {
-    reject_outer_shell_syntax(
-        command,
-        "Bash wrapper must be a single stateful sandbox run command",
-    )?;
-    let words = split_simple_command_words(command)?;
-    if words.is_empty() {
-        return Err("Bash commands must use stateful sandbox run".to_string());
-    }
-    if first_word_is_env_assignment(&words[0]) {
-        return Err("Bash wrapper must not use outer environment assignments".to_string());
-    }
-    if words.len() < 3 || words[1] != "sandbox" || words[2] != "run" {
-        return Err("Bash commands must use stateful sandbox run".to_string());
-    }
-
-    let mut fs = "read-only".to_string();
-    let mut network = "disabled".to_string();
-    let mut write_targets = Vec::new();
-    let mut create_targets = Vec::new();
-    let mut write_dirs = Vec::new();
-    let mut inner_command = None;
-    let mut index = 3;
-    while index < words.len() {
-        let arg = &words[index];
-        match arg.as_str() {
-            "--" => {
-                return Err("stateful sandbox run does not support argv mode".to_string());
-            }
-            "--fs" => {
-                index += 1;
-                fs = parse_sandbox_run_arg_value(&words, index, "--fs")?;
-            }
-            "--network" => {
-                index += 1;
-                network = parse_sandbox_run_arg_value(&words, index, "--network")?;
-            }
-            "--write-target" => {
-                index += 1;
-                write_targets.push(parse_sandbox_run_arg_value(
-                    &words,
-                    index,
-                    "--write-target",
-                )?);
-            }
-            "--create-target" => {
-                index += 1;
-                create_targets.push(parse_sandbox_run_arg_value(
-                    &words,
-                    index,
-                    "--create-target",
-                )?);
-            }
-            "--write-dir" => {
-                index += 1;
-                write_dirs.push(parse_sandbox_run_arg_value(&words, index, "--write-dir")?);
-            }
-            "--command" => {
-                if inner_command.is_some() {
-                    return Err("stateful sandbox run requires exactly one --command".to_string());
-                }
-                index += 1;
-                inner_command = Some(parse_sandbox_run_arg_value(&words, index, "--command")?);
-            }
-            "--timeout-seconds" => {
-                index += 1;
-                let timeout = parse_sandbox_run_arg_value(&words, index, "--timeout-seconds")?;
-                if timeout.parse::<u64>().is_err() {
-                    return Err(
-                        "stateful sandbox run --timeout-seconds requires an integer value"
-                            .to_string(),
-                    );
-                }
-            }
-            _ => {
-                return Err(format!("unsupported stateful sandbox run argument `{arg}`"));
-            }
-        }
-        index += 1;
-    }
-
-    let Some(command) = inner_command else {
-        return Err("stateful sandbox run requires exactly one --command".to_string());
-    };
-
-    Ok(SandboxRunInvocation {
-        executable: words[0].clone(),
-        fs,
-        network,
-        write_targets,
-        create_targets,
-        write_dirs,
-        command,
-    })
-}
-
+#[cfg(feature = "codex-benchmark")]
 fn parse_nested_codex_benchmark_sandbox_invocation(
     command: &str,
 ) -> Result<NestedCodexBenchmarkSandboxInvocation, String> {
@@ -817,6 +768,7 @@ fn parse_external_run_invocation(command: &str) -> Result<StatefulExternalRunInv
 
     Ok(StatefulExternalRunInvocation {
         executable: words[0].clone(),
+        subcommand: words[2].clone(),
     })
 }
 
@@ -852,11 +804,7 @@ fn is_stateful_control_command(command: &str) -> bool {
     matches!(command, "server")
 }
 
-fn validate_git_profile_inner_command(command: &str) -> Result<(), String> {
-    parse_git_profile_command(command)?;
-    Ok(())
-}
-
+#[cfg(feature = "codex-benchmark")]
 fn parse_sandbox_run_arg_value(
     words: &[String],
     index: usize,
@@ -868,117 +816,7 @@ fn parse_sandbox_run_arg_value(
         .ok_or_else(|| format!("stateful sandbox run argument `{arg}` requires a value"))
 }
 
-fn reject_outer_shell_syntax(command: &str, single_command_message: &str) -> Result<(), String> {
-    let mut state = QuoteState::None;
-    let mut chars = command.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match state {
-            QuoteState::None => match ch {
-                '\'' => state = QuoteState::Single,
-                '"' => state = QuoteState::Double,
-                '$' if chars.peek().is_some_and(|next| *next == '(') => {
-                    return Err("Bash wrapper must not use command substitution".to_string());
-                }
-                '\\' => {
-                    return Err("Bash wrapper must not use shell escapes".to_string());
-                }
-                ';' | '|' | '&' | '<' | '>' | '\n' | '\r' | '`' => {
-                    return Err(single_command_message.to_string());
-                }
-                _ => {}
-            },
-            QuoteState::Single => {
-                if ch == '\'' {
-                    state = QuoteState::None;
-                }
-            }
-            QuoteState::Double => match ch {
-                '"' => state = QuoteState::None,
-                '$' if chars.peek().is_some_and(|next| *next == '(') => {
-                    return Err("Bash wrapper must not use command substitution".to_string());
-                }
-                '`' => {
-                    return Err("Bash wrapper must not use command substitution".to_string());
-                }
-                '\\' => {
-                    return Err("Bash wrapper must not use shell escapes".to_string());
-                }
-                _ => {}
-            },
-        }
-    }
-
-    if state != QuoteState::None {
-        return Err("Bash wrapper command has unterminated quotes".to_string());
-    }
-
-    Ok(())
-}
-
-fn split_simple_command_words(command: &str) -> Result<Vec<String>, String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut state = QuoteState::None;
-    let mut in_word = false;
-
-    for ch in command.chars() {
-        match state {
-            QuoteState::None => match ch {
-                '\'' => {
-                    state = QuoteState::Single;
-                    in_word = true;
-                }
-                '"' => {
-                    state = QuoteState::Double;
-                    in_word = true;
-                }
-                ch if ch.is_whitespace() => {
-                    if in_word {
-                        words.push(std::mem::take(&mut current));
-                        in_word = false;
-                    }
-                }
-                _ => {
-                    current.push(ch);
-                    in_word = true;
-                }
-            },
-            QuoteState::Single => {
-                if ch == '\'' {
-                    state = QuoteState::None;
-                } else {
-                    current.push(ch);
-                }
-            }
-            QuoteState::Double => {
-                if ch == '"' {
-                    state = QuoteState::None;
-                } else {
-                    current.push(ch);
-                }
-            }
-        }
-    }
-
-    if state != QuoteState::None {
-        return Err("Bash wrapper command has unterminated quotes".to_string());
-    }
-    if in_word {
-        words.push(current);
-    }
-
-    Ok(words)
-}
-
-fn first_word_is_env_assignment(word: &str) -> bool {
-    let Some((name, _value)) = word.split_once('=') else {
-        return false;
-    };
-    !name.is_empty()
-        && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
-        && !name.chars().next().is_some_and(|c| c.is_ascii_digit())
-}
-
+#[cfg(feature = "codex-benchmark")]
 fn hook_path_is_under_target(path: &str) -> bool {
     let trimmed = path.trim().replace('\\', "/");
     if trimmed.is_empty() || trimmed.starts_with('/') {
@@ -1042,7 +880,7 @@ fn authorize_apply_patch(
             reason: "apply_patch target is outside the enabled repo".to_string(),
         });
     };
-    authorize_targets(input, runtime, targets, identity)
+    authorize_targets(input, runtime, repo_root, targets, identity)
 }
 
 fn authorize_file_change_tool(
@@ -1064,7 +902,7 @@ fn authorize_file_change_tool(
             reason: "file_change target is outside the enabled repo".to_string(),
         });
     };
-    authorize_targets(input, runtime, targets, identity)
+    authorize_targets(input, runtime, repo_root, targets, identity)
 }
 
 fn authorize_file_write_tool(
@@ -1096,7 +934,13 @@ fn authorize_file_write_tool(
         });
     };
 
-    authorize_targets(input, runtime, vec![PatchTarget::write(&target)], identity)
+    authorize_targets(
+        input,
+        runtime,
+        repo_root,
+        vec![PatchTarget::write(&target)],
+        identity,
+    )
 }
 
 fn normalize_targets(
@@ -1123,59 +967,52 @@ fn normalize_targets(
     Ok(Some(normalized))
 }
 
-fn percent_encode_current_resource(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::new();
-    for byte in value.bytes() {
-        match byte {
-            65..=90 | 97..=122 | 48..=57 | 45 | 46 | 47 | 95 | 126 => {
-                encoded.push(byte as char);
-            }
-            _ => {
-                encoded.push(37 as char);
-                encoded.push(HEX[(byte >> 4) as usize] as char);
-                encoded.push(HEX[(byte & 0x0f) as usize] as char);
-            }
-        }
-    }
-    encoded
-}
-
 fn hook_authorize_purpose(
     input: &PreToolUseInput,
     runtime: &ServerRuntime,
     target: &PatchTarget,
+    workspace_id: &str,
 ) -> Option<String> {
-    let resource = percent_encode_current_resource(&target.path);
-    let response = get_json(runtime, &format!("/v1/current?resource={resource}")).ok()?;
+    let response = get_json(runtime, "/v1/current").ok()?;
     if !(200..300).contains(&response.status_code) {
         return None;
     }
     let body: serde_json::Value = serde_json::from_str(&response.body).ok()?;
     let items = body.get("items")?.as_array()?;
-    items.iter().find_map(|item| {
+    let mut fallback = None;
+    for item in items {
         let matches_intent = item.get("kind").and_then(serde_json::Value::as_str) == Some("intent")
             && item.get("freshness").and_then(serde_json::Value::as_str) == Some("live")
-            && item.get("resource").and_then(serde_json::Value::as_str)
-                == Some(target.path.as_str())
             && item.get("session_id").and_then(serde_json::Value::as_str)
                 == Some(input.stateful_session_id())
-            && item.get("workspace_id").and_then(serde_json::Value::as_str)
-                == Some(runtime.workspace_id.as_str());
+            && item.get("workspace_id").and_then(serde_json::Value::as_str) == Some(workspace_id);
         if !matches_intent {
-            return None;
+            continue;
         }
-        item.get("purpose")
+        let Some(purpose) = item
+            .get("purpose")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|purpose| !purpose.is_empty())
             .map(str::to_string)
-    })
+        else {
+            continue;
+        };
+        if item.get("resource").and_then(serde_json::Value::as_str) == Some(target.path.as_str()) {
+            return Some(purpose);
+        }
+        if fallback.is_none() {
+            fallback = Some(purpose);
+        }
+    }
+
+    fallback
 }
 
 fn authorize_targets(
     input: &PreToolUseInput,
     runtime: Option<&ServerRuntime>,
+    repo_root: Option<&Path>,
     targets: Vec<PatchTarget>,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<HookOutcome> {
@@ -1192,12 +1029,16 @@ fn authorize_targets(
         return Ok(HookOutcome::Allow);
     }
 
+    let workspace_id = effective_workspace_id(runtime, identity);
     for target in targets {
-        let purpose = hook_authorize_purpose(input, runtime, &target);
+        let purpose = hook_authorize_purpose(input, runtime, &target, &workspace_id);
         let mut payload = json!({
             "action": target.action,
             "path": target.path,
         });
+        if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
+            payload["base_observations"] = json!([observation]);
+        }
         if let Some(purpose) = purpose {
             payload["queue_on_conflict"] = json!(true);
             payload["purpose"] = json!(purpose);
@@ -1210,7 +1051,7 @@ fn authorize_targets(
             runtime,
             request_id: uuid::Uuid::new_v4().to_string(),
             session_id: input.stateful_session_id().to_string(),
-            workspace_id: runtime.workspace_id.clone(),
+            workspace_id: workspace_id.clone(),
             identity: identity.cloned(),
             source_kind: "hook",
             event: "pre_tool_use",
@@ -1218,7 +1059,14 @@ fn authorize_targets(
             source_tool_name: Some(input.tool_name.as_str()),
             payload,
         });
-        let response = post_json(runtime, "/v1/authorize", &body)?;
+        let response = match post_json(runtime, "/v1/authorize", &body) {
+            Ok(response) => response,
+            Err(error) => {
+                return Ok(HookOutcome::Deny {
+                    reason: authorization_unavailable_reason(&error),
+                });
+            }
+        };
 
         if !(200..300).contains(&response.status_code) {
             return Ok(HookOutcome::Deny {
@@ -1229,15 +1077,92 @@ fn authorize_targets(
             });
         }
 
-        let decision: AuthorizeDecision = serde_json::from_str(&response.body)?;
+        let decision: AuthorizeDecision = match serde_json::from_str(&response.body) {
+            Ok(decision) => decision,
+            Err(error) => {
+                return Ok(HookOutcome::Deny {
+                    reason: authorization_unavailable_reason(&error),
+                });
+            }
+        };
         if decision.decision != "allow" {
             return Ok(HookOutcome::Deny {
-                reason: decision.required_next_action.unwrap_or(decision.message),
+                reason: authorization_denial_reason(decision),
             });
         }
     }
 
     Ok(HookOutcome::Allow)
+}
+
+fn authorization_unavailable_reason(error: &dyn std::fmt::Display) -> String {
+    format!(
+        "server_unavailable: stateful authorization is unavailable while contacting /v1/authorize: {error}. Writes fail closed. Run `stateful server status`, restart or rejoin the stateful server, then retry after declaring exact intent and acquiring a same-session file lease."
+    )
+}
+
+fn authorization_denial_reason(decision: AuthorizeDecision) -> String {
+    let mut reason = decision.required_next_action.unwrap_or(decision.message);
+    let Some(wait) = decision.wait else {
+        return reason;
+    };
+
+    if !reason.contains(&wait.wait_id) {
+        let mut wait_details = vec![format!("wait_id {}", wait.wait_id)];
+        if let Some(queue_position) = wait.queue_position {
+            wait_details.push(format!("queue position {queue_position}"));
+        }
+        if let Some(blocking_session_id) = wait.blocking_session_id {
+            wait_details.push(format!("blocked by session {blocking_session_id}"));
+        }
+        reason.push_str(&format!(" Track {}.", wait_details.join(", ")));
+    }
+    let has_resume_guidance = [
+        "state.notifications.poll",
+        "state.resume.next",
+        "reread",
+        "state.intent.claim",
+    ]
+    .iter()
+    .all(|term| reason.contains(term));
+    if !has_resume_guidance {
+        let target = wait.path.as_deref().unwrap_or("the target");
+        reason.push_str(&format!(
+            " Resume by polling state.notifications.poll or state.resume.next for wait_id {}; when reserved, reread {}, then call state.intent.claim with wait_id {} before retrying the write.",
+            wait.wait_id, target, wait.wait_id
+        ));
+    }
+    reason
+}
+
+fn base_observation_for_target(
+    repo_root: Option<&Path>,
+    relative_path: &str,
+) -> Option<serde_json::Value> {
+    let repo_root = repo_root?;
+    let target_path = repo_root.join(relative_path);
+    match fs::read(&target_path) {
+        Ok(bytes) => Some(json!({
+            "path": relative_path,
+            "exists": true,
+            "content_hash": hook_content_hash(&bytes),
+        })),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(json!({
+            "path": relative_path,
+            "exists": false,
+            "content_hash": null,
+        })),
+        Err(_) => None,
+    }
+}
+
+fn hook_content_hash(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
 }
 
 fn normalize_file_tool_target(
@@ -1248,7 +1173,7 @@ fn normalize_file_tool_target(
     let path = path.trim();
     let candidate = Path::new(path);
     let Some(repo_root) = repo_root else {
-        return Ok(Some(path.replace('\\', "/")));
+        return Ok(Some(normalize_relative_path(path)));
     };
     let repo_root = repo_root
         .canonicalize()
@@ -1262,7 +1187,7 @@ fn normalize_file_tool_target(
         let Ok(relative) = candidate.strip_prefix(&repo_root) else {
             return Ok(None);
         };
-        return Ok(Some(relative.to_string_lossy().replace('\\', "/")));
+        return Ok(Some(normalize_relative_path(relative.to_string_lossy())));
     }
 
     let base = cwd.unwrap_or(repo_root.as_path());
@@ -1272,7 +1197,7 @@ fn normalize_file_tool_target(
         return Ok(None);
     };
 
-    Ok(Some(relative.to_string_lossy().replace('\\', "/")))
+    Ok(Some(normalize_relative_path(relative.to_string_lossy())))
 }
 
 fn extract_apply_patch_write_targets(patch: &str) -> Vec<PatchTarget> {
@@ -1464,6 +1389,12 @@ struct RuntimeHookInput {
     session_id: String,
 }
 
+impl RuntimeHookInput {
+    fn stateful_session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct HookCwdInput {
     #[serde(default)]
@@ -1472,7 +1403,7 @@ struct HookCwdInput {
 
 impl PreToolUseInput {
     fn stateful_session_id(&self) -> &str {
-        runtime_adapter().stateful_session_id(&self.runtime)
+        self.runtime.stateful_session_id()
     }
 
     fn command(&self) -> Option<&str> {
@@ -1493,6 +1424,19 @@ struct AuthorizeDecision {
     message: String,
     #[serde(default)]
     required_next_action: Option<String>,
+    #[serde(default)]
+    wait: Option<AuthorizeWait>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthorizeWait {
+    wait_id: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    queue_position: Option<u64>,
+    #[serde(default)]
+    blocking_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1505,6 +1449,12 @@ struct SessionStartInput {
 struct SessionEventInput {
     #[serde(flatten)]
     runtime: RuntimeHookInput,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(default)]
+    tool_input: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1520,18 +1470,67 @@ struct ContextRenderResponse {
 
 impl SessionStartInput {
     fn stateful_session_id(&self) -> &str {
-        runtime_adapter().stateful_session_id(&self.runtime)
+        self.runtime.stateful_session_id()
     }
 }
 
 impl SessionEventInput {
     fn stateful_session_id(&self) -> &str {
-        runtime_adapter().stateful_session_id(&self.runtime)
+        self.runtime.stateful_session_id()
+    }
+
+    fn patch_text(&self) -> Option<&str> {
+        string_payload_field(
+            &self.tool_input,
+            &["command", "patch", "input", "cmd", "diff"],
+        )
     }
 }
 
 impl UserPromptSubmitInput {
     fn stateful_session_id(&self) -> &str {
-        runtime_adapter().stateful_session_id(&self.runtime)
+        self.runtime.stateful_session_id()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_hook_input_exposes_session_id_directly() {
+        let input = RuntimeHookInput {
+            session_id: "codex-session-1".to_string(),
+        };
+
+        assert_eq!(input.stateful_session_id(), "codex-session-1");
+    }
+
+    #[test]
+    fn hook_session_extraction_does_not_keep_fake_runtime_adapter() {
+        let source = include_str!("hook.rs");
+
+        assert!(!source.contains(&concat!("Claude", "CodeRuntimeAdapter")));
+        assert!(!source.contains(&concat!("trait ", "RuntimeAdapter")));
+    }
+
+    #[test]
+    fn hook_file_target_uses_core_relative_path_normalization() {
+        let temp =
+            std::env::temp_dir().join(format!("stateful-hook-normalize-{}", std::process::id()));
+        let repo = temp.join("repo");
+        let cwd = repo.join("src");
+        std::fs::create_dir_all(&cwd).expect("repo dirs should create");
+
+        let normalized = normalize_file_tool_target(r".\auth\..\auth.ts", Some(&repo), Some(&cwd))
+            .expect("target should normalize")
+            .expect("target should stay in repo");
+
+        assert_eq!(
+            normalized,
+            stateful_core::normalize_relative_path("src/auth.ts")
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

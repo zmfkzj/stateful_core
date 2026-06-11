@@ -10,26 +10,32 @@ use axum::{
 use policy_service::{
     AuthorizationOutcome, AuthorizeWriteInput, BaseObservation, CancelIntentInput,
     CancelIntentOutcome, ClaimIntentInput, ClaimIntentOutcome, PolicyService, RequestIntentInput,
-    RequestIntentOutcome, WaitQueueInfo,
+    RequestIntentOutcome, WaitQueueInfo, lease_observation_for_path,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use stateful_core::{ContextPackage, ReconciliationDecision, RenderMode, render_prompt_text};
+use stateful_core::{
+    ContextPackage, ReconciliationDecision, RenderMode, normalized_relative_path_is_empty,
+    render_prompt_text,
+};
 use stateful_store::{
     CurrentStateIdentityFilter, Event, OutboxEntry, Store, StoreError, WaitRecord,
 };
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 pub const CRATE_NAME: &str = "stateful-server";
 const RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
+const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     bearer_token: String,
     store: SharedStore,
+    maintenance_interval: Duration,
 }
 
 impl ServerConfig {
@@ -44,7 +50,13 @@ impl ServerConfig {
         Self {
             bearer_token: bearer_token.into(),
             store: Arc::new(Mutex::new(store)),
+            maintenance_interval: DEFAULT_MAINTENANCE_INTERVAL,
         }
+    }
+
+    pub fn with_maintenance_interval(mut self, interval: Duration) -> Self {
+        self.maintenance_interval = interval;
+        self
     }
 }
 
@@ -63,6 +75,10 @@ pub fn build_router(config: ServerConfig) -> Router {
         .route("/v1/intent/claim", post(intent_claim))
         .route("/v1/intent/cancel", post(intent_cancel))
         .route("/v1/lease/acquire", post(lease_acquire))
+        .route(
+            "/v1/lease/refresh-observation",
+            post(lease_refresh_observation),
+        )
         .route("/v1/lease/release", post(lease_release))
         .route("/v1/activity/observe", post(activity_observe))
         .route("/v1/activity/finalize", post(activity_finalize))
@@ -85,8 +101,27 @@ pub async fn serve_listener(
     listener: tokio::net::TcpListener,
     config: ServerConfig,
 ) -> anyhow::Result<()> {
-    axum::serve(listener, build_router(config)).await?;
+    let maintenance = run_maintenance_loop(config.store.clone(), config.maintenance_interval);
+    tokio::select! {
+        result = axum::serve(listener, build_router(config)) => {
+            result?;
+        }
+        () = maintenance => {}
+    }
     Ok(())
+}
+
+async fn run_maintenance_loop(store: SharedStore, interval: Duration) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        let Ok(store) = store.lock() else {
+            continue;
+        };
+        let _ = store.expire_stale();
+        let _ = store.prune_retention();
+    }
 }
 
 async fn health() -> StatusCode {
@@ -266,7 +301,6 @@ async fn authorize(
         root: non_empty_identity(workspace.root),
         branch: non_empty_identity(workspace.branch),
         source_kind: Some(source.kind),
-        source_tool_name: source.tool_name,
         queue_on_conflict: payload.queue_on_conflict,
         queue_purpose,
         action: payload.action,
@@ -280,7 +314,7 @@ async fn authorize(
             .collect(),
     };
 
-    let outcome = match authorize_with_policy(&config.store, input, true) {
+    let outcome = match authorize_with_policy_and_audit(&config.store, input) {
         Ok(outcome) => outcome,
         Err(message) => {
             return (
@@ -389,11 +423,19 @@ async fn intent_request(
 
     match request_intent_with_policy(&config.store, input) {
         Ok(outcome) => (StatusCode::OK, Json(request_intent_json(outcome))),
-        Err(message) => (
+        Err(RequestIntentError::RequestFailed(message)) => (
             StatusCode::CONFLICT,
             Json(json!({
                 "status": "error",
                 "reason_code": "request_failed",
+                "message": message
+            })),
+        ),
+        Err(RequestIntentError::State(message)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "error",
+                "reason_code": "state_error",
                 "message": message
             })),
         ),
@@ -428,7 +470,7 @@ async fn intent_claim(
         branch: non_empty_identity(envelope.request.workspace.branch),
     };
 
-    match claim_intent_with_policy(&config.store, input) {
+    match claim_intent_with_policy_and_audit(&config.store, input) {
         Ok(outcome) => (StatusCode::OK, Json(claim_intent_json(outcome))),
         Err(message) => (
             StatusCode::CONFLICT,
@@ -465,7 +507,7 @@ async fn intent_cancel(
         request_id: payload.request_id,
     };
 
-    match cancel_intent_with_policy(&config.store, input) {
+    match cancel_intent_with_policy_and_audit(&config.store, input) {
         Ok(outcome) => (StatusCode::OK, Json(cancel_intent_json(outcome))),
         Err(message) => (
             StatusCode::CONFLICT,
@@ -514,7 +556,8 @@ fn lease_conflict_response() -> (StatusCode, Json<Value>) {
         Json(json!({
             "status": "error",
             "reason_code": "lease_conflict",
-            "message": "Requested lease conflicts with an active lease or reserved request."
+            "message": "Requested lease conflicts with an active lease or reserved request.",
+            "required_next_action": "To wait for this path, call state.intent.request with action, path, purpose, and request_id. Then poll state.notifications.poll or state.resume.next; when reserved, reread the target and call state.intent.claim with the wait_id before retrying the write."
         })),
     )
 }
@@ -558,31 +601,15 @@ fn require_files_planned(
     if files_planned.is_empty()
         || files_planned
             .iter()
-            .any(|path| normalized_scope_is_empty(path))
+            .any(|path| normalized_relative_path_is_empty(path))
     {
         return Err(missing_scope_response());
     }
     Ok(files_planned)
 }
 
-fn normalized_scope_is_empty(path: &str) -> bool {
-    let normalized = path.trim().replace(char::from(92), "/");
-    let mut segments = Vec::new();
-    for segment in normalized.split(char::from(47)) {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            segments.pop();
-        } else {
-            segments.push(segment);
-        }
-    }
-    segments.is_empty()
-}
-
 fn require_scope_path(path: String) -> Result<String, (StatusCode, Json<Value>)> {
-    if normalized_scope_is_empty(&path) {
+    if normalized_relative_path_is_empty(&path) {
         return Err(missing_scope_response());
     }
     Ok(path)
@@ -606,7 +633,27 @@ async fn lease_acquire(
     }
 
     let result = match config.store.lock() {
-        Ok(store) => store.acquire_lease(input.session_id, input.workspace_id, input.path),
+        Ok(store) => {
+            let session_id = input.session_id;
+            let workspace_id = input.workspace_id;
+            let path = input.path;
+            let observation = match input.root.as_deref().filter(|root| !root.is_empty()) {
+                Some(root) => match lease_observation_for_path(root, &path) {
+                    Ok(observation) => Some(observation),
+                    Err(error) => return status_response(Err(error)),
+                },
+                None => None,
+            };
+            match store.acquire_lease_with_observation_and_event(
+                &session_id,
+                &workspace_id,
+                &path,
+                observation,
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) => Err(error),
+            }
+        }
         Err(_) => return status_response(Err("store lock poisoned".to_string())),
     };
 
@@ -615,6 +662,46 @@ async fn lease_acquire(
         Err(StoreError::MissingPurpose) => missing_purpose_response(),
         Err(StoreError::MissingIntent) => missing_intent_response(),
         Err(StoreError::LeaseConflict) => lease_conflict_response(),
+        Err(error) => status_response(Err(error.to_string())),
+    }
+}
+
+async fn lease_refresh_observation(
+    State(config): State<ServerConfig>,
+    headers: HeaderMap,
+    Json(input): Json<LeaseRequest>,
+) -> (StatusCode, Json<Value>) {
+    if !has_valid_bearer_token(&headers, &config.bearer_token) {
+        return unauthorized();
+    }
+
+    let root = match input.root.as_deref().filter(|root| !root.is_empty()) {
+        Some(root) => root,
+        None => {
+            return status_response(Err(
+                "root is required to refresh lease observations".to_string()
+            ));
+        }
+    };
+    let observation = match lease_observation_for_path(root, &input.path) {
+        Ok(observation) => observation,
+        Err(error) => return status_response(Err(error)),
+    };
+
+    let result = match config.store.lock() {
+        Ok(store) => store.refresh_exact_file_lease_observation(
+            input.session_id,
+            input.workspace_id,
+            input.path,
+            observation,
+        ),
+        Err(_) => return status_response(Err("store lock poisoned".to_string())),
+    };
+
+    match result {
+        Ok(()) => status_response(Ok(())),
+        Err(StoreError::LeaseOwnerMismatch) => lease_owner_mismatch_response(),
+        Err(StoreError::LeaseNotFound) => lease_not_found_response(),
         Err(error) => status_response(Err(error.to_string())),
     }
 }
@@ -668,15 +755,8 @@ async fn activity_finalize(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .append_activity(&input.session_id, &input.workspace_id)
-                .map_err(|error| error.to_string())?;
-            let released = store
-                .release_session_leases(&input.session_id, &input.workspace_id)
-                .map_err(|error| error.to_string())?;
-            let completed = store
-                .complete_session_intents(&input.session_id, &input.workspace_id)
-                .map_err(|error| error.to_string())?;
-            Ok((released, completed))
+                .finalize_session_activity(&input.session_id, &input.workspace_id)
+                .map_err(|error| error.to_string())
         });
 
     match result {
@@ -728,6 +808,7 @@ async fn context_render(
                 repo_id: input.repo_id.as_deref().and_then(non_empty_str),
                 worktree_id: input.worktree_id.as_deref().and_then(non_empty_str),
                 root: input.root.as_deref().and_then(non_empty_str),
+                exclude_session_id: input.session_id.as_deref().and_then(non_empty_str),
             };
             store
                 .live_current_state_for_workspace_identity(
@@ -785,7 +866,6 @@ async fn conflicts_check(
         root: None,
         branch: None,
         source_kind: None,
-        source_tool_name: None,
         queue_on_conflict: input.queue_on_conflict,
         queue_purpose: None,
         action: input.action,
@@ -875,11 +955,16 @@ async fn outbox_sync(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .append_outbox(OutboxEntry::new(
-                    input.outbox_id,
-                    input.session_id,
-                    input.sequence,
-                ))
+                .append_outbox(
+                    OutboxEntry::synced(
+                        input.outbox_id.clone(),
+                        input.session_id.clone(),
+                        input.sequence,
+                    )
+                    .with_workspace_id(input.workspace_id.clone())
+                    .with_event_type(input.event_type.clone())
+                    .with_payload(input.payload.clone()),
+                )
                 .map_err(|error| error.to_string())
         });
 
@@ -998,43 +1083,117 @@ fn authorize_with_policy(
     PolicyService::new(&store).authorize_write(input, allow_queue_side_effects)
 }
 
-fn claim_intent_with_policy(
+fn authorize_with_policy_and_audit(
+    store: &SharedStore,
+    input: AuthorizeWriteInput,
+) -> Result<AuthorizationOutcome, String> {
+    let audit_input = input.clone();
+    let store = store
+        .lock()
+        .map_err(|_| "store lock poisoned".to_string())?;
+    store.transaction(
+        |store| {
+            if let Some(heartbeat) = authorize_heartbeat_event(&audit_input) {
+                store.append(heartbeat).map_err(|error| error.to_string())?;
+            }
+            let outcome = PolicyService::new(store).authorize_write(input, true)?;
+            if matches!(outcome.decision.decision, stateful_core::DecisionKind::Deny) {
+                let audit = authorization_denied_audit_event(&audit_input, &outcome);
+                store.append(audit).map_err(|error| error.to_string())?;
+            }
+            Ok(outcome)
+        },
+        |error| error.to_string(),
+    )
+}
+
+fn authorize_heartbeat_event(input: &AuthorizeWriteInput) -> Option<Event> {
+    let workspace_id = input.workspace_id.as_ref()?;
+    Some(with_request_identity(
+        Event::session_heartbeat(input.session_id.clone(), workspace_id.clone()),
+        WorkspaceIdentityRequest {
+            repo_id: input.repo_id.clone(),
+            worktree_id: input.worktree_id.clone(),
+            root: input.root.clone(),
+            branch: input.branch.clone(),
+        },
+    ))
+}
+
+fn claim_intent_with_policy_and_audit(
     store: &SharedStore,
     input: ClaimIntentInput,
 ) -> Result<ClaimIntentOutcome, String> {
     let store = store
         .lock()
         .map_err(|_| "store lock poisoned".to_string())?;
-    PolicyService::new(&store).claim_intent(input)
+    store.transaction(
+        |store| {
+            let outcome = PolicyService::new(store).claim_intent(input)?;
+            let audit = intent_claimed_audit_event(&outcome);
+            store.append(audit).map_err(|error| error.to_string())?;
+            Ok(outcome)
+        },
+        |error| error.to_string(),
+    )
 }
 
 fn request_intent_with_policy(
     store: &SharedStore,
     input: RequestIntentInput,
-) -> Result<RequestIntentOutcome, String> {
+) -> Result<RequestIntentOutcome, RequestIntentError> {
+    let audit_input = input.clone();
     let store = store
         .lock()
-        .map_err(|_| "store lock poisoned".to_string())?;
-    PolicyService::new(&store).request_intent(input)
+        .map_err(|_| RequestIntentError::State("store lock poisoned".to_string()))?;
+    store.transaction(
+        |store| {
+            let outcome = PolicyService::new(store)
+                .request_intent(input)
+                .map_err(RequestIntentError::RequestFailed)?;
+            let audit = intent_requested_audit_event(&audit_input, &outcome);
+            store
+                .append(audit)
+                .map_err(|error| RequestIntentError::State(error.to_string()))?;
+            Ok(outcome)
+        },
+        |error| RequestIntentError::State(error.to_string()),
+    )
 }
 
-fn cancel_intent_with_policy(
+enum RequestIntentError {
+    RequestFailed(String),
+    State(String),
+}
+
+fn cancel_intent_with_policy_and_audit(
     store: &SharedStore,
     input: CancelIntentInput,
 ) -> Result<CancelIntentOutcome, String> {
+    let request_id = input.request_id.clone();
     let store = store
         .lock()
         .map_err(|_| "store lock poisoned".to_string())?;
-    PolicyService::new(&store).cancel_intent(input)
+    store.transaction(
+        |store| {
+            let outcome = PolicyService::new(store).cancel_intent(input)?;
+            let audit = intent_canceled_audit_event(&request_id, &outcome);
+            store.append(audit).map_err(|error| error.to_string())?;
+            Ok(outcome)
+        },
+        |error| error.to_string(),
+    )
+}
+
+fn append_event(store: &SharedStore, event: Event) -> Result<(), String> {
+    store
+        .lock()
+        .map_err(|_| "store lock poisoned".to_string())
+        .and_then(|store| store.append(event).map_err(|error| error.to_string()))
 }
 
 fn append_event_response(store: &SharedStore, event: Event) -> (StatusCode, Json<Value>) {
-    let result = store
-        .lock()
-        .map_err(|_| "store lock poisoned".to_string())
-        .and_then(|store| store.append(event).map_err(|error| error.to_string()));
-
-    match result {
+    match append_event(store, event) {
         Ok(()) => (
             StatusCode::OK,
             Json(json!({
@@ -1071,6 +1230,132 @@ fn with_request_identity(mut event: Event, identity: WorkspaceIdentityRequest) -
     event.worktree_id = identity.worktree_id;
     event.root = identity.root;
     event.branch = identity.branch;
+    event
+}
+
+fn with_wait_identity(mut event: Event, wait: &WaitRecord) -> Event {
+    event.repo_id = wait.repo_id.clone();
+    event.worktree_id = wait.worktree_id.clone();
+    event.root = wait.root.clone();
+    event.branch = wait.branch.clone();
+    event
+}
+
+fn intent_requested_audit_event(
+    input: &RequestIntentInput,
+    outcome: &RequestIntentOutcome,
+) -> Event {
+    let wait_id = outcome
+        .wait
+        .as_ref()
+        .map(|wait| wait.record.wait_id.clone())
+        .or_else(|| {
+            outcome
+                .reservation
+                .as_ref()
+                .map(|reservation| reservation.wait_id.clone())
+        });
+    let queue_position = outcome.wait.as_ref().and_then(|wait| wait.queue_position);
+    let blocking_session_id = outcome
+        .wait
+        .as_ref()
+        .and_then(|wait| wait.record.blocking_session_id.clone())
+        .or_else(|| {
+            outcome
+                .reservation
+                .as_ref()
+                .and_then(|reservation| reservation.blocking_session_id.clone())
+        });
+
+    with_request_identity(
+        Event::intent_requested(
+            input.session_id.clone(),
+            input.workspace_id.clone(),
+            outcome.request_id.clone(),
+            input.action.clone(),
+            input.path.clone(),
+            input.purpose.clone(),
+            outcome.request_state.clone(),
+            wait_id,
+            queue_position,
+            blocking_session_id,
+        ),
+        WorkspaceIdentityRequest {
+            repo_id: input.repo_id.clone(),
+            worktree_id: input.worktree_id.clone(),
+            root: input.root.clone(),
+            branch: input.branch.clone(),
+        },
+    )
+}
+
+fn intent_claimed_audit_event(outcome: &ClaimIntentOutcome) -> Event {
+    let reservation = &outcome.reservation;
+    with_wait_identity(
+        Event::intent_claimed(
+            reservation.session_id.clone(),
+            reservation.workspace_id.clone(),
+            reservation.wait_id.clone(),
+            reservation.action.clone(),
+            reservation.relative_path.clone(),
+            reservation.purpose.clone(),
+        ),
+        reservation,
+    )
+}
+
+fn intent_canceled_audit_event(request_id: &str, outcome: &CancelIntentOutcome) -> Event {
+    let wait = &outcome.wait;
+    with_wait_identity(
+        Event::intent_canceled(
+            wait.session_id.clone(),
+            wait.workspace_id.clone(),
+            request_id.to_string(),
+            wait.wait_id.clone(),
+            wait.action.clone(),
+            wait.relative_path.clone(),
+            wait.purpose.clone(),
+        ),
+        wait,
+    )
+}
+
+fn authorization_denied_audit_event(
+    input: &AuthorizeWriteInput,
+    outcome: &AuthorizationOutcome,
+) -> Event {
+    let mut event = with_request_identity(
+        Event::authorization_denied(
+            input.session_id.clone(),
+            input.workspace_id.clone().unwrap_or_default(),
+            input.action.clone(),
+            input.path.clone(),
+            input.old_path.clone(),
+            input.new_path.clone(),
+            outcome.decision.reason_code.clone(),
+            outcome.decision.message.clone(),
+        ),
+        WorkspaceIdentityRequest {
+            repo_id: input.repo_id.clone(),
+            worktree_id: input.worktree_id.clone(),
+            root: input.root.clone(),
+            branch: input.branch.clone(),
+        },
+    );
+
+    if let Some(wait) = outcome.wait.as_ref() {
+        event.payload["wait"] = json!({
+            "wait_id": wait.record.wait_id,
+            "session_id": wait.record.session_id,
+            "workspace_id": wait.record.workspace_id,
+            "relative_path": wait.record.relative_path,
+            "action": wait.record.action,
+            "status": wait.record.status,
+            "queue_position": wait.queue_position,
+            "blocking_session_id": wait.record.blocking_session_id,
+        });
+    }
+
     event
 }
 
@@ -1270,6 +1555,8 @@ struct LeaseRequest {
     session_id: String,
     workspace_id: String,
     path: String,
+    #[serde(default)]
+    root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1356,6 +1643,8 @@ struct ContextRenderRequest {
     mode: Option<String>,
     resource: Option<String>,
     workspace_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
     #[serde(default)]
     repo_id: Option<String>,
     #[serde(default)]

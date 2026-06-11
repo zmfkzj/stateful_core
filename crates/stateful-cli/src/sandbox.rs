@@ -1,5 +1,6 @@
 use clap::ValueEnum;
 use serde_json::Value;
+use stateful_core::normalize_relative_path;
 use std::{
     collections::BTreeSet,
     error::Error as StdError,
@@ -20,9 +21,13 @@ use crate::{
     discover_runtime_with_global, ensure_server, post_json, protocol_envelope,
     read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
     runtime_env_override_is_configured,
+    shell_command::{
+        first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
+    },
 };
 
 pub(crate) const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
+const BUILD_PROFILE_WRITE_DIR: &str = "tmp";
 #[cfg(unix)]
 const SIGTERM: i32 = 15;
 #[cfg(unix)]
@@ -32,6 +37,7 @@ const SIGKILL: i32 = 9;
 pub enum SandboxFsProfile {
     ReadOnly,
     WriteTargets,
+    Build,
     Git,
 }
 
@@ -50,6 +56,20 @@ pub struct SandboxRunRequest {
     pub write_dirs: Vec<String>,
     pub command: String,
     pub timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SandboxRunBashInvocation {
+    pub(crate) executable: String,
+    pub(crate) request: SandboxRunRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ValidatedSandboxRunShape {
+    pub(crate) write_targets: Vec<String>,
+    pub(crate) create_targets: Vec<String>,
+    pub(crate) write_dirs: Vec<String>,
+    pub(crate) git_command_words: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -135,27 +155,21 @@ pub fn run_sandbox_in_repo(
     paths: &GlobalPaths,
     request: SandboxRunRequest,
 ) -> anyhow::Result<SandboxRunOutput> {
-    if request.command.trim().is_empty() {
-        anyhow::bail!("sandbox run command is required");
-    }
-
     let repo_root = match repo_gate(paths, repo_root)? {
-        RepoGate::Enabled { repo_root } => {
-            if !runtime_env_override_is_configured() {
-                ensure_server(paths)?;
-            }
-            repo_root
-        }
+        RepoGate::Enabled { repo_root } => repo_root,
         RepoGate::Disabled => anyhow::bail!("stateful sandbox run requires an enabled repo"),
         RepoGate::OutsideGitRepo => anyhow::bail!("stateful sandbox run requires a Git repo"),
     };
-    let runtime = discover_runtime_with_global(&repo_root, paths)?;
-    let write_targets = normalize_sandbox_target_paths("write_targets", &request.write_targets)?;
-    let create_targets = normalize_sandbox_target_paths("create_targets", &request.create_targets)?;
-    let write_dirs = normalize_sandbox_target_paths("write_dirs", &request.write_dirs)?;
-    validate_profile_targets(request.fs, &write_targets, &create_targets, &write_dirs)?;
-    let git_command_words = if request.fs == SandboxFsProfile::Git {
-        Some(validate_git_profile_command(&request.command)?)
+    let shape = validate_sandbox_run_request_shape(&request)?;
+    let write_targets = shape.write_targets;
+    let create_targets = shape.create_targets;
+    let write_dirs = shape.write_dirs;
+    let git_command_words = shape.git_command_words;
+    let runtime = if sandbox_profile_requires_runtime(request.fs) {
+        if !runtime_env_override_is_configured() {
+            ensure_server(paths)?;
+        }
+        Some(discover_runtime_with_global(&repo_root, paths)?)
     } else {
         None
     };
@@ -169,13 +183,17 @@ pub fn run_sandbox_in_repo(
                 read_current_session_file(&repo_root).map_err(|_| {
                     anyhow::anyhow!("sandbox write-targets requires a current stateful session")
                 })?;
+            let runtime = runtime
+                .as_ref()
+                .expect("write-targets sandbox profile requires runtime");
             let authorize_context = SandboxAuthorizeContext {
-                runtime: &runtime,
+                runtime,
                 repo_root: &repo_root,
                 paths,
                 session_id: &current_session.session_id,
                 workspace_id: &current_session.workspace_id,
                 network: request.network,
+                fs_profile: sandbox_fs_profile_name(request.fs),
             };
 
             for path in write_targets.iter().chain(create_targets.iter()) {
@@ -229,6 +247,56 @@ pub fn run_sandbox_in_repo(
                 &write_dirs,
             )?
         }
+        SandboxFsProfile::Build => {
+            let current_session: CurrentSession =
+                read_current_session_file(&repo_root).map_err(|_| {
+                    anyhow::anyhow!("sandbox build profile requires a current stateful session")
+                })?;
+            let runtime = runtime
+                .as_ref()
+                .expect("build sandbox profile requires runtime");
+            let authorize_context = SandboxAuthorizeContext {
+                runtime,
+                repo_root: &repo_root,
+                paths,
+                session_id: &current_session.session_id,
+                workspace_id: &current_session.workspace_id,
+                network: request.network,
+                fs_profile: sandbox_fs_profile_name(request.fs),
+            };
+            let build_write_dirs = vec![BUILD_PROFILE_WRITE_DIR.to_string()];
+            let authorization_path = sandbox_write_dir_display_path(BUILD_PROFILE_WRITE_DIR);
+            let response = authorize_sandbox_write(
+                &authorize_context,
+                "write_directory",
+                &authorization_path,
+            )?;
+            match classify_sandbox_authorize_response(BUILD_PROFILE_WRITE_DIR, response)? {
+                SandboxAuthorizeDecision::Allow => {
+                    allowed_write_targets.push(authorization_path);
+                }
+                SandboxAuthorizeDecision::Deny(body) => {
+                    let body = enrich_sandbox_write_dir_denial(body);
+                    denied_write_targets.push(serde_json::json!({
+                        "path": sandbox_write_dir_display_path(BUILD_PROFILE_WRITE_DIR),
+                        "authorization": body,
+                    }));
+                }
+            }
+
+            if !denied_write_targets.is_empty() {
+                let body = serde_json::json!({
+                    "status": "error",
+                    "message": "stateful sandbox run target authorization denied",
+                    "allowed_write_targets": allowed_write_targets,
+                    "denied_write_targets": denied_write_targets,
+                })
+                .to_string();
+                return Err(SandboxAuthorizationDenied::new(body).into());
+            }
+
+            prepare_sandbox_writable_paths(&repo_root, &[], &[], &build_write_dirs)?
+        }
         SandboxFsProfile::Git => {
             allowed_write_targets
                 .push(sandbox_write_dir_display_path(&repo_root.to_string_lossy()));
@@ -268,6 +336,165 @@ pub fn run_sandbox_in_repo(
         allowed_write_targets,
         denied_write_targets: Vec::new(),
     })
+}
+
+pub(crate) fn parse_sandbox_run_bash_invocation(
+    command: &str,
+) -> Result<SandboxRunBashInvocation, String> {
+    reject_outer_shell_syntax(
+        command,
+        "Bash wrapper must be a single stateful sandbox run command",
+    )?;
+    let words = split_simple_command_words(command)?;
+    if words.is_empty() {
+        return Err("Bash commands must use stateful sandbox run".to_string());
+    }
+    if first_word_is_env_assignment(&words[0]) {
+        return Err("Bash wrapper must not use outer environment assignments".to_string());
+    }
+    if words.len() < 3 || words[1] != "sandbox" || words[2] != "run" {
+        return Err("Bash commands must use stateful sandbox run".to_string());
+    }
+
+    let mut fs = SandboxFsProfile::ReadOnly;
+    let mut network = SandboxNetworkPolicy::Disabled;
+    let mut write_targets = Vec::new();
+    let mut create_targets = Vec::new();
+    let mut write_dirs = Vec::new();
+    let mut inner_command = None;
+    let mut timeout_seconds = None;
+    let mut index = 3;
+    while index < words.len() {
+        let arg = &words[index];
+        match arg.as_str() {
+            "--" => {
+                return Err("stateful sandbox run does not support argv mode".to_string());
+            }
+            "--fs" => {
+                index += 1;
+                let value = parse_sandbox_run_arg_value(&words, index, "--fs")?;
+                fs = parse_sandbox_fs_profile(&value)?;
+            }
+            "--network" => {
+                index += 1;
+                let value = parse_sandbox_run_arg_value(&words, index, "--network")?;
+                network = parse_sandbox_network_policy(&value)?;
+            }
+            "--write-target" => {
+                index += 1;
+                write_targets.push(parse_sandbox_run_arg_value(
+                    &words,
+                    index,
+                    "--write-target",
+                )?);
+            }
+            "--create-target" => {
+                index += 1;
+                create_targets.push(parse_sandbox_run_arg_value(
+                    &words,
+                    index,
+                    "--create-target",
+                )?);
+            }
+            "--write-dir" => {
+                index += 1;
+                write_dirs.push(parse_sandbox_run_arg_value(&words, index, "--write-dir")?);
+            }
+            "--command" => {
+                if inner_command.is_some() {
+                    return Err("stateful sandbox run requires exactly one --command".to_string());
+                }
+                index += 1;
+                inner_command = Some(parse_sandbox_run_arg_value(&words, index, "--command")?);
+            }
+            "--timeout-seconds" => {
+                index += 1;
+                let timeout = parse_sandbox_run_arg_value(&words, index, "--timeout-seconds")?;
+                timeout_seconds = Some(timeout.parse::<u64>().map_err(|_| {
+                    "stateful sandbox run --timeout-seconds requires an integer value".to_string()
+                })?);
+            }
+            _ => {
+                return Err(format!("unsupported stateful sandbox run argument `{arg}`"));
+            }
+        }
+        index += 1;
+    }
+
+    let Some(command) = inner_command else {
+        return Err("stateful sandbox run requires exactly one --command".to_string());
+    };
+
+    Ok(SandboxRunBashInvocation {
+        executable: words[0].clone(),
+        request: SandboxRunRequest {
+            fs,
+            network,
+            write_targets,
+            create_targets,
+            write_dirs,
+            command,
+            timeout_seconds,
+        },
+    })
+}
+
+pub(crate) fn validate_sandbox_run_request_shape(
+    request: &SandboxRunRequest,
+) -> anyhow::Result<ValidatedSandboxRunShape> {
+    if request.command.trim().is_empty() {
+        anyhow::bail!("stateful sandbox run requires a non-empty --command");
+    }
+
+    let write_targets = normalize_sandbox_target_paths("write_targets", &request.write_targets)?;
+    let create_targets = normalize_sandbox_target_paths("create_targets", &request.create_targets)?;
+    let write_dirs = normalize_sandbox_target_paths("write_dirs", &request.write_dirs)?;
+    validate_profile_network_policy(request.fs, request.network)?;
+    validate_profile_targets(request.fs, &write_targets, &create_targets, &write_dirs)?;
+    let git_command_words = if request.fs == SandboxFsProfile::Git {
+        Some(validate_git_profile_command(&request.command)?)
+    } else {
+        None
+    };
+
+    Ok(ValidatedSandboxRunShape {
+        write_targets,
+        create_targets,
+        write_dirs,
+        git_command_words,
+    })
+}
+
+fn parse_sandbox_run_arg_value(
+    words: &[String],
+    index: usize,
+    arg: &str,
+) -> Result<String, String> {
+    words
+        .get(index)
+        .cloned()
+        .ok_or_else(|| format!("stateful sandbox run argument `{arg}` requires a value"))
+}
+
+fn parse_sandbox_fs_profile(value: &str) -> Result<SandboxFsProfile, String> {
+    match value {
+        "read-only" => Ok(SandboxFsProfile::ReadOnly),
+        "write-targets" => Ok(SandboxFsProfile::WriteTargets),
+        "build" => Ok(SandboxFsProfile::Build),
+        "git" => Ok(SandboxFsProfile::Git),
+        _ => Err(
+            "stateful sandbox run supports only read-only, write-targets, build, and git profiles"
+                .to_string(),
+        ),
+    }
+}
+
+fn parse_sandbox_network_policy(value: &str) -> Result<SandboxNetworkPolicy, String> {
+    match value {
+        "disabled" => Ok(SandboxNetworkPolicy::Disabled),
+        "enabled" => Ok(SandboxNetworkPolicy::Enabled),
+        _ => Err("stateful sandbox run network must be disabled or enabled".to_string()),
+    }
 }
 
 pub fn run_external_sandboxed_command(
@@ -493,7 +720,7 @@ pub(crate) fn normalize_sandbox_target_path(field: &str, path: &str) -> anyhow::
         anyhow::bail!("stateful sandbox run {field} entries must not be empty");
     }
 
-    Ok(segments.join("/"))
+    Ok(normalize_relative_path(segments.join("/")))
 }
 
 fn ensure_repo_file_target(repo_root: &Path, relative_path: &str) -> anyhow::Result<()> {
@@ -747,6 +974,13 @@ fn validate_profile_targets(
                 ensure_artifact_write_dir_target(path)?;
             }
         }
+        SandboxFsProfile::Build => {
+            if !write_targets.is_empty() || !create_targets.is_empty() || !write_dirs.is_empty() {
+                anyhow::bail!(
+                    "build profile manages tmp/ writes automatically and rejects explicit write targets, create targets, and write dirs"
+                );
+            }
+        }
         SandboxFsProfile::Git => {
             if !write_targets.is_empty() || !create_targets.is_empty() || !write_dirs.is_empty() {
                 anyhow::bail!(
@@ -756,6 +990,30 @@ fn validate_profile_targets(
         }
     }
     Ok(())
+}
+
+fn validate_profile_network_policy(
+    fs: SandboxFsProfile,
+    network: SandboxNetworkPolicy,
+) -> anyhow::Result<()> {
+    if fs == SandboxFsProfile::ReadOnly && network == SandboxNetworkPolicy::Enabled {
+        anyhow::bail!("read-only sandbox run requires --network disabled");
+    }
+
+    Ok(())
+}
+
+fn sandbox_fs_profile_name(fs: SandboxFsProfile) -> &'static str {
+    match fs {
+        SandboxFsProfile::ReadOnly => "read-only",
+        SandboxFsProfile::WriteTargets => "write-targets",
+        SandboxFsProfile::Build => "build",
+        SandboxFsProfile::Git => "git",
+    }
+}
+
+fn sandbox_profile_requires_runtime(fs: SandboxFsProfile) -> bool {
+    !matches!(fs, SandboxFsProfile::ReadOnly)
 }
 
 fn git_profile_writable_paths(repo_root: &Path) -> Vec<SandboxWritablePath> {
@@ -787,6 +1045,26 @@ fn git_profile_private_dir(repo_root: &Path) -> PathBuf {
 
 fn git_profile_hooks_dir(repo_root: &Path) -> PathBuf {
     git_profile_private_dir(repo_root).join("hooks-disabled")
+}
+
+fn git_profile_persistent_metadata_paths(repo_root: &Path) -> Vec<SandboxWritablePath> {
+    let dot_git = repo_root.join(".git");
+    if dot_git.exists() && !dot_git.is_dir() {
+        return vec![SandboxWritablePath::file(dot_git)];
+    }
+
+    vec![
+        SandboxWritablePath::file(dot_git.join("config")),
+        SandboxWritablePath::file(dot_git.join("config.worktree")),
+        SandboxWritablePath::directory(dot_git.join("hooks")),
+    ]
+}
+
+fn existing_git_profile_persistent_metadata_paths(repo_root: &Path) -> Vec<SandboxWritablePath> {
+    git_profile_persistent_metadata_paths(repo_root)
+        .into_iter()
+        .filter(|path| path.path.exists())
+        .collect()
 }
 
 fn validate_git_profile_command(command: &str) -> anyhow::Result<Vec<String>> {
@@ -852,8 +1130,20 @@ fn git_profile_subcommand(words: &[String]) -> Result<(usize, &str), String> {
 }
 
 fn validate_git_profile_subcommand_args(subcommand: &str, args: &[String]) -> Result<(), String> {
+    if subcommand == "remote" {
+        return validate_git_profile_remote_args(args);
+    }
+
     for arg in args {
         match subcommand {
+            "branch" if is_git_profile_branch_config_persistence_arg(arg) => {
+                return Err("git profile does not allow branch config persistence".to_string());
+            }
+            "checkout" | "switch" if is_git_profile_tracking_arg(arg) => {
+                return Err(
+                    "git profile does not allow branch tracking config persistence".to_string(),
+                );
+            }
             "grep"
                 if arg == "-O"
                     || arg.starts_with("-O")
@@ -876,11 +1166,92 @@ fn validate_git_profile_subcommand_args(subcommand: &str, args: &[String]) -> Re
             {
                 return Err("git profile does not allow receive-pack overrides".to_string());
             }
+            "push" if is_git_profile_push_set_upstream_arg(arg) => {
+                return Err("git profile does not allow push upstream persistence".to_string());
+            }
             "rebase" if arg == "--exec" || arg == "-x" || arg.starts_with("--exec=") => {
                 return Err("git profile does not allow rebase --exec".to_string());
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+fn is_git_profile_branch_config_persistence_arg(arg: &str) -> bool {
+    arg == "--set-upstream-to"
+        || arg.starts_with("--set-upstream-to=")
+        || arg == "--set-upstream"
+        || arg.starts_with("--set-upstream=")
+        || arg == "--unset-upstream"
+        || is_git_profile_tracking_arg(arg)
+        || is_git_profile_short_option(arg, 'u')
+}
+
+fn is_git_profile_tracking_arg(arg: &str) -> bool {
+    arg == "--track" || arg.starts_with("--track=") || is_git_profile_short_option(arg, 't')
+}
+
+fn is_git_profile_push_set_upstream_arg(arg: &str) -> bool {
+    arg == "--set-upstream"
+        || arg.starts_with("--set-upstream=")
+        || is_git_profile_short_option(arg, 'u')
+}
+
+fn is_git_profile_short_option(arg: &str, short: char) -> bool {
+    let Some(rest) = arg.strip_prefix('-') else {
+        return false;
+    };
+    !rest.starts_with('-') && rest.starts_with(short)
+}
+
+fn validate_git_profile_remote_args(args: &[String]) -> Result<(), String> {
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-v" | "--verbose" => index += 1,
+            arg if arg.starts_with('-') => {
+                return Err(format!("git profile does not allow remote option `{arg}`"));
+            }
+            _ => break,
+        }
+    }
+
+    let Some(action) = args.get(index).map(String::as_str) else {
+        return Ok(());
+    };
+
+    match action {
+        "get-url" => validate_git_profile_remote_get_url_args(&args[index + 1..]),
+        "show" => validate_git_profile_remote_show_args(&args[index + 1..]),
+        "add" | "rename" | "remove" | "rm" | "set-branches" | "set-head" | "set-url" | "update"
+        | "prune" => Err("git profile does not allow remote metadata mutation".to_string()),
+        _ => Err(format!(
+            "git profile does not allow remote subcommand `{action}`"
+        )),
+    }
+}
+
+fn validate_git_profile_remote_get_url_args(args: &[String]) -> Result<(), String> {
+    for arg in args {
+        if arg == "--all" || arg == "--push" || !arg.starts_with('-') {
+            continue;
+        }
+        return Err(format!(
+            "git profile does not allow remote get-url option `{arg}`"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_git_profile_remote_show_args(args: &[String]) -> Result<(), String> {
+    for arg in args {
+        if arg == "-n" || !arg.starts_with('-') {
+            continue;
+        }
+        return Err(format!(
+            "git profile does not allow remote show option `{arg}`"
+        ));
     }
     Ok(())
 }
@@ -901,7 +1272,6 @@ const GIT_PROFILE_ALLOWED_SUBCOMMANDS: &[&str] = &[
     "diff",
     "fetch",
     "grep",
-    "init",
     "log",
     "ls-files",
     "merge",
@@ -1028,9 +1398,9 @@ enum ShellQuoteState {
 
 fn ensure_artifact_write_dir_target(relative_path: &str) -> anyhow::Result<()> {
     let top_level = relative_path.split('/').next().unwrap_or_default();
-    if top_level != "target" {
+    if top_level != BUILD_PROFILE_WRITE_DIR {
         anyhow::bail!(
-            "stateful sandbox run --write-dir is limited to the target/ artifact tree; use native Codex edit tools or exact file write targets for source-tree edits"
+            "stateful sandbox run --write-dir is limited to the tmp/ artifact tree; use native Codex edit tools or exact file write targets for source-tree edits"
         );
     }
     Ok(())
@@ -1074,6 +1444,9 @@ pub(crate) fn apply_sandbox_temp_env(command: &mut Command, temp_dir: Option<&Pa
         .env("TMPDIR", temp_dir)
         .env("TEMP", temp_dir)
         .env("TMP", temp_dir);
+    if let Some(tmp_root) = temp_dir.parent() {
+        command.env("CARGO_TARGET_DIR", tmp_root.join("target"));
+    }
 }
 
 pub(crate) struct SandboxAuthorizeContext<'a> {
@@ -1083,6 +1456,7 @@ pub(crate) struct SandboxAuthorizeContext<'a> {
     pub(crate) session_id: &'a str,
     pub(crate) workspace_id: &'a str,
     pub(crate) network: SandboxNetworkPolicy,
+    pub(crate) fs_profile: &'static str,
 }
 
 pub(crate) fn authorize_sandbox_write(
@@ -1105,7 +1479,7 @@ pub(crate) fn authorize_sandbox_write(
             "path": path,
             "purpose": sandbox_authorize_purpose(action, path),
             "queue_on_conflict": true,
-            "fs_profile": "write-targets",
+            "fs_profile": context.fs_profile,
             "network_policy": match context.network {
                 SandboxNetworkPolicy::Disabled => "disabled",
                 SandboxNetworkPolicy::Enabled => "enabled",
@@ -1194,7 +1568,7 @@ fn seatbelt_git_command(
     hooks_dir: &Path,
     network: SandboxNetworkPolicy,
 ) -> Command {
-    let profile = seatbelt_git_profile(writable_paths, network);
+    let profile = seatbelt_git_profile(writable_paths, cwd, network);
     let mut sandbox = Command::new("/usr/bin/sandbox-exec");
     sandbox
         .arg("-p")
@@ -1209,9 +1583,14 @@ fn seatbelt_git_command(
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn seatbelt_git_profile(
     writable_paths: &[SandboxWritablePath],
+    repo_root: &Path,
     network: SandboxNetworkPolicy,
 ) -> String {
     let mut profile = seatbelt_profile(writable_paths, network);
+    push_seatbelt_file_write_denies(
+        &mut profile,
+        &git_profile_persistent_metadata_paths(repo_root),
+    );
     profile.push_str(
         "(allow mach-lookup\n\
              (global-name \"com.apple.system.opendirectoryd.libinfo\")\n\
@@ -1220,6 +1599,26 @@ fn seatbelt_git_profile(
              (global-name \"com.apple.trustd.agent\"))\n",
     );
     profile
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn push_seatbelt_file_write_denies(profile: &mut String, protected_paths: &[SandboxWritablePath]) {
+    if protected_paths.is_empty() {
+        return;
+    }
+
+    profile.push_str("(deny file-write*");
+    for protected_path in protected_paths {
+        profile.push_str(" (literal \"");
+        profile.push_str(&seatbelt_escape(&protected_path.path.to_string_lossy()));
+        profile.push_str("\")");
+        if protected_path.kind == SandboxWritablePathKind::Directory {
+            profile.push_str(" (subpath \"");
+            profile.push_str(&seatbelt_escape(&protected_path.path.to_string_lossy()));
+            profile.push_str("\")");
+        }
+    }
+    profile.push_str(")\n");
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -1301,6 +1700,11 @@ fn bubblewrap_git_args(
     network: SandboxNetworkPolicy,
 ) -> Vec<OsString> {
     let mut args = bubblewrap_base_args(cwd, writable_paths, network);
+    for protected_path in existing_git_profile_persistent_metadata_paths(cwd) {
+        args.push(OsString::from("--ro-bind"));
+        args.push(protected_path.path.as_os_str().to_owned());
+        args.push(protected_path.path.as_os_str().to_owned());
+    }
     args.push(OsString::from("git"));
     args.extend(words.iter().skip(1).map(OsString::from));
     args
@@ -1360,7 +1764,7 @@ fn apply_git_profile_env(command: &mut Command, temp_dir: &Path, hooks_dir: &Pat
     command
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_COUNT", "5")
+        .env("GIT_CONFIG_COUNT", "7")
         .env("GIT_CONFIG_KEY_0", "core.hooksPath")
         .env("GIT_CONFIG_VALUE_0", hooks_dir)
         .env("GIT_CONFIG_KEY_1", "core.fsmonitor")
@@ -1371,7 +1775,10 @@ fn apply_git_profile_env(command: &mut Command, temp_dir: &Path, hooks_dir: &Pat
         .env("GIT_CONFIG_VALUE_3", "")
         .env("GIT_CONFIG_KEY_4", "protocol.ext.allow")
         .env("GIT_CONFIG_VALUE_4", "never")
-        .env("GIT_EXTERNAL_DIFF", "")
+        .env("GIT_CONFIG_KEY_5", "branch.autoSetupMerge")
+        .env("GIT_CONFIG_VALUE_5", "false")
+        .env("GIT_CONFIG_KEY_6", "branch.autoSetupRebase")
+        .env("GIT_CONFIG_VALUE_6", "never")
         .env("GIT_LFS_SKIP_SMUDGE", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", ":")
@@ -1557,6 +1964,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sandbox_target_uses_core_relative_path_normalization() {
+        let normalized = normalize_sandbox_target_path("write_targets", r".\src\.\auth.ts")
+            .expect("target should normalize");
+
+        assert_eq!(
+            normalized,
+            stateful_core::normalize_relative_path("src/auth.ts")
+        );
+    }
+
     fn sandbox_output(status: &'static str, exit_code: Option<i32>) -> SandboxRunOutput {
         SandboxRunOutput {
             status,
@@ -1664,7 +2082,7 @@ mod tests {
         let writable_paths = vec![
             SandboxWritablePath::file(PathBuf::from("/repo/src/allowed.ts")),
             SandboxWritablePath::file(PathBuf::from("/repo/src/new.ts")),
-            SandboxWritablePath::directory(PathBuf::from("/repo/target")),
+            SandboxWritablePath::directory(PathBuf::from("/repo/tmp")),
         ];
         let args = bubblewrap_args(
             "printf ok > src/allowed.ts",
@@ -1686,7 +2104,7 @@ mod tests {
         );
         assert!(
             args.windows(3)
-                .any(|window| { window == ["--bind", "/repo/target", "/repo/target"] })
+                .any(|window| { window == ["--bind", "/repo/tmp", "/repo/tmp"] })
         );
         assert!(
             args.windows(3)
@@ -1733,6 +2151,53 @@ mod tests {
     }
 
     #[test]
+    fn bubblewrap_git_profile_rebinds_persistent_git_metadata_read_only() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "stateful-sandbox-git-readonly-overrides-{}",
+            std::process::id()
+        ));
+        if repo_root.exists() {
+            fs::remove_dir_all(&repo_root).expect("old temp root should be removable");
+        }
+        fs::create_dir_all(repo_root.join(".git/hooks"))
+            .expect("git hooks dir should be creatable");
+        fs::write(
+            repo_root.join(".git/config"),
+            "[core]\n\trepositoryformatversion = 0\n",
+        )
+        .expect("git config should be writable");
+        let config = repo_root.join(".git/config").to_string_lossy().into_owned();
+        let hooks = repo_root.join(".git/hooks").to_string_lossy().into_owned();
+
+        let writable_paths = git_profile_writable_paths(&repo_root);
+        let words = vec!["git".to_string(), "status".to_string()];
+        let args = bubblewrap_git_args(
+            &words,
+            &repo_root,
+            &writable_paths,
+            SandboxNetworkPolicy::Disabled,
+        );
+        let args = args
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.windows(3).any(|window| {
+            window[0] == "--bind"
+                && window[1] == repo_root.to_string_lossy()
+                && window[2] == repo_root.to_string_lossy()
+        }));
+        assert!(args.windows(3).any(|window| {
+            window[0] == "--ro-bind" && window[1] == config && window[2] == config
+        }));
+        assert!(args.windows(3).any(|window| {
+            window[0] == "--ro-bind" && window[1] == hooks && window[2] == hooks
+        }));
+
+        fs::remove_dir_all(&repo_root).expect("temp root should be removable");
+    }
+
+    #[test]
     fn prepare_writable_files_validates_all_targets_before_creating_files() {
         let repo_root = std::env::temp_dir().join(format!(
             "stateful-sandbox-create-target-order-{}",
@@ -1747,7 +2212,7 @@ mod tests {
             &repo_root,
             &["src/missing.txt".to_string()],
             &["src/new.txt".to_string()],
-            &["target".to_string()],
+            &["tmp".to_string()],
         )
         .expect_err("missing write target should fail before create target is materialized");
 
@@ -1762,7 +2227,7 @@ mod tests {
             "failed sandbox run should not leave create target behind"
         );
         assert!(
-            !repo_root.join("target").exists(),
+            !repo_root.join("tmp").exists(),
             "failed sandbox run should not leave write dir behind"
         );
 
@@ -1779,18 +2244,18 @@ mod tests {
         fs::create_dir_all(&repo_root).expect("repo root should be creatable");
 
         let writable_paths =
-            prepare_sandbox_writable_paths(&repo_root, &[], &[], &["target".to_string()])
+            prepare_sandbox_writable_paths(&repo_root, &[], &[], &["tmp".to_string()])
                 .expect("write dir should prepare");
 
-        assert!(repo_root.join("target").is_dir());
-        assert!(repo_root.join("target/.stateful-tmp").is_dir());
+        assert!(repo_root.join("tmp").is_dir());
+        assert!(repo_root.join("tmp/.stateful-tmp").is_dir());
         assert_eq!(
             writable_paths,
             vec![SandboxWritablePath::directory(
                 repo_root
-                    .join("target")
+                    .join("tmp")
                     .canonicalize()
-                    .expect("target write dir should be canonicalizable")
+                    .expect("tmp write dir should be canonicalizable")
             )]
         );
 
@@ -1801,12 +2266,12 @@ mod tests {
     fn sandbox_temp_dir_uses_first_writable_directory() {
         let writable_paths = vec![
             SandboxWritablePath::file(PathBuf::from("/repo/README.md")),
-            SandboxWritablePath::directory(PathBuf::from("/repo/target")),
+            SandboxWritablePath::directory(PathBuf::from("/repo/tmp")),
         ];
 
         assert_eq!(
             sandbox_temp_dir(&writable_paths),
-            Some(PathBuf::from("/repo/target/.stateful-tmp"))
+            Some(PathBuf::from("/repo/tmp/.stateful-tmp"))
         );
     }
 
@@ -1835,7 +2300,7 @@ mod tests {
     fn apply_sandbox_temp_env_sets_standard_temp_vars() {
         let mut command = Command::new("true");
 
-        apply_sandbox_temp_env(&mut command, Some(Path::new("/repo/target/.stateful-tmp")));
+        apply_sandbox_temp_env(&mut command, Some(Path::new("/repo/tmp/.stateful-tmp")));
 
         let envs = command
             .get_envs()
@@ -1852,15 +2317,19 @@ mod tests {
         );
         assert_eq!(
             envs.get("TMPDIR"),
-            Some(&Some("/repo/target/.stateful-tmp".to_string()))
+            Some(&Some("/repo/tmp/.stateful-tmp".to_string()))
         );
         assert_eq!(
             envs.get("TEMP"),
-            Some(&Some("/repo/target/.stateful-tmp".to_string()))
+            Some(&Some("/repo/tmp/.stateful-tmp".to_string()))
         );
         assert_eq!(
             envs.get("TMP"),
-            Some(&Some("/repo/target/.stateful-tmp".to_string()))
+            Some(&Some("/repo/tmp/.stateful-tmp".to_string()))
+        );
+        assert_eq!(
+            envs.get("CARGO_TARGET_DIR"),
+            Some(&Some("/repo/tmp/target".to_string()))
         );
     }
 
@@ -1870,7 +2339,7 @@ mod tests {
             &[
                 SandboxWritablePath::file(PathBuf::from("/repo/src/allowed.ts")),
                 SandboxWritablePath::file(PathBuf::from("/repo/src/quoted\"path.ts")),
-                SandboxWritablePath::directory(PathBuf::from("/repo/target")),
+                SandboxWritablePath::directory(PathBuf::from("/repo/tmp")),
             ],
             SandboxNetworkPolicy::Disabled,
         );
@@ -1881,7 +2350,7 @@ mod tests {
         assert!(profile.contains("(literal \"/dev/null\")"));
         assert!(profile.contains("(literal \"/repo/src/allowed.ts\")"));
         assert!(profile.contains("(literal \"/repo/src/quoted\\\"path.ts\")"));
-        assert!(profile.contains("(subpath \"/repo/target\")"));
+        assert!(profile.contains("(subpath \"/repo/tmp\")"));
         assert!(!profile.contains("subpath \"/repo/src\""));
         assert!(!profile.contains("subpath \"/dev\""));
         assert!(!profile.contains("(allow network*)"));
@@ -1890,10 +2359,30 @@ mod tests {
     #[test]
     fn seatbelt_git_profile_allows_repo_root_subpath() {
         let writable_paths = git_profile_writable_paths(Path::new("/repo"));
-        let profile = seatbelt_git_profile(&writable_paths, SandboxNetworkPolicy::Enabled);
+        let profile = seatbelt_git_profile(
+            &writable_paths,
+            Path::new("/repo"),
+            SandboxNetworkPolicy::Enabled,
+        );
 
         assert!(profile.contains("(subpath \"/repo\")"));
         assert!(profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn seatbelt_git_profile_denies_persistent_git_metadata_writes() {
+        let writable_paths = git_profile_writable_paths(Path::new("/repo"));
+        let profile = seatbelt_git_profile(
+            &writable_paths,
+            Path::new("/repo"),
+            SandboxNetworkPolicy::Enabled,
+        );
+
+        assert!(profile.contains("(deny file-write*"));
+        assert!(profile.contains("(literal \"/repo/.git/config\")"));
+        assert!(profile.contains("(literal \"/repo/.git/config.worktree\")"));
+        assert!(profile.contains("(literal \"/repo/.git/hooks\")"));
+        assert!(profile.contains("(subpath \"/repo/.git/hooks\")"));
     }
 
     #[cfg(target_os = "macos")]
@@ -1958,6 +2447,41 @@ mod tests {
     }
 
     #[test]
+    fn read_only_profile_rejects_network_enabled() {
+        let error = validate_profile_network_policy(
+            SandboxFsProfile::ReadOnly,
+            SandboxNetworkPolicy::Enabled,
+        )
+        .expect_err("read-only profile should reject network enabled");
+
+        assert!(
+            error
+                .to_string()
+                .contains("read-only sandbox run requires --network disabled")
+        );
+    }
+
+    #[test]
+    fn build_profile_rejects_explicit_write_targets() {
+        validate_profile_targets(SandboxFsProfile::Build, &[], &[], &[])
+            .expect("build profile should manage tmp writes automatically");
+
+        let error = validate_profile_targets(
+            SandboxFsProfile::Build,
+            &["README.md".to_string()],
+            &[],
+            &[],
+        )
+        .expect_err("build profile should reject explicit write targets");
+
+        assert!(
+            error
+                .to_string()
+                .contains("build profile manages tmp/ writes automatically")
+        );
+    }
+
+    #[test]
     fn git_profile_rejects_explicit_write_targets() {
         validate_profile_targets(SandboxFsProfile::Git, &[], &[], &[])
             .expect("git profile should manage write scope automatically");
@@ -1971,6 +2495,40 @@ mod tests {
                 .to_string()
                 .contains("git profile manages repo writes automatically")
         );
+    }
+
+    #[test]
+    fn git_profile_env_disables_implicit_branch_tracking_config() {
+        let mut command = Command::new("git");
+        apply_git_profile_env(
+            &mut command,
+            Path::new("/repo/.git/stateful/.stateful-tmp"),
+            Path::new("/repo/.git/stateful/hooks-disabled"),
+        );
+        let envs = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(envs.get("GIT_CONFIG_COUNT"), Some(&"7".to_string()));
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_5"),
+            Some(&"branch.autoSetupMerge".to_string())
+        );
+        assert_eq!(envs.get("GIT_CONFIG_VALUE_5"), Some(&"false".to_string()));
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_6"),
+            Some(&"branch.autoSetupRebase".to_string())
+        );
+        assert_eq!(envs.get("GIT_CONFIG_VALUE_6"), Some(&"never".to_string()));
+        assert!(!envs.contains_key("GIT_EXTERNAL_DIFF"));
     }
 
     #[test]
@@ -2023,6 +2581,79 @@ mod tests {
                 error.to_string().contains("git profile"),
                 "unexpected error for `{command}`: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn git_profile_rejects_persistent_metadata_mutation() {
+        let cases = [
+            "git remote add origin https://example.test/repo.git",
+            "git remote set-url origin https://example.test/repo.git",
+            "git remote rename origin backup",
+            "git remote remove origin",
+            "git remote rm origin",
+            "git remote set-head origin main",
+            "git remote set-branches origin main",
+            "git remote update origin",
+            "git remote prune origin",
+        ];
+
+        for command in cases {
+            let error = validate_git_profile_command(command)
+                .expect_err("git profile should reject persistent metadata mutation");
+
+            assert!(
+                error.to_string().contains("git profile"),
+                "unexpected error for `{command}`: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_profile_rejects_local_config_persistence_options() {
+        let cases = [
+            "git init",
+            "git init --template /tmp/template",
+            "git branch --set-upstream-to=origin/main",
+            "git branch --set-upstream-to origin/main",
+            "git branch -u origin/main",
+            "git branch --track new origin/main",
+            "git branch -t new origin/main",
+            "git branch --unset-upstream",
+            "git push --set-upstream origin main",
+            "git push -u origin main",
+            "git push --follow-tags --set-upstream origin main",
+            "git checkout --track origin/main",
+            "git checkout -t origin/main",
+            "git switch --track origin/main",
+            "git switch -t origin/main",
+        ];
+
+        for command in cases {
+            let error = validate_git_profile_command(command)
+                .expect_err("git profile should reject local config persistence options");
+
+            assert!(
+                error.to_string().contains("git profile"),
+                "unexpected error for `{command}`: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_profile_allows_read_only_remote_queries() {
+        let cases = [
+            "git remote",
+            "git remote -v",
+            "git remote get-url origin",
+            "git remote get-url --push origin",
+            "git remote get-url --all origin",
+            "git remote show -n origin",
+        ];
+
+        for command in cases {
+            validate_git_profile_command(command)
+                .unwrap_or_else(|error| panic!("expected `{command}` to be allowed: {error}"));
         }
     }
 

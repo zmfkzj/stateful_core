@@ -1,6 +1,9 @@
 use std::fs;
 
-use stateful_cli::{GlobalPaths, RepoRegistry, detect_git_root, disable_repo, enable_repo};
+use stateful_cli::{
+    GlobalPaths, RepoRegistry, detect_git_root, disable_repo, enable_repo,
+    workspace_id_for_enabled_repo,
+};
 
 #[test]
 fn enable_repo_registers_git_root_and_writes_repo_configs() {
@@ -30,6 +33,10 @@ fn enable_repo_registers_git_root_and_writes_repo_configs() {
     );
 
     assert!(repo.join(".stateful/config.yml").is_file());
+    let repo_config = fs::read_to_string(repo.join(".stateful/config.yml"))
+        .expect("repo config yml should exist");
+    assert!(repo_config.contains("informational target defaults"));
+    assert!(repo_config.contains("Runtime loading of these keys is not yet shipped."));
     assert!(!repo.join(".stateful/validation.yml").exists());
     assert!(
         fixture
@@ -96,6 +103,31 @@ fn enabled_lookup_returns_false_for_unknown_repo() {
     let registry = RepoRegistry::default();
 
     assert!(!registry.is_enabled(&repo));
+}
+
+#[test]
+fn workspace_id_is_stable_for_enabled_repo_and_distinct_per_root() {
+    let fixture = TestFixture::new("workspace-id");
+    let repo_a = fixture.create_repo("repo-a");
+    let repo_b = fixture.create_repo("repo-b");
+    let nested_a = repo_a.join("src");
+    fs::create_dir_all(&nested_a).expect("nested repo directory should be creatable");
+
+    enable_repo(&fixture.paths, &repo_a).expect("repo a should enable");
+    enable_repo(&fixture.paths, &repo_b).expect("repo b should enable");
+
+    let workspace_a = workspace_id_for_enabled_repo(&fixture.paths, &nested_a)
+        .expect("enabled repo a should have a workspace id");
+    let workspace_a_again = workspace_id_for_enabled_repo(&fixture.paths, &repo_a)
+        .expect("workspace id should be stable");
+    let workspace_b = workspace_id_for_enabled_repo(&fixture.paths, &repo_b)
+        .expect("enabled repo b should have a workspace id");
+
+    assert_eq!(workspace_a, workspace_a_again);
+    assert_ne!(workspace_a, workspace_b);
+    assert!(workspace_a.starts_with("workspace-"));
+    assert_ne!(workspace_a, "local");
+    assert_ne!(workspace_b, "local");
 }
 
 struct TestFixture {

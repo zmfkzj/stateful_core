@@ -2,8 +2,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use stateful_core::{
     CurrentFreshness, CurrentItem, CurrentItemKind, CurrentSeverity, IntentScope, PolicyState,
+    normalize_relative_path,
 };
 use std::path::Path;
+use std::time::Duration as StdDuration;
 use thiserror::Error;
 use time::{Date, Duration, Month, OffsetDateTime, Time};
 use uuid::Uuid;
@@ -15,6 +17,8 @@ const INTENT_MAX_SECONDS: i64 = 3600;
 const LEASE_TTL_SECONDS: i64 = 300;
 const RESERVATION_TTL_SECONDS: i64 = 120;
 const ACTIVITY_TTL_SECONDS: i64 = 900;
+const EVENT_RETENTION_DAYS: i64 = 14;
+const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -42,6 +46,8 @@ pub enum StoreError {
     MissingPurpose,
     #[error("intent scope is required")]
     MissingScope,
+    #[error("invalid timestamp: {0}")]
+    InvalidTimestamp(String),
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -51,6 +57,7 @@ pub struct CurrentStateIdentityFilter<'a> {
     pub repo_id: Option<&'a str>,
     pub worktree_id: Option<&'a str>,
     pub root: Option<&'a str>,
+    pub exclude_session_id: Option<&'a str>,
 }
 
 impl CurrentStateIdentityFilter<'_> {
@@ -65,6 +72,12 @@ pub struct WorkspaceIdentity<'a> {
     pub worktree_id: Option<&'a str>,
     pub root: Option<&'a str>,
     pub branch: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseObservation {
+    pub exists: bool,
+    pub content_hash: Option<String>,
 }
 
 impl WorkspaceIdentity<'_> {
@@ -89,54 +102,57 @@ impl Store {
         }
 
         let conn = Connection::open(path)?;
+        configure_file_connection(&conn)?;
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
     }
 
+    pub fn transaction<T, E, F, M>(&self, operation: F, map_store_error: M) -> Result<T, E>
+    where
+        F: FnOnce(&Self) -> Result<T, E>,
+        M: Fn(StoreError) -> E,
+    {
+        if !self.conn.is_autocommit() {
+            return operation(self);
+        }
+
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|error| map_store_error(StoreError::from(error)))?;
+
+        let result = (|| -> Result<T, E> {
+            let value = operation(self)?;
+            self.conn
+                .execute_batch("COMMIT")
+                .map_err(|error| map_store_error(StoreError::from(error)))?;
+            Ok(value)
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
     pub fn open_in_memory() -> StoreResult<Self> {
         let conn = Connection::open_in_memory()?;
+        configure_connection(&conn)?;
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
     }
 
     pub fn append(&self, event: Event) -> StoreResult<()> {
+        if !self.conn.is_autocommit() {
+            return self.append_inner(&event);
+        }
+
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
 
         let result = (|| -> StoreResult<()> {
-            let inserted = self.conn.execute(
-                "INSERT OR IGNORE INTO events (
-                    event_id,
-                    event_type,
-                    session_id,
-                    workspace_id,
-                    repo_id,
-                    worktree_id,
-                    root,
-                    branch,
-                    payload_json,
-                    created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    event.event_id,
-                    event.event_type.as_str(),
-                    event.session_id,
-                    event.workspace_id,
-                    event.repo_id,
-                    event.worktree_id,
-                    event.root,
-                    event.branch,
-                    serde_json::to_string(&event.payload)
-                        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
-                    event.created_at,
-                ],
-            )?;
-
-            if inserted == 1 {
-                self.materialize(&event)?;
-            }
-
+            self.append_inner(&event)?;
             self.conn.execute_batch("COMMIT")?;
             Ok(())
         })();
@@ -146,6 +162,42 @@ impl Store {
         }
 
         result
+    }
+
+    fn append_inner(&self, event: &Event) -> StoreResult<()> {
+        let inserted = self.conn.execute(
+            "INSERT OR IGNORE INTO events (
+                event_id,
+                event_type,
+                session_id,
+                workspace_id,
+                repo_id,
+                worktree_id,
+                root,
+                branch,
+                payload_json,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                &event.event_id,
+                event.event_type.as_str(),
+                &event.session_id,
+                &event.workspace_id,
+                &event.repo_id,
+                &event.worktree_id,
+                &event.root,
+                &event.branch,
+                serde_json::to_string(&event.payload)
+                    .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
+                &event.created_at,
+            ],
+        )?;
+
+        if inserted == 1 {
+            self.materialize(event)?;
+        }
+
+        Ok(())
     }
 
     pub fn session(&self, session_id: &str) -> StoreResult<Option<SessionRecord>> {
@@ -425,6 +477,9 @@ impl Store {
             if workspace_filter.is_some_and(|filter| workspace_id != filter) {
                 continue;
             }
+            if identity_filter.exclude_session_id == Some(session_id.as_str()) {
+                continue;
+            }
             if !identity_filter_matches(
                 identity_filter,
                 repo_id.as_deref(),
@@ -476,38 +531,53 @@ impl Store {
         relative_path: &str,
         lease_is_directory: bool,
     ) -> StoreResult<Option<String>> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT scopes_json, purpose
-                 FROM intents
-                 WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'
-                 ORDER BY declared_at DESC
-                 LIMIT 1",
-                params![session_id, workspace_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        let Some((scopes_json, purpose)) = row else {
-            return Ok(None);
-        };
-        let scopes: Vec<IntentScope> = serde_json::from_str(&scopes_json).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-        })?;
+        for (scopes, purpose) in self.active_intent_scope_rows(session_id, workspace_id)? {
+            let covers_lease = scopes.iter().any(|scope| {
+                if lease_is_directory {
+                    scope.allows_write_directory(relative_path)
+                } else {
+                    scope.allows_write(relative_path)
+                }
+            });
 
-        let covers_lease = scopes.iter().any(|scope| {
-            if lease_is_directory {
-                scope.allows_write_directory(relative_path)
-            } else {
-                scope.allows_write(relative_path)
+            if covers_lease {
+                return Ok(Some(purpose));
             }
-        });
-
-        if covers_lease {
-            Ok(Some(purpose))
-        } else {
-            Ok(None)
         }
+
+        Ok(None)
+    }
+
+    fn active_intent_scope_rows(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+    ) -> StoreResult<Vec<(Vec<IntentScope>, String)>> {
+        let mut statement = self.conn.prepare(
+            "SELECT scopes_json, purpose
+             FROM intents
+             WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'
+             ORDER BY declared_at DESC, rowid DESC",
+        )?;
+        let rows = statement
+            .query_map(params![session_id, workspace_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut parsed_rows = Vec::with_capacity(rows.len());
+        for (scopes_json, purpose) in rows {
+            let scopes: Vec<IntentScope> = serde_json::from_str(&scopes_json).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
+            parsed_rows.push((scopes, purpose));
+        }
+
+        Ok(parsed_rows)
     }
 
     fn live_lease_items(
@@ -537,6 +607,12 @@ impl Store {
 
         for (session_id, workspace_id, relative_path, action, purpose, expires_at) in rows {
             if workspace_filter.is_some_and(|filter| workspace_id != filter) {
+                continue;
+            }
+            if identity_filter
+                .exclude_session_id
+                .is_some_and(|excluded| session_id.as_deref() == Some(excluded))
+            {
                 continue;
             }
             if !identity_filter.is_empty() {
@@ -653,6 +729,12 @@ impl Store {
             if workspace_filter.is_some_and(|filter| workspace_id != filter) {
                 continue;
             }
+            if identity_filter
+                .exclude_session_id
+                .is_some_and(|excluded| session_id == excluded)
+            {
+                continue;
+            }
             if !identity_filter_matches(
                 identity_filter,
                 repo_id.as_deref(),
@@ -760,12 +842,21 @@ impl Store {
                 worktree_id,
                 root,
                 branch,
+                payload_json,
                 created_at
              FROM events
-             ORDER BY rowid ASC
+             ORDER BY rowid DESC
              LIMIT ?1",
         )?;
         let rows = statement.query_map([limit], |row| {
+            let payload_json: String = row.get(8)?;
+            let payload = serde_json::from_str(&payload_json).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    8,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
             Ok(EventRecord {
                 event_id: row.get(0)?,
                 event_type: row.get(1)?,
@@ -775,7 +866,8 @@ impl Store {
                 worktree_id: row.get(5)?,
                 root: row.get(6)?,
                 branch: row.get(7)?,
-                created_at: row.get(8)?,
+                payload,
+                created_at: row.get(9)?,
             })
         })?;
 
@@ -784,22 +876,68 @@ impl Store {
     }
 
     pub fn append_outbox(&self, entry: OutboxEntry) -> StoreResult<()> {
+        let payload = serde_json::to_string(&entry.payload)
+            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
         self.conn.execute(
             "INSERT OR IGNORE INTO outbox (
                 outbox_id,
                 session_id,
+                workspace_id,
                 sequence,
+                event_type,
+                payload_json,
                 sync_status
-            ) VALUES (?1, ?2, ?3, ?4)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 entry.outbox_id,
                 entry.session_id,
+                entry.workspace_id,
                 entry.sequence,
+                entry.event_type,
+                payload,
                 entry.sync_status.as_str(),
             ],
         )?;
 
         Ok(())
+    }
+
+    pub fn outbox_entry(&self, outbox_id: impl AsRef<str>) -> StoreResult<Option<OutboxRecord>> {
+        self.conn
+            .query_row(
+                "SELECT
+                    outbox_id,
+                    session_id,
+                    workspace_id,
+                    sequence,
+                    event_type,
+                    payload_json,
+                    sync_status
+                 FROM outbox
+                 WHERE outbox_id = ?1",
+                [outbox_id.as_ref()],
+                |row| {
+                    let payload_json: String = row.get(5)?;
+                    let payload = serde_json::from_str(&payload_json).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            rusqlite::types::Type::Text,
+                            Box::new(err),
+                        )
+                    })?;
+                    Ok(OutboxRecord {
+                        outbox_id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        workspace_id: row.get(2)?,
+                        sequence: row.get(3)?,
+                        event_type: row.get(4)?,
+                        payload,
+                        sync_status: SyncStatus::from_str(row.get::<_, String>(6)?.as_str()),
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
 
     pub fn outbox_count(&self) -> StoreResult<u64> {
@@ -841,8 +979,116 @@ impl Store {
         workspace_id: impl AsRef<str>,
         relative_path: impl AsRef<str>,
     ) -> StoreResult<()> {
+        self.acquire_lease_with_observation(session_id, workspace_id, relative_path, None)
+    }
+
+    pub fn acquire_lease_with_observation(
+        &self,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        observation: Option<LeaseObservation>,
+    ) -> StoreResult<()> {
+        let session_id = session_id.as_ref().to_string();
+        let workspace_id = workspace_id.as_ref().to_string();
+        let relative_path = relative_path.as_ref().to_string();
+        if !self.conn.is_autocommit() {
+            return self.acquire_lease_with_observation_inner(
+                &session_id,
+                &workspace_id,
+                &relative_path,
+                observation,
+            );
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<()> {
+            self.acquire_lease_with_observation_inner(
+                &session_id,
+                &workspace_id,
+                &relative_path,
+                observation,
+            )?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
+    pub fn acquire_lease_with_observation_and_event(
+        &self,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        observation: Option<LeaseObservation>,
+    ) -> StoreResult<()> {
+        let session_id = session_id.as_ref().to_string();
+        let workspace_id = workspace_id.as_ref().to_string();
+        let relative_path = relative_path.as_ref().to_string();
+        if !self.conn.is_autocommit() {
+            return self.acquire_lease_with_observation_and_event_inner(
+                &session_id,
+                &workspace_id,
+                &relative_path,
+                observation,
+            );
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<()> {
+            self.acquire_lease_with_observation_and_event_inner(
+                &session_id,
+                &workspace_id,
+                &relative_path,
+                observation,
+            )?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
+    fn acquire_lease_with_observation_and_event_inner(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        relative_path: &str,
+        observation: Option<LeaseObservation>,
+    ) -> StoreResult<()> {
+        self.acquire_lease_with_observation_inner(
+            session_id,
+            workspace_id,
+            relative_path,
+            observation,
+        )?;
+        self.append_inner(&Event::lease_acquired(
+            session_id.to_string(),
+            workspace_id.to_string(),
+            relative_path.to_string(),
+        ))
+    }
+
+    fn acquire_lease_with_observation_inner(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        relative_path: &str,
+        observation: Option<LeaseObservation>,
+    ) -> StoreResult<()> {
         self.expire_stale()?;
-        let requested_relative_path = relative_path.as_ref();
+        let requested_relative_path = relative_path;
         let lease_is_directory = requested_relative_path.ends_with("/");
         let lease_action = if lease_is_directory {
             "write_directory"
@@ -850,11 +1096,9 @@ impl Store {
             "write_file"
         };
         let relative_path = normalize_relative_path(requested_relative_path);
-        let session_id = session_id.as_ref().to_string();
-        let workspace_id = workspace_id.as_ref().to_string();
         let Some(purpose) = self.active_intent_purpose_for_lease(
-            &session_id,
-            &workspace_id,
+            session_id,
+            workspace_id,
             &relative_path,
             lease_is_directory,
         )?
@@ -863,8 +1107,8 @@ impl Store {
         };
         let purpose = required_purpose(&purpose)?;
         if self.active_lease_conflicts_for_acquire(
-            &session_id,
-            &workspace_id,
+            session_id,
+            workspace_id,
             &relative_path,
             lease_action,
             lease_is_directory,
@@ -872,7 +1116,11 @@ impl Store {
             return Err(StoreError::LeaseConflict);
         }
         let now = now_timestamp();
-        let expires_at = timestamp_after(&now, LEASE_TTL_SECONDS);
+        let expires_at = timestamp_after(&now, LEASE_TTL_SECONDS)?;
+        let observed_exists = observation.as_ref().map(|observation| observation.exists);
+        let observed_content_hash = observation
+            .as_ref()
+            .and_then(|observation| observation.content_hash.as_deref());
         self.conn.execute(
             "INSERT INTO leases (
                 lease_id,
@@ -884,8 +1132,10 @@ impl Store {
                 purpose,
                 action,
                 status,
-                expires_at
-            ) VALUES (?1, ?2, ?3, NULL, ?4, NULL, ?5, ?6, 'active', ?7)",
+                expires_at,
+                observed_exists,
+                observed_content_hash
+            ) VALUES (?1, ?2, ?3, NULL, ?4, NULL, ?5, ?6, 'active', ?7, ?8, ?9)",
             params![
                 Uuid::new_v4().to_string(),
                 session_id,
@@ -894,6 +1144,8 @@ impl Store {
                 purpose,
                 lease_action,
                 expires_at,
+                observed_exists,
+                observed_content_hash,
             ],
         )?;
 
@@ -991,38 +1243,55 @@ impl Store {
         };
         let relative_path = normalize_relative_path(requested_relative_path);
         let workspace_id = workspace_id.as_ref().to_string();
-        let released = self.conn.execute(
-            "UPDATE leases
-             SET status = 'released'
-             WHERE session_id = ?1 AND workspace_id = ?2 AND relative_path = ?3 AND action = ?4 AND status = 'active'",
-            params![session_id.as_ref(), workspace_id, relative_path, lease_action],
-        )?;
-        if released == 0 {
-            let owner_exists = self.conn.query_row(
-                "SELECT EXISTS(
-                        SELECT 1 FROM leases
-                        WHERE session_id != ?1
-                          AND workspace_id = ?2
-                          AND relative_path = ?3
-                          AND action = ?4
-                          AND status = 'active'
-                    )",
-                params![
-                    session_id.as_ref(),
-                    workspace_id,
-                    relative_path,
-                    lease_action
-                ],
-                |row| row.get::<_, bool>(0),
-            )?;
-            if owner_exists {
-                return Err(StoreError::LeaseOwnerMismatch);
-            }
-            return Err(StoreError::LeaseNotFound);
-        }
-        self.promote_waiters_after_lease_release(&workspace_id, &relative_path)?;
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
 
-        Ok(())
+        let result = (|| -> StoreResult<()> {
+            let released = self.conn.execute(
+                "UPDATE leases
+                 SET status = 'released'
+                 WHERE session_id = ?1 AND workspace_id = ?2 AND relative_path = ?3 AND action = ?4 AND status = 'active'",
+                params![session_id.as_ref(), workspace_id, relative_path, lease_action],
+            )?;
+            if released == 0 {
+                let owner_exists = self.conn.query_row(
+                    "SELECT EXISTS(
+                            SELECT 1 FROM leases
+                            WHERE session_id != ?1
+                              AND workspace_id = ?2
+                              AND relative_path = ?3
+                              AND action = ?4
+                              AND status = 'active'
+                        )",
+                    params![
+                        session_id.as_ref(),
+                        workspace_id,
+                        relative_path,
+                        lease_action
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                if owner_exists {
+                    return Err(StoreError::LeaseOwnerMismatch);
+                }
+                return Err(StoreError::LeaseNotFound);
+            }
+            self.promote_waiters_after_lease_release(&workspace_id, &relative_path)?;
+            self.append_inner(&Event::lease_released(
+                session_id.as_ref().to_string(),
+                workspace_id.clone(),
+                relative_path.clone(),
+                lease_action,
+            ))?;
+            self.conn.execute_batch("COMMIT")?;
+
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
     }
 
     pub fn release_session_leases(
@@ -1030,30 +1299,143 @@ impl Store {
         session_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<u64> {
+        let session_id = session_id.as_ref().to_string();
+        let workspace_id = workspace_id.as_ref().to_string();
+        if !self.conn.is_autocommit() {
+            return self.release_session_leases_inner(&session_id, &workspace_id);
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<u64> {
+            let released = self.release_session_leases_inner(&session_id, &workspace_id)?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(released)
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
+    fn release_session_leases_inner(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+    ) -> StoreResult<u64> {
         self.expire_stale()?;
-        let mut statement = self.conn.prepare(
-            "SELECT relative_path FROM leases
-             WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'",
-        )?;
-        let paths = statement
-            .query_map(params![session_id.as_ref(), workspace_id.as_ref()], |row| {
+        let paths = {
+            let mut statement = self.conn.prepare(
+                "SELECT relative_path FROM leases
+                 WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'",
+            )?;
+            let paths = statement.query_map(params![session_id, workspace_id], |row| {
                 row.get::<_, String>(0)
             })?;
-        let paths = paths.collect::<Result<Vec<_>, _>>()?;
+            paths.collect::<Result<Vec<_>, _>>()?
+        };
         let released = paths.len() as u64;
 
         self.conn.execute(
             "UPDATE leases
              SET status = 'released'
              WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'",
-            params![session_id.as_ref(), workspace_id.as_ref()],
+            params![session_id, workspace_id],
         )?;
 
         for path in paths {
-            self.promote_waiters_after_lease_release(workspace_id.as_ref(), &path)?;
+            self.promote_waiters_after_lease_release(workspace_id, &path)?;
         }
 
         Ok(released)
+    }
+
+    pub fn refresh_exact_file_lease_observation(
+        &self,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        observation: LeaseObservation,
+    ) -> StoreResult<()> {
+        self.expire_stale()?;
+        let session_id = session_id.as_ref().to_string();
+        let workspace_id = workspace_id.as_ref().to_string();
+        let relative_path = normalize_relative_path(relative_path.as_ref());
+        if !self.conn.is_autocommit() {
+            return self.refresh_exact_file_lease_observation_inner(
+                &session_id,
+                &workspace_id,
+                &relative_path,
+                &observation,
+            );
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<()> {
+            self.refresh_exact_file_lease_observation_inner(
+                &session_id,
+                &workspace_id,
+                &relative_path,
+                &observation,
+            )?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
+    fn refresh_exact_file_lease_observation_inner(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        relative_path: &str,
+        observation: &LeaseObservation,
+    ) -> StoreResult<()> {
+        let updated = self.conn.execute(
+            "UPDATE leases
+             SET observed_exists = ?1, observed_content_hash = ?2
+             WHERE session_id = ?3
+               AND workspace_id = ?4
+               AND relative_path = ?5
+               AND action = 'write_file'
+               AND status = 'active'",
+            params![
+                observation.exists,
+                observation.content_hash.as_deref(),
+                session_id,
+                workspace_id,
+                relative_path,
+            ],
+        )?;
+        if updated > 0 {
+            return Ok(());
+        }
+
+        let owner_exists = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM leases
+                WHERE session_id != ?1
+                  AND workspace_id = ?2
+                  AND relative_path = ?3
+                  AND action = 'write_file'
+                  AND status = 'active'
+            )",
+            params![session_id, workspace_id, relative_path],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if owner_exists {
+            return Err(StoreError::LeaseOwnerMismatch);
+        }
+
+        Err(StoreError::LeaseNotFound)
     }
 
     pub fn complete_session_intents(
@@ -1061,12 +1443,20 @@ impl Store {
         session_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<u64> {
+        self.complete_session_intents_inner(session_id.as_ref(), workspace_id.as_ref())
+    }
+
+    fn complete_session_intents_inner(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+    ) -> StoreResult<u64> {
         self.expire_stale()?;
         let completed = self.conn.execute(
             "UPDATE intents
              SET status = 'completed'
              WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'",
-            params![session_id.as_ref(), workspace_id.as_ref()],
+            params![session_id, workspace_id],
         )?;
         Ok(completed as u64)
     }
@@ -1241,6 +1631,40 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    pub fn active_exact_file_lease_observation_by_session(
+        &self,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<Option<LeaseObservation>> {
+        self.expire_stale()?;
+        let relative_path = normalize_relative_path(relative_path.as_ref());
+        self.conn
+            .query_row(
+                "SELECT observed_exists, observed_content_hash
+                 FROM leases
+                 WHERE workspace_id = ?1
+                    AND session_id = ?2
+                    AND status = 'active'
+                    AND action = 'write_file'
+                    AND relative_path = ?3
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                params![workspace_id.as_ref(), session_id.as_ref(), relative_path],
+                |row| {
+                    let observed_exists = row.get::<_, Option<bool>>(0)?;
+                    let observed_content_hash = row.get::<_, Option<String>>(1)?;
+                    Ok(observed_exists.map(|exists| LeaseObservation {
+                        exists,
+                        content_hash: observed_content_hash,
+                    }))
+                },
+            )
+            .optional()
+            .map(|row| row.flatten())
+            .map_err(StoreError::from)
+    }
+
     pub fn enqueue_waiter(
         &self,
         session_id: impl AsRef<str>,
@@ -1356,6 +1780,16 @@ impl Store {
         let purpose = required_purpose(input.purpose)?;
         if let Some(waiter) = self.waiter_by_request_id(input.request_id)? {
             self.update_waiter_identity_if_missing(&waiter.wait_id, identity)?;
+            if waiter.status == "expired" {
+                self.conn.execute(
+                    "UPDATE wait_queue
+                     SET status = 'queued',
+                         reservation_expires_at = NULL,
+                         blocking_session_id = ?1
+                     WHERE wait_id = ?2 AND status = 'expired'",
+                    params![input.blocking_session_id, waiter.wait_id],
+                )?;
+            }
             let waiter = self
                 .waiter(&waiter.wait_id)?
                 .expect("existing waiter should load");
@@ -1445,12 +1879,52 @@ impl Store {
         session_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<WaitRecord> {
+        let request_id = request_id.as_ref().to_string();
+        let session_id = session_id.as_ref().to_string();
+        let workspace_id = workspace_id.as_ref().to_string();
+        if !self.conn.is_autocommit() {
+            return self.cancel_intent_request_inner(&request_id, &session_id, &workspace_id);
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<WaitRecord> {
+            let canceled =
+                self.cancel_intent_request_inner(&request_id, &session_id, &workspace_id)?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(canceled)
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
+    fn cancel_intent_request_inner(
+        &self,
+        request_id: &str,
+        session_id: &str,
+        workspace_id: &str,
+    ) -> StoreResult<WaitRecord> {
         self.expire_stale()?;
-        let waiter = self
-            .waiter_by_request_id(request_id.as_ref())?
+        let wait_id = self
+            .conn
+            .query_row(
+                "SELECT wait_id FROM wait_queue
+                 WHERE request_id = ?1
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                params![request_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
             .ok_or(StoreError::IntentRequestNotFound)?;
-        if waiter.session_id != session_id.as_ref() || waiter.workspace_id != workspace_id.as_ref()
-        {
+        let waiter = self
+            .waiter(&wait_id)?
+            .ok_or(StoreError::IntentRequestNotFound)?;
+        if waiter.session_id != session_id || waiter.workspace_id != workspace_id {
             return Err(StoreError::IntentRequestOwnerMismatch);
         }
         if waiter.status == "canceled" {
@@ -1464,7 +1938,7 @@ impl Store {
             "UPDATE wait_queue
              SET status = 'canceled', reservation_expires_at = NULL
              WHERE wait_id = ?1 AND status IN ('queued', 'reserved')",
-            params![waiter.wait_id],
+            params![&waiter.wait_id],
         )?;
 
         self.promote_next_waiter_after_path_release(&waiter.workspace_id, &waiter.relative_path)?;
@@ -1472,6 +1946,47 @@ impl Store {
         let mut canceled = waiter;
         canceled.status = "canceled".to_string();
         canceled.reservation_expires_at = None;
+        Ok(canceled)
+    }
+
+    fn cancel_session_waiters_inner(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+    ) -> StoreResult<u64> {
+        self.expire_stale()?;
+        let waiters = {
+            let mut statement = self.conn.prepare(
+                "SELECT workspace_id, relative_path
+                 FROM wait_queue
+                 WHERE session_id = ?1
+                    AND workspace_id = ?2
+                    AND status IN ('queued', 'reserved')
+                 ORDER BY rowid ASC",
+            )?;
+            let waiters = statement.query_map(params![session_id, workspace_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            waiters.collect::<Result<Vec<_>, _>>()?
+        };
+        let canceled = waiters.len() as u64;
+        if canceled == 0 {
+            return Ok(0);
+        }
+
+        self.conn.execute(
+            "UPDATE wait_queue
+             SET status = 'canceled', reservation_expires_at = NULL
+             WHERE session_id = ?1
+                AND workspace_id = ?2
+                AND status IN ('queued', 'reserved')",
+            params![session_id, workspace_id],
+        )?;
+
+        for (workspace_id, relative_path) in waiters {
+            self.promote_next_waiter_after_path_release(&workspace_id, &relative_path)?;
+        }
+
         Ok(canceled)
     }
 
@@ -1503,6 +2018,30 @@ impl Store {
     ) -> StoreResult<Option<WaitRecord>> {
         let workspace_id = workspace_id.as_ref().to_string();
         let relative_path = normalize_relative_path(relative_path.as_ref());
+        if !self.conn.is_autocommit() {
+            return self.promote_next_waiter_exact(&workspace_id, &relative_path);
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<Option<WaitRecord>> {
+            let promoted = self.promote_next_waiter_exact(&workspace_id, &relative_path)?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(promoted)
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
+    fn promote_next_waiter_exact(
+        &self,
+        workspace_id: &str,
+        relative_path: &str,
+    ) -> StoreResult<Option<WaitRecord>> {
         let active_reservation = self
             .conn
             .query_row(
@@ -1542,8 +2081,29 @@ impl Store {
         workspace_id: impl AsRef<str>,
         relative_path: impl AsRef<str>,
     ) -> StoreResult<Option<WaitRecord>> {
-        self.expire_stale()?;
-        self.promote_next_waiter_after_path_release(workspace_id.as_ref(), relative_path.as_ref())
+        let workspace_id = workspace_id.as_ref().to_string();
+        let relative_path = relative_path.as_ref().to_string();
+        let now = now_timestamp();
+        if !self.conn.is_autocommit() {
+            self.expire_stale_at_inner(&now)?;
+            return self.promote_next_waiter_after_path_release(&workspace_id, &relative_path);
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<Option<WaitRecord>> {
+            self.expire_stale_at_inner(&now)?;
+            let promoted =
+                self.promote_next_waiter_after_path_release(&workspace_id, &relative_path)?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(promoted)
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
     }
 
     pub fn active_reservation(
@@ -1757,6 +2317,100 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    pub fn active_waiter_for_directory_by_session(
+        &self,
+        workspace_id: impl AsRef<str>,
+        directory_path: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<Option<WaitRecord>> {
+        self.expire_stale()?;
+        let directory_path = normalize_relative_path(directory_path.as_ref());
+        let directory_prefix = format!("{directory_path}/");
+        self.conn
+            .query_row(
+                "SELECT
+                    wait_id,
+                    session_id,
+                    workspace_id,
+                    repo_id,
+                    worktree_id,
+                    root,
+                    branch,
+                    relative_path,
+                    action,
+                    status,
+                    requested_at,
+                    reservation_expires_at,
+                    blocking_session_id,
+                    purpose
+                 FROM wait_queue
+                 WHERE workspace_id = ?1
+                    AND session_id = ?2
+                    AND status IN ('queued', 'reserved')
+                    AND (
+                        (action = 'write_directory' AND relative_path = ?3)
+                        OR substr(relative_path, 1, ?4) = ?5
+                        OR (action = 'write_directory'
+                           AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
+                    )
+                 ORDER BY rowid ASC
+                 LIMIT 1",
+                params![
+                    workspace_id.as_ref(),
+                    session_id.as_ref(),
+                    directory_path,
+                    directory_prefix.len() as i64,
+                    directory_prefix,
+                ],
+                wait_record_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn active_waiter_for_path_by_session(
+        &self,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+    ) -> StoreResult<Option<WaitRecord>> {
+        self.expire_stale()?;
+        let relative_path = normalize_relative_path(relative_path.as_ref());
+        self.conn
+            .query_row(
+                "SELECT
+                    wait_id,
+                    session_id,
+                    workspace_id,
+                    repo_id,
+                    worktree_id,
+                    root,
+                    branch,
+                    relative_path,
+                    action,
+                    status,
+                    requested_at,
+                    reservation_expires_at,
+                    blocking_session_id,
+                    purpose
+                 FROM wait_queue
+                 WHERE workspace_id = ?1
+                    AND session_id = ?2
+                    AND status IN ('queued', 'reserved')
+                    AND (
+                        (action = 'write_file' AND relative_path = ?3)
+                        OR (action = 'write_directory'
+                           AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
+                    )
+                 ORDER BY rowid ASC
+                 LIMIT 1",
+                params![workspace_id.as_ref(), session_id.as_ref(), relative_path],
+                wait_record_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
     pub fn active_reservation_owner(
         &self,
         workspace_id: impl AsRef<str>,
@@ -1827,6 +2481,92 @@ impl Store {
         Ok(())
     }
 
+    pub fn claim_reservation_with_intent_and_lease(
+        &self,
+        wait_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        event: Event,
+        lease_path: impl AsRef<str>,
+        lease_observation: Option<LeaseObservation>,
+    ) -> StoreResult<WaitRecord> {
+        let wait_id = wait_id.as_ref().to_string();
+        let session_id = session_id.as_ref().to_string();
+        let workspace_id = workspace_id.as_ref().to_string();
+        let lease_path = lease_path.as_ref().to_string();
+        if !self.conn.is_autocommit() {
+            return self.claim_reservation_with_intent_and_lease_inner(
+                &wait_id,
+                &session_id,
+                &workspace_id,
+                &event,
+                &lease_path,
+                lease_observation.clone(),
+            );
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<WaitRecord> {
+            let claimed = self.claim_reservation_with_intent_and_lease_inner(
+                &wait_id,
+                &session_id,
+                &workspace_id,
+                &event,
+                &lease_path,
+                lease_observation.clone(),
+            )?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(claimed)
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
+    fn claim_reservation_with_intent_and_lease_inner(
+        &self,
+        wait_id: &str,
+        session_id: &str,
+        workspace_id: &str,
+        event: &Event,
+        lease_path: &str,
+        lease_observation: Option<LeaseObservation>,
+    ) -> StoreResult<WaitRecord> {
+        self.expire_stale()?;
+        let reservation = self
+            .waiter(wait_id)?
+            .ok_or(StoreError::ReservationOwnerMismatch)?;
+        if reservation.session_id != session_id
+            || reservation.workspace_id != workspace_id
+            || reservation.status != "reserved"
+        {
+            return Err(StoreError::ReservationOwnerMismatch);
+        }
+
+        self.conn.execute(
+            "UPDATE wait_queue
+             SET status = 'claimed'
+             WHERE wait_id = ?1 AND status = 'reserved'",
+            params![wait_id],
+        )?;
+
+        self.append_inner(event)?;
+        self.acquire_lease_with_observation_and_event(
+            session_id,
+            workspace_id,
+            lease_path,
+            lease_observation,
+        )?;
+
+        let mut claimed = reservation;
+        claimed.status = "claimed".to_string();
+        Ok(claimed)
+    }
+
     pub fn expire_reservation(&self, wait_id: impl AsRef<str>) -> StoreResult<()> {
         self.conn.execute(
             "UPDATE wait_queue
@@ -1854,24 +2594,46 @@ impl Store {
         target_session_id: impl AsRef<str>,
     ) -> StoreResult<Vec<NotificationRecord>> {
         self.expire_stale()?;
-        let mut statement = self.conn.prepare(
-            "SELECT
-                notification_id,
-                target_session_id,
-                workspace_id,
-                kind,
-                payload_json,
-                status,
-                created_at,
-                expires_at
-             FROM notifications
-             WHERE target_session_id = ?1 AND status = 'pending'
-             ORDER BY rowid ASC",
-        )?;
-        let rows = statement.query_map([target_session_id.as_ref()], notification_from_row)?;
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> StoreResult<Vec<NotificationRecord>> {
+            let mut statement = self.conn.prepare(
+                "SELECT
+                    notification_id,
+                    target_session_id,
+                    workspace_id,
+                    kind,
+                    payload_json,
+                    status,
+                    created_at,
+                    expires_at
+                 FROM notifications
+                 WHERE target_session_id = ?1 AND status = 'pending'
+                 ORDER BY rowid ASC",
+            )?;
+            let rows = statement.query_map([target_session_id.as_ref()], notification_from_row)?;
+            let notifications = rows
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(StoreError::from)?;
+            drop(statement);
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+            for notification in &notifications {
+                self.conn.execute(
+                    "UPDATE notifications
+                     SET status = 'delivered'
+                     WHERE notification_id = ?1 AND status = 'pending'",
+                    params![&notification.notification_id],
+                )?;
+            }
+
+            self.conn.execute_batch("COMMIT")?;
+            Ok(notifications)
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
     }
 
     fn append_notification(
@@ -1882,6 +2644,7 @@ impl Store {
         payload: serde_json::Value,
     ) -> StoreResult<()> {
         let now = now_timestamp();
+        let expires_at = timestamp_after(&now, RESERVATION_TTL_SECONDS)?;
         self.conn.execute(
             "INSERT INTO notifications (
                 notification_id,
@@ -1900,7 +2663,7 @@ impl Store {
                 kind,
                 payload.to_string(),
                 now,
-                timestamp_after(&now, RESERVATION_TTL_SECONDS),
+                expires_at,
             ],
         )?;
 
@@ -1912,7 +2675,12 @@ impl Store {
         session_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<()> {
+        self.append_activity_inner(session_id.as_ref(), workspace_id.as_ref())
+    }
+
+    fn append_activity_inner(&self, session_id: &str, workspace_id: &str) -> StoreResult<()> {
         let now = now_timestamp();
+        let expires_at = timestamp_after(&now, ACTIVITY_TTL_SECONDS)?;
         self.conn.execute(
             "INSERT INTO activities (
                 activity_id,
@@ -1922,13 +2690,57 @@ impl Store {
             ) VALUES (?1, ?2, ?3, ?4)",
             params![
                 Uuid::new_v4().to_string(),
-                session_id.as_ref(),
-                workspace_id.as_ref(),
-                timestamp_after(&now, ACTIVITY_TTL_SECONDS),
+                session_id,
+                workspace_id,
+                expires_at,
             ],
         )?;
 
         Ok(())
+    }
+
+    pub fn finalize_session_activity(
+        &self,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+    ) -> StoreResult<(u64, u64)> {
+        let session_id = session_id.as_ref().to_string();
+        let workspace_id = workspace_id.as_ref().to_string();
+        if !self.conn.is_autocommit() {
+            return self.finalize_session_activity_inner(&session_id, &workspace_id);
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<(u64, u64)> {
+            let finalized = self.finalize_session_activity_inner(&session_id, &workspace_id)?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(finalized)
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
+    fn finalize_session_activity_inner(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+    ) -> StoreResult<(u64, u64)> {
+        self.append_activity_inner(session_id, workspace_id)?;
+        self.cancel_session_waiters_inner(session_id, workspace_id)?;
+        let released = self.release_session_leases_inner(session_id, workspace_id)?;
+        let completed = self.complete_session_intents_inner(session_id, workspace_id)?;
+        self.append_inner(&Event::activity_finalized(
+            session_id.to_string(),
+            workspace_id.to_string(),
+            released,
+            completed,
+        ))?;
+        Ok((released, completed))
     }
 
     pub fn activity_count(&self) -> StoreResult<u64> {
@@ -1966,24 +2778,13 @@ impl Store {
     ) -> StoreResult<PolicyState> {
         self.expire_stale()?;
         let scopes = self
-            .conn
-            .query_row(
-                "SELECT scopes_json FROM intents
-                 WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'
-                 ORDER BY declared_at DESC
-                 LIMIT 1",
-                params![session_id, workspace_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-
-        let Some(scopes_json) = scopes else {
+            .active_intent_scope_rows(session_id, workspace_id)?
+            .into_iter()
+            .flat_map(|(scopes, _purpose)| scopes)
+            .collect::<Vec<_>>();
+        if scopes.is_empty() {
             return Ok(PolicyState::default());
-        };
-
-        let scopes: Vec<IntentScope> = serde_json::from_str(&scopes_json).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-        })?;
+        }
 
         Ok(PolicyState::default().with_active_intent_scopes(scopes))
     }
@@ -1996,35 +2797,72 @@ impl Store {
     ) -> StoreResult<bool> {
         self.expire_stale()?;
         let relative_path = normalize_relative_path(relative_path.as_ref());
-        let scopes = self
-            .conn
-            .query_row(
-                "SELECT scopes_json FROM intents
-                 WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'
-                 ORDER BY declared_at DESC
-                 LIMIT 1",
-                params![session_id.as_ref(), workspace_id.as_ref()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
 
-        let Some(scopes_json) = scopes else {
-            return Ok(false);
-        };
-        let scopes: Vec<IntentScope> = serde_json::from_str(&scopes_json).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-        })?;
+        for (scopes, _purpose) in
+            self.active_intent_scope_rows(session_id.as_ref(), workspace_id.as_ref())?
+        {
+            if scopes
+                .iter()
+                .any(|scope| matches!(scope, IntentScope::File(path) if path == &relative_path))
+            {
+                return Ok(true);
+            }
+        }
 
-        Ok(scopes
-            .iter()
-            .any(|scope| matches!(scope, IntentScope::File(path) if path == &relative_path)))
+        Ok(false)
     }
 
     pub fn expire_stale(&self) -> StoreResult<()> {
         self.expire_stale_at(&now_timestamp())
     }
 
+    pub fn prune_retention(&self) -> StoreResult<()> {
+        let cutoff =
+            format_timestamp(OffsetDateTime::now_utc() - Duration::days(EVENT_RETENTION_DAYS));
+        self.prune_retention_before(&cutoff)
+    }
+
+    pub fn prune_retention_before(&self, cutoff: &str) -> StoreResult<()> {
+        if !self.conn.is_autocommit() {
+            return self.prune_retention_before_inner(cutoff);
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<()> {
+            self.prune_retention_before_inner(cutoff)?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
     pub fn expire_stale_at(&self, now: &str) -> StoreResult<()> {
+        if !self.conn.is_autocommit() {
+            return self.expire_stale_at_inner(now);
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<()> {
+            self.expire_stale_at_inner(now)?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
+    fn expire_stale_at_inner(&self, now: &str) -> StoreResult<()> {
         self.conn.execute(
             "UPDATE intents
              SET status = 'expired'
@@ -2085,6 +2923,27 @@ impl Store {
             [now],
         )?;
 
+        Ok(())
+    }
+
+    fn prune_retention_before_inner(&self, cutoff: &str) -> StoreResult<()> {
+        self.conn
+            .execute("DELETE FROM events WHERE created_at < ?1", [cutoff])?;
+        self.conn.execute(
+            "DELETE FROM reconciliations WHERE created_at < ?1",
+            [cutoff],
+        )?;
+        self.conn
+            .execute("DELETE FROM conflicts WHERE checked_at < ?1", [cutoff])?;
+        self.conn.execute(
+            "DELETE FROM human_observations WHERE created_at < ?1",
+            [cutoff],
+        )?;
+        self.conn.execute(
+            "DELETE FROM notifications
+             WHERE status IN ('expired', 'delivered') AND created_at < ?1",
+            [cutoff],
+        )?;
         Ok(())
     }
 
@@ -2165,7 +3024,9 @@ impl Store {
                 purpose TEXT,
                 action TEXT NOT NULL DEFAULT 'write_file',
                 status TEXT NOT NULL,
-                expires_at TEXT
+                expires_at TEXT,
+                observed_exists INTEGER,
+                observed_content_hash TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_leases_workspace_path_status
@@ -2249,7 +3110,10 @@ impl Store {
             CREATE TABLE IF NOT EXISTS outbox (
                 outbox_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL DEFAULT '',
                 sequence INTEGER NOT NULL,
+                event_type TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL DEFAULT '{}',
                 sync_status TEXT NOT NULL
             );
 
@@ -2319,6 +3183,31 @@ impl Store {
             "action",
             "ALTER TABLE leases ADD COLUMN action TEXT NOT NULL DEFAULT 'write_file';",
         )?;
+        self.add_column_if_missing(
+            "leases",
+            "observed_exists",
+            "ALTER TABLE leases ADD COLUMN observed_exists INTEGER;",
+        )?;
+        self.add_column_if_missing(
+            "leases",
+            "observed_content_hash",
+            "ALTER TABLE leases ADD COLUMN observed_content_hash TEXT;",
+        )?;
+        self.add_column_if_missing(
+            "outbox",
+            "workspace_id",
+            "ALTER TABLE outbox ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '';",
+        )?;
+        self.add_column_if_missing(
+            "outbox",
+            "event_type",
+            "ALTER TABLE outbox ADD COLUMN event_type TEXT NOT NULL DEFAULT '';",
+        )?;
+        self.add_column_if_missing(
+            "outbox",
+            "payload_json",
+            "ALTER TABLE outbox ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}';",
+        )?;
         self.remove_legacy_rows_without_required_purpose()?;
         self.conn.execute_batch(
             "
@@ -2370,7 +3259,13 @@ impl Store {
         let supported = (table == "events"
             && matches!(column, "repo_id" | "worktree_id" | "root" | "branch"))
             || (table == "intents" && column == "purpose")
-            || (table == "leases" && matches!(column, "purpose" | "action"))
+            || (table == "leases"
+                && matches!(
+                    column,
+                    "purpose" | "action" | "observed_exists" | "observed_content_hash"
+                ))
+            || (table == "outbox"
+                && matches!(column, "workspace_id" | "event_type" | "payload_json"))
             || (table == "wait_queue"
                 && matches!(
                     column,
@@ -2398,18 +3293,53 @@ impl Store {
     ) -> StoreResult<()> {
         self.expire_stale_at(heartbeat_at)?;
 
-        let lease_expires_at = timestamp_after(heartbeat_at, LEASE_TTL_SECONDS);
-        self.conn.execute(
-            "UPDATE leases
-             SET expires_at = ?1
-             WHERE session_id = ?2
-                AND workspace_id = ?3
-                AND status = ?4
-                AND (expires_at IS NULL OR expires_at < ?1)",
-            params![lease_expires_at, session_id, workspace_id, "active"],
-        )?;
+        let lease_expires_at = timestamp_after(heartbeat_at, LEASE_TTL_SECONDS)?;
+        let active_leases = {
+            let mut statement = self.conn.prepare(
+                "SELECT lease_id, relative_path, action
+                 FROM leases
+                 WHERE session_id = ?1
+                    AND workspace_id = ?2
+                    AND status = ?3
+                    AND (expires_at IS NULL OR expires_at < ?4)",
+            )?;
+            statement
+                .query_map(
+                    params![session_id, workspace_id, "active", lease_expires_at],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (lease_id, relative_path, action) in active_leases {
+            let lease_is_directory = action == "write_directory";
+            if self
+                .active_intent_purpose_for_lease(
+                    session_id,
+                    workspace_id,
+                    &relative_path,
+                    lease_is_directory,
+                )?
+                .is_none()
+            {
+                continue;
+            }
+            self.conn.execute(
+                "UPDATE leases
+                 SET expires_at = ?1
+                 WHERE lease_id = ?2
+                    AND status = ?3
+                    AND (expires_at IS NULL OR expires_at < ?1)",
+                params![lease_expires_at, lease_id, "active"],
+            )?;
+        }
 
-        let activity_expires_at = timestamp_after(heartbeat_at, ACTIVITY_TTL_SECONDS);
+        let activity_expires_at = timestamp_after(heartbeat_at, ACTIVITY_TTL_SECONDS)?;
         self.conn.execute(
             "UPDATE activities
              SET expires_at = ?1
@@ -2436,8 +3366,8 @@ impl Store {
         drop(statement);
 
         for (intent_id, declared_at, current_expires_at) in intents {
-            let refreshed = timestamp_after(heartbeat_at, INTENT_TTL_SECONDS);
-            let max_expires_at = timestamp_after(&declared_at, INTENT_MAX_SECONDS);
+            let refreshed = timestamp_after(heartbeat_at, INTENT_TTL_SECONDS)?;
+            let max_expires_at = timestamp_after(&declared_at, INTENT_MAX_SECONDS)?;
             let next_expires_at = if refreshed.as_str() < max_expires_at.as_str() {
                 refreshed
             } else {
@@ -2494,11 +3424,7 @@ impl Store {
                         .as_str()
                         .ok_or(StoreError::MissingPurpose)?,
                 )?;
-                self.conn.execute(
-                    "UPDATE intents SET status = 'superseded'
-                     WHERE session_id = ?1 AND workspace_id = ?2 AND status = 'active'",
-                    params![event.session_id, event.workspace_id],
-                )?;
+                let expires_at = timestamp_after(&event.created_at, INTENT_TTL_SECONDS)?;
                 self.conn.execute(
                     "INSERT INTO intents (
                         intent_id,
@@ -2517,10 +3443,17 @@ impl Store {
                         purpose,
                         scopes_json,
                         event.created_at,
-                        timestamp_after(&event.created_at, INTENT_TTL_SECONDS),
+                        expires_at,
                     ],
                 )?;
             }
+            EventType::LeaseAcquired
+            | EventType::LeaseReleased
+            | EventType::IntentRequested
+            | EventType::IntentClaimed
+            | EventType::IntentCanceled
+            | EventType::ActivityFinalized
+            | EventType::AuthorizationDenied => {}
         }
 
         Ok(())
@@ -2673,11 +3606,12 @@ impl Store {
 
     fn promote_waiter_by_id(&self, wait_id: &str) -> StoreResult<Option<WaitRecord>> {
         let now = now_timestamp();
+        let reservation_expires_at = timestamp_after(&now, RESERVATION_TTL_SECONDS)?;
         self.conn.execute(
             "UPDATE wait_queue
              SET status = 'reserved', reservation_expires_at = ?1
              WHERE wait_id = ?2 AND status = 'queued'",
-            params![timestamp_after(&now, RESERVATION_TTL_SECONDS), wait_id],
+            params![reservation_expires_at, wait_id],
         )?;
 
         let waiter = self.waiter(wait_id)?;
@@ -2697,21 +3631,6 @@ impl Store {
 
         Ok(waiter)
     }
-}
-
-fn normalize_relative_path(path: &str) -> String {
-    path.replace('\\', "/")
-        .split('/')
-        .filter(|segment| !segment.is_empty() && *segment != ".")
-        .fold(Vec::new(), |mut segments, segment| {
-            if segment == ".." {
-                segments.pop();
-            } else {
-                segments.push(segment);
-            }
-            segments
-        })
-        .join("/")
 }
 
 fn required_intent_scopes(scopes: &serde_json::Value) -> StoreResult<Vec<IntentScope>> {
@@ -2798,13 +3717,25 @@ fn identity_filter_matches(
     true
 }
 
+fn configure_file_connection(conn: &Connection) -> StoreResult<()> {
+    configure_connection(conn)?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    Ok(())
+}
+
+fn configure_connection(conn: &Connection) -> StoreResult<()> {
+    conn.busy_timeout(StdDuration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
+    Ok(())
+}
+
 fn now_timestamp() -> String {
     format_timestamp(OffsetDateTime::now_utc())
 }
 
-fn timestamp_after(timestamp: &str, seconds: i64) -> String {
-    let base = parse_timestamp(timestamp).unwrap_or_else(OffsetDateTime::now_utc);
-    format_timestamp(base + Duration::seconds(seconds))
+fn timestamp_after(timestamp: &str, seconds: i64) -> StoreResult<String> {
+    let base = parse_timestamp(timestamp)
+        .ok_or_else(|| StoreError::InvalidTimestamp(timestamp.to_string()))?;
+    Ok(format_timestamp(base + Duration::seconds(seconds)))
 }
 
 fn parse_timestamp(timestamp: &str) -> Option<OffsetDateTime> {
@@ -3029,6 +3960,259 @@ impl Event {
             created_at: now_timestamp(),
         }
     }
+
+    pub fn lease_acquired(
+        session_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Self {
+        let session_id = session_id.into();
+        let workspace_id = workspace_id.into();
+        let path = path.into();
+        let action = if path.ends_with('/') {
+            "write_directory"
+        } else {
+            "write_file"
+        };
+
+        Self {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: EventType::LeaseAcquired,
+            payload: serde_json::json!({
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "path": path,
+                "action": action,
+            }),
+            session_id,
+            workspace_id,
+            repo_id: None,
+            worktree_id: None,
+            root: None,
+            branch: None,
+            created_at: now_timestamp(),
+        }
+    }
+
+    pub fn intent_requested(
+        session_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        request_id: impl Into<String>,
+        action: impl Into<String>,
+        relative_path: impl Into<String>,
+        purpose: impl Into<String>,
+        request_state: impl Into<String>,
+        wait_id: Option<String>,
+        queue_position: Option<u64>,
+        blocking_session_id: Option<String>,
+    ) -> Self {
+        let session_id = session_id.into();
+        let workspace_id = workspace_id.into();
+        let request_id = request_id.into();
+        let action = action.into();
+        let relative_path = relative_path.into();
+        let purpose = purpose.into();
+        let request_state = request_state.into();
+
+        Self {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: EventType::IntentRequested,
+            payload: serde_json::json!({
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "request_id": request_id,
+                "action": action,
+                "relative_path": relative_path,
+                "purpose": purpose,
+                "request_state": request_state,
+                "wait_id": wait_id,
+                "queue_position": queue_position,
+                "blocking_session_id": blocking_session_id,
+            }),
+            session_id,
+            workspace_id,
+            repo_id: None,
+            worktree_id: None,
+            root: None,
+            branch: None,
+            created_at: now_timestamp(),
+        }
+    }
+
+    pub fn lease_released(
+        session_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        path: impl Into<String>,
+        action: impl Into<String>,
+    ) -> Self {
+        let session_id = session_id.into();
+        let workspace_id = workspace_id.into();
+        let path = path.into();
+        let action = action.into();
+
+        Self {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: EventType::LeaseReleased,
+            payload: serde_json::json!({
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "path": path,
+                "action": action,
+            }),
+            session_id,
+            workspace_id,
+            repo_id: None,
+            worktree_id: None,
+            root: None,
+            branch: None,
+            created_at: now_timestamp(),
+        }
+    }
+
+    pub fn intent_claimed(
+        session_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        wait_id: impl Into<String>,
+        action: impl Into<String>,
+        relative_path: impl Into<String>,
+        purpose: impl Into<String>,
+    ) -> Self {
+        let session_id = session_id.into();
+        let workspace_id = workspace_id.into();
+        let wait_id = wait_id.into();
+        let action = action.into();
+        let relative_path = relative_path.into();
+        let purpose = purpose.into();
+
+        Self {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: EventType::IntentClaimed,
+            payload: serde_json::json!({
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "wait_id": wait_id,
+                "action": action,
+                "relative_path": relative_path,
+                "purpose": purpose,
+                "request_state": "claimed",
+            }),
+            session_id,
+            workspace_id,
+            repo_id: None,
+            worktree_id: None,
+            root: None,
+            branch: None,
+            created_at: now_timestamp(),
+        }
+    }
+
+    pub fn intent_canceled(
+        session_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        request_id: impl Into<String>,
+        wait_id: impl Into<String>,
+        action: impl Into<String>,
+        relative_path: impl Into<String>,
+        purpose: impl Into<String>,
+    ) -> Self {
+        let session_id = session_id.into();
+        let workspace_id = workspace_id.into();
+        let request_id = request_id.into();
+        let wait_id = wait_id.into();
+        let action = action.into();
+        let relative_path = relative_path.into();
+        let purpose = purpose.into();
+
+        Self {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: EventType::IntentCanceled,
+            payload: serde_json::json!({
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "request_id": request_id,
+                "wait_id": wait_id,
+                "action": action,
+                "relative_path": relative_path,
+                "purpose": purpose,
+                "request_state": "canceled",
+            }),
+            session_id,
+            workspace_id,
+            repo_id: None,
+            worktree_id: None,
+            root: None,
+            branch: None,
+            created_at: now_timestamp(),
+        }
+    }
+
+    pub fn activity_finalized(
+        session_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        released_leases: u64,
+        completed_intents: u64,
+    ) -> Self {
+        let session_id = session_id.into();
+        let workspace_id = workspace_id.into();
+
+        Self {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: EventType::ActivityFinalized,
+            payload: serde_json::json!({
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "released_leases": released_leases,
+                "completed_intents": completed_intents,
+            }),
+            session_id,
+            workspace_id,
+            repo_id: None,
+            worktree_id: None,
+            root: None,
+            branch: None,
+            created_at: now_timestamp(),
+        }
+    }
+
+    pub fn authorization_denied(
+        session_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        action: impl Into<String>,
+        path: impl Into<String>,
+        old_path: Option<String>,
+        new_path: Option<String>,
+        reason_code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        let session_id = session_id.into();
+        let workspace_id = workspace_id.into();
+        let action = action.into();
+        let path = path.into();
+        let reason_code = reason_code.into();
+        let message = message.into();
+
+        Self {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: EventType::AuthorizationDenied,
+            payload: serde_json::json!({
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "action": action,
+                "path": path,
+                "old_path": old_path,
+                "new_path": new_path,
+                "reason_code": reason_code,
+                "message": message,
+            }),
+            session_id,
+            workspace_id,
+            repo_id: None,
+            worktree_id: None,
+            root: None,
+            branch: None,
+            created_at: now_timestamp(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3036,6 +4220,13 @@ pub enum EventType {
     SessionRegistered,
     SessionHeartbeat,
     IntentDeclared,
+    LeaseAcquired,
+    LeaseReleased,
+    IntentRequested,
+    IntentClaimed,
+    IntentCanceled,
+    ActivityFinalized,
+    AuthorizationDenied,
 }
 
 impl EventType {
@@ -3044,6 +4235,13 @@ impl EventType {
             Self::SessionRegistered => "SessionRegistered",
             Self::SessionHeartbeat => "SessionHeartbeat",
             Self::IntentDeclared => "IntentDeclared",
+            Self::LeaseAcquired => "LeaseAcquired",
+            Self::LeaseReleased => "LeaseReleased",
+            Self::IntentRequested => "IntentRequested",
+            Self::IntentClaimed => "IntentClaimed",
+            Self::IntentCanceled => "IntentCanceled",
+            Self::ActivityFinalized => "ActivityFinalized",
+            Self::AuthorizationDenied => "AuthorizationDenied",
         }
     }
 }
@@ -3088,6 +4286,7 @@ pub struct EventRecord {
     pub worktree_id: Option<String>,
     pub root: Option<String>,
     pub branch: Option<String>,
+    pub payload: serde_json::Value,
     pub created_at: String,
 }
 
@@ -3125,7 +4324,10 @@ pub struct NotificationRecord {
 pub struct OutboxEntry {
     pub outbox_id: String,
     pub session_id: String,
+    pub workspace_id: String,
     pub sequence: u64,
+    pub event_type: String,
+    pub payload: serde_json::Value,
     pub sync_status: SyncStatus,
 }
 
@@ -3134,21 +4336,70 @@ impl OutboxEntry {
         Self {
             outbox_id: outbox_id.into(),
             session_id: session_id.into(),
+            workspace_id: String::new(),
             sequence,
+            event_type: String::new(),
+            payload: serde_json::json!({}),
             sync_status: SyncStatus::Pending,
         }
+    }
+
+    pub fn synced(
+        outbox_id: impl Into<String>,
+        session_id: impl Into<String>,
+        sequence: u64,
+    ) -> Self {
+        Self {
+            sync_status: SyncStatus::Synced,
+            ..Self::new(outbox_id, session_id, sequence)
+        }
+    }
+
+    pub fn with_workspace_id(mut self, workspace_id: impl Into<String>) -> Self {
+        self.workspace_id = workspace_id.into();
+        self
+    }
+
+    pub fn with_event_type(mut self, event_type: impl Into<String>) -> Self {
+        self.event_type = event_type.into();
+        self
+    }
+
+    pub fn with_payload(mut self, payload: serde_json::Value) -> Self {
+        self.payload = payload;
+        self
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncStatus {
     Pending,
+    Synced,
 }
 
 impl SyncStatus {
     fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Synced => "synced",
         }
     }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "synced" => Self::Synced,
+            _ => Self::Pending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxRecord {
+    pub outbox_id: String,
+    pub session_id: String,
+    pub workspace_id: String,
+    pub sequence: u64,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub sync_status: SyncStatus,
 }

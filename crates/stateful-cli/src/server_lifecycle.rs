@@ -8,7 +8,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use crate::runtime::{runtime_base_url_is_localhost, runtime_identity_pid};
 use crate::{
     GlobalPaths, ServerRuntime, get_json, runtime_has_required_identity,
     runtime_identity_matches_pid, write_global_runtime_file,
@@ -116,6 +115,40 @@ fn ensure_current_server_with_options(
     Ok(runtime)
 }
 
+pub(crate) fn register_foreground_runtime(
+    paths: &GlobalPaths,
+    runtime: &ServerRuntime,
+    options: &ServerStartOptions,
+) -> anyhow::Result<()> {
+    register_foreground_runtime_with_health(paths, runtime, options, runtime_is_healthy)
+}
+
+fn register_foreground_runtime_with_health<H>(
+    paths: &GlobalPaths,
+    runtime: &ServerRuntime,
+    options: &ServerStartOptions,
+    health: H,
+) -> anyhow::Result<()>
+where
+    H: Fn(&ServerRuntime) -> bool,
+{
+    let _lock = acquire_start_lock(paths)?;
+    if let Some(existing) = read_runtime_file(paths)?
+        && health(&existing)
+    {
+        ensure_runtime_matches_options(&existing, options)?;
+        anyhow::bail!(
+            "stateful server is already running at {} workspace {} pid {}; stop it with `stateful server stop` before starting a foreground server",
+            existing.base_url,
+            existing.workspace_id,
+            existing.pid
+        );
+    }
+
+    write_global_runtime_file(paths, runtime)?;
+    Ok(())
+}
+
 pub fn runtime_is_healthy(runtime: &ServerRuntime) -> bool {
     runtime_is_basic_healthy(runtime) && runtime_has_required_identity(runtime)
 }
@@ -165,36 +198,12 @@ pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
 pub fn restart_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
     let runtime = read_runtime_file(paths)?
         .ok_or_else(|| anyhow::anyhow!("no stateful server runtime file found to restart"))?;
-    let runtime = runtime_for_local_restart(paths, runtime)?;
+    if runtime.pid == 0 {
+        return Err(remote_runtime_cannot_be_killed(&runtime));
+    }
     let options = server_start_options_from_runtime(&runtime)?;
     stop_server(paths)?;
     ensure_server_with_options(paths, options)
-}
-
-fn runtime_for_local_restart(
-    paths: &GlobalPaths,
-    mut runtime: ServerRuntime,
-) -> anyhow::Result<ServerRuntime> {
-    if runtime.pid != 0 {
-        return Ok(runtime);
-    }
-    if !runtime_base_url_is_localhost(&runtime.base_url) {
-        return Err(remote_runtime_cannot_be_killed(&runtime));
-    }
-    let Some(identity_pid) = runtime_identity_pid(&runtime)? else {
-        return Err(remote_runtime_cannot_be_killed(&runtime));
-    };
-    if identity_pid == 0 {
-        return Err(remote_runtime_cannot_be_killed(&runtime));
-    }
-    match pid_matches_current_exe(identity_pid) {
-        Ok(true) => {}
-        Ok(false) | Err(_) => return Err(remote_runtime_cannot_be_killed(&runtime)),
-    }
-
-    runtime.pid = identity_pid;
-    write_global_runtime_file(paths, &runtime)?;
-    Ok(runtime)
 }
 
 fn remote_runtime_cannot_be_killed(runtime: &ServerRuntime) -> anyhow::Error {
@@ -507,5 +516,77 @@ struct StartLock {
 impl Drop for StartLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreground_registration_respects_existing_start_lock() {
+        let home = temp_home("stateful-foreground-start-lock");
+        let paths = GlobalPaths::new(&home);
+        fs::create_dir_all(&paths.runtime_dir).expect("runtime dir should be creatable");
+        fs::write(&paths.server_lock, "other-process").expect("lock should be writable");
+        let options = ServerStartOptions::default();
+        let runtime = ServerRuntime::new(
+            "http://127.0.0.1:43873",
+            "token",
+            options.workspace_id.clone(),
+            123,
+        );
+
+        let error = register_foreground_runtime_with_health(&paths, &runtime, &options, |_| false)
+            .expect_err("foreground registration should respect the start lock");
+
+        assert!(
+            error.to_string().contains("start lock"),
+            "unexpected error: {error}"
+        );
+        assert!(!paths.server_json.exists());
+        assert_eq!(
+            fs::read_to_string(&paths.server_lock).expect("lock should remain readable"),
+            "other-process"
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn foreground_registration_rejects_conflicting_healthy_runtime() {
+        let home = temp_home("stateful-foreground-runtime-conflict");
+        let paths = GlobalPaths::new(&home);
+        let existing = ServerRuntime::new("http://127.0.0.1:43874", "token", "local", 456);
+        write_global_runtime_file(&paths, &existing).expect("existing runtime should write");
+        let options = ServerStartOptions::default();
+        let runtime = ServerRuntime::new(
+            "http://127.0.0.1:43873",
+            "token",
+            options.workspace_id.clone(),
+            123,
+        );
+
+        let error = register_foreground_runtime_with_health(&paths, &runtime, &options, |_| true)
+            .expect_err("foreground registration should reject a healthy conflicting runtime");
+
+        assert!(
+            error
+                .to_string()
+                .contains("does not match requested server options"),
+            "unexpected error: {error}"
+        );
+        let contents = fs::read_to_string(&paths.server_json).expect("runtime should remain");
+        let preserved: ServerRuntime =
+            serde_json::from_str(&contents).expect("runtime should remain valid JSON");
+        assert_eq!(preserved.base_url, existing.base_url);
+        assert_eq!(preserved.pid, existing.pid);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    fn temp_home(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp home should be creatable");
+        root
     }
 }

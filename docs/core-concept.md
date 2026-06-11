@@ -10,7 +10,8 @@ This creates avoidable coordination failures:
 
 - two agents edit the same file without knowing it
 - one session repeats investigation another session already started
-- an agent overwrites or reverses nearby human work
+- an agent writes a file that changed in the shared checkout after its lease was
+  acquired
 - stale memory is mistaken for current activity
 - an interrupted session leaves no structured handoff state
 
@@ -32,6 +33,29 @@ memory = past evidence and recall
 current state = active, expiring operational truth
 ```
 
+## When Shared State Is The Right Tool
+
+The default way to avoid multi-actor collisions should be isolation: separate
+branches, worktrees, containers, or an orchestrator that partitions work so
+actors do not touch the same checkout. Git merge and review remain the right
+tools for reconciling committed history.
+
+`stateful_core` is useful in the narrower case where isolation removes too much
+shared context:
+
+- the repository's working environment is too heavy to clone per actor, such as
+  warm build artifacts, dev servers, local databases, device state, or
+  credentials already attached to the canonical checkout
+- tightly coupled tasks need to see and build on each other's uncommitted edits
+  before a clean commit or merge point exists
+- the canonical checkout can change outside an agent turn, and supported agent
+  writes need current, expiring coordination signals before they proceed
+
+If none of those conditions hold, use the simpler isolated workflow and let Git,
+the orchestrator, or the platform sandbox carry the coordination burden.
+Shared-state coordination is the residual niche for work that must stay in one
+live workspace and still needs write-time collision checks.
+
 ## Current State
 
 Current state is a scoped, time-bound summary of active work.
@@ -43,11 +67,16 @@ Examples:
 - A session intends to edit `src/auth.ts`.
 - A file has an active advisory lease.
 - A session is testing after a change.
-- A human appears to be editing a nearby file.
+- A file changed after an agent acquired its exact file lease, or a future
+  observer/IDE integration reports nearby human editing activity.
 - A session finalized as `done`, `failed`, or `blocked`.
 
 Current state must be compact enough to render into an agent prompt and precise
 enough to drive conflict checks before important tool calls.
+
+The shipped v1 prototype observes Codex sessions, supported tool effects, MCP
+calls, exact file lease freshness, and explicit reconciliation acknowledgements.
+It does not automatically watch human editor buffers or filesystem saves.
 
 ## Freshness
 
@@ -110,8 +139,8 @@ read-only inspection must use the trusted absolute `stateful` wrapper:
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
 --command <cmd>`. Command-shaped writes must use the wrapper with
 `--fs write-targets` and explicit target flags. Raw Bash test commands are not
-allowlisted; use `stateful sandbox run --fs write-targets --write-dir target
---command <cmd>` after exact `target/` directory intent and a successful
+allowlisted; use `stateful sandbox run --fs build --network enabled --command
+<cmd>` after exact `tmp/` directory intent and a successful
 same-session directory lease.
 
 ## Product Shape

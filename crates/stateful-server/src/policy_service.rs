@@ -1,5 +1,10 @@
-use stateful_core::{AuthorizationInput, Decision, DecisionKind, SourceKind};
-use stateful_store::{Event, IntentRequestInput, Store, WaitRecord, WorkspaceIdentity};
+use stateful_core::{
+    AuthorizationInput, Decision, DecisionKind, SourceKind, normalize_relative_path,
+    normalized_relative_path_is_empty,
+};
+use stateful_store::{
+    Event, IntentRequestInput, LeaseObservation, Store, WaitRecord, WorkspaceIdentity,
+};
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -24,7 +29,6 @@ pub struct AuthorizeWriteInput {
     pub root: Option<String>,
     pub branch: Option<String>,
     pub source_kind: Option<SourceKind>,
-    pub source_tool_name: Option<String>,
     pub queue_on_conflict: bool,
     pub queue_purpose: Option<String>,
     pub action: String,
@@ -126,8 +130,19 @@ fn missing_rename_or_move_paths() -> AuthorizationOutcome {
     }
 }
 
-fn is_native_edit_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "apply_patch" | "Edit" | "Write" | "file_change")
+fn can_queue_after_policy_denial(decision: &Decision) -> bool {
+    matches!(
+        decision.reason_code.as_str(),
+        "missing_intent" | "scope_mismatch"
+    )
+}
+
+fn active_lease_conflict_decision() -> Decision {
+    Decision::deny(
+        "active_lease_conflict",
+        "Write target is covered by another active session lease.",
+        "Refresh current state, coordinate with the lease owner, or wait for the lease to release. Do not redeclare intent or change session_id; that does not release another session's lease.",
+    )
 }
 
 impl<'a> PolicyService<'a> {
@@ -170,36 +185,6 @@ impl<'a> PolicyService<'a> {
             }
         };
 
-        if let Some(workspace_id) = &input.workspace_id {
-            let reservation_conflict = self.reservation_conflict(&input, workspace_id)?;
-
-            if let Some(reservation) = reservation_conflict {
-                return Ok(AuthorizationOutcome {
-                    decision: Decision::deny(
-                        "reservation_conflict",
-                        "Write target is reserved for the next waiting session.",
-                        "Wait for the active reservation to be claimed or expire. Do not redeclare intent or change session_id; that does not release another session's reservation.",
-                    ),
-                    wait: None,
-                    reservation: Some(reservation),
-                });
-            }
-
-            let current_session_reservation =
-                self.current_session_reservation(&input, workspace_id)?;
-            if let Some(reservation) = current_session_reservation {
-                return Ok(AuthorizationOutcome {
-                    decision: Decision::deny(
-                        "reservation_claim_required",
-                        "Write target has an active reservation for this session, but it has not been claimed.",
-                        "Reread the target, then call state.intent.claim for the reservation before writing.",
-                    ),
-                    wait: None,
-                    reservation: Some(reservation),
-                });
-            }
-        }
-
         let policy_state = if let Some(workspace_id) = &input.workspace_id {
             self.store
                 .policy_state_for_session(&input.session_id, workspace_id)
@@ -210,22 +195,17 @@ impl<'a> PolicyService<'a> {
 
         let decision = stateful_core::authorize_action(&policy_state, authorization_input);
         if decision.decision != DecisionKind::Allow {
+            if can_queue_after_policy_denial(&decision) {
+                if let Some(outcome) = self.queue_active_lease_conflict(
+                    &input,
+                    input.workspace_id.as_deref(),
+                    allow_queue_side_effects,
+                )? {
+                    return Ok(outcome);
+                }
+            }
             return Ok(AuthorizationOutcome {
                 decision,
-                wait: None,
-                reservation: None,
-            });
-        }
-
-        if matches!(input.source_kind.as_ref(), Some(SourceKind::Hook))
-            && input.source_tool_name.is_none()
-        {
-            return Ok(AuthorizationOutcome {
-                decision: Decision::deny(
-                    "missing_tool_name",
-                    "Hook write authorization requires source.tool_name.",
-                    "Send the native tool name in source.tool_name; do not use source_ref as the tool name.",
-                ),
                 wait: None,
                 reservation: None,
             });
@@ -243,13 +223,46 @@ impl<'a> PolicyService<'a> {
             });
         };
 
-        if self.requires_exact_native_file_scope(&input)
-            && !self.has_exact_native_file_intent(&input, workspace_id)?
+        let current_session_reservation = self.current_session_reservation(&input, workspace_id)?;
+        if let Some(reservation) = current_session_reservation {
+            return Ok(AuthorizationOutcome {
+                decision: Decision::deny(
+                    "reservation_claim_required",
+                    "Write target has an active reservation for this session, but it has not been claimed.",
+                    "Reread the target, then call state.intent.claim for the reservation before writing.",
+                ),
+                wait: None,
+                reservation: Some(reservation),
+            });
+        }
+
+        let reservation_conflict = self.reservation_conflict(&input, workspace_id)?;
+        if let Some(reservation) = reservation_conflict {
+            return Ok(AuthorizationOutcome {
+                decision: Decision::deny(
+                    "reservation_conflict",
+                    "Write target is reserved for the next waiting session.",
+                    "Wait for the active reservation to be claimed or expire. Do not redeclare intent or change session_id; that does not release another session's reservation.",
+                ),
+                wait: None,
+                reservation: Some(reservation),
+            });
+        }
+
+        if self.requires_exact_hook_file_scope(&input)
+            && !self.has_exact_hook_file_intent(&input, workspace_id)?
         {
+            if let Some(outcome) = self.queue_active_lease_conflict(
+                &input,
+                Some(workspace_id),
+                allow_queue_side_effects,
+            )? {
+                return Ok(outcome);
+            }
             return Ok(AuthorizationOutcome {
                 decision: Decision::deny(
                     "scope_mismatch",
-                    "Native edit targets require exact active file intent for every affected path.",
+                    "Hook file targets require exact active file intent for every affected path.",
                     "Declare exact file intent for every affected path and acquire matching same-session file leases before writing.",
                 ),
                 wait: None,
@@ -259,65 +272,31 @@ impl<'a> PolicyService<'a> {
 
         let lease_owner = self.lease_conflict_owner(&input, workspace_id)?;
         if let Some(owner) = lease_owner {
-            let wait = if allow_queue_side_effects
-                && input.queue_on_conflict
-                && !is_multi_path_action(&input.action)
-            {
-                let purpose = input
-                    .queue_purpose
-                    .as_deref()
-                    .ok_or_else(|| "queue purpose is required".to_string())?;
-                let waiter = self
-                    .store
-                    .enqueue_waiter_with_identity(
-                        &input.session_id,
-                        workspace_id,
-                        &path,
-                        &input.action,
-                        purpose,
-                        Some(&owner),
-                        workspace_identity(
-                            &input.repo_id,
-                            &input.worktree_id,
-                            &input.root,
-                            &input.branch,
-                        ),
-                    )
-                    .map_err(|error| error.to_string())?;
-                let queue_position = self
-                    .store
-                    .queue_position(&waiter.wait_id)
-                    .map_err(|error| error.to_string())?;
-                Some(WaitQueueInfo {
-                    record: waiter,
-                    queue_position,
-                })
-            } else {
-                None
-            };
+            let wait = self.enqueue_waiter_for_active_lease_conflict(
+                &input,
+                workspace_id,
+                &owner,
+                allow_queue_side_effects,
+            )?;
 
             return Ok(AuthorizationOutcome {
-                decision: Decision::deny(
-                    "active_lease_conflict",
-                    "Write target is covered by another active session lease.",
-                    "Refresh current state, coordinate with the lease owner, or wait for the lease to release. Do not redeclare intent or change session_id; that does not release another session's lease.",
-                ),
+                decision: active_lease_conflict_decision(),
                 wait,
                 reservation: None,
             });
         }
 
-        let requires_exact_native_file_scope = self.requires_exact_native_file_scope(&input);
-        let has_required_lease = if requires_exact_native_file_scope {
-            self.has_exact_native_file_lease(&input, workspace_id)?
+        let requires_exact_hook_file_scope = self.requires_exact_hook_file_scope(&input);
+        let has_required_lease = if requires_exact_hook_file_scope {
+            self.has_exact_hook_file_lease(&input, workspace_id)?
         } else {
             self.has_required_lease(&input, workspace_id)?
         };
         if !has_required_lease {
-            let decision = if requires_exact_native_file_scope {
+            let decision = if requires_exact_hook_file_scope {
                 Decision::deny(
                     "missing_lease",
-                    "Native edit targets require exact active same-session file leases for every affected path.",
+                    "Hook file targets require exact active same-session file leases for every affected path.",
                     "Acquire matching same-session file leases for every affected path before writing. Do not change session_id; that does not create same-session lease ownership.",
                 )
             } else {
@@ -327,6 +306,14 @@ impl<'a> PolicyService<'a> {
                     "Acquire the relevant same-session file or directory lease successfully before writing. Do not change session_id; that does not create same-session lease ownership.",
                 )
             };
+            return Ok(AuthorizationOutcome {
+                decision,
+                wait: None,
+                reservation: None,
+            });
+        }
+
+        if let Some(decision) = self.lease_observation_decision(&input, workspace_id)? {
             return Ok(AuthorizationOutcome {
                 decision,
                 wait: None,
@@ -349,17 +336,90 @@ impl<'a> PolicyService<'a> {
         })
     }
 
-    fn requires_exact_native_file_scope(&self, input: &AuthorizeWriteInput) -> bool {
+    fn queue_active_lease_conflict(
+        &self,
+        input: &AuthorizeWriteInput,
+        workspace_id: Option<&str>,
+        allow_queue_side_effects: bool,
+    ) -> Result<Option<AuthorizationOutcome>, String> {
+        let Some(workspace_id) = workspace_id else {
+            return Ok(None);
+        };
+        let Some(owner) = self.lease_conflict_owner(input, workspace_id)? else {
+            return Ok(None);
+        };
+        let wait = self.enqueue_waiter_for_active_lease_conflict(
+            input,
+            workspace_id,
+            &owner,
+            allow_queue_side_effects,
+        )?;
+        let Some(wait) = wait else {
+            return Ok(None);
+        };
+        Ok(Some(AuthorizationOutcome {
+            decision: active_lease_conflict_decision(),
+            wait: Some(wait),
+            reservation: None,
+        }))
+    }
+
+    fn enqueue_waiter_for_active_lease_conflict(
+        &self,
+        input: &AuthorizeWriteInput,
+        workspace_id: &str,
+        blocking_session_id: &str,
+        allow_queue_side_effects: bool,
+    ) -> Result<Option<WaitQueueInfo>, String> {
+        if !allow_queue_side_effects
+            || !input.queue_on_conflict
+            || is_multi_path_action(&input.action)
+        {
+            return Ok(None);
+        }
+
+        let purpose = input
+            .queue_purpose
+            .as_deref()
+            .ok_or_else(|| "queue purpose is required".to_string())?;
+        let waiter = self
+            .store
+            .enqueue_waiter_with_identity(
+                &input.session_id,
+                workspace_id,
+                &input.path,
+                &input.action,
+                purpose,
+                Some(blocking_session_id),
+                workspace_identity(
+                    &input.repo_id,
+                    &input.worktree_id,
+                    &input.root,
+                    &input.branch,
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        let queue_position = self
+            .store
+            .queue_position(&waiter.wait_id)
+            .map_err(|error| error.to_string())?;
+        Ok(Some(WaitQueueInfo {
+            record: waiter,
+            queue_position,
+        }))
+    }
+
+    fn requires_exact_hook_file_scope(&self, input: &AuthorizeWriteInput) -> bool {
         if !matches!(input.source_kind.as_ref(), Some(SourceKind::Hook)) {
             return false;
         }
-        input
-            .source_tool_name
-            .as_deref()
-            .is_some_and(is_native_edit_tool)
+        matches!(
+            input.action.as_str(),
+            "write_file" | "delete_file" | "rename_file" | "move_file"
+        )
     }
 
-    fn has_exact_native_file_intent(
+    fn has_exact_hook_file_intent(
         &self,
         input: &AuthorizeWriteInput,
         workspace_id: &str,
@@ -376,7 +436,7 @@ impl<'a> PolicyService<'a> {
         Ok(true)
     }
 
-    fn has_exact_native_file_lease(
+    fn has_exact_hook_file_lease(
         &self,
         input: &AuthorizeWriteInput,
         workspace_id: &str,
@@ -391,6 +451,48 @@ impl<'a> PolicyService<'a> {
             }
         }
         Ok(true)
+    }
+
+    fn lease_observation_decision(
+        &self,
+        input: &AuthorizeWriteInput,
+        workspace_id: &str,
+    ) -> Result<Option<Decision>, String> {
+        if !self.requires_exact_hook_file_scope(input) {
+            return Ok(None);
+        }
+
+        for path in self.affected_paths(input) {
+            let Some(observation) = self
+                .store
+                .active_exact_file_lease_observation_by_session(
+                    workspace_id,
+                    path,
+                    &input.session_id,
+                )
+                .map_err(|error| error.to_string())?
+            else {
+                continue;
+            };
+            let Some(root) = input.root.as_deref().filter(|root| !root.is_empty()) else {
+                return Ok(Some(stale_lease_observation_decision(
+                    "Lease observations require workspace.root so target freshness can be checked.",
+                )));
+            };
+            let current = current_target_observation(root, path)?;
+            if current.exists != observation.exists {
+                return Ok(Some(stale_lease_observation_decision(
+                    "Target existence changed since the active lease was acquired.",
+                )));
+            }
+            if observation.exists && current.content_hash != observation.content_hash {
+                return Ok(Some(stale_lease_observation_decision(
+                    "Target content changed since the active lease was acquired.",
+                )));
+            }
+        }
+
+        Ok(None)
     }
 
     fn has_required_lease(
@@ -601,13 +703,9 @@ impl<'a> PolicyService<'a> {
         {
             return Err("reservation owner mismatch".to_string());
         }
-        if normalized_path_is_empty(&reservation.relative_path) {
+        if normalized_relative_path_is_empty(&reservation.relative_path) {
             return Err("intent scope is required".to_string());
         }
-
-        self.store
-            .claim_reservation(&input.wait_id, &input.session_id)
-            .map_err(|error| error.to_string())?;
 
         let scope = if reservation.action == "write_directory" {
             format!("{}/", reservation.relative_path.trim_end_matches('/'))
@@ -631,15 +729,24 @@ impl<'a> PolicyService<'a> {
             .or_else(|| reservation.worktree_id.clone());
         event.root = input.root.clone().or_else(|| reservation.root.clone());
         event.branch = input.branch.clone().or_else(|| reservation.branch.clone());
-        self.store
-            .append(event)
-            .map_err(|error| error.to_string())?;
-        self.store
-            .acquire_lease(&input.session_id, &input.workspace_id, &lease_path)
+        let lease_observation = input
+            .root
+            .as_deref()
+            .filter(|root| !root.is_empty())
+            .map(|root| lease_observation_for_path(root, &lease_path))
+            .transpose()?;
+        let claimed = self
+            .store
+            .claim_reservation_with_intent_and_lease(
+                &input.wait_id,
+                &input.session_id,
+                &input.workspace_id,
+                event,
+                &lease_path,
+                lease_observation,
+            )
             .map_err(|error| error.to_string())?;
 
-        let mut claimed = reservation;
-        claimed.status = "claimed".to_string();
         Ok(ClaimIntentOutcome {
             reservation: claimed,
         })
@@ -652,7 +759,7 @@ impl<'a> PolicyService<'a> {
         if !matches!(input.action.as_str(), "write_file" | "write_directory") {
             return Err("unsupported intent request action".to_string());
         }
-        if normalized_path_is_empty(&input.path) {
+        if normalized_relative_path_is_empty(&input.path) {
             return Err("intent scope is required".to_string());
         }
 
@@ -808,22 +915,6 @@ impl<'a> PolicyService<'a> {
     }
 }
 
-fn normalized_path_is_empty(path: &str) -> bool {
-    let normalized = path.trim().replace(char::from(92), "/");
-    let mut segments = Vec::new();
-    for segment in normalized.split(char::from(47)) {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            segments.pop();
-        } else {
-            segments.push(segment);
-        }
-    }
-    segments.is_empty()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CurrentTargetObservation {
     exists: bool,
@@ -836,6 +927,25 @@ fn stale_observation_decision(message: &str) -> Decision {
         message,
         "Reread the target and retry with a fresh base_observations entry before writing.",
     )
+}
+
+fn stale_lease_observation_decision(message: &str) -> Decision {
+    Decision::deny(
+        "stale_lease_observation",
+        message,
+        "Reread the target, release and reacquire the lease, then retry before writing.",
+    )
+}
+
+pub(crate) fn lease_observation_for_path(
+    root: &str,
+    relative_path: &str,
+) -> Result<LeaseObservation, String> {
+    let current = current_target_observation(root, relative_path)?;
+    Ok(LeaseObservation {
+        exists: current.exists,
+        content_hash: current.content_hash,
+    })
 }
 
 fn current_target_observation(
@@ -878,22 +988,6 @@ fn workspace_relative_path(root: &str, relative_path: &str) -> Result<PathBuf, S
         }
     }
     Ok(path)
-}
-
-fn normalize_relative_path(path: impl AsRef<str>) -> String {
-    path.as_ref()
-        .replace('\\', "/")
-        .split('/')
-        .filter(|segment| !segment.is_empty() && *segment != ".")
-        .fold(Vec::new(), |mut segments, segment| {
-            if segment == ".." {
-                segments.pop();
-            } else {
-                segments.push(segment);
-            }
-            segments
-        })
-        .join("/")
 }
 
 fn content_hash(bytes: &[u8]) -> String {

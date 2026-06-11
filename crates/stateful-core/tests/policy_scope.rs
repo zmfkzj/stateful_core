@@ -1,4 +1,6 @@
-use stateful_core::{IntentScope, ScopeSet};
+use stateful_core::{
+    IntentScope, ScopeSet, normalize_relative_path, normalized_relative_path_is_empty,
+};
 
 #[test]
 fn directory_scope_allows_depth_two_but_not_depth_three() {
@@ -44,4 +46,15 @@ fn rename_requires_exact_source_and_destination_file_scope() {
 
     assert!(scopes.allows_rename("src/old.ts", "src/new.ts"));
     assert!(!scopes.allows_rename("src/old.ts", "src/other.ts"));
+}
+
+#[test]
+fn core_normalizes_workspace_relative_paths_for_shared_policy_keys() {
+    assert_eq!(
+        normalize_relative_path(r"src//auth/../auth.ts"),
+        "src/auth.ts"
+    );
+    assert_eq!(normalize_relative_path(r"src\.\auth.ts"), "src/auth.ts");
+    assert!(normalized_relative_path_is_empty("./../"));
+    assert!(normalized_relative_path_is_empty(" . "));
 }

@@ -24,8 +24,13 @@ stateful-core = { path = "../stateful-core" }
 stateful-mcp = { path = "../stateful-mcp" }
 stateful-server = { path = "../stateful-server" }
 stateful-store = { path = "../stateful-store" }
+time = { workspace = true, features = ["formatting", "parsing"] }
 tokio.workspace = true
 uuid.workspace = true
+
+[features]
+default = []
+codex-benchmark = []
 
 [lints]
 workspace = true

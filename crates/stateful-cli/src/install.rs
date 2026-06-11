@@ -83,12 +83,7 @@ pub fn apply_global_install(options: InstallOptions) -> anyhow::Result<InstallPl
         RepoRegistry::default().save(&options.paths)?;
     }
 
-    let _store = stateful_store::Store::open(&options.paths.state_db).with_context(|| {
-        format!(
-            "failed to initialize state database {}",
-            options.paths.state_db.display()
-        )
-    })?;
+    initialize_state_database_if_missing(&options.paths.state_db)?;
 
     plan.summary = format!(
         "apply: installed stateful global files under {}",
@@ -96,6 +91,25 @@ pub fn apply_global_install(options: InstallOptions) -> anyhow::Result<InstallPl
     );
 
     Ok(plan)
+}
+
+fn initialize_state_database_if_missing(path: &Path) -> anyhow::Result<()> {
+    match path.metadata() {
+        Ok(metadata) if metadata.is_file() => return Ok(()),
+        Ok(_) => anyhow::bail!(
+            "state database path exists but is not a file: {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect state database {}", path.display()));
+        }
+    }
+
+    let _store = stateful_store::Store::open(path)
+        .with_context(|| format!("failed to initialize state database {}", path.display()))?;
+    Ok(())
 }
 
 pub fn plan_codex_install(options: &CodexInstallOptions) -> anyhow::Result<InstallPlan> {
@@ -798,7 +812,7 @@ command = {}
 statusMessage = "Checking stateful intent context"
 
 [[hooks.PreToolUse]]
-matcher = "Bash|apply_patch|Edit|Write|file_change|mcp__filesystem__.*"
+matcher = ".*"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
@@ -818,7 +832,7 @@ statusMessage = "Recording stateful activity"
 [[hooks.Stop.hooks]]
 type = "command"
 command = {}
-statusMessage = "Finalizing stateful activity"
+statusMessage = "Recording stateful activity"
 {GLOBAL_CODEX_BLOCK_END}
 "#,
         toml_string(binary_path),

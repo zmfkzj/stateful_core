@@ -23,6 +23,10 @@ fn synthetic_benchmark_runs_both_modes_and_compares_current_state_coordination()
     assert!(artifacts.manifest_path.is_file());
     assert!(artifacts.stateful_run_dir.join("run.json").is_file());
     assert!(artifacts.no_state_run_dir.join("run.json").is_file());
+    let stateful_run = read_json(&artifacts.stateful_run_dir.join("run.json"));
+    let no_state_run = read_json(&artifacts.no_state_run_dir.join("run.json"));
+    assert_eq!(stateful_run["evidence_kind"], "synthetic_fixture");
+    assert_eq!(no_state_run["evidence_kind"], "synthetic_fixture");
 
     let manifest: Vec<stateful_bench::PairManifestEntry> =
         read_jsonl(&artifacts.manifest_path).expect("manifest should parse");
@@ -58,10 +62,39 @@ fn synthetic_benchmark_runs_both_modes_and_compares_current_state_coordination()
     assert_eq!(comparison.stateful.lost_edit_events, 0);
     assert_eq!(comparison.stateful.coordinated_blocks, 5);
     assert_eq!(comparison.stateful.denied_writes, 5);
+    let comparison_value =
+        serde_json::to_value(&comparison).expect("comparison report should serialize");
+    assert_eq!(comparison_value["evidence_kind"], "synthetic_fixture");
+    assert_eq!(comparison_value["empirical_claim_allowed"], false);
+    assert!(
+        comparison_value["evidence_notes"]
+            .as_array()
+            .expect("evidence notes should be an array")
+            .iter()
+            .any(|note| note
+                .as_str()
+                .is_some_and(|text| text.contains("scripted fixture")))
+    );
+    assert_eq!(
+        comparison_value["coordination_effects"]["prevented_uncoordinated_same_file_collisions"],
+        4
+    );
+    assert_eq!(
+        comparison_value["coordination_effects"]["prevented_lost_edit_events"],
+        4
+    );
+    assert_eq!(
+        comparison_value["coordination_effects"]["additional_coordination_friction_events"],
+        10
+    );
     assert!(
         comparison.stateful.raw_manifest_score > comparison.no_state.raw_manifest_score,
         "stateful synthetic score should be higher than no-state"
     );
+    let markdown = comparison.render_markdown();
+    assert!(markdown.contains("Evidence kind: synthetic_fixture"));
+    assert!(markdown.contains("Empirical claim allowed: no"));
+    assert!(markdown.contains("scripted fixture for validating report plumbing"));
 
     fs::remove_dir_all(root).expect("temp root should clean up");
 }

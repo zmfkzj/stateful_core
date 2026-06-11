@@ -333,6 +333,33 @@ fn restart_refuses_remote_pid_zero_runtime_that_cannot_be_killed() {
 }
 
 #[test]
+fn restart_refuses_joined_pid_zero_runtime_without_identity_probe() {
+    let home = temp_home("stateful-server-restart-joined-pid-zero-without-probe");
+    let paths = GlobalPaths::new(&home);
+    let fake = FakeHttpServer::start(vec![fake_response(
+        200,
+        r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+    )]);
+    let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 0);
+    stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
+
+    let error = restart_server(&paths).expect_err("joined runtime restart should fail locally");
+
+    assert!(
+        error
+            .to_string()
+            .contains("remote stateful server cannot be killed"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(fake.request_count(), 0);
+    let contents = fs::read_to_string(&paths.server_json).expect("runtime should remain readable");
+    let preserved: ServerRuntime =
+        serde_json::from_str(&contents).expect("runtime should remain valid JSON");
+    assert_eq!(preserved.pid, 0);
+    assert_eq!(preserved.base_url, runtime.base_url);
+}
+
+#[test]
 fn stop_server_refuses_identity_pid_mismatch() {
     let home = temp_home("stateful-server-stop-identity-mismatch");
     let paths = GlobalPaths::new(&home);
@@ -534,6 +561,7 @@ fn fake_response(status: u16, body: &'static str) -> String {
 
 struct FakeHttpServer {
     addr: std::net::SocketAddr,
+    requests: Arc<AtomicUsize>,
 }
 
 impl FakeHttpServer {
@@ -542,19 +570,26 @@ impl FakeHttpServer {
         let addr = listener
             .local_addr()
             .expect("fake server addr should be known");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_for_thread = requests.clone();
         thread::spawn(move || {
             for response in responses {
                 if let Ok((mut stream, _addr)) = listener.accept() {
+                    requests_for_thread.fetch_add(1, Ordering::SeqCst);
                     read_request(&mut stream);
                     let _ = stream.write_all(response.as_bytes());
                 }
             }
         });
-        Self { addr }
+        Self { addr, requests }
     }
 
     fn base_url(&self) -> String {
         format!("http://{}", self.addr)
+    }
+
+    fn request_count(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
     }
 }
 

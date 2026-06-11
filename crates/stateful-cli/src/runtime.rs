@@ -2,12 +2,13 @@ use std::{
     fs,
     io::{Read, Write},
     net::{IpAddr, TcpStream},
-    path::Path,
-    time::Duration,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use crate::global_paths::GlobalPaths;
 use crate::repo_registry::RepoIdentity;
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 pub const STATEFUL_SESSION_ID_ENV: &str = "STATEFUL_SESSION_ID";
 const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
+static SECRET_JSON_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntentDeclareArgs {
@@ -111,7 +113,7 @@ pub fn write_runtime_file(
     };
 
     fs::create_dir_all(parent)?;
-    fs::write(path, serde_json::to_string_pretty(runtime)?)?;
+    write_secret_json_file(&path, &serde_json::to_string_pretty(runtime)?)?;
     Ok(())
 }
 
@@ -124,7 +126,81 @@ pub fn write_global_runtime_file(
     };
 
     fs::create_dir_all(parent)?;
-    fs::write(&paths.server_json, serde_json::to_string_pretty(runtime)?)?;
+    write_secret_json_file(&paths.server_json, &serde_json::to_string_pretty(runtime)?)?;
+    Ok(())
+}
+
+fn write_secret_json_file(path: &Path, contents: &str) -> anyhow::Result<()> {
+    let temp_path = secret_json_temp_path(path)?;
+    let result = write_secret_json_temp_file(&temp_path, contents).and_then(|_| {
+        fs::rename(&temp_path, path)?;
+        #[cfg(unix)]
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        sync_parent_dir(path)?;
+        Ok(())
+    });
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    result
+}
+
+fn write_secret_json_temp_file(path: &Path, contents: &str) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+
+    #[cfg(not(unix))]
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn secret_json_temp_path(path: &Path) -> anyhow::Result<PathBuf> {
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("runtime file path has no parent");
+    };
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        anyhow::bail!("runtime file path has no file name");
+    };
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let counter = SECRET_JSON_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    Ok(parent.join(format!(
+        ".{file_name}.{}.{}.{}.tmp",
+        std::process::id(),
+        nanos,
+        counter
+    )))
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> anyhow::Result<()> {
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("runtime file path has no parent");
+    };
+    let directory = fs::File::open(parent)?;
+    directory.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -214,7 +290,10 @@ pub fn read_current_session_file(repo_root: impl AsRef<Path>) -> anyhow::Result<
         return read_current_session_file_for_session(repo_root, &session_id);
     }
 
-    read_legacy_current_session_file(repo_root)
+    read_verified_legacy_current_session_file(
+        repo_root,
+        LegacySessionFallback::AllowWithoutSessionBoundFile,
+    )
 }
 
 fn read_legacy_current_session_file(repo_root: &Path) -> anyhow::Result<CurrentSession> {
@@ -226,6 +305,12 @@ fn read_legacy_current_session_file(repo_root: &Path) -> anyhow::Result<CurrentS
     Ok(serde_json::from_str(&contents)?)
 }
 
+#[derive(Clone, Copy)]
+enum LegacySessionFallback {
+    AllowWithoutSessionBoundFile,
+    RequireSessionBoundFile,
+}
+
 pub fn read_current_session_file_for_mcp(
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<CurrentSession> {
@@ -234,11 +319,36 @@ pub fn read_current_session_file_for_mcp(
         return read_current_session_file_for_session(repo_root, &session_id);
     }
 
+    read_verified_legacy_current_session_file(
+        repo_root,
+        LegacySessionFallback::RequireSessionBoundFile,
+    )
+}
+
+fn read_verified_legacy_current_session_file(
+    repo_root: &Path,
+    fallback: LegacySessionFallback,
+) -> anyhow::Result<CurrentSession> {
     let legacy_session = read_legacy_current_session_file(repo_root)?;
     validate_session_id(
         &legacy_session.session_id,
         "current session file session_id",
     )?;
+    let session_file_count = session_bound_current_session_file_count(repo_root)?;
+    if session_file_count > 1 {
+        anyhow::bail!(
+            "multiple session-bound current-session files exist and STATEFUL_SESSION_ID is unset; set STATEFUL_SESSION_ID to the active session id before using session-bound tools"
+        );
+    }
+    if session_file_count == 0
+        && matches!(
+            fallback,
+            LegacySessionFallback::AllowWithoutSessionBoundFile
+        )
+    {
+        return Ok(legacy_session);
+    }
+
     let session_bound = read_current_session_file_for_session(
         repo_root,
         &legacy_session.session_id,
@@ -257,6 +367,40 @@ pub fn read_current_session_file_for_mcp(
     }
 
     Ok(legacy_session)
+}
+
+fn session_bound_current_session_file_count(repo_root: &Path) -> anyhow::Result<usize> {
+    let sessions_dir = repo_root
+        .join(".stateful_core")
+        .join("runtime")
+        .join("sessions");
+    reject_untrusted_directory_if_present(&sessions_dir, "current session directory")?;
+    let entries = match fs::read_dir(&sessions_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut session_file_count = 0usize;
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!("stateful refuses symlinked current session file");
+        }
+        if !metadata.is_file() {
+            anyhow::bail!("stateful current session file is not a regular file");
+        }
+        if is_hard_linked_file(&metadata) {
+            anyhow::bail!("stateful refuses hard-linked current session file");
+        }
+        session_file_count += 1;
+    }
+
+    Ok(session_file_count)
 }
 
 pub fn write_current_session_file_for_session(
@@ -351,7 +495,7 @@ fn write_plain_file(path: &Path, label: &str, contents: &str) -> anyhow::Result<
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    fs::write(path, contents)?;
+    write_secret_json_file(path, contents)?;
     Ok(())
 }
 
@@ -703,7 +847,7 @@ pub fn protocol_envelope(args: ProtocolEnvelopeArgs<'_>) -> serde_json::Value {
     serde_json::json!({
         "protocol_version": runtime.protocol_version.as_str(),
         "request_id": request_id,
-        "observed_at": runtime.started_at.as_str(),
+        "observed_at": now_rfc3339_timestamp(),
         "session": {
             "session_id": session_id,
             "actor_id": format!("stateful-cli:{}", runtime.pid),
@@ -719,6 +863,12 @@ pub fn protocol_envelope(args: ProtocolEnvelopeArgs<'_>) -> serde_json::Value {
         "source": source,
         "payload": payload
     })
+}
+
+fn now_rfc3339_timestamp() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("UTC timestamp should format as RFC3339")
 }
 
 fn runtime_file_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf {
@@ -803,18 +953,6 @@ pub fn runtime_identity_matches_pid(runtime: &ServerRuntime) -> anyhow::Result<b
         && identity.pid == runtime.pid)
 }
 
-pub fn runtime_identity_pid(runtime: &ServerRuntime) -> anyhow::Result<Option<u32>> {
-    let Some(identity) = fetch_runtime_identity(runtime)? else {
-        return Ok(None);
-    };
-    if runtime_identity_matches_runtime(runtime, &identity)
-        && runtime_identity_has_required_capabilities(runtime, &identity)
-    {
-        return Ok(Some(identity.pid));
-    }
-    Ok(None)
-}
-
 fn runtime_from_env() -> anyhow::Result<Option<ServerRuntime>> {
     let (Some(base_url), Some(token)) = (
         std::env::var("STATEFUL_SERVER_URL").ok(),
@@ -849,7 +987,7 @@ pub fn runtime_from_remote(
     token: impl Into<String>,
     workspace_id: impl Into<String>,
 ) -> anyhow::Result<ServerRuntime> {
-    let mut runtime = ServerRuntime::new(base_url, token, workspace_id, 0);
+    let runtime = ServerRuntime::new(base_url, token, workspace_id, 0);
     let Some(identity) = fetch_runtime_identity(&runtime)? else {
         anyhow::bail!("LAN server did not return a valid stateful runtime identity");
     };
@@ -858,9 +996,6 @@ pub fn runtime_from_remote(
             "LAN server does not support required runtime capabilities: {}",
             REQUIRED_RUNTIME_CAPABILITIES.join(", ")
         );
-    }
-    if runtime_base_url_is_localhost(&runtime.base_url) {
-        runtime.pid = identity.pid;
     }
     Ok(runtime)
 }

@@ -39,7 +39,7 @@ policy.
 - Do not add a Codex CLI `exec_command` schema extension in this change.
 - Do not support command-string metadata markers.
 - Do not support `-- <argv...>` execution in the MVP.
-- Do not ship generic `git-metadata` or `workspace` write profiles in the MVP.
+- Do not ship a broad `workspace` write profile in the MVP.
 - Do not make `stateful` responsible for content provenance, read
   confidentiality, or all possible network side effects.
 
@@ -49,7 +49,7 @@ MVP syntax:
 
 ```text
 stateful sandbox run
-  --fs read-only|write-targets
+  --fs read-only|write-targets|build|git
   --network disabled|enabled
   --write-target <repo-relative-path>...
   --create-target <repo-relative-path>...
@@ -83,20 +83,49 @@ opaque string executed inside the selected sandbox with `/bin/sh -c`.
   Directory targets are accepted only through `--write-dir`.
 - Rejects `--write-dir` values that are empty, absolute, outside the repo, under
   `.git`, contain control characters, resolve through symlinked parents, or are
-  not under `target/`. `--write-dir` is for the `target/` artifact tree, not
-  source-tree editing.
+  not under `tmp/`. `--write-dir` is for the `tmp/` artifact tree, not
+  source-tree editing or build/test execution.
 - Calls `/v1/authorize` for each write/create file target and each write
   directory before execution.
 - Runs the command with only authorized file targets and directory subtrees
   writable.
 - Allows `/dev/null` writes.
 
+`build` profile:
+
+- Rejects `--write-target`, `--create-target`, and `--write-dir`; it manages
+  its write scope automatically.
+- Calls `/v1/authorize` once for `tmp/` with `payload.action: write_directory`
+  and `payload.fs_profile: build`.
+- Runs the command with `tmp/` writable and standard temp variables pointing to
+  `tmp/.stateful-tmp`.
+- Is language-independent; callers must direct tool-specific build caches under
+  `tmp/` when those tools do not use standard temp variables.
+- Allows `/dev/null` writes.
+
+`git` profile:
+
+- Rejects `--write-target`, `--create-target`, and `--write-dir`; it manages
+  repo write scope automatically.
+- Requires `--command` to parse as one `git ...` command with an explicit
+  allowlisted git subcommand.
+- Runs with the repo worktree and Git internals writable inside the OS sandbox.
+- Rejects inline git config, path or exec overrides, known shell-dispatching
+  subcommand options, `git init`, branch upstream/tracking persistence,
+  `push -u`, and config-mutating `git remote` subcommands.
+- Limits `git remote` to read-only queries such as listing, `get-url`, and
+  `show`; denies `add`, `rename`, `remove`, `rm`, `set-url`, `set-head`,
+  `set-branches`, `update`, and `prune`.
+- Disables implicit branch tracking config with profile-scoped
+  `branch.autoSetupMerge=false` and `branch.autoSetupRebase=never` overrides.
+- Allows `/dev/null` writes.
+
 `--write-dir` authorization:
 
-- The session must first declare exact `target/` directory intent with a
+- The session must first declare exact `tmp/` directory intent with a
   trailing slash.
 - The session must acquire the matching same-session directory lease before
-  invoking the wrapper.
+  invoking the wrapper or the `build` profile.
 - The wrapper authorizes the normalized directory target with
   `payload.action: write_directory`.
 - Source-tree edits do not use `--write-dir`; use native Codex edit tools after
@@ -125,7 +154,7 @@ Network policy:
 
 - The wrapper reads the current stateful session file, including run-bound
   session files when `STATEFUL_CODEX_RUN_ID` is present.
-- If no current session exists, `write-targets` fails closed.
+- If no current session exists, `write-targets` and `build` fail closed.
 - The MVP does not accept user-supplied `--session-id` or `--workspace-id` for
   sandbox writes. This avoids session spoofing through Bash command text.
 - `read-only` may run without a current session, but hook-allowed Codex usage
@@ -134,7 +163,8 @@ Network policy:
 ## Authorization Flow
 
 For `write-targets`, the wrapper builds one `/v1/authorize` request per file or
-directory target.
+directory target. For `build`, the wrapper builds one `/v1/authorize` request
+for `tmp/`.
 
 Request properties:
 
@@ -142,15 +172,15 @@ Request properties:
 - `source.event`: `sandbox_run`
 - `source.source_ref`: `stateful.sandbox.run`
 - `payload.action`: `write_file` for `--write-target` / `--create-target`, or
-  `write_directory` for `--write-dir`
+  `write_directory` for `--write-dir` and `build`
 - `payload.path`: normalized repo-relative file or directory target
 - `payload.queue_on_conflict`: `true`
-- `payload.fs_profile`: `write-targets`
+- `payload.fs_profile`: `write-targets` or `build`
 - `payload.network_policy`: `disabled` or `enabled`
 
 If any target is denied, the inner command is not executed. The response
 includes allowed and denied targets. Non-2xx server errors fail closed for
-`write-targets`.
+`write-targets` or `build`.
 
 ## Hook Contract
 
@@ -200,8 +230,8 @@ Allowed examples:
 
 ```text
 /trusted/path/stateful sandbox run --fs read-only --network disabled --command "rg auth src"
-/trusted/path/stateful sandbox run --fs write-targets --network enabled --write-target target/report.txt --command "printf x > target/report.txt"
-/trusted/path/stateful sandbox run --fs write-targets --network enabled --write-dir target --command "cargo test --workspace"
+/trusted/path/stateful sandbox run --fs write-targets --network enabled --write-target tmp/report.txt --command "printf x > tmp/report.txt"
+/trusted/path/stateful sandbox run --fs build --network enabled --command "cargo test --workspace"
 ```
 
 ## Sandbox Backends
@@ -214,7 +244,9 @@ Backend requirements:
 - `/dev/null` is writable in every profile.
 - `read-only` blocks repo/source writes.
 - `write-targets` allows exact authorized target file writes.
-- `write-targets` allows authorized artifact directory subtree writes.
+- `write-targets` allows authorized `tmp/` artifact directory subtree writes.
+- `build` automatically authorizes and allows the `tmp/` artifact directory
+  subtree without language-specific behavior.
 - `write-targets` blocks unlisted repo writes.
 - `--network disabled` disables network where supported.
 - `--network enabled` omits the no-network restriction where supported.
@@ -251,20 +283,16 @@ messages must all point to `stateful sandbox run`.
 
 ## Deferred Profiles
 
-`git-metadata` is deferred because generic `.git` write access can bypass
-structured commit safeguards, stage unrelated user changes, mutate refs, or
-run Git hooks outside explicit source-path authorization.
-
 `workspace` is deferred because broad workspace writes need a server-side policy
 and audit contract before they can be safely exposed.
 
-Both profiles must fail closed in hooks and in the wrapper until their exact
+Deferred profiles must fail closed in hooks and in the wrapper until their exact
 authorization payloads and sandbox behavior are specified.
 
 Existing structured wrappers such as `stateful commit` and `stateful push` may
-remain while these profiles are deferred. They should not expand into a large
-family of command-specific wrappers; they are temporary or narrow structured
-paths until the generic profile model is precise enough.
+remain while broad workspace writes are deferred. They should not expand into a
+large family of command-specific wrappers; they are temporary or narrow
+structured paths until the generic profile model is precise enough.
 
 ## Testing
 
@@ -273,8 +301,10 @@ CLI parsing tests:
 - `sandbox run` requires exactly one `--command`.
 - `read-only` rejects write/create/directory targets.
 - `write-targets` requires at least one write/create/directory target.
+- `build` rejects explicit write/create/directory targets and authorizes
+  `tmp/` automatically.
 - `--network disabled|enabled` parses and defaults to disabled.
-- `git-metadata` and `workspace` fail closed.
+- `workspace` and other unknown profiles fail closed.
 - `-- <argv...>` and command-string metadata markers are rejected.
 
 Hook tests:
@@ -284,12 +314,20 @@ Hook tests:
 - Valid canonical `stateful sandbox run --fs write-targets --write-target ...`
   is allowed.
 - Valid canonical `stateful sandbox run --fs write-targets --write-dir ...` is
-  allowed only for the authorized `target/` artifact tree.
+  allowed only for the authorized `tmp/` artifact tree.
+- Valid canonical `stateful sandbox run --fs build ...` is allowed without
+  explicit write targets.
 - Bare `stateful` is rejected unless canonical resolution proves it is the
   trusted binary.
 - Outer redirects, pipelines, command separators, env assignments, command
   substitution, aliases, and trailing commands are denied.
 - Missing write targets for `write-targets` are denied.
+- Explicit write targets for `build` are denied.
+- Explicit write targets for `git` are denied.
+- Shell-dispatching git options, local config persistence surfaces, and
+  config-mutating `git remote` subcommands are denied.
+- Read-only `git remote` queries such as `remote -v` and `remote get-url` are
+  allowed.
 - Unknown or deferred profiles are denied.
 
 Sandbox execution tests:
