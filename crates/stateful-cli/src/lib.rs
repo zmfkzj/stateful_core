@@ -1,9 +1,10 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
 };
 
+mod codex_benchmark;
 mod codex_wrapper;
 mod commit;
 mod external_run;
@@ -33,8 +34,9 @@ pub use hook::{
     handle_session_start_in_repo, handle_stop_in_repo, handle_user_prompt_submit_in_repo,
 };
 pub use install::{
-    InstallOptions, InstallPlan, apply_global_install, current_stateful_binary_path,
-    default_codex_config_path, plan_global_install,
+    CodexInstallOptions, InstallOptions, InstallPlan, apply_codex_install, apply_global_install,
+    current_stateful_binary_path, default_codex_config_path, plan_codex_install,
+    plan_global_install,
 };
 pub use lan::{
     ServerJoinOptions, ServerJoinResult, ServerStartRuntimeOptions, ServerStartRuntimeResult,
@@ -49,17 +51,17 @@ pub use repo_registry::{
     repo_gate, repo_identity_for_enabled_repo,
 };
 pub use runtime::{
-    CODEX_THREAD_ID_ENV, CurrentSession, HttpResponse, IntentCancelArgs, IntentClaimArgs,
-    IntentDeclareArgs, IntentRequestArgs, ProtocolEnvelopeArgs, STATEFUL_CODEX_RUN_ID_ENV,
-    ServerRuntime, cancel_intent_via_http, claim_intent_via_http, declare_intent_via_http,
-    discover_runtime, discover_runtime_with_global, discover_runtime_with_optional_global,
-    get_json, global_state_db_path, intent_cancel_protocol_body, intent_claim_protocol_body,
+    CurrentSession, HttpResponse, IntentCancelArgs, IntentClaimArgs, IntentDeclareArgs,
+    IntentRequestArgs, ProtocolEnvelopeArgs, STATEFUL_SESSION_ID_ENV, ServerRuntime,
+    cancel_intent_via_http, claim_intent_via_http, declare_intent_via_http, discover_runtime,
+    discover_runtime_with_global, discover_runtime_with_optional_global, get_json,
+    global_state_db_path, intent_cancel_protocol_body, intent_claim_protocol_body,
     intent_declare_protocol_body, intent_request_protocol_body, post_json, protocol_envelope,
-    read_current_session_file, read_current_session_file_for_codex_run, request_intent_via_http,
+    read_current_session_file, read_current_session_file_for_session, request_intent_via_http,
     runtime_env_override_is_configured, runtime_from_remote, runtime_has_required_identity,
     runtime_identity_matches_pid, write_current_session_file,
-    write_current_session_file_for_codex_run, write_current_session_file_for_codex_session,
-    write_global_runtime_file, write_runtime_file,
+    write_current_session_file_for_current_stateful_session,
+    write_current_session_file_for_session, write_global_runtime_file, write_runtime_file,
 };
 pub use sandbox::{SandboxFsProfile, SandboxNetworkPolicy};
 pub use server_lifecycle::{
@@ -81,6 +83,8 @@ pub enum Command {
     Install {
         #[arg(long)]
         yes: bool,
+        #[arg(long = "agent", value_enum)]
+        agents: Vec<InstallAgent>,
         #[arg(long)]
         codex_config: Option<PathBuf>,
         #[arg(long)]
@@ -102,17 +106,6 @@ pub enum Command {
     Current,
     Events,
     Doctor,
-    Commit {
-        #[arg(short = 'm', long)]
-        message: String,
-        #[arg(required = true, num_args = 1.., last = true)]
-        paths: Vec<String>,
-    },
-    Push {
-        #[arg(requires = "branch")]
-        remote: Option<String>,
-        branch: Option<String>,
-    },
     Codex {
         #[arg(long, default_value = "codex")]
         codex_bin: String,
@@ -148,6 +141,11 @@ pub enum Command {
     SyncOutbox,
     #[command(subcommand)]
     Hook(HookCommand),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum InstallAgent {
+    Codex,
 }
 
 #[derive(Debug, Subcommand)]
@@ -334,24 +332,37 @@ pub fn run() -> anyhow::Result<()> {
     match cli.command {
         Command::Install {
             yes,
+            agents,
             codex_config,
             binary,
         } => {
             let paths = GlobalPaths::from_env()?;
-            let codex_config_path = match codex_config {
-                Some(path) => path,
-                None => default_codex_config_path()?,
+            let plan = if agents.is_empty() {
+                if codex_config.is_some() {
+                    anyhow::bail!("--codex-config requires --agent codex");
+                }
+                if binary.is_some() {
+                    anyhow::bail!("--binary requires --agent codex");
+                }
+                apply_global_install(InstallOptions { yes, paths })?
+            } else if agents.contains(&InstallAgent::Codex) {
+                let codex_config_path = match codex_config {
+                    Some(path) => path,
+                    None => default_codex_config_path()?,
+                };
+                let binary_path = match binary {
+                    Some(path) => path,
+                    None => current_stateful_binary_path()?,
+                };
+                apply_codex_install(CodexInstallOptions {
+                    yes,
+                    paths,
+                    codex_config_path,
+                    binary_path,
+                })?
+            } else {
+                anyhow::bail!("no supported install agents selected");
             };
-            let binary_path = match binary {
-                Some(path) => path,
-                None => current_stateful_binary_path()?,
-            };
-            let plan = apply_global_install(InstallOptions {
-                yes,
-                paths,
-                codex_config_path,
-                binary_path,
-            })?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -482,47 +493,6 @@ pub fn run() -> anyhow::Result<()> {
             let report = doctor_report(current_repo_root_or_current_dir()?);
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Command::Commit { message, paths } => {
-            let cwd = std::env::current_dir()?;
-            let repo_root = detect_git_root(&cwd)?;
-            let paths = root_relative_paths(&repo_root, &cwd, paths)?;
-            let current_session = read_current_session_file(&repo_root).ok();
-            let result = run_structured_commit(CommitRequest {
-                repo_root,
-                message,
-                paths,
-                session_id: current_session
-                    .as_ref()
-                    .map(|session| session.session_id.clone()),
-                workspace_id: current_session.map(|session| session.workspace_id),
-                authorize: None,
-            })?;
-            println!(
-                "{}",
-                serde_json::to_string(&serde_json::json!({
-                    "status": "ok",
-                    "commit": result.commit_sha,
-                    "paths": result.committed_paths
-                }))?
-            );
-        }
-        Command::Push { remote, branch } => {
-            let cwd = std::env::current_dir()?;
-            let repo_root = detect_git_root(&cwd)?;
-            let result = run_structured_push(PushRequest {
-                repo_root,
-                remote,
-                branch,
-            })?;
-            println!(
-                "{}",
-                serde_json::to_string(&serde_json::json!({
-                    "status": "ok",
-                    "remote": result.remote,
-                    "branch": result.branch
-                }))?
-            );
-        }
         Command::Codex {
             codex_bin,
             sandbox,
@@ -636,10 +606,10 @@ pub fn run() -> anyhow::Result<()> {
         }) => {
             let paths = GlobalPaths::from_env()?;
             let repo_root = current_repo_root_or_current_dir()?;
-            let output = match sandbox::run_nested_codex_benchmark_sandbox_in_repo(
+            let output = match codex_benchmark::run_nested_codex_benchmark_sandbox_in_repo(
                 &repo_root,
                 &paths,
-                sandbox::NestedCodexBenchmarkSandboxRequest {
+                codex_benchmark::NestedCodexBenchmarkSandboxRequest {
                     purpose,
                     write_dir,
                     codex_home_root,
@@ -853,50 +823,6 @@ fn discover_runtime_for_current_dir() -> anyhow::Result<(PathBuf, ServerRuntime)
 fn current_repo_root_or_current_dir() -> anyhow::Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     Ok(detect_git_root(&cwd).unwrap_or(cwd))
-}
-
-fn root_relative_paths(
-    repo_root: &Path,
-    cwd: &Path,
-    paths: Vec<String>,
-) -> anyhow::Result<Vec<String>> {
-    let canonical_repo = repo_root
-        .canonicalize()
-        .unwrap_or_else(|_| repo_root.to_path_buf());
-    let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    let cwd_relative = canonical_cwd.strip_prefix(&canonical_repo).ok();
-
-    Ok(paths
-        .into_iter()
-        .map(|path| {
-            if Path::new(&path).is_absolute() {
-                path.to_string()
-            } else if let Some(prefix) =
-                cwd_relative.filter(|prefix| !prefix.as_os_str().is_empty())
-            {
-                normalize_root_relative_path(&prefix.join(&path))
-            } else {
-                path.to_string()
-            }
-        })
-        .collect())
-}
-
-fn normalize_root_relative_path(path: &Path) -> String {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::Normal(part) => normalized.push(part),
-            std::path::Component::ParentDir => {
-                if !normalized.pop() {
-                    normalized.push("..");
-                }
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized.to_string_lossy().replace('\\', "/")
 }
 
 fn resolve_session_workspace(

@@ -7,11 +7,12 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::outbox::queue_session_heartbeat_outbox;
+use crate::sandbox::parse_git_profile_command;
 use crate::{
     CurrentSession, GlobalPaths, HookCommand, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
     ServerRuntime, discover_runtime_with_global, ensure_server, get_json, post_json,
     protocol_envelope, repo_gate, repo_identity_for_enabled_repo,
-    runtime_env_override_is_configured, write_current_session_file_for_codex_session,
+    runtime_env_override_is_configured, write_current_session_file_for_current_stateful_session,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +56,25 @@ enum QuoteState {
     None,
     Single,
     Double,
+}
+
+trait RuntimeAdapter {
+    fn stateful_session_id<'a>(&self, input: &'a RuntimeHookInput) -> &'a str;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClaudeCodeRuntimeAdapter;
+
+static CLAUDE_CODE_RUNTIME_ADAPTER: ClaudeCodeRuntimeAdapter = ClaudeCodeRuntimeAdapter;
+
+impl RuntimeAdapter for ClaudeCodeRuntimeAdapter {
+    fn stateful_session_id<'a>(&self, input: &'a RuntimeHookInput) -> &'a str {
+        &input.session_id
+    }
+}
+
+fn runtime_adapter() -> &'static dyn RuntimeAdapter {
+    &CLAUDE_CODE_RUNTIME_ADAPTER
 }
 
 impl HookOutcome {
@@ -243,7 +263,7 @@ fn remember_current_session(
     input: &str,
 ) -> anyhow::Result<()> {
     let input: SessionEventInput = serde_json::from_str(input)?;
-    write_current_session_file_for_codex_session(
+    write_current_session_file_for_current_stateful_session(
         repo_root,
         &CurrentSession::new(input.stateful_session_id(), runtime.workspace_id.clone()),
     )
@@ -322,7 +342,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 fn stateful_command_policy_reminder() -> String {
     let binary = trusted_stateful_binary_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- Before using Bash, use the `stateful-command-policy` skill.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For file edits, declare exact intent, acquire the same-session file lease successfully, then use native Codex edit tools such as `apply_patch` or Edit.\n- For command-shaped writes, declare exact intent, acquire the matching file or directory lease successfully, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`, `{binary} sandbox run --fs write-targets --create-target <file> --command '<cmd>'`, or `{binary} sandbox run --fs write-targets --write-dir target --command '<cmd>'` for target/ artifacts."
+        "Stateful command policy reminder:\n- Before using Bash, use the `stateful-command-policy` skill.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For git operations, use `{binary} sandbox run --fs git --network enabled --command 'git <args>'`.\n- For file edits, declare exact intent, acquire the same-session file lease successfully, then use native Codex edit tools such as `apply_patch` or Edit.\n- For command-shaped writes, declare exact intent, acquire the matching file or directory lease successfully, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`, `{binary} sandbox run --fs write-targets --create-target <file> --command '<cmd>'`, or `{binary} sandbox run --fs write-targets --write-dir target --command '<cmd>'` for target/ artifacts."
     )
 }
 
@@ -439,9 +459,12 @@ fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
             "stateful sandbox run requires the trusted absolute stateful binary",
         );
     }
-    if !matches!(invocation.fs.as_str(), "read-only" | "write-targets") {
+    if !matches!(
+        invocation.fs.as_str(),
+        "read-only" | "write-targets" | "git"
+    ) {
         return bash_policy_deny(
-            "stateful sandbox run supports only read-only and write-targets profiles",
+            "stateful sandbox run supports only read-only, write-targets, and git profiles",
         );
     }
     if !matches!(invocation.network.as_str(), "disabled" | "enabled") {
@@ -467,6 +490,19 @@ fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
         return bash_policy_deny(
             "write-targets sandbox run requires at least one write target, create target, or write dir",
         );
+    }
+    if invocation.fs == "git" {
+        if !invocation.write_targets.is_empty()
+            || !invocation.create_targets.is_empty()
+            || !invocation.write_dirs.is_empty()
+        {
+            return bash_policy_deny(
+                "git profile manages repo writes automatically and rejects explicit write targets, create targets, and write dirs",
+            );
+        }
+        if let Err(reason) = validate_git_profile_inner_command(&invocation.command) {
+            return bash_policy_deny(reason);
+        }
     }
 
     HookOutcome::Allow
@@ -543,7 +579,8 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 
 fn bash_policy_guidance() -> String {
     format!(
-        "Use the `stateful-command-policy` skill before Bash. Raw Bash is denied; for read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`; for approved repo-external writes use `{} external-run request --purpose '<purpose>' --write-dir <dir> --command '<cmd>'`.",
+        "Use the `stateful-command-policy` skill before Bash. Raw Bash is denied; for read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`; for git operations use `{} sandbox run --fs git --network enabled --command 'git <args>'`; for approved repo-external writes use `{} external-run request --purpose '<purpose>' --write-dir <dir> --command '<cmd>'`.",
+        trusted_stateful_binary_for_guidance(),
         trusted_stateful_binary_for_guidance(),
         trusted_stateful_binary_for_guidance()
     )
@@ -794,7 +831,7 @@ fn parse_stateful_control_invocation(command: &str) -> Result<StatefulControlInv
     }
     if words.len() < 2 || !is_stateful_control_command(&words[1]) {
         return Err(
-            "Bash commands must use stateful sandbox run, stateful external-run, or a trusted stateful commit, push, or server command"
+            "Bash commands must use stateful sandbox run, stateful external-run, or a trusted stateful server command"
                 .to_string(),
         );
     }
@@ -812,7 +849,12 @@ fn command_mentions_stateful_control(command: &str) -> bool {
 }
 
 fn is_stateful_control_command(command: &str) -> bool {
-    matches!(command, "commit" | "push" | "server")
+    matches!(command, "server")
+}
+
+fn validate_git_profile_inner_command(command: &str) -> Result<(), String> {
+    parse_git_profile_command(command)?;
+    Ok(())
 }
 
 fn parse_sandbox_run_arg_value(
@@ -1410,12 +1452,16 @@ fn normalize_path(path: PathBuf) -> PathBuf {
 
 #[derive(Debug, Deserialize)]
 struct PreToolUseInput {
-    session_id: String,
-    #[serde(default)]
-    thread_id: Option<String>,
+    #[serde(flatten)]
+    runtime: RuntimeHookInput,
     tool_name: String,
     #[serde(default)]
     tool_input: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeHookInput {
+    session_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1426,7 +1472,7 @@ struct HookCwdInput {
 
 impl PreToolUseInput {
     fn stateful_session_id(&self) -> &str {
-        codex_thread_id_or_session_id(self.thread_id.as_deref(), &self.session_id)
+        runtime_adapter().stateful_session_id(&self.runtime)
     }
 
     fn command(&self) -> Option<&str> {
@@ -1451,23 +1497,20 @@ struct AuthorizeDecision {
 
 #[derive(Debug, Deserialize)]
 struct SessionStartInput {
-    session_id: String,
-    #[serde(default)]
-    thread_id: Option<String>,
+    #[serde(flatten)]
+    runtime: RuntimeHookInput,
 }
 
 #[derive(Debug, Deserialize)]
 struct SessionEventInput {
-    session_id: String,
-    #[serde(default)]
-    thread_id: Option<String>,
+    #[serde(flatten)]
+    runtime: RuntimeHookInput,
 }
 
 #[derive(Debug, Deserialize)]
 struct UserPromptSubmitInput {
-    session_id: String,
-    #[serde(default)]
-    thread_id: Option<String>,
+    #[serde(flatten)]
+    runtime: RuntimeHookInput,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1475,26 +1518,20 @@ struct ContextRenderResponse {
     prompt_text: String,
 }
 
-fn codex_thread_id_or_session_id<'a>(thread_id: Option<&'a str>, session_id: &'a str) -> &'a str {
-    thread_id
-        .filter(|thread_id| !thread_id.is_empty())
-        .unwrap_or(session_id)
-}
-
 impl SessionStartInput {
     fn stateful_session_id(&self) -> &str {
-        codex_thread_id_or_session_id(self.thread_id.as_deref(), &self.session_id)
+        runtime_adapter().stateful_session_id(&self.runtime)
     }
 }
 
 impl SessionEventInput {
     fn stateful_session_id(&self) -> &str {
-        codex_thread_id_or_session_id(self.thread_id.as_deref(), &self.session_id)
+        runtime_adapter().stateful_session_id(&self.runtime)
     }
 }
 
 impl UserPromptSubmitInput {
     fn stateful_session_id(&self) -> &str {
-        codex_thread_id_or_session_id(self.thread_id.as_deref(), &self.session_id)
+        runtime_adapter().stateful_session_id(&self.runtime)
     }
 }

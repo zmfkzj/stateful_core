@@ -22,6 +22,12 @@ const GLOBAL_CODEX_BLOCK_END: &str = "# /stateful-core-global-install";
 pub struct InstallOptions {
     pub yes: bool,
     pub paths: GlobalPaths,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexInstallOptions {
+    pub yes: bool,
+    pub paths: GlobalPaths,
     pub codex_config_path: PathBuf,
     pub binary_path: String,
 }
@@ -36,9 +42,8 @@ pub fn plan_global_install(options: &InstallOptions) -> anyhow::Result<InstallPl
     let mode = if options.yes { "apply" } else { "dry-run" };
     Ok(InstallPlan {
         summary: format!(
-            "{mode}: install stateful global files under {} and merge Codex config {}",
-            options.paths.home.display(),
-            options.codex_config_path.display()
+            "{mode}: install stateful global files under {}",
+            options.paths.home.display()
         ),
         files: vec![
             options.paths.home.clone(),
@@ -46,8 +51,6 @@ pub fn plan_global_install(options: &InstallOptions) -> anyhow::Result<InstallPl
             options.paths.repos_dir.clone(),
             options.paths.config_yml.clone(),
             options.paths.state_db.clone(),
-            options.codex_config_path.clone(),
-            global_command_policy_skill_path(&options.codex_config_path),
         ],
     })
 }
@@ -57,8 +60,6 @@ pub fn apply_global_install(options: InstallOptions) -> anyhow::Result<InstallPl
     if !options.yes {
         return Ok(plan);
     }
-    let codex_update = plan_codex_config_update(&options.codex_config_path, &options.binary_path)?;
-
     fs::create_dir_all(&options.paths.home).with_context(|| {
         format!(
             "failed to create stateful home {}",
@@ -89,6 +90,42 @@ pub fn apply_global_install(options: InstallOptions) -> anyhow::Result<InstallPl
         )
     })?;
 
+    plan.summary = format!(
+        "apply: installed stateful global files under {}",
+        options.paths.home.display()
+    );
+
+    Ok(plan)
+}
+
+pub fn plan_codex_install(options: &CodexInstallOptions) -> anyhow::Result<InstallPlan> {
+    let mode = if options.yes { "apply" } else { "dry-run" };
+    let mut plan = plan_global_install(&InstallOptions {
+        yes: options.yes,
+        paths: options.paths.clone(),
+    })?;
+    plan.summary = format!(
+        "{mode}: install stateful global files under {} and merge Codex config {}",
+        options.paths.home.display(),
+        options.codex_config_path.display()
+    );
+    plan.files.push(options.codex_config_path.clone());
+    plan.files
+        .push(global_command_policy_skill_path(&options.codex_config_path));
+    Ok(plan)
+}
+
+pub fn apply_codex_install(options: CodexInstallOptions) -> anyhow::Result<InstallPlan> {
+    let mut plan = plan_codex_install(&options)?;
+    if !options.yes {
+        return Ok(plan);
+    }
+    let codex_update = plan_codex_config_update(&options.codex_config_path, &options.binary_path)?;
+
+    apply_global_install(InstallOptions {
+        yes: true,
+        paths: options.paths.clone(),
+    })?;
     write_codex_config_update(&options.codex_config_path, codex_update)?;
     write_global_command_policy_skill(&options.codex_config_path)?;
     plan.summary = format!(
@@ -742,7 +779,7 @@ fn global_codex_config_block(
 {features_section}[mcp_servers.stateful]
 command = {}
 args = ["mcp", "serve"]
-env_vars = ["STATEFUL_CODEX_RUN_ID", "CODEX_THREAD_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
+env_vars = ["STATEFUL_SESSION_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
 startup_timeout_sec = 20
 
 [[hooks.SessionStart]]

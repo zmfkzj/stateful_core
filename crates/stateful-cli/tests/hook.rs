@@ -11,10 +11,9 @@ use std::{
 };
 
 use stateful_cli::{
-    CODEX_THREAD_ID_ENV, CurrentSession, GlobalPaths, HookOutcome, STATEFUL_CODEX_RUN_ID_ENV,
-    ServerRuntime, enable_repo, handle_post_tool_use_in_repo, handle_pre_tool_use,
-    handle_pre_tool_use_in_repo, read_current_session_file_for_codex_run,
-    write_global_runtime_file,
+    CurrentSession, GlobalPaths, HookOutcome, STATEFUL_SESSION_ID_ENV, ServerRuntime, enable_repo,
+    handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
+    read_current_session_file_for_session, write_global_runtime_file,
 };
 
 fn assert_raw_bash_denied_with_sandbox_run_guidance(outcome: HookOutcome) {
@@ -52,9 +51,9 @@ fn read_legacy_current_session_file(repo_root: &Path) -> CurrentSession {
 }
 
 #[test]
-fn session_start_records_current_session_under_codex_thread_id() {
+fn session_start_records_current_session_under_runtime_session_id() {
     let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-session-start-thread-id-test-{}",
+        "stateful-hook-session-start-session-id-test-{}",
         std::process::id()
     ));
     if temp_root.exists() {
@@ -68,8 +67,9 @@ fn session_start_records_current_session_under_codex_thread_id() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "codex-root-1",
-      "thread_id": "codex-thread-1",
+      "session_id": "claude-session-1",
+      "thread_id": "legacy-thread-1",
+      "transcript_path": "/tmp/transcript.jsonl",
       "cwd": "/repo",
       "hook_event_name": "SessionStart"
     }"#;
@@ -83,19 +83,19 @@ fn session_start_records_current_session_under_codex_thread_id() {
     );
     let request = rx.recv().expect("session register request should arrive");
     assert!(request.contains("POST /v1/session/register HTTP/1.1"));
-    assert!(request.contains("\"session_id\":\"codex-thread-1\""));
-    let session = read_current_session_file_for_codex_run(&repo_root, "codex-thread-1")
-        .expect("current session should be keyed by Codex thread id");
-    assert_eq!(session.session_id, "codex-thread-1");
+    assert!(request.contains("\"session_id\":\"claude-session-1\""));
+    let session = read_current_session_file_for_session(&repo_root, "claude-session-1")
+        .expect("current session should be keyed by runtime session id");
+    assert_eq!(session.session_id, "claude-session-1");
     assert_eq!(session.workspace_id, "w1");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn pre_tool_use_authorization_uses_codex_thread_id() {
+fn pre_tool_use_authorization_uses_runtime_session_id() {
     let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-pre-tool-thread-id-test-{}",
+        "stateful-hook-pre-tool-session-id-test-{}",
         std::process::id()
     ));
     if temp_root.exists() {
@@ -111,8 +111,9 @@ fn pre_tool_use_authorization_uses_codex_thread_id() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "codex-root-1",
-      "thread_id": "codex-thread-1",
+      "session_id": "claude-session-1",
+      "thread_id": "legacy-thread-1",
+      "transcript_path": "/tmp/transcript.jsonl",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -126,10 +127,7 @@ fn pre_tool_use_authorization_uses_codex_thread_id() {
         &paths,
         &["hook", "pre-tool-use"],
         input,
-        &[
-            (STATEFUL_CODEX_RUN_ID_ENV, "codex-root-1"),
-            (CODEX_THREAD_ID_ENV, "codex-thread-1"),
-        ],
+        &[(STATEFUL_SESSION_ID_ENV, "claude-session-1")],
     );
 
     assert!(
@@ -139,7 +137,7 @@ fn pre_tool_use_authorization_uses_codex_thread_id() {
     );
     let request = rx.recv().expect("captured request should arrive");
     let body = request_json_body(&request);
-    assert_eq!(body["session"]["session_id"], "codex-thread-1");
+    assert_eq!(body["session"]["session_id"], "claude-session-1");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -222,6 +220,85 @@ fn pre_tool_use_allows_canonical_sandbox_run_write_targets() {
 }
 
 #[test]
+fn pre_tool_use_allows_sandbox_run_git_profile_for_git_commands() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs git --network enabled --timeout-seconds 30 --command 'git fetch --all'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_run_git_profile_dispatch_surfaces() {
+    let stateful = trusted_stateful_path();
+    let cases = [
+        (
+            "alias config",
+            format!(
+                "{stateful} sandbox run --fs git --network enabled --command \"git -c alias.x='!curl https://example.test' x\""
+            ),
+        ),
+        (
+            "config env",
+            format!(
+                "{stateful} sandbox run --fs git --network enabled --command 'git --config-env=alias.x=STATEFUL_ALIAS x'"
+            ),
+        ),
+        (
+            "submodule foreach",
+            format!(
+                "{stateful} sandbox run --fs git --network enabled --command \"git submodule foreach 'printf nope'\""
+            ),
+        ),
+        (
+            "rebase exec",
+            format!(
+                "{stateful} sandbox run --fs git --network enabled --command \"git rebase --exec 'printf nope'\""
+            ),
+        ),
+        (
+            "grep pager",
+            format!(
+                "{stateful} sandbox run --fs git --network enabled --command \"git grep --open-files-in-pager='sh -c id' TODO\""
+            ),
+        ),
+    ];
+
+    for (name, command) in cases {
+        let input = serde_json::json!({
+            "session_id": "s1",
+            "cwd": "/repo",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": command
+            }
+        })
+        .to_string();
+
+        let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+        let HookOutcome::Deny { reason } = outcome else {
+            panic!("{name}: expected Bash denial");
+        };
+        assert!(
+            reason.contains("git profile"),
+            "{name}: reason `{reason}` should mention git profile"
+        );
+    }
+}
+
+#[test]
 fn pre_tool_use_allows_sandbox_run_write_dir() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
@@ -300,10 +377,11 @@ fn pre_tool_use_allows_external_run_approve_and_run() {
 }
 
 #[test]
-fn pre_tool_use_allows_trusted_stateful_commit_and_push_wrappers() {
+fn pre_tool_use_denies_trusted_stateful_git_wrappers() {
     let stateful = trusted_stateful_path();
     let cases = [
         format!("{stateful} commit -m docs-update -- README.md"),
+        format!("{stateful} pull"),
         format!("{stateful} push origin dev"),
     ];
 
@@ -321,7 +399,7 @@ fn pre_tool_use_allows_trusted_stateful_commit_and_push_wrappers() {
 
         let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-        assert_eq!(outcome, HookOutcome::Allow);
+        assert_bash_denial_mentions(outcome, "stateful sandbox run");
     }
 }
 
@@ -454,7 +532,26 @@ fn pre_tool_use_denies_invalid_nested_codex_benchmark_sandbox_wrappers() {
             format!(
                 "{stateful} sandbox run --fs relaxed --network enabled --write-dir target --command 'cargo test'"
             ),
-            "supports only read-only and write-targets profiles",
+            "supports only read-only, write-targets, and git profiles",
+        ),
+        (
+            "git profile with non-git command",
+            format!("{stateful} sandbox run --fs git --network enabled --command 'rm README.md'"),
+            "git profile requires a single git command",
+        ),
+        (
+            "git profile with shell control in inner command",
+            format!(
+                "{stateful} sandbox run --fs git --network enabled --command 'git status; rm README.md'"
+            ),
+            "git profile requires a single git command",
+        ),
+        (
+            "git profile with explicit write target",
+            format!(
+                "{stateful} sandbox run --fs git --network enabled --write-target README.md --command 'git status'"
+            ),
+            "git profile manages repo writes automatically",
         ),
     ];
 
@@ -532,7 +629,7 @@ fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
         (
             "invalid fs",
             format!("{stateful} sandbox run --fs read-write --command 'rg auth src'"),
-            "supports only read-only and write-targets profiles",
+            "supports only read-only, write-targets, and git profiles",
         ),
         (
             "invalid network",
@@ -747,9 +844,9 @@ fn pre_tool_use_in_repo_records_current_session_for_mcp() {
 }
 
 #[test]
-fn pre_tool_use_records_current_session_for_codex_run() {
+fn pre_tool_use_records_current_session_for_stateful_session_id() {
     let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-codex-run-session-test-{}",
+        "stateful-hook-stateful-session-test-{}",
         std::process::id()
     ));
     if temp_root.exists() {
@@ -779,7 +876,7 @@ fn pre_tool_use_records_current_session_for_codex_run() {
         &paths,
         &["hook", "pre-tool-use"],
         input,
-        &[(STATEFUL_CODEX_RUN_ID_ENV, "s-current")],
+        &[(STATEFUL_SESSION_ID_ENV, "s-current")],
     );
 
     assert!(
@@ -787,7 +884,7 @@ fn pre_tool_use_records_current_session_for_codex_run() {
         "stateful hook failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let session = read_current_session_file_for_codex_run(&repo_root, "s-current")
+    let session = read_current_session_file_for_session(&repo_root, "s-current")
         .expect("session-bound current session should read");
     assert_eq!(session.session_id, "s-current");
     assert_eq!(session.workspace_id, "w1");

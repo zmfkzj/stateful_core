@@ -13,9 +13,9 @@ use stateful_cli::{
     IntentRequestArgs, ServerRuntime, cancel_intent_via_http, claim_intent_via_http,
     declare_intent_via_http, discover_runtime, discover_runtime_with_global, get_json,
     global_state_db_path, post_json, read_current_session_file,
-    read_current_session_file_for_codex_run, request_intent_via_http, state_db_path,
-    write_current_session_file, write_current_session_file_for_codex_run,
-    write_global_runtime_file, write_runtime_file,
+    read_current_session_file_for_session, request_intent_via_http, state_db_path,
+    write_current_session_file, write_current_session_file_for_session, write_global_runtime_file,
+    write_runtime_file,
 };
 
 const CURRENT_SESSION_CHILD_CASE: &str = "STATEFUL_RUNTIME_CURRENT_SESSION_CHILD_CASE";
@@ -67,6 +67,18 @@ fn current_session_file_child_probe() {
             assert_eq!(session.session_id, "thread-child");
             assert_eq!(session.workspace_id, "w1");
         }
+        "read_uses_legacy_session" => {
+            let session =
+                read_current_session_file(&repo_root).expect("current session should read");
+            assert_eq!(session.session_id, "legacy-session");
+            assert_eq!(session.workspace_id, "w1");
+        }
+        "read_uses_stateful_session_id" => {
+            let session =
+                read_current_session_file(&repo_root).expect("current session should read");
+            assert_eq!(session.session_id, "session-child");
+            assert_eq!(session.workspace_id, "w1");
+        }
         "read_symlink_error" => {
             let error =
                 read_current_session_file(&repo_root).expect_err("symlinked session should fail");
@@ -91,9 +103,9 @@ fn current_session_file_child_probe() {
 }
 
 #[test]
-fn current_session_file_prefers_codex_thread_id_over_run_id() {
+fn current_session_file_prefers_stateful_session_id_over_codex_aliases() {
     let temp_root = std::env::temp_dir().join(format!(
-        "stateful-current-session-thread-id-test-{}",
+        "stateful-current-session-generic-env-test-{}",
         std::process::id()
     ));
     if temp_root.exists() {
@@ -101,13 +113,65 @@ fn current_session_file_prefers_codex_thread_id_over_run_id() {
     }
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
 
-    write_current_session_file_for_codex_run(
+    write_current_session_file(&temp_root, &CurrentSession::new("legacy-session", "w1"))
+        .expect("legacy current session should write");
+    write_current_session_file_for_session(
+        &temp_root,
+        "session-child",
+        &CurrentSession::new("session-child", "w1"),
+    )
+    .expect("generic session-bound current session should write");
+    write_current_session_file_for_session(
+        &temp_root,
+        "thread-child",
+        &CurrentSession::new("thread-child", "w1"),
+    )
+    .expect("codex thread-bound current session should write");
+
+    let output = Command::new(std::env::current_exe().expect("current test binary path"))
+        .arg("current_session_file_child_probe")
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env_clear()
+        .env(CURRENT_SESSION_CHILD_CASE, "read_uses_stateful_session_id")
+        .env(CURRENT_SESSION_CHILD_ROOT, &temp_root)
+        .env("STATEFUL_SESSION_ID", "session-child")
+        .env("STATEFUL_CODEX_RUN_ID", "root-session")
+        .env("CODEX_THREAD_ID", "thread-child")
+        .output()
+        .expect("current session child test should run");
+
+    assert!(
+        output.status.success(),
+        "current session child failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn current_session_file_ignores_codex_aliases_without_stateful_session_id() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-current-session-ignore-codex-env-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    write_current_session_file(&temp_root, &CurrentSession::new("legacy-session", "w1"))
+        .expect("legacy current session should write");
+    write_current_session_file_for_session(
         &temp_root,
         "thread-child",
         &CurrentSession::new("thread-child", "w1"),
     )
     .expect("thread-bound current session should write");
-    write_current_session_file_for_codex_run(
+    write_current_session_file_for_session(
         &temp_root,
         "root-session",
         &CurrentSession::new("root-session", "w1"),
@@ -120,7 +184,7 @@ fn current_session_file_prefers_codex_thread_id_over_run_id() {
         .arg("--exact")
         .arg("--nocapture")
         .env_clear()
-        .env(CURRENT_SESSION_CHILD_CASE, "read_prefers_codex_thread_id")
+        .env(CURRENT_SESSION_CHILD_CASE, "read_uses_legacy_session")
         .env(CURRENT_SESSION_CHILD_ROOT, &temp_root)
         .env("STATEFUL_CODEX_RUN_ID", "root-session")
         .env("CODEX_THREAD_ID", "thread-child")
@@ -499,11 +563,9 @@ fn current_session_file_refuses_non_regular_file_before_writing() {
 }
 
 #[test]
-fn codex_run_session_file_is_isolated_from_legacy_current_session() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-codex-run-session-test-{}",
-        std::process::id()
-    ));
+fn session_file_is_isolated_from_legacy_current_session() {
+    let temp_root =
+        std::env::temp_dir().join(format!("stateful-session-file-test-{}", std::process::id()));
     if temp_root.exists() {
         fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
     }
@@ -511,7 +573,7 @@ fn codex_run_session_file_is_isolated_from_legacy_current_session() {
 
     write_current_session_file(&temp_root, &CurrentSession::new("s-legacy", "w1"))
         .expect("legacy current session should write");
-    write_current_session_file_for_codex_run(
+    write_current_session_file_for_session(
         &temp_root,
         "s-run-a",
         &CurrentSession::new("s-run-a", "w1"),
@@ -519,7 +581,7 @@ fn codex_run_session_file_is_isolated_from_legacy_current_session() {
     .expect("session-bound current session should write");
 
     let session =
-        read_current_session_file_for_codex_run(&temp_root, "s-run-a").expect("run session reads");
+        read_current_session_file_for_session(&temp_root, "s-run-a").expect("run session reads");
 
     assert_eq!(session.session_id, "s-run-a");
     assert_eq!(session.workspace_id, "w1");
@@ -528,9 +590,9 @@ fn codex_run_session_file_is_isolated_from_legacy_current_session() {
 }
 
 #[test]
-fn codex_run_session_file_refuses_to_rebind_to_different_stateful_session() {
+fn session_file_refuses_to_rebind_to_different_stateful_session() {
     let temp_root = std::env::temp_dir().join(format!(
-        "stateful-codex-run-session-rebind-test-{}",
+        "stateful-session-file-rebind-test-{}",
         std::process::id()
     ));
     if temp_root.exists() {
@@ -538,19 +600,19 @@ fn codex_run_session_file_refuses_to_rebind_to_different_stateful_session() {
     }
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
 
-    write_current_session_file_for_codex_run(
+    write_current_session_file_for_session(
         &temp_root,
         "s-run-a",
         &CurrentSession::new("s-run-a", "w1"),
     )
     .expect("session-bound current session should write");
 
-    let error = write_current_session_file_for_codex_run(
+    let error = write_current_session_file_for_session(
         &temp_root,
         "s-run-a",
         &CurrentSession::new("s-run-a", "w2"),
     )
-    .expect_err("same codex run should not rebind to a different Stateful session");
+    .expect_err("same session file should not rebind to a different Stateful session");
 
     assert!(error.to_string().contains("already bound"));
 

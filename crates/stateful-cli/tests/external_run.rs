@@ -65,6 +65,105 @@ fn external_run_request_returns_copy_paste_approval_guidance() {
 }
 
 #[test]
+fn external_run_request_guidance_summarizes_approval_inputs_by_flag() {
+    let root = temp_root("guidance-summary");
+    let repo_root = root.join("repo");
+    let external_dir = root.join("bin");
+    let existing_file = external_dir.join("stateful");
+    let created_file = external_dir.join("stateful.new");
+    let paths = GlobalPaths::new(root.join("home"));
+    fs::create_dir_all(&repo_root).expect("repo root should be created");
+    fs::create_dir_all(&external_dir).expect("external dir should be created");
+    fs::write(&existing_file, "old").expect("external file should be created");
+
+    let command = format!(
+        "install -m 755 target/release/stateful {}",
+        shell_quote_path(&created_file)
+    );
+    let approval = request_external_run(ExternalRunRequest {
+        repo_root,
+        paths,
+        purpose: "install rebuilt binaries".to_string(),
+        command: command.clone(),
+        write_targets: vec![existing_file.to_string_lossy().to_string()],
+        create_targets: vec![created_file.to_string_lossy().to_string()],
+        write_dirs: vec![external_dir.to_string_lossy().to_string()],
+        network: SandboxNetworkPolicy::Disabled,
+        timeout_seconds: Some(10),
+    })
+    .expect("request should be recorded");
+
+    assert!(approval.guidance.contains("External run request details:"));
+    assert!(
+        approval
+            .guidance
+            .contains("--purpose: \"install rebuilt binaries\"")
+    );
+    assert!(
+        approval
+            .guidance
+            .contains(&format!("--write-target: {}", existing_file.display()))
+    );
+    assert!(
+        approval
+            .guidance
+            .contains(&format!("--create-target: {}", created_file.display()))
+    );
+    assert!(
+        approval
+            .guidance
+            .contains(&format!("--write-dir: {}", external_dir.display()))
+    );
+    assert!(
+        approval
+            .guidance
+            .contains(&format!("--command: {:?}", command))
+    );
+}
+
+#[test]
+fn external_run_request_guidance_escapes_multiline_approval_inputs() {
+    let root = temp_root("guidance-escaped");
+    let repo_root = root.join("repo");
+    let external_dir = root.join("bin");
+    let paths = GlobalPaths::new(root.join("home"));
+    fs::create_dir_all(&repo_root).expect("repo root should be created");
+    fs::create_dir_all(&external_dir).expect("external dir should be created");
+
+    let approval = request_external_run(ExternalRunRequest {
+        repo_root,
+        paths,
+        purpose: "install\n--write-dir: /spoofed".to_string(),
+        command: "printf ok\n--purpose: spoofed".to_string(),
+        write_targets: Vec::new(),
+        create_targets: Vec::new(),
+        write_dirs: vec![external_dir.to_string_lossy().to_string()],
+        network: SandboxNetworkPolicy::Disabled,
+        timeout_seconds: Some(10),
+    })
+    .expect("request should be recorded");
+
+    assert!(
+        approval
+            .guidance
+            .contains("--purpose: \"install\\n--write-dir: /spoofed\"")
+    );
+    assert!(
+        approval
+            .guidance
+            .contains("--command: \"printf ok\\n--purpose: spoofed\"")
+    );
+    assert!(
+        !approval.guidance.contains("install\n--write-dir: /spoofed"),
+        "guidance should not render raw multiline purpose values"
+    );
+    assert!(
+        !approval.guidance.contains("printf ok\n--purpose: spoofed"),
+        "guidance should not render raw multiline command values"
+    );
+}
+
+#[test]
 fn approved_external_run_can_write_external_directory() {
     if std::env::var_os("STATEFUL_SANDBOX_RUN_ACTIVE").is_some() {
         return;

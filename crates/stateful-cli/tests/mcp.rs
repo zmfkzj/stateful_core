@@ -10,7 +10,7 @@ use std::{
 
 use stateful_cli::{
     CurrentSession, GlobalPaths, ServerRuntime, enable_repo, handle_mcp_jsonrpc_in_repo,
-    serve_mcp_stdio_in_repo, write_current_session_file, write_current_session_file_for_codex_run,
+    serve_mcp_stdio_in_repo, write_current_session_file, write_current_session_file_for_session,
     write_global_runtime_file,
 };
 
@@ -598,13 +598,13 @@ fn mcp_context_render_defaults_to_current_session_workspace() {
         .expect("repo identity should resolve");
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok","prompt_text":""}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    write_current_session_file_for_codex_run(&repo_root, "s1", &CurrentSession::new("s1", "w1"))
+    write_current_session_file_for_session(&repo_root, "s1", &CurrentSession::new("s1", "w1"))
         .expect("session-bound current session should write");
 
     let response = run_mcp_jsonrpc_in_repo_with_env(
         &repo_root,
         &paths,
-        &[("STATEFUL_CODEX_RUN_ID", "s1")],
+        &[("STATEFUL_SESSION_ID", "s1")],
         r#"{
           "jsonrpc":"2.0",
           "id":2,
@@ -648,13 +648,13 @@ fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    write_current_session_file_for_codex_run(&repo_root, "s1", &CurrentSession::new("s1", "w1"))
+    write_current_session_file_for_session(&repo_root, "s1", &CurrentSession::new("s1", "w1"))
         .expect("session-bound current session should write");
 
     let response = run_mcp_jsonrpc_in_repo_with_env(
         &repo_root,
         &paths,
-        &[("STATEFUL_CODEX_RUN_ID", "s1")],
+        &[("STATEFUL_SESSION_ID", "s1")],
         r#"{
           "jsonrpc":"2.0",
           "id":2,
@@ -856,7 +856,7 @@ fn mcp_intent_declare_defaults_to_current_hook_session() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    write_current_session_file_for_codex_run(
+    write_current_session_file_for_session(
         &repo_root,
         "s-current",
         &CurrentSession::new("s-current", "w1"),
@@ -866,7 +866,7 @@ fn mcp_intent_declare_defaults_to_current_hook_session() {
     let response = run_mcp_jsonrpc_in_repo_with_env(
         &repo_root,
         &paths,
-        &[("STATEFUL_CODEX_RUN_ID", "s-current")],
+        &[("STATEFUL_SESSION_ID", "s-current")],
         r#"{
           "jsonrpc":"2.0",
           "id":3,
@@ -909,7 +909,7 @@ fn mcp_intent_declare_refuses_session_id_that_differs_from_current_session() {
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
-    write_current_session_file_for_codex_run(
+    write_current_session_file_for_session(
         &repo_root,
         "s-current",
         &CurrentSession::new("s-current", "w1"),
@@ -919,7 +919,7 @@ fn mcp_intent_declare_refuses_session_id_that_differs_from_current_session() {
     let response = run_mcp_jsonrpc_in_repo_with_env(
         &repo_root,
         &paths,
-        &[("STATEFUL_CODEX_RUN_ID", "s-current")],
+        &[("STATEFUL_SESSION_ID", "s-current")],
         r#"{
           "jsonrpc":"2.0",
           "id":4,
@@ -951,15 +951,15 @@ fn mcp_intent_declare_refuses_session_id_that_differs_from_current_session() {
 }
 
 #[test]
-fn mcp_lease_acquire_defaults_to_codex_run_bound_session_over_legacy() {
-    let temp_root = temp_root("stateful-mcp-codex-run-lease-session");
+fn mcp_lease_acquire_defaults_to_stateful_session_bound_file_over_legacy() {
+    let temp_root = temp_root("stateful-mcp-session-lease-session");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    write_current_session_file_for_codex_run(
+    write_current_session_file_for_session(
         &repo_root,
         "session-a",
         &CurrentSession::new("session-a", "workspace-a"),
@@ -973,7 +973,7 @@ fn mcp_lease_acquire_defaults_to_codex_run_bound_session_over_legacy() {
     let response = run_mcp_jsonrpc_in_repo_with_env(
         &repo_root,
         &paths,
-        &[("STATEFUL_CODEX_RUN_ID", "session-a")],
+        &[("STATEFUL_SESSION_ID", "session-a")],
         r#"{
           "jsonrpc":"2.0",
           "id":9,
@@ -1005,15 +1005,15 @@ fn mcp_lease_acquire_defaults_to_codex_run_bound_session_over_legacy() {
 }
 
 #[test]
-fn mcp_lease_acquire_rejects_legacy_session_when_codex_run_is_bound_elsewhere() {
-    let temp_root = temp_root("stateful-mcp-codex-run-lease-mismatch");
+fn mcp_lease_acquire_rejects_legacy_session_when_stateful_session_is_bound_elsewhere() {
+    let temp_root = temp_root("stateful-mcp-session-lease-mismatch");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    write_current_session_file_for_codex_run(
+    write_current_session_file_for_session(
         &repo_root,
         "session-a",
         &CurrentSession::new("session-a", "workspace-a"),
@@ -1027,7 +1027,7 @@ fn mcp_lease_acquire_rejects_legacy_session_when_codex_run_is_bound_elsewhere() 
     let response = run_mcp_jsonrpc_in_repo_with_env(
         &repo_root,
         &paths,
-        &[("STATEFUL_CODEX_RUN_ID", "session-a")],
+        &[("STATEFUL_SESSION_ID", "session-a")],
         r#"{
           "jsonrpc":"2.0",
           "id":10,
@@ -1064,8 +1064,8 @@ fn mcp_lease_acquire_rejects_legacy_session_when_codex_run_is_bound_elsewhere() 
 }
 
 #[test]
-fn mcp_lease_acquire_with_codex_run_requires_run_bound_session_file() {
-    let temp_root = temp_root("stateful-mcp-codex-run-missing-session");
+fn mcp_lease_acquire_with_stateful_session_id_requires_session_bound_file() {
+    let temp_root = temp_root("stateful-mcp-session-missing-session");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -1080,7 +1080,7 @@ fn mcp_lease_acquire_with_codex_run_requires_run_bound_session_file() {
     let response = run_mcp_jsonrpc_in_repo_with_env(
         &repo_root,
         &paths,
-        &[("STATEFUL_CODEX_RUN_ID", "missing-session")],
+        &[("STATEFUL_SESSION_ID", "missing-session")],
         r#"{
           "jsonrpc":"2.0",
           "id":11,
@@ -1113,25 +1113,38 @@ fn mcp_lease_acquire_with_codex_run_requires_run_bound_session_file() {
 }
 
 #[test]
-fn mcp_lease_acquire_without_stateful_run_id_uses_codex_thread_bound_session() {
-    let temp_root = temp_root("stateful-mcp-codex-thread-session");
+fn mcp_lease_acquire_ignores_codex_env_aliases_without_stateful_session_id() {
+    let temp_root = temp_root("stateful-mcp-ignore-codex-session-aliases");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    write_current_session_file_for_codex_run(
+    write_current_session_file_for_session(
         &repo_root,
         "thread-a",
         &CurrentSession::new("thread-a", "workspace-a"),
     )
     .expect("session-bound current session should write");
+    write_current_session_file_for_session(
+        &repo_root,
+        "run-a",
+        &CurrentSession::new("run-a", "workspace-run"),
+    )
+    .expect("run-bound current session should write");
+    write_legacy_current_session_for_test(
+        &repo_root,
+        &CurrentSession::new("legacy-a", "workspace-legacy"),
+    );
 
     let response = run_mcp_jsonrpc_in_repo_with_env(
         &repo_root,
         &paths,
-        &[("CODEX_THREAD_ID", "thread-a")],
+        &[
+            ("STATEFUL_CODEX_RUN_ID", "run-a"),
+            ("CODEX_THREAD_ID", "thread-a"),
+        ],
         r#"{
           "jsonrpc":"2.0",
           "id":12,
@@ -1145,33 +1158,34 @@ fn mcp_lease_acquire_without_stateful_run_id_uses_codex_thread_bound_session() {
         }"#,
     );
 
-    let request = rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("lease acquire request should arrive");
-    assert!(request.contains("POST /v1/lease/acquire HTTP/1.1"));
-    let body = request_json_body(&request);
-    assert_eq!(body["session_id"], "thread-a");
-    assert_eq!(body["workspace_id"], "workspace-a");
-    assert_eq!(body["path"], "src/auth.ts");
-
     let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
     assert_eq!(json["jsonrpc"], "2.0");
     assert_eq!(json["id"], 12);
-    assert_eq!(json["result"]["isError"], false);
+    assert_eq!(json["result"]["isError"], true);
+    assert!(
+        json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("has no matching session-bound file")
+    );
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "Codex env aliases should be ignored before HTTP"
+    );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn mcp_lease_acquire_without_codex_env_uses_verified_current_hook_session() {
-    let temp_root = temp_root("stateful-mcp-codex-env-missing-current-session");
+fn mcp_lease_acquire_without_stateful_session_id_uses_verified_legacy_session() {
+    let temp_root = temp_root("stateful-mcp-session-env-missing-current-session");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    write_current_session_file_for_codex_run(
+    write_current_session_file_for_session(
         &repo_root,
         "session-a",
         &CurrentSession::new("session-a", "workspace-a"),
@@ -1216,8 +1230,8 @@ fn mcp_lease_acquire_without_codex_env_uses_verified_current_hook_session() {
 }
 
 #[test]
-fn mcp_lease_acquire_without_codex_identifiers_rejects_legacy_current_session_before_http() {
-    let temp_root = temp_root("stateful-mcp-codex-run-required");
+fn mcp_lease_acquire_without_stateful_session_id_rejects_unverified_legacy_session_before_http() {
+    let temp_root = temp_root("stateful-mcp-session-required");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -1257,7 +1271,7 @@ fn mcp_lease_acquire_without_codex_identifiers_rejects_legacy_current_session_be
     );
     assert!(
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
-        "missing Codex identifiers should fail before HTTP"
+        "unverified legacy session should fail before HTTP"
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -1272,13 +1286,13 @@ fn mcp_tools_call_for_intent_claim_posts_to_state_server() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    write_current_session_file_for_codex_run(&repo_root, "s1", &CurrentSession::new("s1", "w1"))
+    write_current_session_file_for_session(&repo_root, "s1", &CurrentSession::new("s1", "w1"))
         .expect("session-bound current session should write");
 
     let response = run_mcp_jsonrpc_in_repo_with_env(
         &repo_root,
         &paths,
-        &[("STATEFUL_CODEX_RUN_ID", "s1")],
+        &[("STATEFUL_SESSION_ID", "s1")],
         r#"{
           "jsonrpc":"2.0",
           "id":5,
@@ -1328,13 +1342,13 @@ fn mcp_tools_call_for_intent_request_posts_to_state_server() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    write_current_session_file_for_codex_run(&repo_root, "s1", &CurrentSession::new("s1", "w1"))
+    write_current_session_file_for_session(&repo_root, "s1", &CurrentSession::new("s1", "w1"))
         .expect("session-bound current session should write");
 
     let response = run_mcp_jsonrpc_in_repo_with_env(
         &repo_root,
         &paths,
-        &[("STATEFUL_CODEX_RUN_ID", "s1")],
+        &[("STATEFUL_SESSION_ID", "s1")],
         r#"{
           "jsonrpc":"2.0",
           "id":6,
@@ -1390,13 +1404,13 @@ fn mcp_tools_call_for_intent_cancel_posts_to_state_server() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    write_current_session_file_for_codex_run(&repo_root, "s1", &CurrentSession::new("s1", "w1"))
+    write_current_session_file_for_session(&repo_root, "s1", &CurrentSession::new("s1", "w1"))
         .expect("session-bound current session should write");
 
     let response = run_mcp_jsonrpc_in_repo_with_env(
         &repo_root,
         &paths,
-        &[("STATEFUL_CODEX_RUN_ID", "s1")],
+        &[("STATEFUL_SESSION_ID", "s1")],
         r#"{
           "jsonrpc":"2.0",
           "id":7,

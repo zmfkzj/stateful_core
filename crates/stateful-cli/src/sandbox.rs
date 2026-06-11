@@ -22,7 +22,7 @@ use crate::{
     runtime_env_override_is_configured,
 };
 
-const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
+pub(crate) const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
 #[cfg(unix)]
 const SIGTERM: i32 = 15;
 #[cfg(unix)]
@@ -32,6 +32,7 @@ const SIGKILL: i32 = 9;
 pub enum SandboxFsProfile {
     ReadOnly,
     WriteTargets,
+    Git,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, ValueEnum)]
@@ -47,15 +48,6 @@ pub struct SandboxRunRequest {
     pub write_targets: Vec<String>,
     pub create_targets: Vec<String>,
     pub write_dirs: Vec<String>,
-    pub command: String,
-    pub timeout_seconds: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NestedCodexBenchmarkSandboxRequest {
-    pub purpose: String,
-    pub write_dir: String,
-    pub codex_home_root: String,
     pub command: String,
     pub timeout_seconds: Option<u64>,
 }
@@ -76,7 +68,7 @@ pub struct SandboxAuthorizationDenied {
 }
 
 impl SandboxAuthorizationDenied {
-    fn new(body: String) -> Self {
+    pub(crate) fn new(body: String) -> Self {
         Self { body }
     }
 
@@ -102,22 +94,15 @@ pub struct SandboxCommandResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SandboxWritablePath {
-    path: PathBuf,
-    kind: SandboxWritablePathKind,
+pub(crate) struct SandboxWritablePath {
+    pub(crate) path: PathBuf,
+    pub(crate) kind: SandboxWritablePathKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SandboxWritablePathKind {
+pub(crate) enum SandboxWritablePathKind {
     File,
     Directory,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NestedCodexBenchmarkSandboxPaths {
-    write_dir: PathBuf,
-    codex_home_root: PathBuf,
-    write_dir_relative: String,
 }
 
 impl SandboxWritablePath {
@@ -128,7 +113,7 @@ impl SandboxWritablePath {
         }
     }
 
-    fn directory(path: PathBuf) -> Self {
+    pub(crate) fn directory(path: PathBuf) -> Self {
         Self {
             path,
             kind: SandboxWritablePathKind::Directory,
@@ -169,6 +154,11 @@ pub fn run_sandbox_in_repo(
     let create_targets = normalize_sandbox_target_paths("create_targets", &request.create_targets)?;
     let write_dirs = normalize_sandbox_target_paths("write_dirs", &request.write_dirs)?;
     validate_profile_targets(request.fs, &write_targets, &create_targets, &write_dirs)?;
+    let git_command_words = if request.fs == SandboxFsProfile::Git {
+        Some(validate_git_profile_command(&request.command)?)
+    } else {
+        None
+    };
 
     let mut allowed_write_targets = Vec::new();
     let mut denied_write_targets = Vec::new();
@@ -239,112 +229,36 @@ pub fn run_sandbox_in_repo(
                 &write_dirs,
             )?
         }
+        SandboxFsProfile::Git => {
+            allowed_write_targets
+                .push(sandbox_write_dir_display_path(&repo_root.to_string_lossy()));
+            prepare_git_profile_writable_paths(&repo_root)?
+        }
     };
 
     let cwd = resolve_sandbox_cwd(&repo_root)?;
     let timeout = Duration::from_secs(request.timeout_seconds.unwrap_or(300).max(1));
-    let result = run_sandboxed_command(
-        &request.command,
-        &cwd,
-        &writable_paths,
-        request.network,
-        timeout,
-    )?;
-
-    Ok(SandboxRunOutput {
-        status: result.status,
-        exit_code: result.exit_code,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        allowed_write_targets,
-        denied_write_targets: Vec::new(),
-    })
-}
-
-pub fn run_nested_codex_benchmark_sandbox_in_repo(
-    repo_root: &Path,
-    paths: &GlobalPaths,
-    request: NestedCodexBenchmarkSandboxRequest,
-) -> anyhow::Result<SandboxRunOutput> {
-    if request.purpose.trim().is_empty() {
-        anyhow::bail!("stateful sandbox run-nested-codex-benchmark requires --purpose");
-    }
-    if request.command.trim().is_empty() {
-        anyhow::bail!("stateful sandbox run-nested-codex-benchmark requires a non-empty --command");
-    }
-    if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
-        anyhow::bail!(
-            "stateful sandbox run-nested-codex-benchmark must be the outermost sandbox command"
-        );
-    }
-
-    let repo_root = match repo_gate(paths, repo_root)? {
-        RepoGate::Enabled { repo_root } => {
-            if !runtime_env_override_is_configured() {
-                ensure_server(paths)?;
-            }
-            repo_root
-        }
-        RepoGate::Disabled => {
-            anyhow::bail!("stateful sandbox run-nested-codex-benchmark requires an enabled repo")
-        }
-        RepoGate::OutsideGitRepo => {
-            anyhow::bail!("stateful sandbox run-nested-codex-benchmark requires a Git repo")
-        }
+    let result = if let Some(words) = git_command_words.as_deref() {
+        let temp_dir = sandbox_temp_dir(&writable_paths)
+            .ok_or_else(|| anyhow::anyhow!("git profile requires a temp directory"))?;
+        run_sandboxed_git_command(
+            words,
+            &cwd,
+            &writable_paths,
+            &temp_dir,
+            &git_profile_hooks_dir(&repo_root),
+            request.network,
+            timeout,
+        )?
+    } else {
+        run_sandboxed_command(
+            &request.command,
+            &cwd,
+            &writable_paths,
+            request.network,
+            timeout,
+        )?
     };
-    let runtime = discover_runtime_with_global(&repo_root, paths)?;
-    let nested_paths = validate_nested_codex_benchmark_paths(
-        &repo_root,
-        &request.write_dir,
-        &request.codex_home_root,
-    )?;
-
-    let current_session: CurrentSession = read_current_session_file(&repo_root).map_err(|_| {
-        anyhow::anyhow!("sandbox run-nested-codex-benchmark requires a current stateful session")
-    })?;
-    let authorize_context = SandboxAuthorizeContext {
-        runtime: &runtime,
-        repo_root: &repo_root,
-        paths,
-        session_id: &current_session.session_id,
-        workspace_id: &current_session.workspace_id,
-        network: SandboxNetworkPolicy::Enabled,
-    };
-    let authorization_path = sandbox_write_dir_display_path(&nested_paths.write_dir_relative);
-    let response =
-        authorize_sandbox_write(&authorize_context, "write_directory", &authorization_path)?;
-    let mut allowed_write_targets = Vec::new();
-    let mut denied_write_targets = Vec::new();
-    match classify_sandbox_authorize_response(&nested_paths.write_dir_relative, response)? {
-        SandboxAuthorizeDecision::Allow => allowed_write_targets.push(authorization_path),
-        SandboxAuthorizeDecision::Deny(body) => {
-            denied_write_targets.push(serde_json::json!({
-                "path": sandbox_write_dir_display_path(&nested_paths.write_dir_relative),
-                "authorization": enrich_sandbox_write_dir_denial(body),
-            }));
-        }
-    }
-    if !denied_write_targets.is_empty() {
-        let body = serde_json::json!({
-            "status": "error",
-            "message": "stateful sandbox run-nested-codex-benchmark target authorization denied",
-            "allowed_write_targets": allowed_write_targets,
-            "denied_write_targets": denied_write_targets,
-        })
-        .to_string();
-        return Err(SandboxAuthorizationDenied::new(body).into());
-    }
-
-    let writable_paths = prepare_nested_codex_benchmark_writable_paths(&nested_paths)?;
-    let cwd = resolve_sandbox_cwd(&repo_root)?;
-    let timeout = Duration::from_secs(request.timeout_seconds.unwrap_or(300).max(1));
-    let result = run_nested_codex_benchmark_sandboxed_command(
-        &request.command,
-        &cwd,
-        &writable_paths,
-        &nested_paths.codex_home_root,
-        timeout,
-    )?;
 
     Ok(SandboxRunOutput {
         status: result.status,
@@ -412,43 +326,43 @@ fn run_sandboxed_command(
     }
 }
 
-fn run_nested_codex_benchmark_sandboxed_command(
-    command: &str,
+fn run_sandboxed_git_command(
+    words: &[String],
     cwd: &Path,
     writable_paths: &[SandboxWritablePath],
-    codex_home_root: &Path,
+    temp_dir: &Path,
+    hooks_dir: &Path,
+    network: SandboxNetworkPolicy,
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
-    let temp_dir = sandbox_temp_dir(writable_paths)
-        .ok_or_else(|| anyhow::anyhow!("nested Codex benchmark sandbox requires a temp dir"))?;
     #[cfg(target_os = "macos")]
     {
         run_command_with_timeout(
-            nested_codex_benchmark_seatbelt_command(
-                command,
-                cwd,
-                writable_paths,
-                &temp_dir,
-                codex_home_root,
-            ),
+            seatbelt_git_command(words, cwd, writable_paths, temp_dir, hooks_dir, network),
             timeout,
         )
     }
 
     #[cfg(target_os = "linux")]
     {
-        let _ = (command, cwd, writable_paths, codex_home_root, timeout);
-        anyhow::bail!(
-            "stateful sandbox run-nested-codex-benchmark is currently supported only on macOS"
-        );
+        run_command_with_timeout(
+            bubblewrap_git_command(words, cwd, writable_paths, temp_dir, hooks_dir, network),
+            timeout,
+        )
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (command, cwd, writable_paths, codex_home_root, timeout);
-        anyhow::bail!(
-            "stateful sandbox run-nested-codex-benchmark is currently supported only on macOS"
+        let _ = (
+            words,
+            cwd,
+            writable_paths,
+            temp_dir,
+            hooks_dir,
+            network,
+            timeout,
         );
+        anyhow::bail!("stateful sandbox run is only supported on macOS and Linux");
     }
 }
 
@@ -544,7 +458,7 @@ fn normalize_sandbox_target_paths(field: &str, paths: &[String]) -> anyhow::Resu
     Ok(normalized)
 }
 
-fn normalize_sandbox_target_path(field: &str, path: &str) -> anyhow::Result<String> {
+pub(crate) fn normalize_sandbox_target_path(field: &str, path: &str) -> anyhow::Result<String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         anyhow::bail!("stateful sandbox run {field} entries must not be empty");
@@ -580,46 +494,6 @@ fn normalize_sandbox_target_path(field: &str, path: &str) -> anyhow::Result<Stri
     }
 
     Ok(segments.join("/"))
-}
-
-fn validate_nested_codex_benchmark_paths(
-    repo_root: &Path,
-    write_dir: &str,
-    codex_home_root: &str,
-) -> anyhow::Result<NestedCodexBenchmarkSandboxPaths> {
-    let write_dir = normalize_sandbox_target_path("write_dirs", write_dir)?;
-    if write_dir != "target" {
-        anyhow::bail!("stateful sandbox run-nested-codex-benchmark requires --write-dir target");
-    }
-
-    let codex_home_root =
-        normalize_sandbox_target_path("codex_home_root", codex_home_root).map_err(|error| {
-            anyhow::anyhow!(
-                "stateful sandbox run-nested-codex-benchmark requires --codex-home-root under target: {error}"
-            )
-        })?;
-    if !codex_home_root.starts_with("target/") {
-        anyhow::bail!(
-            "stateful sandbox run-nested-codex-benchmark requires --codex-home-root under target"
-        );
-    }
-
-    ensure_repo_dir_target(repo_root, &write_dir).map_err(|error| {
-        anyhow::anyhow!(
-            "stateful sandbox run-nested-codex-benchmark write dir `{write_dir}` is unsafe: {error}"
-        )
-    })?;
-    ensure_repo_dir_target(repo_root, &codex_home_root).map_err(|error| {
-        anyhow::anyhow!(
-            "stateful sandbox run-nested-codex-benchmark codex home root `{codex_home_root}` is unsafe: {error}"
-        )
-    })?;
-
-    Ok(NestedCodexBenchmarkSandboxPaths {
-        write_dir: repo_root.join(&write_dir),
-        codex_home_root: repo_root.join(&codex_home_root),
-        write_dir_relative: write_dir,
-    })
 }
 
 fn ensure_repo_file_target(repo_root: &Path, relative_path: &str) -> anyhow::Result<()> {
@@ -665,7 +539,7 @@ fn ensure_repo_file_target(repo_root: &Path, relative_path: &str) -> anyhow::Res
     Ok(())
 }
 
-fn ensure_repo_dir_target(repo_root: &Path, relative_path: &str) -> anyhow::Result<()> {
+pub(crate) fn ensure_repo_dir_target(repo_root: &Path, relative_path: &str) -> anyhow::Result<()> {
     let canonical_repo = repo_root
         .canonicalize()
         .unwrap_or_else(|_| repo_root.to_path_buf());
@@ -757,7 +631,7 @@ fn ensure_no_symlinked_existing_components(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn resolve_sandbox_cwd(repo_root: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn resolve_sandbox_cwd(repo_root: &Path) -> anyhow::Result<PathBuf> {
     let cwd = repo_root
         .canonicalize()
         .map_err(|error| anyhow::anyhow!("stateful sandbox run cwd must exist: {error}"))?;
@@ -849,25 +723,6 @@ fn prepare_sandbox_writable_paths(
     Ok(writable_paths)
 }
 
-fn prepare_nested_codex_benchmark_writable_paths(
-    paths: &NestedCodexBenchmarkSandboxPaths,
-) -> anyhow::Result<Vec<SandboxWritablePath>> {
-    fs::create_dir_all(&paths.write_dir)?;
-    fs::create_dir_all(paths.write_dir.join(".stateful-tmp"))?;
-    fs::create_dir_all(&paths.codex_home_root)?;
-
-    let mut seen = BTreeSet::new();
-    let mut writable_paths = Vec::new();
-    for path in [&paths.write_dir, &paths.codex_home_root] {
-        let canonical = path.canonicalize()?;
-        if seen.insert(canonical.clone()) {
-            writable_paths.push(SandboxWritablePath::directory(canonical));
-        }
-    }
-
-    Ok(writable_paths)
-}
-
 fn validate_profile_targets(
     fs: SandboxFsProfile,
     write_targets: &[String],
@@ -892,8 +747,283 @@ fn validate_profile_targets(
                 ensure_artifact_write_dir_target(path)?;
             }
         }
+        SandboxFsProfile::Git => {
+            if !write_targets.is_empty() || !create_targets.is_empty() || !write_dirs.is_empty() {
+                anyhow::bail!(
+                    "git profile manages repo writes automatically and rejects explicit write targets, create targets, and write dirs"
+                );
+            }
+        }
     }
     Ok(())
+}
+
+fn git_profile_writable_paths(repo_root: &Path) -> Vec<SandboxWritablePath> {
+    vec![
+        SandboxWritablePath::directory(git_profile_private_dir(repo_root)),
+        SandboxWritablePath::directory(repo_root.to_path_buf()),
+    ]
+}
+
+fn prepare_git_profile_writable_paths(
+    repo_root: &Path,
+) -> anyhow::Result<Vec<SandboxWritablePath>> {
+    let writable_paths = git_profile_writable_paths(repo_root);
+    let temp_dir = sandbox_temp_dir(&writable_paths)
+        .ok_or_else(|| anyhow::anyhow!("git profile requires a temp directory"))?;
+    fs::create_dir_all(&temp_dir)?;
+    fs::create_dir_all(git_profile_hooks_dir(repo_root))?;
+    Ok(writable_paths)
+}
+
+fn git_profile_private_dir(repo_root: &Path) -> PathBuf {
+    let dot_git = repo_root.join(".git");
+    if dot_git.is_dir() || !dot_git.exists() {
+        dot_git.join("stateful")
+    } else {
+        repo_root.join(".stateful-git")
+    }
+}
+
+fn git_profile_hooks_dir(repo_root: &Path) -> PathBuf {
+    git_profile_private_dir(repo_root).join("hooks-disabled")
+}
+
+fn validate_git_profile_command(command: &str) -> anyhow::Result<Vec<String>> {
+    parse_git_profile_command(command)
+        .map_err(|reason| anyhow::anyhow!("git profile requires a single git command: {reason}"))
+}
+
+pub(crate) fn parse_git_profile_command(command: &str) -> Result<Vec<String>, String> {
+    reject_git_profile_shell_syntax(command)
+        .map_err(|reason| format!("git profile requires a single git command: {reason}"))?;
+    let words = split_git_profile_command_words(command)
+        .map_err(|reason| format!("git profile requires a single git command: {reason}"))?;
+    if words.first().is_none_or(|word| word != "git") {
+        return Err("git profile requires a single git command".to_string());
+    }
+    validate_git_profile_words(&words)?;
+    Ok(words)
+}
+
+fn validate_git_profile_words(words: &[String]) -> Result<(), String> {
+    let (subcommand_index, subcommand) = git_profile_subcommand(words)?;
+    if !GIT_PROFILE_ALLOWED_SUBCOMMANDS.contains(&subcommand) {
+        return Err(format!(
+            "git profile does not allow git subcommand `{subcommand}`"
+        ));
+    }
+    validate_git_profile_subcommand_args(subcommand, &words[subcommand_index + 1..])
+}
+
+fn git_profile_subcommand(words: &[String]) -> Result<(usize, &str), String> {
+    let mut index = 1;
+    while index < words.len() {
+        let word = words[index].as_str();
+        if word == "--" {
+            return Err("git profile requires an explicit git subcommand".to_string());
+        }
+        if word == "-c" || word.starts_with("-c") {
+            return Err("git profile does not allow inline git config".to_string());
+        }
+        if word == "--config-env" || word.starts_with("--config-env=") {
+            return Err("git profile does not allow config-env".to_string());
+        }
+        if word == "-C"
+            || word.starts_with("-C")
+            || matches!(
+                word,
+                "--git-dir" | "--work-tree" | "--namespace" | "--exec-path"
+            )
+            || word.starts_with("--git-dir=")
+            || word.starts_with("--work-tree=")
+            || word.starts_with("--namespace=")
+            || word.starts_with("--exec-path=")
+        {
+            return Err("git profile does not allow git path or exec overrides".to_string());
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return Ok((index, word));
+    }
+    Err("git profile requires an explicit git subcommand".to_string())
+}
+
+fn validate_git_profile_subcommand_args(subcommand: &str, args: &[String]) -> Result<(), String> {
+    for arg in args {
+        match subcommand {
+            "grep"
+                if arg == "-O"
+                    || arg.starts_with("-O")
+                    || arg == "--open-files-in-pager"
+                    || arg.starts_with("--open-files-in-pager=") =>
+            {
+                return Err("git profile does not allow grep pager dispatch".to_string());
+            }
+            "archive" if arg == "--exec" || arg.starts_with("--exec=") => {
+                return Err("git profile does not allow archive --exec".to_string());
+            }
+            "fetch" | "pull" if arg == "--upload-pack" || arg.starts_with("--upload-pack=") => {
+                return Err("git profile does not allow upload-pack overrides".to_string());
+            }
+            "push"
+                if arg == "--receive-pack"
+                    || arg.starts_with("--receive-pack=")
+                    || arg == "--exec"
+                    || arg.starts_with("--exec=") =>
+            {
+                return Err("git profile does not allow receive-pack overrides".to_string());
+            }
+            "rebase" if arg == "--exec" || arg == "-x" || arg.starts_with("--exec=") => {
+                return Err("git profile does not allow rebase --exec".to_string());
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+const GIT_PROFILE_ALLOWED_SUBCOMMANDS: &[&str] = &[
+    "add",
+    "am",
+    "apply",
+    "archive",
+    "blame",
+    "branch",
+    "cat-file",
+    "checkout",
+    "cherry-pick",
+    "clean",
+    "commit",
+    "describe",
+    "diff",
+    "fetch",
+    "grep",
+    "init",
+    "log",
+    "ls-files",
+    "merge",
+    "mv",
+    "pull",
+    "push",
+    "rebase",
+    "remote",
+    "reset",
+    "restore",
+    "rev-list",
+    "rev-parse",
+    "revert",
+    "rm",
+    "show",
+    "stash",
+    "status",
+    "switch",
+    "tag",
+];
+
+fn reject_git_profile_shell_syntax(command: &str) -> Result<(), String> {
+    let mut state = ShellQuoteState::None;
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match state {
+            ShellQuoteState::None => match ch {
+                '\'' => state = ShellQuoteState::Single,
+                '"' => state = ShellQuoteState::Double,
+                '$' if chars.peek().is_some_and(|next| *next == '(') => {
+                    return Err("command substitution is not supported".to_string());
+                }
+                '\\' => return Err("shell escapes are not supported".to_string()),
+                ';' | '|' | '&' | '<' | '>' | '\n' | '\r' | '`' => {
+                    return Err("shell control syntax is not supported".to_string());
+                }
+                _ => {}
+            },
+            ShellQuoteState::Single => {
+                if ch == '\'' {
+                    state = ShellQuoteState::None;
+                }
+            }
+            ShellQuoteState::Double => match ch {
+                '"' => state = ShellQuoteState::None,
+                '$' if chars.peek().is_some_and(|next| *next == '(') => {
+                    return Err("command substitution is not supported".to_string());
+                }
+                '`' => return Err("command substitution is not supported".to_string()),
+                '\\' => return Err("shell escapes are not supported".to_string()),
+                _ => {}
+            },
+        }
+    }
+
+    if state != ShellQuoteState::None {
+        return Err("unterminated quotes".to_string());
+    }
+
+    Ok(())
+}
+
+fn split_git_profile_command_words(command: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut state = ShellQuoteState::None;
+    let mut in_word = false;
+
+    for ch in command.chars() {
+        match state {
+            ShellQuoteState::None => match ch {
+                '\'' => {
+                    state = ShellQuoteState::Single;
+                    in_word = true;
+                }
+                '"' => {
+                    state = ShellQuoteState::Double;
+                    in_word = true;
+                }
+                ch if ch.is_whitespace() => {
+                    if in_word {
+                        words.push(std::mem::take(&mut current));
+                        in_word = false;
+                    }
+                }
+                _ => {
+                    current.push(ch);
+                    in_word = true;
+                }
+            },
+            ShellQuoteState::Single => {
+                if ch == '\'' {
+                    state = ShellQuoteState::None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            ShellQuoteState::Double => {
+                if ch == '"' {
+                    state = ShellQuoteState::None;
+                } else {
+                    current.push(ch);
+                }
+            }
+        }
+    }
+
+    if state != ShellQuoteState::None {
+        return Err("unterminated quotes".to_string());
+    }
+    if in_word {
+        words.push(current);
+    }
+
+    Ok(words)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellQuoteState {
+    None,
+    Single,
+    Double,
 }
 
 fn ensure_artifact_write_dir_target(relative_path: &str) -> anyhow::Result<()> {
@@ -906,11 +1036,11 @@ fn ensure_artifact_write_dir_target(relative_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn sandbox_write_dir_display_path(path: &str) -> String {
+pub(crate) fn sandbox_write_dir_display_path(path: &str) -> String {
     format!("{}/", path.trim_end_matches('/'))
 }
 
-fn enrich_sandbox_write_dir_denial(mut body: Value) -> Value {
+pub(crate) fn enrich_sandbox_write_dir_denial(mut body: Value) -> Value {
     let is_unsupported_action = body
         .get("reason_code")
         .and_then(Value::as_str)
@@ -928,14 +1058,14 @@ fn enrich_sandbox_write_dir_denial(mut body: Value) -> Value {
     body
 }
 
-fn sandbox_temp_dir(writable_paths: &[SandboxWritablePath]) -> Option<PathBuf> {
+pub(crate) fn sandbox_temp_dir(writable_paths: &[SandboxWritablePath]) -> Option<PathBuf> {
     writable_paths
         .iter()
         .find(|path| path.kind == SandboxWritablePathKind::Directory)
         .map(|path| path.path.join(".stateful-tmp"))
 }
 
-fn apply_sandbox_temp_env(command: &mut Command, temp_dir: Option<&Path>) {
+pub(crate) fn apply_sandbox_temp_env(command: &mut Command, temp_dir: Option<&Path>) {
     command.env(STATEFUL_SANDBOX_RUN_ACTIVE_ENV, "1");
     let Some(temp_dir) = temp_dir else {
         return;
@@ -946,25 +1076,16 @@ fn apply_sandbox_temp_env(command: &mut Command, temp_dir: Option<&Path>) {
         .env("TMP", temp_dir);
 }
 
-fn apply_nested_codex_benchmark_env(
-    command: &mut Command,
-    temp_dir: &Path,
-    codex_home_root: &Path,
-) {
-    apply_sandbox_temp_env(command, Some(temp_dir));
-    command.env("STATEFUL_NESTED_CODEX_HOME_ROOT", codex_home_root);
+pub(crate) struct SandboxAuthorizeContext<'a> {
+    pub(crate) runtime: &'a ServerRuntime,
+    pub(crate) repo_root: &'a Path,
+    pub(crate) paths: &'a GlobalPaths,
+    pub(crate) session_id: &'a str,
+    pub(crate) workspace_id: &'a str,
+    pub(crate) network: SandboxNetworkPolicy,
 }
 
-struct SandboxAuthorizeContext<'a> {
-    runtime: &'a ServerRuntime,
-    repo_root: &'a Path,
-    paths: &'a GlobalPaths,
-    session_id: &'a str,
-    workspace_id: &'a str,
-    network: SandboxNetworkPolicy,
-}
-
-fn authorize_sandbox_write(
+pub(crate) fn authorize_sandbox_write(
     context: &SandboxAuthorizeContext<'_>,
     action: &str,
     path: &str,
@@ -1002,12 +1123,12 @@ fn sandbox_authorize_purpose(action: &str, path: &str) -> String {
     }
 }
 
-enum SandboxAuthorizeDecision {
+pub(crate) enum SandboxAuthorizeDecision {
     Allow,
     Deny(Value),
 }
 
-fn classify_sandbox_authorize_response(
+pub(crate) fn classify_sandbox_authorize_response(
     path: &str,
     response: HttpResponse,
 ) -> anyhow::Result<SandboxAuthorizeDecision> {
@@ -1065,24 +1186,40 @@ fn seatbelt_command(
 }
 
 #[cfg(target_os = "macos")]
-fn nested_codex_benchmark_seatbelt_command(
-    command: &str,
+fn seatbelt_git_command(
+    words: &[String],
     cwd: &Path,
     writable_paths: &[SandboxWritablePath],
     temp_dir: &Path,
-    codex_home_root: &Path,
+    hooks_dir: &Path,
+    network: SandboxNetworkPolicy,
 ) -> Command {
-    let profile = nested_codex_benchmark_seatbelt_profile(writable_paths);
+    let profile = seatbelt_git_profile(writable_paths, network);
     let mut sandbox = Command::new("/usr/bin/sandbox-exec");
     sandbox
         .arg("-p")
         .arg(profile)
-        .arg("/bin/sh")
-        .arg("-c")
-        .arg(command)
+        .arg("git")
+        .args(&words[1..])
         .current_dir(cwd);
-    apply_nested_codex_benchmark_env(&mut sandbox, temp_dir, codex_home_root);
+    apply_git_profile_env(&mut sandbox, temp_dir, hooks_dir);
     sandbox
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn seatbelt_git_profile(
+    writable_paths: &[SandboxWritablePath],
+    network: SandboxNetworkPolicy,
+) -> String {
+    let mut profile = seatbelt_profile(writable_paths, network);
+    profile.push_str(
+        "(allow mach-lookup\n\
+             (global-name \"com.apple.system.opendirectoryd.libinfo\")\n\
+             (global-name \"com.apple.system.DirectoryService.libinfo_v1\")\n\
+             (global-name \"com.apple.trustd\")\n\
+             (global-name \"com.apple.trustd.agent\"))\n",
+    );
+    profile
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -1109,24 +1246,7 @@ fn seatbelt_profile(
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn nested_codex_benchmark_seatbelt_profile(writable_paths: &[SandboxWritablePath]) -> String {
-    let mut profile = String::from(
-        "(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n(allow sysctl-read)\n(allow network*)\n(allow file-write* (literal \"/dev/null\")",
-    );
-    for writable_path in writable_paths {
-        profile.push_str(match writable_path.kind {
-            SandboxWritablePathKind::File => " (literal \"",
-            SandboxWritablePathKind::Directory => " (subpath \"",
-        });
-        profile.push_str(&seatbelt_escape(&writable_path.path.to_string_lossy()));
-        profile.push_str("\")");
-    }
-    profile.push_str(")\n");
-    profile
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn seatbelt_escape(value: &str) -> String {
+pub(crate) fn seatbelt_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
@@ -1144,9 +1264,50 @@ fn bubblewrap_command(
     bwrap
 }
 
+#[cfg(target_os = "linux")]
+fn bubblewrap_git_command(
+    words: &[String],
+    cwd: &Path,
+    writable_paths: &[SandboxWritablePath],
+    temp_dir: &Path,
+    hooks_dir: &Path,
+    network: SandboxNetworkPolicy,
+) -> Command {
+    let mut bwrap = Command::new("bwrap");
+    bwrap.args(bubblewrap_git_args(words, cwd, writable_paths, network));
+    apply_git_profile_env(&mut bwrap, temp_dir, hooks_dir);
+    bwrap
+}
+
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn bubblewrap_args(
     command: &str,
+    cwd: &Path,
+    writable_paths: &[SandboxWritablePath],
+    network: SandboxNetworkPolicy,
+) -> Vec<OsString> {
+    let mut args = bubblewrap_base_args(cwd, writable_paths, network);
+    args.push(OsString::from("/bin/sh"));
+    args.push(OsString::from("-c"));
+    args.push(OsString::from(command));
+    args
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn bubblewrap_git_args(
+    words: &[String],
+    cwd: &Path,
+    writable_paths: &[SandboxWritablePath],
+    network: SandboxNetworkPolicy,
+) -> Vec<OsString> {
+    let mut args = bubblewrap_base_args(cwd, writable_paths, network);
+    args.push(OsString::from("git"));
+    args.extend(words.iter().skip(1).map(OsString::from));
+    args
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn bubblewrap_base_args(
     cwd: &Path,
     writable_paths: &[SandboxWritablePath],
     network: SandboxNetworkPolicy,
@@ -1181,13 +1342,45 @@ fn bubblewrap_args(
     args.push(OsString::from("--chdir"));
     args.push(cwd.as_os_str().to_owned());
     args.push(OsString::from("--"));
-    args.push(OsString::from("/bin/sh"));
-    args.push(OsString::from("-c"));
-    args.push(OsString::from(command));
     args
 }
 
-fn run_command_with_timeout(
+fn apply_git_profile_env(command: &mut Command, temp_dir: &Path, hooks_dir: &Path) {
+    apply_sandbox_temp_env(command, Some(temp_dir));
+    for (key, _) in std::env::vars_os() {
+        let key_string = key.to_string_lossy();
+        if key_string == "GIT_CONFIG_COUNT"
+            || key_string.starts_with("GIT_CONFIG_KEY_")
+            || key_string.starts_with("GIT_CONFIG_VALUE_")
+            || key_string.starts_with("GIT_")
+        {
+            command.env_remove(key);
+        }
+    }
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_COUNT", "5")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", hooks_dir)
+        .env("GIT_CONFIG_KEY_1", "core.fsmonitor")
+        .env("GIT_CONFIG_VALUE_1", "false")
+        .env("GIT_CONFIG_KEY_2", "diff.external")
+        .env("GIT_CONFIG_VALUE_2", "")
+        .env("GIT_CONFIG_KEY_3", "interactive.diffFilter")
+        .env("GIT_CONFIG_VALUE_3", "")
+        .env("GIT_CONFIG_KEY_4", "protocol.ext.allow")
+        .env("GIT_CONFIG_VALUE_4", "never")
+        .env("GIT_EXTERNAL_DIFF", "")
+        .env("GIT_LFS_SKIP_SMUDGE", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", ":")
+        .env("GIT_SEQUENCE_EDITOR", ":")
+        .env("GIT_PAGER", "cat")
+        .env("PAGER", "cat");
+}
+
+pub(crate) fn run_command_with_timeout(
     mut command: Command,
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
@@ -1504,6 +1697,42 @@ mod tests {
     }
 
     #[test]
+    fn bubblewrap_git_profile_binds_repo_root_writable() {
+        let writable_paths = git_profile_writable_paths(Path::new("/repo"));
+        let words = vec![
+            "git".to_string(),
+            "checkout".to_string(),
+            "main".to_string(),
+        ];
+        let args = bubblewrap_git_args(
+            &words,
+            Path::new("/repo"),
+            &writable_paths,
+            SandboxNetworkPolicy::Disabled,
+        );
+        let args = args
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--bind", "/repo", "/repo"] })
+        );
+        assert!(args.ends_with(&[
+            "--".to_string(),
+            "git".to_string(),
+            "checkout".to_string(),
+            "main".to_string(),
+        ]));
+        assert!(
+            !args
+                .windows(2)
+                .any(|window| { window == ["/bin/sh", "-c"] })
+        );
+    }
+
+    #[test]
     fn prepare_writable_files_validates_all_targets_before_creating_files() {
         let repo_root = std::env::temp_dir().join(format!(
             "stateful-sandbox-create-target-order-{}",
@@ -1659,107 +1888,160 @@ mod tests {
     }
 
     #[test]
+    fn seatbelt_git_profile_allows_repo_root_subpath() {
+        let writable_paths = git_profile_writable_paths(Path::new("/repo"));
+        let profile = seatbelt_git_profile(&writable_paths, SandboxNetworkPolicy::Enabled);
+
+        assert!(profile.contains("(subpath \"/repo\")"));
+        assert!(profile.contains("(allow network*)"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_git_command_profile_allows_macos_identity_and_trust_services() {
+        let writable_paths = git_profile_writable_paths(Path::new("/repo"));
+        let words = vec![
+            "git".to_string(),
+            "push".to_string(),
+            "origin".to_string(),
+            "dev".to_string(),
+        ];
+        let command = seatbelt_git_command(
+            &words,
+            Path::new("/repo"),
+            &writable_paths,
+            Path::new("/repo/.git/stateful/.stateful-tmp"),
+            Path::new("/repo/.git/stateful/hooks-disabled"),
+            SandboxNetworkPolicy::Enabled,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let profile = args
+            .windows(2)
+            .find_map(|window| {
+                if window[0] == "-p" {
+                    Some(window[1].clone())
+                } else {
+                    None
+                }
+            })
+            .expect("seatbelt git command should pass a profile after -p");
+
+        assert!(profile.contains("(allow mach-lookup"));
+        for global_name in [
+            "com.apple.system.opendirectoryd.libinfo",
+            "com.apple.system.DirectoryService.libinfo_v1",
+            "com.apple.trustd",
+            "com.apple.trustd.agent",
+        ] {
+            assert!(
+                profile.contains(&format!("(global-name \"{global_name}\")")),
+                "git profile should allow {global_name}: {profile}"
+            );
+        }
+    }
+
+    #[test]
+    fn seatbelt_profile_does_not_allow_macos_identity_or_trust_services_by_default() {
+        let profile = seatbelt_profile(&[], SandboxNetworkPolicy::Enabled);
+
+        for global_name in [
+            "com.apple.system.opendirectoryd.libinfo",
+            "com.apple.system.DirectoryService.libinfo_v1",
+            "com.apple.trustd",
+            "com.apple.trustd.agent",
+        ] {
+            assert!(!profile.contains(global_name));
+        }
+    }
+
+    #[test]
+    fn git_profile_rejects_explicit_write_targets() {
+        validate_profile_targets(SandboxFsProfile::Git, &[], &[], &[])
+            .expect("git profile should manage write scope automatically");
+
+        let error =
+            validate_profile_targets(SandboxFsProfile::Git, &["README.md".to_string()], &[], &[])
+                .expect_err("git profile should reject explicit write targets");
+
+        assert!(
+            error
+                .to_string()
+                .contains("git profile manages repo writes automatically")
+        );
+    }
+
+    #[test]
+    fn git_profile_rejects_git_alias_config_dispatch() {
+        let cases = [
+            "git -c alias.x='!curl https://example.test' x",
+            "git -calias.x='!curl https://example.test' x",
+            "git --config-env=alias.x=STATEFUL_ALIAS x",
+            "git x",
+        ];
+
+        for command in cases {
+            let error = validate_git_profile_command(command)
+                .expect_err("git profile should reject alias dispatch surfaces");
+
+            assert!(
+                error.to_string().contains("git profile"),
+                "unexpected error for `{command}`: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_profile_rejects_shell_dispatching_git_subcommands() {
+        let cases = [
+            "git submodule foreach 'printf nope'",
+            "git filter-branch --tree-filter 'printf nope'",
+            "git difftool --tool vimdiff",
+            "git mergetool --tool vimdiff",
+            "git rebase --exec 'printf nope'",
+            "git bisect run printf nope",
+            "git grep --open-files-in-pager='sh -c id' TODO",
+            "git grep --open-files-in-pager TODO",
+            "git grep -Ocat TODO",
+            "git grep -O TODO",
+            "git archive --exec=sh HEAD",
+            "git archive --remote=origin --exec sh HEAD",
+            "git fetch --upload-pack=sh origin",
+            "git fetch --upload-pack sh origin",
+            "git pull --upload-pack=sh origin main",
+            "git push --receive-pack=sh origin main",
+            "git push --exec=sh origin main",
+        ];
+
+        for command in cases {
+            let error = validate_git_profile_command(command)
+                .expect_err("git profile should reject shell-dispatching git commands");
+
+            assert!(
+                error.to_string().contains("git profile"),
+                "unexpected error for `{command}`: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_profile_temp_dir_uses_private_git_dir() {
+        let writable_paths = git_profile_writable_paths(Path::new("/repo"));
+
+        assert_eq!(
+            sandbox_temp_dir(&writable_paths),
+            Some(PathBuf::from("/repo/.git/stateful/.stateful-tmp"))
+        );
+    }
+
+    #[test]
     fn seatbelt_profile_allows_network_only_when_enabled() {
         let disabled = seatbelt_profile(&[], SandboxNetworkPolicy::Disabled);
         let enabled = seatbelt_profile(&[], SandboxNetworkPolicy::Enabled);
 
         assert!(!disabled.contains("(allow network*)"));
         assert!(enabled.contains("(allow network*)"));
-    }
-
-    #[test]
-    fn nested_codex_benchmark_paths_must_stay_under_target() {
-        let repo_root = Path::new("/repo");
-
-        let paths = validate_nested_codex_benchmark_paths(
-            repo_root,
-            "target",
-            "target/nested-codex-homes/run-1",
-        )
-        .expect("target write dir and nested Codex home should validate");
-        assert_eq!(paths.write_dir, PathBuf::from("/repo/target"));
-        assert_eq!(
-            paths.codex_home_root,
-            PathBuf::from("/repo/target/nested-codex-homes/run-1")
-        );
-
-        for (write_dir, codex_home_root, expected) in [
-            (
-                "crates",
-                "target/nested-codex-homes/run-1",
-                "requires --write-dir target",
-            ),
-            (
-                "target",
-                "/Users/me/.codex",
-                "requires --codex-home-root under target",
-            ),
-            (
-                "target",
-                "target/../codex-home",
-                "requires --codex-home-root under target",
-            ),
-        ] {
-            let error =
-                validate_nested_codex_benchmark_paths(repo_root, write_dir, codex_home_root)
-                    .expect_err("invalid nested Codex benchmark paths should fail");
-            assert!(
-                error.to_string().contains(expected),
-                "unexpected error for {write_dir} {codex_home_root}: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn nested_codex_benchmark_env_sets_isolated_codex_home_root() {
-        let mut command = Command::new("true");
-
-        apply_nested_codex_benchmark_env(
-            &mut command,
-            Path::new("/repo/target/.stateful-tmp"),
-            Path::new("/repo/target/nested-codex-homes/run-1"),
-        );
-
-        let envs = command
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-
-        assert_eq!(
-            envs.get(STATEFUL_SANDBOX_RUN_ACTIVE_ENV),
-            Some(&Some("1".to_string()))
-        );
-        assert_eq!(
-            envs.get("STATEFUL_NESTED_CODEX_HOME_ROOT"),
-            Some(&Some("/repo/target/nested-codex-homes/run-1".to_string()))
-        );
-        assert_eq!(
-            envs.get("TMPDIR"),
-            Some(&Some("/repo/target/.stateful-tmp".to_string()))
-        );
-    }
-
-    #[test]
-    fn nested_codex_benchmark_seatbelt_profile_is_target_only_with_network() {
-        let profile = nested_codex_benchmark_seatbelt_profile(&[
-            SandboxWritablePath::directory(PathBuf::from("/repo/target")),
-            SandboxWritablePath::directory(PathBuf::from("/repo/target/nested-codex-homes/run-1")),
-        ]);
-
-        assert!(profile.contains("(deny default)"));
-        assert!(profile.contains("(allow process*)"));
-        assert!(profile.contains("(allow file-read*)"));
-        assert!(profile.contains("(allow sysctl-read)"));
-        assert!(profile.contains("(allow network*)"));
-        assert!(profile.contains("(literal \"/dev/null\")"));
-        assert!(profile.contains("(subpath \"/repo/target\")"));
-        assert!(profile.contains("(subpath \"/repo/target/nested-codex-homes/run-1\")"));
-        assert!(!profile.contains("(allow file-write*)\n"));
-        assert!(!profile.contains("(subpath \"/Users"));
     }
 }
