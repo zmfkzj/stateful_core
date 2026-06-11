@@ -191,6 +191,76 @@ async fn authorize_accepts_hook_source_kind() {
 }
 
 #[tokio::test]
+async fn lease_release_rejects_other_session_owner_with_actionable_error() {
+    let app = build_router(ServerConfig::new("secret-token"));
+    ensure_test_intent_via_http(&app, "s1", "w1", "target/").await;
+    let acquire = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "target/"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(acquire.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/lease/release",
+            serde_json::json!({
+                "session_id": "s2",
+                "workspace_id": "w1",
+                "path": "target/"
+            }),
+        ))
+        .await
+        .expect("lease release should complete");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["reason_code"], "lease_owner_mismatch");
+    assert!(
+        json["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("wait") && message.contains("coordinate")),
+        "message should direct the caller to wait or coordinate: {json}"
+    );
+}
+
+#[tokio::test]
+async fn lease_release_rejects_missing_same_session_lease() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/lease/release",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "target/"
+            }),
+        ))
+        .await
+        .expect("lease release should complete");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["reason_code"], "lease_not_found");
+    assert!(
+        json["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("same-session lease")),
+        "message should explain no same-session lease was released: {json}"
+    );
+}
+
+#[tokio::test]
 async fn side_effecting_routes_intent_declare_rejects_legacy_body() {
     let app = build_router(ServerConfig::new("secret-token"));
 
@@ -663,7 +733,10 @@ async fn lease_activity_and_conflict_routes_are_available() {
         ))
         .await
         .expect("lease release should complete");
-    assert_eq!(release.status(), StatusCode::OK);
+    assert_eq!(release.status(), StatusCode::NOT_FOUND);
+    let json = response_json(release, 2048).await;
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["reason_code"], "lease_not_found");
 
     let reopened = Store::open(&db_path).expect("file store should reopen");
     assert_eq!(reopened.lease_count().expect("lease count should load"), 1);
@@ -1410,6 +1483,80 @@ async fn active_lease_by_other_session_denies_authorize_even_with_matching_inten
     let required_next_action = json["required_next_action"].as_str().unwrap_or_default();
     assert!(required_next_action.contains("Do not redeclare intent"));
     assert!(required_next_action.contains("session_id"));
+}
+
+#[tokio::test]
+async fn authorize_denies_when_target_changed_since_base_observation() {
+    let app = build_router(ServerConfig::new("secret-token"));
+    let temp_root =
+        std::env::temp_dir().join(format!("stateful-base-observation-{}", std::process::id()));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let src_dir = temp_root.join("src");
+    std::fs::create_dir_all(&src_dir).expect("src directory should be created");
+    let target = src_dir.join("auth.ts");
+    std::fs::write(&target, "original contents\n").expect("target file should be created");
+
+    let mut declare_body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "purpose": "Test requested work.",
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    declare_body["workspace"]["root"] = serde_json::json!(temp_root.to_string_lossy());
+    let declare = app
+        .clone()
+        .oneshot(json_request("/v1/intent/declare", declare_body))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    std::fs::write(&target, "updated contents\n").expect("target file should be changed");
+
+    let mut authorize_body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts",
+            "base_observations": [{
+                "path": "src/auth.ts",
+                "exists": true,
+                "content_hash": test_content_hash(b"original contents\n")
+            }]
+        }),
+    );
+    authorize_body["workspace"]["root"] = serde_json::json!(temp_root.to_string_lossy());
+    let response = app
+        .oneshot(json_request("/v1/authorize", authorize_body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "stale_target_observation");
+    let required_next_action = json["required_next_action"].as_str().unwrap_or_default();
+    assert!(required_next_action.contains("Reread"));
+
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -4295,6 +4442,15 @@ async fn response_json(response: Response<Body>, limit: usize) -> serde_json::Va
         .await
         .expect("body should read");
     serde_json::from_slice(&body).expect("body should be json")
+}
+
+fn test_content_hash(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
 }
 
 fn authorized_get(path: &str) -> Request<Body> {

@@ -22,7 +22,7 @@ fn codex_wrapper_defaults_to_passthrough_session_configuration() {
             .env
             .iter()
             .all(|(key, _)| key != "STATEFUL_CODEX_RUN_ID"),
-        "stateful codex must let Codex session_id be the Stateful run/session id"
+        "stateful codex must let Codex provide the Stateful run/thread id"
     );
     assert!(
         invocation

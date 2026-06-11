@@ -8,9 +8,9 @@ use axum::{
     routing::{get, post},
 };
 use policy_service::{
-    AuthorizationOutcome, AuthorizeWriteInput, CancelIntentInput, CancelIntentOutcome,
-    ClaimIntentInput, ClaimIntentOutcome, PolicyService, RequestIntentInput, RequestIntentOutcome,
-    WaitQueueInfo,
+    AuthorizationOutcome, AuthorizeWriteInput, BaseObservation, CancelIntentInput,
+    CancelIntentOutcome, ClaimIntentInput, ClaimIntentOutcome, PolicyService, RequestIntentInput,
+    RequestIntentOutcome, WaitQueueInfo,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -273,6 +273,11 @@ async fn authorize(
         old_path: payload.old_path,
         new_path: payload.new_path,
         path: payload.path,
+        base_observations: payload
+            .base_observations
+            .into_iter()
+            .map(BaseObservation::from)
+            .collect(),
     };
 
     let outcome = match authorize_with_policy(&config.store, input, true) {
@@ -514,6 +519,28 @@ fn lease_conflict_response() -> (StatusCode, Json<Value>) {
     )
 }
 
+fn lease_owner_mismatch_response() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "status": "error",
+            "reason_code": "lease_owner_mismatch",
+            "message": "Cannot release a lease owned by another session; wait for the lease to release, or coordinate with the lease owner."
+        })),
+    )
+}
+
+fn lease_not_found_response() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({
+            "status": "error",
+            "reason_code": "lease_not_found",
+            "message": "No active same-session lease matched the requested path, workspace, and lease type."
+        })),
+    )
+}
+
 fn missing_scope_response() -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
@@ -601,17 +628,17 @@ async fn lease_release(
         return unauthorized();
     }
 
-    let result = config
-        .store
-        .lock()
-        .map_err(|_| "store lock poisoned".to_string())
-        .and_then(|store| {
-            store
-                .release_lease(input.session_id, input.workspace_id, input.path)
-                .map_err(|error| error.to_string())
-        });
+    let result = match config.store.lock() {
+        Ok(store) => store.release_lease(input.session_id, input.workspace_id, input.path),
+        Err(_) => return status_response(Err("store lock poisoned".to_string())),
+    };
 
-    status_response(result)
+    match result {
+        Ok(()) => status_response(Ok(())),
+        Err(StoreError::LeaseOwnerMismatch) => lease_owner_mismatch_response(),
+        Err(StoreError::LeaseNotFound) => lease_not_found_response(),
+        Err(error) => status_response(Err(error.to_string())),
+    }
 }
 
 async fn activity_observe(
@@ -765,6 +792,7 @@ async fn conflicts_check(
         old_path: input.old_path,
         new_path: input.new_path,
         path: input.path,
+        base_observations: Vec::new(),
     };
 
     match authorize_with_policy(&config.store, input, false) {
@@ -1286,6 +1314,26 @@ struct AuthorizePayload {
     #[serde(default)]
     new_path: Option<String>,
     path: String,
+    #[serde(default)]
+    base_observations: Vec<BaseObservationPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BaseObservationPayload {
+    path: String,
+    exists: bool,
+    #[serde(default)]
+    content_hash: Option<String>,
+}
+
+impl From<BaseObservationPayload> for BaseObservation {
+    fn from(payload: BaseObservationPayload) -> Self {
+        Self {
+            path: payload.path,
+            exists: payload.exists,
+            content_hash: payload.content_hash,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

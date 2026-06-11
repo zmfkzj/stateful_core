@@ -189,13 +189,13 @@ each Codex process.
 On the host Mac:
 
 ```bash
-stateful lan serve
+stateful server start --host 0.0.0.0 --workspace-id shared
 ```
 
 The command prints one or more join commands. Run one on the remote Mac:
 
 ```bash
-stateful lan join http://192.168.0.23:43873 --token <token>
+stateful server join http://192.168.0.23:43873 --token <token>
 ```
 
 This installs global stateful/Codex MCP configuration and writes remote runtime
@@ -203,13 +203,13 @@ discovery under `$STATEFUL_HOME/runtime/server.json`. It does not enable the
 current repo. To enable the current repo on the remote Mac, pass:
 
 ```bash
-stateful lan join http://192.168.0.23:43873 --token <token> --enable-repo
+stateful server join http://192.168.0.23:43873 --token <token> --enable-repo
 ```
 
 LAN mode uses bearer token auth over `http://` as a local trust guard. Use SSH
 tunneling instead of LAN mode on untrusted networks.
 
-If the host uses `stateful lan serve --workspace-id <id>`, run the printed join
+If the host uses `stateful server start --workspace-id <id>`, run the printed join
 command as-is; it includes the matching workspace id.
 
 ## Useful Next Steps
@@ -229,7 +229,7 @@ stateful server status
 
 For manual CLI use outside the default Codex workflow, declare what you plan to
 edit and inspect the active current state. In `stateful codex`, lifecycle hooks
-bind the current Codex session id as the Stateful session id by default. Outside
+bind the current Codex thread id as the Stateful session id by default. Outside
 hooks, pass session and workspace IDs explicitly.
 
 ```bash
@@ -267,13 +267,14 @@ stateful doctor
   unless `--yes` is passed.
 - `stateful enable [--repo <path>]`, `stateful disable`, and
   `stateful repos list` manage the repo allowlist used by global hooks.
-- `stateful server start` starts the local HTTP state server detached by
-  default. Use `stateful server start --foreground`, `stateful server status`,
-  and `stateful server stop` for lifecycle control. Bare `stateful server`
-  remains a foreground compatibility form.
-- `stateful lan serve` shares a runtime over a trusted LAN. `stateful lan join`
-  installs global MCP config and writes remote runtime discovery, enabling the
-  current repo only when `--enable-repo` is supplied.
+- `stateful server start` starts the HTTP state server detached by default and
+  always prints `stateful server join ...` commands. Bind to `0.0.0.0` only on a
+  trusted LAN. Use `stateful server start --foreground`,
+  `stateful server restart`, `stateful server status`, and
+  `stateful server stop` for lifecycle control. Bare `stateful server` remains
+  a foreground compatibility form.
+- `stateful server join` installs global MCP config and writes remote runtime
+  discovery, enabling the current repo only when `--enable-repo` is supplied.
 - `stateful status` and `stateful doctor` report setup health, including global
   install fields and repo-enabled status.
 - `stateful current` prints current-state summary counts.
@@ -345,14 +346,15 @@ used by CLI and MCP calls. `UserPromptSubmit` renders brief current-state
 context. `PreToolUse` authorizes supported tool actions. `PostToolUse` records
 activity or heartbeats. `Stop` finalizes activity and releases leases.
 
-`SessionStart` uses the Codex hook `session_id` as the Stateful session id and
-writes `.stateful_core/runtime/sessions/<session_id>.json` plus the current
+`SessionStart` uses the Codex hook `thread_id` as the Stateful session id when
+Codex provides it, falling back to the hook `session_id` for older payloads. It
+writes `.stateful_core/runtime/sessions/<thread_id>.json` plus the current
 session alias `.stateful_core/runtime/session.json`. Session-bound MCP tools use
-`STATEFUL_CODEX_RUN_ID` or `CODEX_THREAD_ID` when Codex forwards one of those
-variables. If the MCP server was started without those per-session variables,
-the tools fall back to `.stateful_core/runtime/session.json` only after
-verifying that its `session_id` has a matching session-bound file with identical
-contents.
+`CODEX_THREAD_ID` when Codex forwards it, falling back to
+`STATEFUL_CODEX_RUN_ID`. If the MCP server was started without those
+per-session variables, the tools fall back to
+`.stateful_core/runtime/session.json` only after verifying that its `session_id`
+has a matching session-bound file with identical contents.
 
 ## Write Authorization
 
@@ -543,14 +545,12 @@ bundled.
 - `STATEFUL_SERVER_URL` and `STATEFUL_SERVER_TOKEN` override runtime discovery
   when both are set. The referenced server must expose the current runtime
   capabilities, including sandbox write-directory authorization.
-- `STATEFUL_CODEX_RUN_ID` is the Stateful/Codex session id when present. It
-  selects `.stateful_core/runtime/sessions/<session_id>.json` and must match
-  `CODEX_THREAD_ID` if both variables are set.
-- `CODEX_THREAD_ID` is the Codex session/thread id fallback used by
-  session-bound tools when `STATEFUL_CODEX_RUN_ID` is not present. Some Codex
-  MCP launches do not forward this per-session value; in that case stateful MCP
-  tools use the hook-written current session alias only if it verifies against
-  the matching session-bound file.
+- `CODEX_THREAD_ID` is the Codex thread id used by session-bound tools when
+  present. It selects `.stateful_core/runtime/sessions/<thread_id>.json`.
+- `STATEFUL_CODEX_RUN_ID` is a compatibility fallback when `CODEX_THREAD_ID` is
+  not present. Some Codex MCP launches do not forward a per-thread value; in
+  that case stateful MCP tools use the hook-written current session alias only
+  if it verifies against the matching session-bound file.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
   authorize Bash. Bash authorization goes through a trusted
   `<absolute-stateful-binary> sandbox run` wrapper command.

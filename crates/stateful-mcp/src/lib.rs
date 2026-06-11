@@ -41,7 +41,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     (
         "state_lease_release",
         "state.lease.release",
-        "Release an advisory lease on a file or resource.",
+        "Release a same-session advisory lease on a file or resource.",
     ),
     (
         "state_activity_observe",

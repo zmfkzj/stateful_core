@@ -1,8 +1,8 @@
 use std::{fs, path::Path};
 
 use stateful_bench::{
-    AgentRunRecord, PairRunRecord, ReportFormat, RunMode, build_report, render_report_markdown,
-    write_jsonl,
+    AgentOutcome, AgentRunRecord, PairRunRecord, ReportFormat, RunMode, build_report,
+    render_report_markdown, write_jsonl,
 };
 
 #[test]
@@ -72,6 +72,172 @@ fn report_loads_pair_artifacts_and_renders_deterministic_summaries() {
     let markdown = render_report_markdown(&report);
     assert!(markdown.contains("# Stateful Bench Report: dev-stateful"));
     assert!(markdown.contains("| Composite coordination score | 0.620 |"));
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn report_counts_and_scores_all_harness_task_results() {
+    let root = temp_root("stateful-bench-report-multi-agent");
+    let run_dir = root.join("runs/dev-stateful");
+    let pair_dir = run_dir.join("pair-1");
+    fs::create_dir_all(&pair_dir).expect("pair dir should exist");
+    fs::write(
+        run_dir.join("run.json"),
+        r#"{"run_id":"dev-stateful","mode":"stateful"}"#,
+    )
+    .expect("run metadata should write");
+    fs::write(
+        pair_dir.join("pair-run.json"),
+        serde_json::to_string(&PairRunRecord {
+            pair_id: "pair-1".to_string(),
+            mode: RunMode::Stateful,
+            agent_a: AgentRunRecord::finished("agent-a", 0, 1000),
+            agent_b: AgentRunRecord::finished("agent-b", 0, 1000),
+            agents: vec![
+                AgentRunRecord::finished("agent-a", 0, 1000),
+                AgentRunRecord::finished("agent-b", 0, 1000),
+                AgentRunRecord::finished("agent-c", 0, 1000),
+                AgentRunRecord::finished("agent-d", 0, 1000),
+                AgentRunRecord::finished("agent-e", 0, 1000),
+            ],
+            wall_time_ms: 1250,
+            combined_patch_path: "combined.patch".to_string(),
+            harness_result_path: Some("harness-result.json".to_string()),
+            error: None,
+        })
+        .expect("pair record should serialize"),
+    )
+    .expect("pair record should write");
+    fs::write(
+        pair_dir.join("harness-result.json"),
+        r#"{
+          "task_results": [
+            {"agent": "agent-a", "status": "passed"},
+            {"agent": "agent-b", "status": "passed"},
+            {"agent": "agent-c", "status": "passed"},
+            {"agent": "agent-d", "status": "passed"},
+            {"agent": "agent-e", "status": "failed"}
+          ]
+        }"#,
+    )
+    .expect("harness result should write");
+
+    let report = build_report(&run_dir).expect("report should build");
+    assert_eq!(report.summary.pairs_scored, 1);
+    assert_eq!(report.summary.task_passed, 4);
+    assert_eq!(report.summary.task_failed, 1);
+    assert_eq!(report.summary.functional_pair_score, 0.8);
+    assert_eq!(report.summary.composite_coordination_score, 0.9);
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn report_marks_missing_multi_agent_harness_results_unknown() {
+    let root = temp_root("stateful-bench-report-missing-multi-agent-results");
+    let run_dir = root.join("runs/dev-stateful");
+    let pair_dir = run_dir.join("pair-1");
+    fs::create_dir_all(&pair_dir).expect("pair dir should exist");
+    fs::write(
+        run_dir.join("run.json"),
+        r#"{"run_id":"dev-stateful","mode":"stateful"}"#,
+    )
+    .expect("run metadata should write");
+    fs::write(
+        pair_dir.join("pair-run.json"),
+        serde_json::to_string(&PairRunRecord {
+            pair_id: "pair-1".to_string(),
+            mode: RunMode::Stateful,
+            agent_a: AgentRunRecord::finished("agent-a", 0, 1000),
+            agent_b: AgentRunRecord::finished("agent-b", 0, 1000),
+            agents: vec![
+                AgentRunRecord::finished("agent-a", 0, 1000),
+                AgentRunRecord::finished("agent-b", 0, 1000),
+                AgentRunRecord::finished("agent-c", 0, 1000),
+                AgentRunRecord::finished("agent-d", 0, 1000),
+                AgentRunRecord::finished("agent-e", 0, 1000),
+            ],
+            wall_time_ms: 1250,
+            combined_patch_path: "combined.patch".to_string(),
+            harness_result_path: Some("harness-result.json".to_string()),
+            error: None,
+        })
+        .expect("pair record should serialize"),
+    )
+    .expect("pair record should write");
+    fs::write(
+        pair_dir.join("harness-result.json"),
+        r#"{
+          "task_results": [
+            {"agent": "agent-a", "status": "passed"}
+          ]
+        }"#,
+    )
+    .expect("harness result should write");
+
+    let report = build_report(&run_dir).expect("report should build");
+    assert_eq!(report.summary.pairs_scored, 0);
+    assert_eq!(report.summary.task_passed, 1);
+    assert_eq!(report.summary.unknown_task_results, 4);
+    assert_eq!(report.pairs[0].task_outcomes.len(), 5);
+    assert!(report.pairs[0].score.is_none());
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn report_counts_timeouts_from_all_recorded_agents() {
+    let root = temp_root("stateful-bench-report-multi-agent-timeout");
+    let run_dir = root.join("runs/dev-stateful");
+    let pair_dir = run_dir.join("pair-1");
+    fs::create_dir_all(&pair_dir).expect("pair dir should exist");
+    fs::write(
+        run_dir.join("run.json"),
+        r#"{"run_id":"dev-stateful","mode":"stateful"}"#,
+    )
+    .expect("run metadata should write");
+    fs::write(
+        pair_dir.join("pair-run.json"),
+        serde_json::to_string(&PairRunRecord {
+            pair_id: "pair-1".to_string(),
+            mode: RunMode::Stateful,
+            agent_a: AgentRunRecord::finished("agent-a", 0, 1000),
+            agent_b: AgentRunRecord::finished("agent-b", 0, 1000),
+            agents: vec![
+                AgentRunRecord::finished("agent-a", 0, 1000),
+                AgentRunRecord::finished("agent-b", 0, 1000),
+                AgentRunRecord {
+                    agent_id: "agent-c".to_string(),
+                    outcome: AgentOutcome::TimedOut,
+                    exit_code: None,
+                    duration_ms: 1250,
+                },
+            ],
+            wall_time_ms: 1250,
+            combined_patch_path: "combined.patch".to_string(),
+            harness_result_path: Some("harness-result.json".to_string()),
+            error: None,
+        })
+        .expect("pair record should serialize"),
+    )
+    .expect("pair record should write");
+    fs::write(
+        pair_dir.join("harness-result.json"),
+        r#"{
+          "task_results": [
+            {"agent": "agent-a", "status": "passed"},
+            {"agent": "agent-b", "status": "passed"},
+            {"agent": "agent-c", "status": "passed"}
+          ]
+        }"#,
+    )
+    .expect("harness result should write");
+
+    let report = build_report(&run_dir).expect("report should build");
+    assert_eq!(report.summary.timeouts, 1);
+    assert_eq!(report.summary.coordination_cost_score, 0.8);
+    assert_eq!(report.summary.composite_coordination_score, 0.96);
 
     fs::remove_dir_all(root).expect("temp root should clean up");
 }

@@ -190,7 +190,7 @@ pub fn handle_post_tool_use_in_repo(
         queue_session_heartbeat_outbox(
             &repo_root,
             &runtime.workspace_id,
-            &input.session_id,
+            input.stateful_session_id(),
             &error.to_string(),
         )?;
     }
@@ -245,7 +245,7 @@ fn remember_current_session(
     let input: SessionEventInput = serde_json::from_str(input)?;
     write_current_session_file_for_codex_session(
         repo_root,
-        &CurrentSession::new(input.session_id, runtime.workspace_id.clone()),
+        &CurrentSession::new(input.stateful_session_id(), runtime.workspace_id.clone()),
     )
 }
 
@@ -255,7 +255,12 @@ fn handle_session_start_with_runtime(
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
     let input: SessionStartInput = serde_json::from_str(input)?;
-    post_session_event(runtime, "/v1/session/register", &input.session_id, identity)
+    post_session_event(
+        runtime,
+        "/v1/session/register",
+        input.stateful_session_id(),
+        identity,
+    )
 }
 
 fn handle_post_tool_use_with_runtime(
@@ -267,7 +272,7 @@ fn handle_post_tool_use_with_runtime(
     post_session_event(
         runtime,
         "/v1/session/heartbeat",
-        &input.session_id,
+        input.stateful_session_id(),
         identity,
     )
 }
@@ -279,7 +284,7 @@ fn handle_user_prompt_submit_with_runtime(
 ) -> anyhow::Result<String> {
     let input: UserPromptSubmitInput = serde_json::from_str(input)?;
     let mut body = json!({
-        "session_id": input.session_id,
+        "session_id": input.stateful_session_id(),
         "workspace_id": runtime.workspace_id,
         "mode": "brief"
     });
@@ -330,7 +335,7 @@ fn handle_stop_with_runtime(
     post_session_event(
         runtime,
         "/v1/activity/finalize",
-        &input.session_id,
+        input.stateful_session_id(),
         identity,
     )
 }
@@ -1112,7 +1117,7 @@ fn hook_authorize_purpose(
             && item.get("resource").and_then(serde_json::Value::as_str)
                 == Some(target.path.as_str())
             && item.get("session_id").and_then(serde_json::Value::as_str)
-                == Some(input.session_id.as_str())
+                == Some(input.stateful_session_id())
             && item.get("workspace_id").and_then(serde_json::Value::as_str)
                 == Some(runtime.workspace_id.as_str());
         if !matches_intent {
@@ -1162,7 +1167,7 @@ fn authorize_targets(
         let body = protocol_envelope(ProtocolEnvelopeArgs {
             runtime,
             request_id: uuid::Uuid::new_v4().to_string(),
-            session_id: input.session_id.clone(),
+            session_id: input.stateful_session_id().to_string(),
             workspace_id: runtime.workspace_id.clone(),
             identity: identity.cloned(),
             source_kind: "hook",
@@ -1406,6 +1411,8 @@ fn normalize_path(path: PathBuf) -> PathBuf {
 #[derive(Debug, Deserialize)]
 struct PreToolUseInput {
     session_id: String,
+    #[serde(default)]
+    thread_id: Option<String>,
     tool_name: String,
     #[serde(default)]
     tool_input: serde_json::Value,
@@ -1418,6 +1425,10 @@ struct HookCwdInput {
 }
 
 impl PreToolUseInput {
+    fn stateful_session_id(&self) -> &str {
+        codex_thread_id_or_session_id(self.thread_id.as_deref(), &self.session_id)
+    }
+
     fn command(&self) -> Option<&str> {
         self.tool_input.get("command")?.as_str()
     }
@@ -1441,19 +1452,49 @@ struct AuthorizeDecision {
 #[derive(Debug, Deserialize)]
 struct SessionStartInput {
     session_id: String,
+    #[serde(default)]
+    thread_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SessionEventInput {
     session_id: String,
+    #[serde(default)]
+    thread_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct UserPromptSubmitInput {
     session_id: String,
+    #[serde(default)]
+    thread_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ContextRenderResponse {
     prompt_text: String,
+}
+
+fn codex_thread_id_or_session_id<'a>(thread_id: Option<&'a str>, session_id: &'a str) -> &'a str {
+    thread_id
+        .filter(|thread_id| !thread_id.is_empty())
+        .unwrap_or(session_id)
+}
+
+impl SessionStartInput {
+    fn stateful_session_id(&self) -> &str {
+        codex_thread_id_or_session_id(self.thread_id.as_deref(), &self.session_id)
+    }
+}
+
+impl SessionEventInput {
+    fn stateful_session_id(&self) -> &str {
+        codex_thread_id_or_session_id(self.thread_id.as_deref(), &self.session_id)
+    }
+}
+
+impl UserPromptSubmitInput {
+    fn stateful_session_id(&self) -> &str {
+        codex_thread_id_or_session_id(self.thread_id.as_deref(), &self.session_id)
+    }
 }

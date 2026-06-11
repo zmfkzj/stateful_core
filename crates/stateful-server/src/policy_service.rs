@@ -1,5 +1,6 @@
 use stateful_core::{AuthorizationInput, Decision, DecisionKind, SourceKind};
 use stateful_store::{Event, IntentRequestInput, Store, WaitRecord, WorkspaceIdentity};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct AuthorizationOutcome {
@@ -30,6 +31,14 @@ pub struct AuthorizeWriteInput {
     pub old_path: Option<String>,
     pub new_path: Option<String>,
     pub path: String,
+    pub base_observations: Vec<BaseObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseObservation {
+    pub path: String,
+    pub exists: bool,
+    pub content_hash: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -325,6 +334,14 @@ impl<'a> PolicyService<'a> {
             });
         }
 
+        if let Some(decision) = self.base_observation_decision(&input)? {
+            return Ok(AuthorizationOutcome {
+                decision,
+                wait: None,
+                reservation: None,
+            });
+        }
+
         Ok(AuthorizationOutcome {
             decision,
             wait: None,
@@ -440,6 +457,53 @@ impl<'a> PolicyService<'a> {
             }
             _ => vec![input.path.as_str()],
         }
+    }
+
+    fn base_observation_decision(
+        &self,
+        input: &AuthorizeWriteInput,
+    ) -> Result<Option<Decision>, String> {
+        if input.base_observations.is_empty() {
+            return Ok(None);
+        }
+
+        let Some(root) = input.root.as_deref() else {
+            return Ok(Some(stale_observation_decision(
+                "Base observations require workspace.root so target freshness can be checked.",
+            )));
+        };
+
+        let affected_paths = self
+            .affected_paths(input)
+            .into_iter()
+            .map(normalize_relative_path)
+            .collect::<Vec<_>>();
+
+        for observation in &input.base_observations {
+            let observed_path = normalize_relative_path(&observation.path);
+            if !affected_paths.iter().any(|path| path == &observed_path) {
+                continue;
+            }
+
+            let current = current_target_observation(root, &observed_path)?;
+            if current.exists != observation.exists {
+                return Ok(Some(stale_observation_decision(
+                    "Target existence changed since the supplied base observation.",
+                )));
+            }
+            if observation.exists
+                && observation
+                    .content_hash
+                    .as_ref()
+                    .is_some_and(|expected| current.content_hash.as_ref() != Some(expected))
+            {
+                return Ok(Some(stale_observation_decision(
+                    "Target content changed since the supplied base observation.",
+                )));
+            }
+        }
+
+        Ok(None)
     }
 
     fn reservation_conflict(
@@ -758,4 +822,85 @@ fn normalized_path_is_empty(path: &str) -> bool {
         }
     }
     segments.is_empty()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CurrentTargetObservation {
+    exists: bool,
+    content_hash: Option<String>,
+}
+
+fn stale_observation_decision(message: &str) -> Decision {
+    Decision::deny(
+        "stale_target_observation",
+        message,
+        "Reread the target and retry with a fresh base_observations entry before writing.",
+    )
+}
+
+fn current_target_observation(
+    root: &str,
+    relative_path: &str,
+) -> Result<CurrentTargetObservation, String> {
+    let path = workspace_relative_path(root, relative_path)?;
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(CurrentTargetObservation {
+            exists: true,
+            content_hash: Some(content_hash(&bytes)),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(CurrentTargetObservation {
+                exists: false,
+                content_hash: None,
+            })
+        }
+        Err(error) => Err(format!(
+            "failed to read target observation for {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn workspace_relative_path(root: &str, relative_path: &str) -> Result<PathBuf, String> {
+    let root = Path::new(root);
+    if root.as_os_str().is_empty() {
+        return Err("workspace.root is required for base observation checks".to_string());
+    }
+
+    let mut path = root.to_path_buf();
+    for component in Path::new(relative_path).components() {
+        match component {
+            Component::Normal(segment) => path.push(segment),
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir => {
+                return Err("base observation paths must stay inside the workspace".to_string());
+            }
+        }
+    }
+    Ok(path)
+}
+
+fn normalize_relative_path(path: impl AsRef<str>) -> String {
+    path.as_ref()
+        .replace('\\', "/")
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .fold(Vec::new(), |mut segments, segment| {
+            if segment == ".." {
+                segments.pop();
+            } else {
+                segments.push(segment);
+            }
+            segments
+        })
+        .join("/")
+}
+
+fn content_hash(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
 }

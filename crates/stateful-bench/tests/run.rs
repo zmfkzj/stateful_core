@@ -35,7 +35,7 @@ fn run_pairs_executes_manifest_agents_in_one_workspace_and_reports_harness_resul
                 .to_string(),
         ),
         harness_cmd_template: Some(
-            "printf '%s\n' '{\"task_results\":[{\"status\":\"passed\"},{\"status\":\"passed\"}]}'"
+            "printf '%s\n' '{\"task_results\":[{\"status\":\"passed\"},{\"status\":\"passed\"},{\"status\":\"passed\"},{\"status\":\"passed\"},{\"status\":\"passed\"}]}'"
                 .to_string(),
         ),
         stateful_binary: "stateful".to_string(),
@@ -86,7 +86,7 @@ fn run_pairs_executes_manifest_agents_in_one_workspace_and_reports_harness_resul
 
     let report = build_report(&run_dir).expect("report should build");
     assert_eq!(report.summary.pairs_scored, 1);
-    assert_eq!(report.summary.task_passed, 2);
+    assert_eq!(report.summary.task_passed, 5);
     assert_eq!(report.summary.composite_coordination_score, 1.0);
 
     fs::remove_dir_all(root).expect("temp root should clean up");
@@ -607,7 +607,7 @@ fn run_pairs_stateful_waits_for_state_server_before_spawning_agents() {
         mode: RunMode::Stateful,
         run_id: "synthetic-stateful".to_string(),
         agent_cmd_template:
-            "test -f \"$STATEFUL_HOME/runtime/server.json\" && printf changed-{agent_id}-{stateful_workspace_id} > {workspace}/{agent_id}.txt"
+            "test -f \"$STATEFUL_HOME/runtime/server.json\" && test -f {workspace}/enable-called && printf changed-{agent_id}-{stateful_workspace_id} > {workspace}/{agent_id}.txt"
                 .to_string(),
         output_dir: output_dir.clone(),
         timeout_seconds: 10,
@@ -764,8 +764,13 @@ fn fake_stateful_binary(root: &Path) -> PathBuf {
     file.write_all(
         br#"#!/bin/sh
 set -eu
-if [ "${1:-}" = "init" ]; then
+if [ "${1:-}" = "enable" ]; then
+  printf enabled > enable-called
   exit 0
+fi
+if [ "${1:-}" = "init" ]; then
+  printf init-is-obsolete >&2
+  exit 2
 fi
 if [ "${1:-}" = "server" ]; then
   shift

@@ -13,7 +13,7 @@ use std::{
 
 use stateful_cli::{
     GlobalPaths, ServerRuntime, ServerStartOptions, detached_server_args, ensure_server_with,
-    ensure_server_with_options, runtime_is_healthy, stop_server,
+    ensure_server_with_options, runtime_is_healthy, server_start_options_from_runtime, stop_server,
 };
 
 #[test]
@@ -372,6 +372,37 @@ fn ensure_server_with_options_rejects_healthy_runtime_on_different_port() {
 }
 
 #[test]
+fn server_start_options_from_runtime_preserves_previous_start_options() {
+    let runtime = ServerRuntime::new("http://0.0.0.0:43874", "secret-token", "shared", 123);
+
+    let options =
+        server_start_options_from_runtime(&runtime).expect("runtime options should parse");
+
+    assert_eq!(
+        options,
+        ServerStartOptions {
+            host: "0.0.0.0".to_string(),
+            port: 43874,
+            token: Some("secret-token".to_string()),
+            workspace_id: "shared".to_string(),
+        }
+    );
+}
+
+#[test]
+fn server_start_options_from_runtime_preserves_bracketed_ipv6_host() {
+    let runtime = ServerRuntime::new("http://[::1]:43875", "secret-token", "w1", 123);
+
+    let options =
+        server_start_options_from_runtime(&runtime).expect("runtime options should parse");
+
+    assert_eq!(options.host, "[::1]");
+    assert_eq!(options.port, 43875);
+    assert_eq!(options.token.as_deref(), Some("secret-token"));
+    assert_eq!(options.workspace_id, "w1");
+}
+
+#[test]
 fn detached_server_args_include_start_options() {
     let args = detached_server_args(&ServerStartOptions {
         host: "127.0.0.2".to_string(),
@@ -427,6 +458,32 @@ fn foreground_server_does_not_write_runtime_when_bind_fails() {
     assert!(
         !paths.server_json.exists(),
         "failed foreground start must not publish a runtime file"
+    );
+}
+
+#[test]
+fn detached_server_reports_child_startup_error_when_bind_fails() {
+    let home = temp_home("stateful-server-detached-bind-fail");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should reserve a port");
+    let port = listener
+        .local_addr()
+        .expect("listener should expose local address")
+        .port();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+        .args(["server", "start", "--port", &port.to_string()])
+        .env("STATEFUL_HOME", &home)
+        .output()
+        .expect("stateful binary should run");
+
+    assert!(
+        !output.status.success(),
+        "server should fail to bind occupied port"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Address already in use"),
+        "startup error should include child bind failure, got: {stderr}"
     );
 }
 

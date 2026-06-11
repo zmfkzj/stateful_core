@@ -75,6 +75,90 @@ fn run_command_parses_mode_and_agent_template() {
 }
 
 #[test]
+fn run_command_exits_nonzero_when_no_pairs_are_scored() {
+    let temp_dir = target_temp_dir("stateful-bench-cli-no-scored-pairs");
+    let pairs_path = temp_dir.join("pairs.jsonl");
+    let output_dir = temp_dir.join("runs");
+    fs::write(
+        &pairs_path,
+        serde_json::json!({
+            "pair_id": "pair-1/pair-2",
+            "repo": "example/repo",
+            "base_commit": "base",
+            "version": "1.0",
+            "eligibility": "same_base_commit",
+            "class": "same_repo_disjoint",
+            "task_a_files": ["agent-a.txt"],
+            "task_b_files": ["agent-b.txt"],
+            "task_a": {
+                "instance_id": "pair-1",
+                "repo": "example/repo",
+                "base_commit": "base",
+                "problem_statement": "Edit a file",
+                "version": "1.0",
+                "patch": "",
+                "test_patch": "",
+                "FAIL_TO_PASS": [],
+                "PASS_TO_PASS": []
+            },
+            "task_b": {
+                "instance_id": "pair-2",
+                "repo": "example/repo",
+                "base_commit": "base",
+                "problem_statement": "Edit a file",
+                "version": "1.0",
+                "patch": "",
+                "test_patch": "",
+                "FAIL_TO_PASS": [],
+                "PASS_TO_PASS": []
+            }
+        })
+        .to_string()
+            + "\n",
+    )
+    .expect("pair manifest should write");
+
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_stateful-bench"))
+        .args([
+            "run",
+            "--pairs",
+            pairs_path.to_str().expect("pairs path should be utf-8"),
+            "--mode",
+            "no-state",
+            "--run-id",
+            "all-setup-errors",
+            "--agent-cmd-template",
+            "true",
+            "--output-dir",
+            output_dir.to_str().expect("output dir should be utf-8"),
+            "--setup-cmd-template",
+            "false",
+        ])
+        .output()
+        .expect("stateful-bench run command should execute");
+
+    assert!(
+        !output.status.success(),
+        "all-setup-error run should fail: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no scored pairs"),
+        "stderr should explain no scored pairs: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output_dir
+            .join("all-setup-errors/pair-1-pair-2/pair-run.json")
+            .is_file(),
+        "run artifacts should still be recorded"
+    );
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
 fn generate_fallback_preflight_command_parses_assume_clean_apply() {
     let cli = Cli::try_parse_from([
         "stateful-bench",
@@ -549,10 +633,152 @@ print(json.dumps({{
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }
 
+#[test]
+fn codex_synthetic_agent_switches_inner_sandbox_for_nested_benchmark() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("codex_synthetic_agent_for_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+default_command = module.codex_command(
+    workspace=Path("/tmp/workspace"),
+    mode="no-state",
+    stateful_binary="/tmp/stateful",
+    base_env={{}},
+)
+nested_command = module.codex_command(
+    workspace=Path("/tmp/workspace"),
+    mode="no-state",
+    stateful_binary="/tmp/stateful",
+    base_env={{"STATEFUL_NESTED_CODEX_HOME_ROOT": "/repo/target/nested-codex-homes"}},
+)
+print(json.dumps({{"default": default_command, "nested": nested_command}}))
+"#,
+        agent_path = codex_synthetic_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+    let default_command = output["default"].as_array().expect("default command");
+    let nested_command = output["nested"].as_array().expect("nested command");
+
+    assert_eq!(
+        command_arg_after(default_command, "--sandbox"),
+        Some("workspace-write")
+    );
+    assert_eq!(
+        command_arg_after(nested_command, "--sandbox"),
+        Some("danger-full-access")
+    );
+}
+
+#[test]
+fn codex_synthetic_agent_builds_nested_codex_environment_with_system_cert() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("codex_synthetic_agent_env_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+env = module.codex_environment(
+    pair_id="pair/one",
+    agent_id="agent-a",
+    base_env={{
+        "PATH": "/bin",
+        "STATEFUL_NESTED_CODEX_HOME_ROOT": "/repo/target/nested-codex-homes",
+    }},
+)
+system_cert = Path("/etc/ssl/cert.pem")
+print(json.dumps({{
+    "env": env,
+    "system_cert_exists": system_cert.is_file(),
+}}, sort_keys=True))
+"#,
+        agent_path = codex_synthetic_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+    let env = &output["env"];
+
+    assert_eq!(
+        env["HOME"],
+        "/repo/target/nested-codex-homes/pair-one/agent-a/home"
+    );
+    assert_eq!(
+        env["CODEX_HOME"],
+        "/repo/target/nested-codex-homes/pair-one/agent-a/home/.codex"
+    );
+    if output["system_cert_exists"].as_bool() == Some(true) {
+        assert_eq!(env["SSL_CERT_FILE"], "/etc/ssl/cert.pem");
+    }
+}
+
+#[test]
+fn codex_synthetic_agent_seeds_and_cleans_nested_auth() {
+    let temp_dir = target_temp_dir("stateful-bench-codex-synthetic-agent-auth");
+    let script = format!(
+        r#"
+import importlib.util
+import json
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("codex_synthetic_agent_auth_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+root = Path({temp_dir})
+source_home = root / "source-home"
+source_auth = source_home / ".codex" / "auth.json"
+source_auth.parent.mkdir(parents=True, exist_ok=True)
+source_auth.write_text("{{\"token\":\"source\"}}")
+
+source_env = {{
+    "PATH": "/bin",
+    "HOME": str(source_home),
+    "STATEFUL_NESTED_CODEX_HOME_ROOT": str(root / "nested-codex-homes"),
+}}
+env = module.codex_environment(pair_id="pair-one", agent_id="agent-a", base_env=source_env)
+seeded = module.prepare_codex_environment(env, source_env=source_env)
+target_auth = Path(env["CODEX_HOME"]) / "auth.json"
+copied = target_auth.read_text()
+module.cleanup_seeded_auth(seeded)
+print(json.dumps({{
+    "copied": copied,
+    "target_exists_after_cleanup": target_auth.exists(),
+    "source_exists_after_cleanup": source_auth.exists(),
+}}))
+"#,
+        agent_path = codex_synthetic_agent_path_json(),
+        temp_dir = serde_json::to_string(&temp_dir.to_string_lossy())
+            .expect("temp dir should encode as json"),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["copied"], "{\"token\":\"source\"}");
+    assert_eq!(output["target_exists_after_cleanup"], false);
+    assert_eq!(output["source_exists_after_cleanup"], true);
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
 fn codex_pair_agent_path_json() -> String {
     serde_json::to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/scripts/codex_pair_agent.py"
+    ))
+    .expect("agent path should encode as json")
+}
+
+fn codex_synthetic_agent_path_json() -> String {
+    serde_json::to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../.stateful_bench/agent_synthetic/codex_synthetic_agent.py"
     ))
     .expect("agent path should encode as json")
 }
