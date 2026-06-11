@@ -32,7 +32,7 @@ fn server_join_writes_global_runtime_without_enabling_repo_by_default() {
     assert!(!result.repo_enabled);
     assert_eq!(result.runtime.base_url, host.base_url());
     assert_eq!(result.runtime.token, "secret-token");
-    assert_eq!(result.runtime.pid, 0);
+    assert_eq!(result.runtime.pid, 9876);
     assert_eq!(result.runtime.workspace_id, "shared");
     assert!(fixture.paths.server_json.is_file());
     assert!(fixture.codex_config.is_file());
@@ -41,6 +41,28 @@ fn server_join_writes_global_runtime_without_enabling_repo_by_default() {
         RepoRegistry::load(&fixture.paths).expect("registry should load"),
         RepoRegistry::default()
     );
+}
+
+#[test]
+fn server_join_to_localhost_records_runtime_identity_pid() {
+    let fixture = TestFixture::new("join-localhost-pid");
+    let host = FakeHttpServer::start(vec![identity_response_with_pid(200, 4321)]);
+
+    let result = join_server_runtime(ServerJoinOptions {
+        paths: fixture.paths.clone(),
+        codex_config_path: fixture.codex_config.clone(),
+        binary_path: "/opt/stateful/bin/stateful".to_string(),
+        base_url: host.base_url(),
+        token: "secret-token".to_string(),
+        workspace_id: "shared".to_string(),
+        enable_repo_root: None,
+    })
+    .expect("server join should succeed");
+
+    assert_eq!(result.runtime.pid, 4321);
+    let contents =
+        fs::read_to_string(&fixture.paths.server_json).expect("runtime should be written");
+    assert!(contents.contains("\"pid\": 4321"));
 }
 
 #[test]
@@ -358,12 +380,19 @@ fn read_any_request(stream: &mut TcpStream) {
 }
 
 fn identity_response(status: u16) -> String {
+    identity_response_with_pid(status, 9876)
+}
+
+fn identity_response_with_pid(status: u16, pid: u32) -> String {
     if status == 401 {
         return http_response(401, r#"{"error":"unauthorized"}"#);
     }
-    http_response(
-        200,
-        r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+    http_response(200, &identity_body(pid))
+}
+
+fn identity_body(pid: u32) -> String {
+    format!(
+        "{{\"status\":\"ok\",\"pid\":{pid},\"protocol_version\":\"stateful.v1\",\"capabilities\":[\"authorize.write_directory\"]}}"
     )
 }
 

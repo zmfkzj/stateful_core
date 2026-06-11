@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{Read, Write},
-    net::TcpStream,
+    net::{IpAddr, TcpStream},
     path::Path,
     time::Duration,
 };
@@ -831,6 +831,18 @@ pub fn runtime_identity_matches_pid(runtime: &ServerRuntime) -> anyhow::Result<b
         && identity.pid == runtime.pid)
 }
 
+pub fn runtime_identity_pid(runtime: &ServerRuntime) -> anyhow::Result<Option<u32>> {
+    let Some(identity) = fetch_runtime_identity(runtime)? else {
+        return Ok(None);
+    };
+    if runtime_identity_matches_runtime(runtime, &identity)
+        && runtime_identity_has_required_capabilities(runtime, &identity)
+    {
+        return Ok(Some(identity.pid));
+    }
+    Ok(None)
+}
+
 fn runtime_from_env() -> anyhow::Result<Option<ServerRuntime>> {
     let (Some(base_url), Some(token)) = (
         std::env::var("STATEFUL_SERVER_URL").ok(),
@@ -865,7 +877,7 @@ pub fn runtime_from_remote(
     token: impl Into<String>,
     workspace_id: impl Into<String>,
 ) -> anyhow::Result<ServerRuntime> {
-    let runtime = ServerRuntime::new(base_url, token, workspace_id, 0);
+    let mut runtime = ServerRuntime::new(base_url, token, workspace_id, 0);
     let Some(identity) = fetch_runtime_identity(&runtime)? else {
         anyhow::bail!("LAN server did not return a valid stateful runtime identity");
     };
@@ -875,7 +887,39 @@ pub fn runtime_from_remote(
             REQUIRED_RUNTIME_CAPABILITIES.join(", ")
         );
     }
+    if runtime_base_url_is_localhost(&runtime.base_url) {
+        runtime.pid = identity.pid;
+    }
     Ok(runtime)
+}
+
+pub fn runtime_base_url_is_localhost(base_url: &str) -> bool {
+    let Some(host) = runtime_base_url_host(base_url) else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(address) => address.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+fn runtime_base_url_host(base_url: &str) -> Option<&str> {
+    let authority = base_url.strip_prefix("http://")?.split('/').next()?;
+    if authority.is_empty() {
+        return None;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, _) = rest.split_once(']')?;
+        return (!host.is_empty()).then_some(host);
+    }
+    let host = authority
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(authority);
+    (!host.is_empty()).then_some(host)
 }
 
 fn fetch_runtime_identity(runtime: &ServerRuntime) -> anyhow::Result<Option<RuntimeIdentity>> {

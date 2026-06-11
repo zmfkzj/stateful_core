@@ -13,7 +13,8 @@ use std::{
 
 use stateful_cli::{
     GlobalPaths, ServerRuntime, ServerStartOptions, detached_server_args, ensure_server_with,
-    ensure_server_with_options, runtime_is_healthy, server_start_options_from_runtime, stop_server,
+    ensure_server_with_options, restart_server, runtime_is_healthy,
+    server_start_options_from_runtime, stop_server,
 };
 
 #[test]
@@ -304,6 +305,28 @@ fn stop_server_refuses_to_kill_unverified_pid() {
 
     assert!(
         error.to_string().contains("refusing to stop"),
+        "unexpected error: {error}"
+    );
+    assert!(paths.server_json.is_file());
+}
+
+#[test]
+fn restart_refuses_remote_pid_zero_runtime_that_cannot_be_killed() {
+    let home = temp_home("stateful-server-restart-remote-pid-zero");
+    let paths = GlobalPaths::new(&home);
+    let fake = FakeHttpServer::start(vec![fake_response(
+        200,
+        r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+    )]);
+    let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 0);
+    stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
+
+    let error = restart_server(&paths).expect_err("remote runtime cannot be restarted locally");
+
+    assert!(
+        error
+            .to_string()
+            .contains("remote stateful server cannot be killed"),
         "unexpected error: {error}"
     );
     assert!(paths.server_json.is_file());
