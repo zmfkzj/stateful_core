@@ -8,6 +8,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use crate::runtime::{runtime_base_url_is_localhost, runtime_identity_pid};
 use crate::{
     GlobalPaths, ServerRuntime, get_json, runtime_has_required_identity,
     runtime_identity_matches_pid, write_global_runtime_file,
@@ -164,9 +165,43 @@ pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
 pub fn restart_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
     let runtime = read_runtime_file(paths)?
         .ok_or_else(|| anyhow::anyhow!("no stateful server runtime file found to restart"))?;
+    let runtime = runtime_for_local_restart(paths, runtime)?;
     let options = server_start_options_from_runtime(&runtime)?;
     stop_server(paths)?;
     ensure_server_with_options(paths, options)
+}
+
+fn runtime_for_local_restart(
+    paths: &GlobalPaths,
+    mut runtime: ServerRuntime,
+) -> anyhow::Result<ServerRuntime> {
+    if runtime.pid != 0 {
+        return Ok(runtime);
+    }
+    if !runtime_base_url_is_localhost(&runtime.base_url) {
+        return Err(remote_runtime_cannot_be_killed(&runtime));
+    }
+    let Some(identity_pid) = runtime_identity_pid(&runtime)? else {
+        return Err(remote_runtime_cannot_be_killed(&runtime));
+    };
+    if identity_pid == 0 {
+        return Err(remote_runtime_cannot_be_killed(&runtime));
+    }
+    match pid_matches_current_exe(identity_pid) {
+        Ok(true) => {}
+        Ok(false) | Err(_) => return Err(remote_runtime_cannot_be_killed(&runtime)),
+    }
+
+    runtime.pid = identity_pid;
+    write_global_runtime_file(paths, &runtime)?;
+    Ok(runtime)
+}
+
+fn remote_runtime_cannot_be_killed(runtime: &ServerRuntime) -> anyhow::Error {
+    anyhow::anyhow!(
+        "remote stateful server cannot be killed from this machine: {}; restart it on the host running that server or start a local stateful server",
+        runtime.base_url
+    )
 }
 
 pub fn server_start_options_from_runtime(
