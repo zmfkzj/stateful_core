@@ -349,6 +349,12 @@ fn lease_descriptors_expose_path_only_schema() {
         );
         assert_eq!(tool.input_schema["additionalProperties"], false);
     }
+
+    let release = descriptor("state_lease_release");
+    assert!(
+        release.description.contains("same-session"),
+        "release tool should make ownership constraints explicit"
+    );
 }
 
 #[test]

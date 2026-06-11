@@ -1,6 +1,6 @@
 use clap::Parser;
 use stateful_cli::{
-    Cli, CodexSandboxMode, Command, ExternalRunCommand, HookCommand, LanCommand, McpCommand,
+    Cli, CodexSandboxMode, Command, ExternalRunCommand, HookCommand, McpCommand,
     NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand, SandboxFsProfile,
     SandboxNetworkPolicy, ServerCommand,
 };
@@ -740,46 +740,46 @@ fn parses_legacy_server_runtime_options() {
 }
 
 #[test]
-fn parses_lan_serve_defaults() {
-    let cli = Cli::try_parse_from(["stateful", "lan", "serve"]).expect("lan serve should parse");
-
-    match cli.command {
-        Command::Lan(LanCommand::Serve {
-            host,
-            port,
-            token,
-            workspace_id,
-        }) => {
-            assert_eq!(host, "0.0.0.0");
-            assert_eq!(port, 43873);
-            assert_eq!(token, None);
-            assert_eq!(workspace_id, "shared");
-        }
-        other => panic!("expected lan serve command, got {other:?}"),
-    }
+fn rejects_removed_lan_subcommand() {
+    assert!(Cli::try_parse_from(["stateful", "lan", "serve"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "stateful",
+            "lan",
+            "join",
+            "http://192.168.0.23:43873",
+            "--token",
+            "secret-token",
+        ])
+        .is_err()
+    );
 }
 
 #[test]
-fn parses_lan_join_without_repo_enablement() {
+fn parses_server_join_without_repo_enablement() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "lan",
+        "server",
         "join",
         "http://192.168.0.23:43873",
         "--token",
         "secret-token",
     ])
-    .expect("lan join should parse");
+    .expect("server join should parse");
 
     match cli.command {
-        Command::Lan(LanCommand::Join {
-            base_url,
-            token,
-            workspace_id,
-            enable_repo,
-            binary,
-            codex_config,
-        }) => {
+        Command::Server {
+            command:
+                Some(ServerCommand::Join {
+                    base_url,
+                    token,
+                    workspace_id,
+                    enable_repo,
+                    binary,
+                    codex_config,
+                }),
+            ..
+        } => {
             assert_eq!(base_url, "http://192.168.0.23:43873");
             assert_eq!(token, "secret-token");
             assert_eq!(workspace_id, "shared");
@@ -787,15 +787,15 @@ fn parses_lan_join_without_repo_enablement() {
             assert_eq!(binary, None);
             assert_eq!(codex_config, None);
         }
-        other => panic!("expected lan join command, got {other:?}"),
+        other => panic!("expected server join command, got {other:?}"),
     }
 }
 
 #[test]
-fn parses_lan_join_with_repo_enablement_and_install_overrides() {
+fn parses_server_join_with_repo_enablement_and_install_overrides() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "lan",
+        "server",
         "join",
         "http://192.168.0.23:43873",
         "--token",
@@ -808,17 +808,21 @@ fn parses_lan_join_with_repo_enablement_and_install_overrides() {
         "--codex-config",
         "/Users/me/.codex/config.toml",
     ])
-    .expect("lan join should parse");
+    .expect("server join should parse");
 
     match cli.command {
-        Command::Lan(LanCommand::Join {
-            base_url,
-            token,
-            workspace_id,
-            enable_repo,
-            binary,
-            codex_config,
-        }) => {
+        Command::Server {
+            command:
+                Some(ServerCommand::Join {
+                    base_url,
+                    token,
+                    workspace_id,
+                    enable_repo,
+                    binary,
+                    codex_config,
+                }),
+            ..
+        } => {
             assert_eq!(base_url, "http://192.168.0.23:43873");
             assert_eq!(token, "secret-token");
             assert_eq!(workspace_id, "w1");
@@ -829,7 +833,21 @@ fn parses_lan_join_with_repo_enablement_and_install_overrides() {
                 Some(std::path::PathBuf::from("/Users/me/.codex/config.toml"))
             );
         }
-        other => panic!("expected lan join command, got {other:?}"),
+        other => panic!("expected server join command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_server_restart_subcommand() {
+    let cli = Cli::try_parse_from(["stateful", "server", "restart"])
+        .expect("server restart should parse");
+
+    match cli.command {
+        Command::Server {
+            command: Some(ServerCommand::Restart),
+            ..
+        } => {}
+        other => panic!("expected server restart command, got {other:?}"),
     }
 }
 

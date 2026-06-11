@@ -268,7 +268,7 @@ pub fn write_current_session_file_for_codex_run(
     let repo_root = repo_root.as_ref();
     if codex_run_id != session.session_id {
         anyhow::bail!(
-            "Codex session file id `{codex_run_id}` must match session_id `{}`",
+            "Codex run/thread file id `{codex_run_id}` must match session_id `{}`",
             session.session_id
         );
     }
@@ -280,7 +280,7 @@ pub fn write_current_session_file_for_codex_run(
             let existing: CurrentSession = serde_json::from_str(&contents)?;
             if existing != *session {
                 anyhow::bail!(
-                    "Codex session `{codex_run_id}` is already bound to session `{}`",
+                    "Codex run/thread `{codex_run_id}` is already bound to session `{}`",
                     existing.session_id
                 );
             }
@@ -310,7 +310,7 @@ pub fn read_current_session_file_for_codex_run(
     let session: CurrentSession = serde_json::from_str(&contents)?;
     if session.session_id != codex_run_id {
         anyhow::bail!(
-            "current session file for Codex session `{codex_run_id}` contains session_id `{}`",
+            "current session file for Codex run/thread `{codex_run_id}` contains session_id `{}`",
             session.session_id
         );
     }
@@ -772,11 +772,9 @@ fn current_codex_thread_id() -> anyhow::Result<Option<String>> {
 fn current_codex_session_id() -> anyhow::Result<Option<String>> {
     let codex_run_id = current_codex_run_id()?;
     let codex_thread_id = current_codex_thread_id()?;
-    match (codex_run_id, codex_thread_id) {
-        (Some(run_id), Some(thread_id)) if run_id != thread_id => anyhow::bail!(
-            "{STATEFUL_CODEX_RUN_ID_ENV} `{run_id}` must match {CODEX_THREAD_ID_ENV} `{thread_id}`"
-        ),
-        (Some(session_id), _) | (_, Some(session_id)) => Ok(Some(session_id)),
+    match (codex_thread_id, codex_run_id) {
+        (Some(thread_id), _) => Ok(Some(thread_id)),
+        (None, Some(run_id)) => Ok(Some(run_id)),
         (None, None) => Ok(None),
     }
 }
@@ -787,7 +785,7 @@ fn ensure_current_session_matches_codex_session(
 ) -> anyhow::Result<()> {
     if codex_session_id != session.session_id {
         anyhow::bail!(
-            "current Codex session id `{codex_session_id}` must match session_id `{}`",
+            "current Codex run/thread id `{codex_session_id}` must match session_id `{}`",
             session.session_id
         );
     }

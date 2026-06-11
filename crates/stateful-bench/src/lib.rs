@@ -229,6 +229,7 @@ pub fn run_cli() -> Result<()> {
             harness_cmd_template,
             stateful_binary,
         } => {
+            let output_dir_for_report = output_dir.clone();
             let metadata = run_pairs(RunOptions {
                 pairs,
                 mode,
@@ -246,6 +247,9 @@ pub fn run_cli() -> Result<()> {
                 stateful_binary,
             })?;
             println!("{}", serde_json::to_string_pretty(&metadata)?);
+            let run_dir = absolute_path(&output_dir_for_report)?.join(&metadata.run_id);
+            let report = build_report(&run_dir)?;
+            ensure_run_has_scored_pairs(&report)?;
         }
         Command::Report {
             run_dir,
@@ -1001,21 +1005,29 @@ pub fn composite_score(
     functional: &FunctionalOutcome,
     collisions: &CollisionMetrics,
 ) -> Option<CompositeScore> {
-    if matches!(
-        functional.task_a,
-        HarnessTaskOutcome::SetupError | HarnessTaskOutcome::Unknown
-    ) || matches!(
-        functional.task_b,
-        HarnessTaskOutcome::SetupError | HarnessTaskOutcome::Unknown
-    ) {
+    composite_score_for_task_outcomes(&[functional.task_a, functional.task_b], collisions)
+}
+
+fn composite_score_for_task_outcomes(
+    outcomes: &[HarnessTaskOutcome],
+    collisions: &CollisionMetrics,
+) -> Option<CompositeScore> {
+    if outcomes.is_empty()
+        || outcomes.iter().any(|outcome| {
+            matches!(
+                outcome,
+                HarnessTaskOutcome::SetupError | HarnessTaskOutcome::Unknown
+            )
+        })
+    {
         return None;
     }
 
-    let passed = [functional.task_a, functional.task_b]
-        .into_iter()
-        .filter(|outcome| *outcome == HarnessTaskOutcome::Passed)
+    let passed = outcomes
+        .iter()
+        .filter(|outcome| **outcome == HarnessTaskOutcome::Passed)
         .count();
-    let functional_pair_score = passed as f64 / 2.0;
+    let functional_pair_score = passed as f64 / outcomes.len() as f64;
 
     let collision_penalty = collisions.uncoordinated_same_file_collisions as f64 * 0.3
         + collisions.lost_edit_events as f64 * 0.4;
@@ -1955,13 +1967,13 @@ fn start_stateful_workspace(
     stateful_home: &Path,
 ) -> Result<Child> {
     run_shell_command(
-        &format!("{stateful_binary} init --binary {stateful_binary}"),
+        &format!("{stateful_binary} enable"),
         workspace,
         None,
         None,
         &[("STATEFUL_HOME", stateful_home)],
     )
-    .context("failed to initialize stateful hooks in benchmark workspace")?;
+    .context("failed to enable stateful hooks in benchmark workspace")?;
 
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
@@ -2966,8 +2978,9 @@ fn summarize_mode_for_manifest(
         summary.false_block_count += pair.false_block_count;
         summary.missed_conflict_count += pair.missed_conflict_count;
         summary.manual_intervention_count += pair.manual_intervention_count;
-        count_comparison_task_outcome(pair.functional.task_a, &mut summary);
-        count_comparison_task_outcome(pair.functional.task_b, &mut summary);
+        for outcome in &pair.task_outcomes {
+            count_comparison_task_outcome(*outcome, &mut summary);
+        }
 
         if let Some(count) = pair.token_count {
             has_tokens = true;
@@ -3025,13 +3038,17 @@ fn comparison_status(pair: Option<&PairReport>) -> PairComparisonStatus {
     let Some(pair) = pair else {
         return PairComparisonStatus::MissingArtifact;
     };
-    if matches!(pair.functional.task_a, HarnessTaskOutcome::SetupError)
-        || matches!(pair.functional.task_b, HarnessTaskOutcome::SetupError)
+    if pair
+        .task_outcomes
+        .iter()
+        .any(|outcome| matches!(outcome, HarnessTaskOutcome::SetupError))
     {
         return PairComparisonStatus::SetupError;
     }
-    if matches!(pair.functional.task_a, HarnessTaskOutcome::Unknown)
-        || matches!(pair.functional.task_b, HarnessTaskOutcome::Unknown)
+    if pair
+        .task_outcomes
+        .iter()
+        .any(|outcome| matches!(outcome, HarnessTaskOutcome::Unknown))
     {
         return PairComparisonStatus::Unknown;
     }
@@ -3242,6 +3259,8 @@ pub struct ReportSummary {
 pub struct PairReport {
     pub pair_id: String,
     pub functional: FunctionalOutcome,
+    #[serde(default)]
+    pub task_outcomes: Vec<HarnessTaskOutcome>,
     pub collisions: CollisionMetrics,
     pub score: Option<CompositeScore>,
     pub wall_time_ms: u64,
@@ -3284,13 +3303,15 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
             .and_then(|path| read_harness_result(pair_dir.join(path)).ok())
             .unwrap_or_default();
         let mut collisions = read_collision_metrics(pair_dir.join("observer-events.jsonl"))?;
-        if record.agent_a.outcome == AgentOutcome::TimedOut
-            || record.agent_b.outcome == AgentOutcome::TimedOut
+        if recorded_agents(&record)
+            .iter()
+            .any(|agent| agent.outcome == AgentOutcome::TimedOut)
         {
             collisions.timeouts += 1;
         }
-        let functional = harness.functional_outcome();
-        let score = composite_score(&functional, &collisions);
+        let task_outcomes = harness.task_outcomes(expected_task_count(&record));
+        let functional = functional_outcome_from_task_outcomes(&task_outcomes);
+        let score = composite_score_for_task_outcomes(&task_outcomes, &collisions);
 
         summary.wall_time_ms += record.wall_time_ms;
         summary.uncoordinated_same_file_collisions += collisions.uncoordinated_same_file_collisions;
@@ -3306,8 +3327,9 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
         summary.false_block_count += harness.metrics.false_block_count;
         summary.missed_conflict_count += harness.metrics.missed_conflict_count;
         summary.manual_intervention_count += harness.metrics.manual_intervention_count;
-        count_task_outcome(functional.task_a, &mut summary);
-        count_task_outcome(functional.task_b, &mut summary);
+        for outcome in &task_outcomes {
+            count_task_outcome(*outcome, &mut summary);
+        }
 
         if let Some(score) = &score {
             score_sums.add(score);
@@ -3328,6 +3350,7 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
         pairs.push(PairReport {
             pair_id: record.pair_id,
             functional,
+            task_outcomes,
             collisions,
             score,
             wall_time_ms: record.wall_time_ms,
@@ -3361,6 +3384,17 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
         summary,
         pairs,
     })
+}
+
+fn ensure_run_has_scored_pairs(report: &RunReport) -> Result<()> {
+    if report.summary.pairs_total > 0 && report.summary.pairs_scored == 0 {
+        anyhow::bail!(
+            "run completed with no scored pairs; setup_errors={}, unknown_task_results={}",
+            report.summary.setup_errors,
+            report.summary.unknown_task_results
+        );
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -3398,19 +3432,42 @@ struct HarnessResult {
 }
 
 impl HarnessResult {
-    fn functional_outcome(&self) -> FunctionalOutcome {
-        FunctionalOutcome {
-            task_a: self
-                .task_results
-                .first()
-                .map(HarnessTaskResult::outcome)
-                .unwrap_or(HarnessTaskOutcome::Unknown),
-            task_b: self
-                .task_results
-                .get(1)
-                .map(HarnessTaskResult::outcome)
-                .unwrap_or(HarnessTaskOutcome::Unknown),
-        }
+    fn task_outcomes(&self, expected_task_count: usize) -> Vec<HarnessTaskOutcome> {
+        let mut outcomes = self
+            .task_results
+            .iter()
+            .map(HarnessTaskResult::outcome)
+            .collect::<Vec<_>>();
+        outcomes.resize(
+            outcomes.len().max(expected_task_count.max(2)),
+            HarnessTaskOutcome::Unknown,
+        );
+        outcomes
+    }
+}
+
+fn expected_task_count(record: &PairRunRecord) -> usize {
+    recorded_agents(record).len().max(2)
+}
+
+fn recorded_agents(record: &PairRunRecord) -> Vec<&AgentRunRecord> {
+    if record.agents.is_empty() {
+        vec![&record.agent_a, &record.agent_b]
+    } else {
+        record.agents.iter().collect()
+    }
+}
+
+fn functional_outcome_from_task_outcomes(outcomes: &[HarnessTaskOutcome]) -> FunctionalOutcome {
+    FunctionalOutcome {
+        task_a: outcomes
+            .first()
+            .copied()
+            .unwrap_or(HarnessTaskOutcome::Unknown),
+        task_b: outcomes
+            .get(1)
+            .copied()
+            .unwrap_or(HarnessTaskOutcome::Unknown),
     }
 }
 

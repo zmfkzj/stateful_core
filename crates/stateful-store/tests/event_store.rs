@@ -1270,6 +1270,34 @@ fn release_lease_matches_requested_path_shape_when_file_and_directory_paths_over
 }
 
 #[test]
+fn release_lease_rejects_other_session_owner() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    acquire_test_lease(&store, "s1", "w1", "target/");
+
+    let error = store
+        .release_lease("s2", "w1", "target/")
+        .expect_err("other session should not release lease");
+
+    assert!(error.to_string().contains("lease owner mismatch"));
+    assert!(
+        store
+            .active_lease_covers_directory_by_session("w1", "target/", "s1")
+            .expect("directory coverage should load")
+    );
+}
+
+#[test]
+fn release_lease_rejects_missing_same_session_lease() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    let error = store
+        .release_lease("s1", "w1", "target/")
+        .expect_err("missing lease should not report success");
+
+    assert!(error.to_string().contains("lease not found"));
+}
+
+#[test]
 fn active_lease_owner_uses_normalized_relative_paths() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 

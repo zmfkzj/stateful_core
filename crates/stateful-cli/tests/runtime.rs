@@ -61,6 +61,12 @@ fn current_session_file_child_probe() {
             assert_eq!(session.session_id, "s1");
             assert_eq!(session.workspace_id, "w1");
         }
+        "read_prefers_codex_thread_id" => {
+            let session =
+                read_current_session_file(&repo_root).expect("current session should read");
+            assert_eq!(session.session_id, "thread-child");
+            assert_eq!(session.workspace_id, "w1");
+        }
         "read_symlink_error" => {
             let error =
                 read_current_session_file(&repo_root).expect_err("symlinked session should fail");
@@ -82,6 +88,53 @@ fn current_session_file_child_probe() {
         }
         other => panic!("unknown current session child case `{other}`"),
     }
+}
+
+#[test]
+fn current_session_file_prefers_codex_thread_id_over_run_id() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-current-session-thread-id-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    write_current_session_file_for_codex_run(
+        &temp_root,
+        "thread-child",
+        &CurrentSession::new("thread-child", "w1"),
+    )
+    .expect("thread-bound current session should write");
+    write_current_session_file_for_codex_run(
+        &temp_root,
+        "root-session",
+        &CurrentSession::new("root-session", "w1"),
+    )
+    .expect("root-bound current session should write");
+
+    let output = Command::new(std::env::current_exe().expect("current test binary path"))
+        .arg("current_session_file_child_probe")
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env_clear()
+        .env(CURRENT_SESSION_CHILD_CASE, "read_prefers_codex_thread_id")
+        .env(CURRENT_SESSION_CHILD_ROOT, &temp_root)
+        .env("STATEFUL_CODEX_RUN_ID", "root-session")
+        .env("CODEX_THREAD_ID", "thread-child")
+        .output()
+        .expect("current session child test should run");
+
+    assert!(
+        output.status.success(),
+        "current session child failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -475,7 +528,7 @@ fn codex_run_session_file_is_isolated_from_legacy_current_session() {
 }
 
 #[test]
-fn codex_run_session_file_refuses_to_rebind_to_different_codex_session() {
+fn codex_run_session_file_refuses_to_rebind_to_different_stateful_session() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-codex-run-session-rebind-test-{}",
         std::process::id()
@@ -497,7 +550,7 @@ fn codex_run_session_file_refuses_to_rebind_to_different_codex_session() {
         "s-run-a",
         &CurrentSession::new("s-run-a", "w2"),
     )
-    .expect_err("same codex run should not rebind to a different Codex session");
+    .expect_err("same codex run should not rebind to a different Stateful session");
 
     assert!(error.to_string().contains("already bound"));
 

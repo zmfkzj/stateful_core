@@ -152,6 +152,10 @@ targets:
     path
     old_path
     new_path
+base_observations:
+  - path
+    exists
+    content_hash
 command
 override_instruction
 ```
@@ -162,6 +166,11 @@ targets to hooks. After exact intent and a successful same-session file lease, h
 including `write_file`, `delete_file`, and `move_file` with source `path` /
 `old_path` and destination `new_path`. For Bash, command text alone never
 authorizes tool use.
+`/v1/authorize` accepts optional `base_observations` for OCC-style freshness
+checks. When supplied, each observation is compared against the current
+workspace file state under `workspace.root`; existence or `content_hash` changes
+for an affected target return `deny` with `reason_code:
+stale_target_observation` and require the caller to reread before retrying.
 Raw Bash is denied by stateful hooks. Bash hook calls are allowed only when the
 outer command is a single strict invocation of the trusted absolute `stateful`
 binary running `<absolute-stateful-binary> sandbox run ... --command <cmd>`.
@@ -326,10 +335,11 @@ repo-local .stateful_core/runtime/server.json compatibility fallback
 `protocol_version`, and `started_at`. The prototype writes it with normal local
 filesystem defaults; user-only file permissions are a future hardening item.
 
-`stateful lan serve` starts a LAN-reachable HTTP runtime and prints join
-commands. `stateful lan join` validates the host runtime, installs global
-stateful/Codex MCP configuration, writes global runtime discovery for the host
-server, and only enables the current repo when `--enable-repo` is supplied.
+`stateful server start` starts the HTTP runtime and always prints
+`stateful server join ...` commands. Binding to `0.0.0.0` makes the runtime
+LAN-reachable. `stateful server join` validates the host runtime, installs
+global stateful/Codex MCP configuration, writes global runtime discovery for the
+host server, and only enables the current repo when `--enable-repo` is supplied.
 
 ## Local HTTP Trust
 
@@ -407,11 +417,11 @@ stateful enable [--repo <path>] [--repo-local-codex]
 stateful disable [--repo <path>]
 stateful repos list
 stateful server
-stateful server start [--foreground]
+stateful server start [--foreground] [--host <host>] [--port <port>] [--token <token>] [--workspace-id <id>]
+stateful server restart
 stateful server stop
 stateful server status
-stateful lan serve [--host <host>] [--port <port>] [--token <token>] [--workspace-id <id>]
-stateful lan join <base-url> --token <token> [--workspace-id <id>] [--enable-repo]
+stateful server join <base-url> --token <token> [--workspace-id <id>] [--enable-repo]
 stateful status
 stateful current
 stateful events

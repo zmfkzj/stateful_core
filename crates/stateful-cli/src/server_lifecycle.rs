@@ -1,6 +1,7 @@
 use std::{
     fs,
     fs::OpenOptions,
+    io::{Read, Seek, SeekFrom},
     path::Path,
     process::{Command, Stdio},
     thread,
@@ -160,6 +161,55 @@ pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
     terminate_runtime(paths, &runtime)
 }
 
+pub fn restart_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
+    let runtime = read_runtime_file(paths)?
+        .ok_or_else(|| anyhow::anyhow!("no stateful server runtime file found to restart"))?;
+    let options = server_start_options_from_runtime(&runtime)?;
+    stop_server(paths)?;
+    ensure_server_with_options(paths, options)
+}
+
+pub fn server_start_options_from_runtime(
+    runtime: &ServerRuntime,
+) -> anyhow::Result<ServerStartOptions> {
+    let (host, port) = parse_runtime_base_url(&runtime.base_url)?;
+    Ok(ServerStartOptions {
+        host,
+        port,
+        token: Some(runtime.token.clone()),
+        workspace_id: runtime.workspace_id.clone(),
+    })
+}
+
+fn parse_runtime_base_url(base_url: &str) -> anyhow::Result<(String, u16)> {
+    let without_scheme = base_url
+        .strip_prefix("http://")
+        .ok_or_else(|| anyhow::anyhow!("only http:// stateful server URLs can be restarted"))?;
+    let authority = without_scheme
+        .split('/')
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing stateful server authority"))?;
+    if authority.is_empty() {
+        anyhow::bail!("missing stateful server authority");
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, port) = rest
+            .split_once("]:")
+            .ok_or_else(|| anyhow::anyhow!("invalid bracketed stateful server authority"))?;
+        if host.is_empty() {
+            anyhow::bail!("missing stateful server host");
+        }
+        return Ok((format!("[{host}]"), port.parse()?));
+    }
+    let (host, port) = authority
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("missing stateful server port"))?;
+    if host.is_empty() {
+        anyhow::bail!("missing stateful server host");
+    }
+    Ok((host.to_string(), port.parse()?))
+}
+
 fn retire_incompatible_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> anyhow::Result<()> {
     if !runtime_is_basic_healthy(runtime) {
         if runtime.pid == 0 {
@@ -211,10 +261,11 @@ fn start_detached_server(
         .create(true)
         .append(true)
         .open(&paths.server_log)?;
+    let log_start = log.metadata()?.len();
     let log_err = log.try_clone()?;
     let mut command = Command::new(std::env::current_exe()?);
     configure_detached_command(&mut command);
-    let child = command
+    let mut child = command
         .args(detached_server_args(options))
         .env("STATEFUL_HOME", &paths.home)
         .stdin(Stdio::null())
@@ -229,12 +280,48 @@ fn start_detached_server(
                 return Ok(runtime);
             }
         }
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!(
+                "stateful server exited before becoming healthy with status {} after starting pid {}{}",
+                status,
+                child.id(),
+                startup_log_detail(paths, log_start)
+            );
+        }
     }
 
     anyhow::bail!(
-        "stateful server did not become healthy after starting pid {}",
-        child.id()
+        "stateful server did not become healthy after starting pid {}{}",
+        child.id(),
+        startup_log_detail(paths, log_start)
     )
+}
+
+fn startup_log_detail(paths: &GlobalPaths, start_offset: u64) -> String {
+    match startup_log_excerpt(paths, start_offset) {
+        Ok(Some(excerpt)) => format!("; recent server log: {excerpt}"),
+        Ok(None) | Err(_) => String::new(),
+    }
+}
+
+fn startup_log_excerpt(paths: &GlobalPaths, start_offset: u64) -> anyhow::Result<Option<String>> {
+    let mut file = fs::File::open(&paths.server_log)?;
+    file.seek(SeekFrom::Start(start_offset))?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    let lines = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(
+        lines.into_iter().rev().collect::<Vec<_>>().join(" | "),
+    ))
 }
 
 pub fn detached_server_args(options: &ServerStartOptions) -> Vec<String> {

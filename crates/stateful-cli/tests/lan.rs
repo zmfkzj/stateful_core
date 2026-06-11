@@ -3,20 +3,21 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
+    process::Command,
     thread,
 };
 
 use stateful_cli::{
-    GlobalPaths, LanJoinOptions, LanServeOptions, RepoRegistry, ServerRuntime, join_lan_runtime,
-    lan_join_commands, serve_lan_runtime, write_global_runtime_file,
+    GlobalPaths, RepoRegistry, ServerJoinOptions, ServerRuntime, ServerStartRuntimeOptions,
+    join_server_runtime, server_join_commands, start_server_runtime, write_global_runtime_file,
 };
 
 #[test]
-fn lan_join_writes_global_runtime_without_enabling_repo_by_default() {
+fn server_join_writes_global_runtime_without_enabling_repo_by_default() {
     let fixture = TestFixture::new("join-global-only");
     let host = FakeHttpServer::start(vec![identity_response(200)]);
 
-    let result = join_lan_runtime(LanJoinOptions {
+    let result = join_server_runtime(ServerJoinOptions {
         paths: fixture.paths.clone(),
         codex_config_path: fixture.codex_config.clone(),
         binary_path: "/opt/stateful/bin/stateful".to_string(),
@@ -25,7 +26,7 @@ fn lan_join_writes_global_runtime_without_enabling_repo_by_default() {
         workspace_id: "shared".to_string(),
         enable_repo_root: None,
     })
-    .expect("lan join should succeed");
+    .expect("server join should succeed");
 
     assert_eq!(result.status, "ok");
     assert!(!result.repo_enabled);
@@ -43,12 +44,12 @@ fn lan_join_writes_global_runtime_without_enabling_repo_by_default() {
 }
 
 #[test]
-fn lan_join_enable_repo_only_when_requested() {
+fn server_join_enable_repo_only_when_requested() {
     let fixture = TestFixture::new("join-enable-repo");
     let host = FakeHttpServer::start(vec![identity_response(200)]);
     init_git_repo(&fixture.repo);
 
-    let result = join_lan_runtime(LanJoinOptions {
+    let result = join_server_runtime(ServerJoinOptions {
         paths: fixture.paths.clone(),
         codex_config_path: fixture.codex_config.clone(),
         binary_path: "/opt/stateful/bin/stateful".to_string(),
@@ -57,7 +58,7 @@ fn lan_join_enable_repo_only_when_requested() {
         workspace_id: "shared".to_string(),
         enable_repo_root: Some(fixture.repo.clone()),
     })
-    .expect("lan join should enable repo");
+    .expect("server join should enable repo");
 
     assert!(result.repo_enabled);
     let registry = RepoRegistry::load(&fixture.paths).expect("registry should load");
@@ -65,11 +66,11 @@ fn lan_join_enable_repo_only_when_requested() {
 }
 
 #[test]
-fn lan_join_invalid_token_fails_before_writing() {
+fn server_join_invalid_token_fails_before_writing() {
     let fixture = TestFixture::new("join-invalid-token");
     let host = FakeHttpServer::start(vec![identity_response(401)]);
 
-    let error = join_lan_runtime(LanJoinOptions {
+    let error = join_server_runtime(ServerJoinOptions {
         paths: fixture.paths.clone(),
         codex_config_path: fixture.codex_config.clone(),
         binary_path: "/opt/stateful/bin/stateful".to_string(),
@@ -90,11 +91,11 @@ fn lan_join_invalid_token_fails_before_writing() {
 }
 
 #[test]
-fn lan_join_missing_capability_fails_before_writing() {
+fn server_join_missing_capability_fails_before_writing() {
     let fixture = TestFixture::new("join-missing-capability");
     let host = FakeHttpServer::start(vec![identity_response_without_write_dir_capability()]);
 
-    let error = join_lan_runtime(LanJoinOptions {
+    let error = join_server_runtime(ServerJoinOptions {
         paths: fixture.paths.clone(),
         codex_config_path: fixture.codex_config.clone(),
         binary_path: "/opt/stateful/bin/stateful".to_string(),
@@ -111,11 +112,11 @@ fn lan_join_missing_capability_fails_before_writing() {
 }
 
 #[test]
-fn lan_join_writes_requested_workspace_id() {
+fn server_join_writes_requested_workspace_id() {
     let fixture = TestFixture::new("join-workspace");
     let host = FakeHttpServer::start(vec![identity_response(200)]);
 
-    let result = join_lan_runtime(LanJoinOptions {
+    let result = join_server_runtime(ServerJoinOptions {
         paths: fixture.paths.clone(),
         codex_config_path: fixture.codex_config.clone(),
         binary_path: "/opt/stateful/bin/stateful".to_string(),
@@ -124,14 +125,14 @@ fn lan_join_writes_requested_workspace_id() {
         workspace_id: "w1".to_string(),
         enable_repo_root: None,
     })
-    .expect("lan join should succeed");
+    .expect("server join should succeed");
 
     assert_eq!(result.runtime.workspace_id, "w1");
 }
 
 #[test]
-fn lan_join_commands_render_one_command_per_address() {
-    let commands = lan_join_commands(
+fn server_join_commands_render_one_command_per_address() {
+    let commands = server_join_commands(
         &[
             "192.168.0.23".parse().expect("ip should parse"),
             "10.0.0.7".parse().expect("ip should parse"),
@@ -143,15 +144,15 @@ fn lan_join_commands_render_one_command_per_address() {
     assert_eq!(
         commands,
         vec![
-            "stateful lan join http://192.168.0.23:43873 --token secret-token",
-            "stateful lan join http://10.0.0.7:43873 --token secret-token",
+            "stateful server join http://192.168.0.23:43873 --token secret-token",
+            "stateful server join http://10.0.0.7:43873 --token secret-token",
         ]
     );
 }
 
 #[test]
-fn lan_join_commands_bracket_ipv6_addresses() {
-    let commands = lan_join_commands(
+fn server_join_commands_bracket_ipv6_addresses() {
+    let commands = server_join_commands(
         &["fe80::1".parse().expect("ip should parse")],
         43873,
         "secret-token",
@@ -159,58 +160,91 @@ fn lan_join_commands_bracket_ipv6_addresses() {
 
     assert_eq!(
         commands,
-        vec!["stateful lan join http://[fe80::1]:43873 --token secret-token"]
+        vec!["stateful server join http://[fe80::1]:43873 --token secret-token"]
     );
 }
 
 #[test]
-fn lan_serve_without_token_reuses_existing_runtime_token() {
+fn server_start_without_token_reuses_existing_runtime_token() {
     let fixture = TestFixture::new("serve-reuse-token");
     let host = FakeRuntimeServer::start();
     let runtime = ServerRuntime::new(host.base_url(), "existing-token", "shared", 0);
     write_global_runtime_file(&fixture.paths, &runtime).expect("runtime should write");
 
-    let result = serve_lan_runtime(LanServeOptions {
+    let result = start_server_runtime(ServerStartRuntimeOptions {
         paths: fixture.paths.clone(),
         host: "127.0.0.1".to_string(),
         port: host.port(),
         token: None,
         workspace_id: "shared".to_string(),
     })
-    .expect("lan serve should reuse existing runtime");
+    .expect("server start should reuse existing runtime");
 
     assert_eq!(result.runtime.token, "existing-token");
     assert_eq!(
         result.join_commands,
         vec![format!(
-            "stateful lan join http://127.0.0.1:{} --token existing-token",
+            "stateful server join http://127.0.0.1:{} --token existing-token",
             host.port()
         )]
     );
 }
 
 #[test]
-fn lan_serve_explicit_host_and_workspace_are_reflected_in_join_command() {
+fn server_start_explicit_host_and_workspace_are_reflected_in_join_command() {
     let fixture = TestFixture::new("serve-explicit-host-workspace");
     let host = FakeRuntimeServer::start();
     let runtime = ServerRuntime::new(host.base_url(), "secret-token", "w1", 0);
     write_global_runtime_file(&fixture.paths, &runtime).expect("runtime should write");
 
-    let result = serve_lan_runtime(LanServeOptions {
+    let result = start_server_runtime(ServerStartRuntimeOptions {
         paths: fixture.paths.clone(),
         host: "127.0.0.1".to_string(),
         port: host.port(),
         token: Some("secret-token".to_string()),
         workspace_id: "w1".to_string(),
     })
-    .expect("lan serve should reuse existing runtime");
+    .expect("server start should reuse existing runtime");
 
     assert_eq!(
         result.join_commands,
         vec![format!(
-            "stateful lan join http://127.0.0.1:{} --token secret-token --workspace-id w1",
+            "stateful server join http://127.0.0.1:{} --token secret-token --workspace-id w1",
             host.port()
         )]
+    );
+}
+
+#[test]
+fn server_start_command_always_prints_join_command() {
+    let fixture = TestFixture::new("server-start-prints-join");
+    let host = FakeRuntimeServer::start();
+    let runtime = ServerRuntime::new(host.base_url(), "existing-token", "shared", 0);
+    write_global_runtime_file(&fixture.paths, &runtime).expect("runtime should write");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+        .args([
+            "server",
+            "start",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &host.port().to_string(),
+            "--workspace-id",
+            "shared",
+        ])
+        .env("STATEFUL_HOME", &fixture.paths.home)
+        .output()
+        .expect("stateful binary should run");
+
+    assert!(output.status.success(), "server start should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "stateful server join http://127.0.0.1:{} --token existing-token",
+            host.port()
+        )),
+        "server start output should include join command, got: {stdout}"
     );
 }
 

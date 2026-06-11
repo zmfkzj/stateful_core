@@ -32,6 +32,10 @@ pub enum StoreError {
     IntentRequestNotCancelable,
     #[error("active lease conflict")]
     LeaseConflict,
+    #[error("lease not found")]
+    LeaseNotFound,
+    #[error("lease owner mismatch")]
+    LeaseOwnerMismatch,
     #[error("matching active intent is required")]
     MissingIntent,
     #[error("purpose is required")]
@@ -286,7 +290,7 @@ impl Store {
         let active_intent_count = intent_rows
             .into_iter()
             .filter(|(workspace_id, repo_id, worktree_id, root)| {
-                !workspace_filter.is_some_and(|filter| workspace_id != filter)
+                workspace_filter.is_none_or(|filter| workspace_id == filter)
                     && identity_filter_matches(
                         identity_filter,
                         repo_id.as_deref(),
@@ -987,12 +991,35 @@ impl Store {
         };
         let relative_path = normalize_relative_path(requested_relative_path);
         let workspace_id = workspace_id.as_ref().to_string();
-        self.conn.execute(
+        let released = self.conn.execute(
             "UPDATE leases
              SET status = 'released'
              WHERE session_id = ?1 AND workspace_id = ?2 AND relative_path = ?3 AND action = ?4 AND status = 'active'",
             params![session_id.as_ref(), workspace_id, relative_path, lease_action],
         )?;
+        if released == 0 {
+            let owner_exists = self.conn.query_row(
+                "SELECT EXISTS(
+                        SELECT 1 FROM leases
+                        WHERE session_id != ?1
+                          AND workspace_id = ?2
+                          AND relative_path = ?3
+                          AND action = ?4
+                          AND status = 'active'
+                    )",
+                params![
+                    session_id.as_ref(),
+                    workspace_id,
+                    relative_path,
+                    lease_action
+                ],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if owner_exists {
+                return Err(StoreError::LeaseOwnerMismatch);
+            }
+            return Err(StoreError::LeaseNotFound);
+        }
         self.promote_waiters_after_lease_release(&workspace_id, &relative_path)?;
 
         Ok(())
@@ -1234,6 +1261,7 @@ impl Store {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn enqueue_waiter_with_identity(
         &self,
         session_id: impl AsRef<str>,

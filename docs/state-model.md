@@ -45,10 +45,11 @@ session
         write actions
 ```
 
-For v1, hooks must treat the current Codex hook `session_id` as authoritative.
-MCP intent declaration may omit `session_id`; in that case the adapter uses the
-current session recorded by lifecycle hooks so that MCP-declared intent and
-write authorization evaluate against the same session.
+For v1, hooks must treat the current Codex hook `thread_id` as authoritative
+when present, falling back to `session_id` for older payloads. MCP intent
+declaration may omit `session_id`; in that case the adapter uses the current
+session recorded by lifecycle hooks so that MCP-declared intent and write
+authorization evaluate against the same session.
 
 ## Activity Record
 

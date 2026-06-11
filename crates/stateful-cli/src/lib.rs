@@ -37,8 +37,9 @@ pub use install::{
     default_codex_config_path, plan_global_install,
 };
 pub use lan::{
-    LanCommand, LanJoinOptions, LanJoinResult, LanServeOptions, LanServeResult, join_lan_runtime,
-    lan_join_commands, serve_lan_runtime,
+    ServerJoinOptions, ServerJoinResult, ServerStartRuntimeOptions, ServerStartRuntimeResult,
+    join_server_runtime, print_server_start_result, server_join_commands,
+    server_start_runtime_result, start_server_runtime,
 };
 pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio_in_repo};
 pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime};
@@ -63,7 +64,8 @@ pub use runtime::{
 pub use sandbox::{SandboxFsProfile, SandboxNetworkPolicy};
 pub use server_lifecycle::{
     ServerStartOptions, detached_server_args, ensure_server, ensure_server_with,
-    ensure_server_with_options, runtime_is_healthy, stop_server,
+    ensure_server_with_options, restart_server, runtime_is_healthy,
+    server_start_options_from_runtime, stop_server,
 };
 
 #[derive(Debug, Parser)]
@@ -96,8 +98,6 @@ pub enum Command {
         #[arg(long, default_value = "local")]
         workspace_id: String,
     },
-    #[command(subcommand)]
-    Lan(LanCommand),
     Status,
     Current,
     Events,
@@ -191,6 +191,20 @@ pub enum ServerCommand {
         token: Option<String>,
         #[arg(long, default_value = "local")]
         workspace_id: String,
+    },
+    Restart,
+    Join {
+        base_url: String,
+        #[arg(long)]
+        token: String,
+        #[arg(long, default_value = "shared")]
+        workspace_id: String,
+        #[arg(long)]
+        enable_repo: bool,
+        #[arg(long)]
+        binary: Option<String>,
+        #[arg(long)]
+        codex_config: Option<PathBuf>,
     },
     Stop,
     Status,
@@ -370,48 +384,30 @@ pub fn run() -> anyhow::Result<()> {
                     run_server(host, port, token, workspace_id)?;
                 } else {
                     let paths = GlobalPaths::from_env()?;
-                    let runtime = ensure_server_with_options(
-                        &paths,
-                        ServerStartOptions {
-                            host,
-                            port,
-                            token,
-                            workspace_id,
-                        },
-                    )?;
-                    println!("{}", serde_json::to_string_pretty(&runtime)?);
-                }
-            }
-            ServerCommand::Status => {
-                let paths = GlobalPaths::from_env()?;
-                let runtime =
-                    discover_runtime_with_global(current_repo_root_or_current_dir()?, &paths).ok();
-                println!("{}", serde_json::to_string_pretty(&runtime)?);
-            }
-            ServerCommand::Stop => {
-                let paths = GlobalPaths::from_env()?;
-                stop_server(&paths)?;
-                println!("{}", serde_json::json!({ "status": "ok" }));
-            }
-        },
-        Command::Lan(command) => match command {
-            LanCommand::Serve {
-                host,
-                port,
-                token,
-                workspace_id,
-            } => {
-                lan::run_lan_command(
-                    LanCommand::Serve {
+                    let result = start_server_runtime(ServerStartRuntimeOptions {
+                        paths,
                         host,
                         port,
                         token,
                         workspace_id,
-                    },
-                    GlobalPaths::from_env()?,
-                )?;
+                    })?;
+                    print_server_start_result(&result)?;
+                }
             }
-            LanCommand::Join {
+            ServerCommand::Restart => {
+                let paths = GlobalPaths::from_env()?;
+                let runtime = restart_server(&paths)?;
+                let options = server_start_options_from_runtime(&runtime)?;
+                let result = start_server_runtime(ServerStartRuntimeOptions {
+                    paths,
+                    host: options.host,
+                    port: options.port,
+                    token: Some(runtime.token),
+                    workspace_id: options.workspace_id,
+                })?;
+                print_server_start_result(&result)?;
+            }
+            ServerCommand::Join {
                 base_url,
                 token,
                 workspace_id,
@@ -433,7 +429,7 @@ pub fn run() -> anyhow::Result<()> {
                 } else {
                     None
                 };
-                let result = join_lan_runtime(LanJoinOptions {
+                let result = join_server_runtime(ServerJoinOptions {
                     paths,
                     codex_config_path,
                     binary_path,
@@ -451,6 +447,17 @@ pub fn run() -> anyhow::Result<()> {
                         "repo_enabled": result.repo_enabled,
                     }))?
                 );
+            }
+            ServerCommand::Status => {
+                let paths = GlobalPaths::from_env()?;
+                let runtime =
+                    discover_runtime_with_global(current_repo_root_or_current_dir()?, &paths).ok();
+                println!("{}", serde_json::to_string_pretty(&runtime)?);
+            }
+            ServerCommand::Stop => {
+                let paths = GlobalPaths::from_env()?;
+                stop_server(&paths)?;
+                println!("{}", serde_json::json!({ "status": "ok" }));
             }
         },
         Command::Status => {
@@ -954,6 +961,8 @@ fn run_server(
     tokio_runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         write_global_runtime_file(&paths, &runtime)?;
+        let result = server_start_runtime_result(runtime.clone(), &host, port);
+        print_server_start_result(&result)?;
         stateful_server::serve_listener(
             listener,
             stateful_server::ServerConfig::with_store(token, store),
