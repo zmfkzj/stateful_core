@@ -2,7 +2,7 @@ use clap::Parser;
 use stateful_cli::{
     Cli, CodexSandboxMode, Command, ExternalRunCommand, GlobalPaths, HookCommand, InstallAgent,
     McpCommand, NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand,
-    SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, doctor_report_with_global,
+    SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, ToolsCommand, doctor_report_with_global,
 };
 use std::{fs, path::PathBuf};
 
@@ -507,6 +507,44 @@ fn parses_repos_list_command() {
         .expect("repos list command should parse");
 
     assert!(matches!(cli.command, Command::Repos(ReposCommand::List)));
+}
+
+#[test]
+fn parses_tools_allow_list_and_deny_commands() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "tools",
+        "allow",
+        "mcp__codex_apps__github__merge_pull_request",
+        "--repo",
+        "/workspace/repo",
+    ])
+    .expect("tools allow command should parse");
+    assert!(matches!(
+        cli.command,
+        Command::Tools(ToolsCommand::Allow {
+            ref tool_name,
+            ref repo,
+        }) if tool_name == "mcp__codex_apps__github__merge_pull_request"
+            && repo.as_deref() == Some(std::path::Path::new("/workspace/repo"))
+    ));
+
+    let cli = Cli::try_parse_from(["stateful", "tools", "list"])
+        .expect("tools list command should parse");
+    assert!(matches!(
+        cli.command,
+        Command::Tools(ToolsCommand::List { repo: None })
+    ));
+
+    let cli = Cli::try_parse_from(["stateful", "tools", "deny", "spawn_agent"])
+        .expect("tools deny command should parse");
+    assert!(matches!(
+        cli.command,
+        Command::Tools(ToolsCommand::Deny {
+            ref tool_name,
+            repo: None,
+        }) if tool_name == "spawn_agent"
+    ));
 }
 
 #[test]

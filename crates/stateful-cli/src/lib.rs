@@ -48,8 +48,9 @@ pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio
 pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime};
 pub use push::{PushRequest, PushResult, run_structured_push};
 pub use repo_registry::{
-    RepoEntry, RepoGate, RepoIdentity, RepoRegistry, detect_git_root, disable_repo,
-    effective_workspace_id_for_repo, enable_repo, repo_gate, repo_identity_for_enabled_repo,
+    RepoEntry, RepoGate, RepoIdentity, RepoRegistry, allow_tool_for_repo, allowed_tools_for_repo,
+    deny_tool_for_repo, detect_git_root, disable_repo, effective_workspace_id_for_repo,
+    enable_repo, repo_gate, repo_identity_for_enabled_repo, tool_allowed_for_enabled_repo,
     workspace_id_for_enabled_repo, workspace_id_for_repo_identity,
 };
 pub use runtime::{
@@ -132,6 +133,8 @@ pub enum Command {
     },
     #[command(subcommand)]
     Repos(ReposCommand),
+    #[command(subcommand)]
+    Tools(ToolsCommand),
     #[command(subcommand)]
     Notifications(NotificationsCommand),
     #[command(subcommand)]
@@ -291,6 +294,24 @@ pub enum IntentCommand {
 #[derive(Debug, Subcommand)]
 pub enum ReposCommand {
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ToolsCommand {
+    Allow {
+        tool_name: String,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    Deny {
+        tool_name: String,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    List {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -655,6 +676,43 @@ pub fn run() -> anyhow::Result<()> {
             let paths = GlobalPaths::from_env()?;
             let registry = RepoRegistry::load(&paths)?;
             println!("{}", serde_json::to_string_pretty(&registry)?);
+        }
+        Command::Tools(ToolsCommand::Allow { tool_name, repo }) => {
+            let paths = GlobalPaths::from_env()?;
+            let repo = repo.unwrap_or(std::env::current_dir()?);
+            let entry = allow_tool_for_repo(&paths, repo, &tool_name)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "repo": entry.root,
+                    "allowed_tools": entry.allowed_tools,
+                }))?
+            );
+        }
+        Command::Tools(ToolsCommand::Deny { tool_name, repo }) => {
+            let paths = GlobalPaths::from_env()?;
+            let repo = repo.unwrap_or(std::env::current_dir()?);
+            let entry = deny_tool_for_repo(&paths, repo, &tool_name)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "repo": entry.root,
+                    "allowed_tools": entry.allowed_tools,
+                }))?
+            );
+        }
+        Command::Tools(ToolsCommand::List { repo }) => {
+            let paths = GlobalPaths::from_env()?;
+            let repo = repo.unwrap_or(std::env::current_dir()?);
+            let root = detect_git_root(&repo)?;
+            let allowed_tools = allowed_tools_for_repo(&paths, &root)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "repo": root,
+                    "allowed_tools": allowed_tools,
+                }))?
+            );
         }
         Command::Notifications(NotificationsCommand::Poll {
             session_id,

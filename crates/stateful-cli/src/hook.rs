@@ -18,7 +18,8 @@ use crate::{
     CurrentSession, GlobalPaths, HookCommand, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
     ServerRuntime, discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server,
     get_json, post_json, protocol_envelope, repo_gate, repo_identity_for_enabled_repo,
-    runtime_env_override_is_configured, write_current_session_file_for_current_stateful_session,
+    runtime_env_override_is_configured, tool_allowed_for_enabled_repo,
+    write_current_session_file_for_current_stateful_session,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,9 +462,10 @@ fn handle_pre_tool_use_with_runtime(
     cwd: Option<&Path>,
 ) -> anyhow::Result<HookOutcome> {
     let input: PreToolUseInput = serde_json::from_str(input)?;
+    let global_paths = GlobalPaths::from_env().ok();
     let identity = repo_root.and_then(|repo_root| {
-        GlobalPaths::from_env()
-            .ok()
+        global_paths
+            .as_ref()
             .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok())
     });
 
@@ -485,12 +487,27 @@ fn handle_pre_tool_use_with_runtime(
             ),
         }),
         tool_name if is_safe_without_repo_write_authorization(tool_name) => Ok(HookOutcome::Allow),
+        tool_name if is_user_allowed_tool(global_paths.as_ref(), repo_root, tool_name) => {
+            Ok(HookOutcome::Allow)
+        }
         tool_name => Ok(HookOutcome::Deny {
             reason: format!(
                 "unclassified tool {tool_name} may write or execute and requires explicit stateful classification before it can run in an enabled repository"
             ),
         }),
     }
+}
+
+fn is_user_allowed_tool(
+    paths: Option<&GlobalPaths>,
+    repo_root: Option<&Path>,
+    tool_name: &str,
+) -> bool {
+    let (Some(paths), Some(repo_root)) = (paths, repo_root) else {
+        return false;
+    };
+
+    tool_allowed_for_enabled_repo(paths, repo_root, tool_name).unwrap_or(false)
 }
 
 fn is_safe_without_repo_write_authorization(tool_name: &str) -> bool {
