@@ -382,8 +382,10 @@ The generated hook configuration covers:
 
 - `SessionStart` for `startup`, `resume`, `clear`, and `compact`
 - `UserPromptSubmit`
-- `PreToolUse` and `PostToolUse` for `Bash`, `apply_patch`, `Edit`, `Write`,
-  `file_change`, and `mcp__filesystem__.*`
+- `PreToolUse` for all tools, with explicit allow/deny classification in the
+  hook
+- `PostToolUse` for `Bash`, `apply_patch`, `Edit`, `Write`, `file_change`,
+  and `mcp__filesystem__.*`
 - `Stop`
 
 `SessionStart` registers the active session and writes the current-session file

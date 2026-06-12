@@ -275,8 +275,8 @@ fn pre_tool_use_raw_bash_denial_mentions_command_policy_skill_and_example() {
 
     assert!(reason.contains("stateful-command-policy"));
     assert!(reason.contains("--fs read-only --network disabled"));
-    assert!(reason.contains("--fs write-targets --network enabled --write-dir tmp"));
-    assert!(!reason.contains("--fs build"));
+    assert!(reason.contains("--fs build --network enabled"));
+    assert!(reason.contains("--fs write-targets --write-target <file>"));
     assert!(reason.contains("--command"));
 }
 
@@ -2814,8 +2814,8 @@ fn user_prompt_submit_posts_context_render() {
     assert!(rendered.contains("Before using Bash"));
     assert!(rendered.contains("stateful-command-policy"));
     assert!(rendered.contains("--fs read-only --network disabled"));
-    assert!(rendered.contains("--fs write-targets --network enabled --write-dir tmp"));
-    assert!(!rendered.contains("--fs build"));
+    assert!(rendered.contains("--fs build --network enabled"));
+    assert!(rendered.contains("--fs write-targets --write-target <file>"));
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/context/render HTTP/1.1"));
     assert!(request.contains("\"mode\":\"brief\""));
