@@ -537,6 +537,69 @@ fn detached_server_reports_child_startup_error_when_bind_fails() {
     );
 }
 
+#[test]
+fn detached_server_start_registers_runtime_without_parent_lock_timeout() {
+    let mut last_bind_race = String::new();
+    for attempt in 0..8 {
+        let home = temp_home(&format!(
+            "stateful-server-detached-start-lock-handoff-{attempt}"
+        ));
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("test listener should reserve a port");
+        let port = listener
+            .local_addr()
+            .expect("listener should expose local address")
+            .port();
+        drop(listener);
+
+        let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+            .args([
+                "server",
+                "start",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+                "--workspace-id",
+                "share",
+            ])
+            .env("STATEFUL_HOME", &home)
+            .output()
+            .expect("stateful binary should run");
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("Address already in use") {
+                last_bind_race = stderr.into_owned();
+                let _ = fs::remove_dir_all(&home);
+                continue;
+            }
+            panic!("detached start should succeed, stderr: {stderr}");
+        }
+
+        let contents = fs::read_to_string(home.join("runtime/server.json"))
+            .expect("runtime file should exist");
+        let runtime: ServerRuntime =
+            serde_json::from_str(&contents).expect("runtime file should be valid JSON");
+        assert_eq!(runtime.base_url, format!("http://127.0.0.1:{port}"));
+        assert_eq!(runtime.workspace_id, "share");
+
+        let stop_output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+            .args(["server", "stop"])
+            .env("STATEFUL_HOME", &home)
+            .output()
+            .expect("stateful stop should run");
+        assert!(
+            stop_output.status.success(),
+            "server stop should succeed, stderr: {}",
+            String::from_utf8_lossy(&stop_output.stderr)
+        );
+        return;
+    }
+
+    panic!("detached start exhausted port-race retries; last stderr: {last_bind_race}");
+}
+
 fn temp_home(name: &str) -> std::path::PathBuf {
     let home = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
     if home.exists() {

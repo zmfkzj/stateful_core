@@ -3,9 +3,9 @@ use std::{
     fs::OpenOptions,
     io::{Read, Seek, SeekFrom},
     path::Path,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::{
@@ -16,6 +16,8 @@ use crate::{
 const START_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const START_LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
 const START_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
+const STARTUP_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+const STARTUP_HEALTH_RETRY_DELAY: Duration = Duration::from_millis(50);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerStartOptions {
     pub host: String,
@@ -69,12 +71,14 @@ pub fn ensure_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
         }
     }
 
-    let _lock = acquire_start_lock(paths)?;
-    if let Some(runtime) = read_runtime_file(paths)? {
-        if runtime_is_healthy(&runtime) {
-            return Ok(runtime);
+    {
+        let _lock = acquire_start_lock(paths)?;
+        if let Some(runtime) = read_runtime_file(paths)? {
+            if runtime_is_healthy(&runtime) {
+                return Ok(runtime);
+            }
+            retire_incompatible_runtime(paths, &runtime)?;
         }
-        retire_incompatible_runtime(paths, &runtime)?;
     }
 
     let options = ServerStartOptions::default();
@@ -101,13 +105,15 @@ fn ensure_current_server_with_options(
         }
     }
 
-    let _lock = acquire_start_lock(paths)?;
-    if let Some(runtime) = read_runtime_file(paths)? {
-        if runtime_is_healthy(&runtime) {
-            ensure_runtime_matches_options(&runtime, options)?;
-            return Ok(runtime);
+    {
+        let _lock = acquire_start_lock(paths)?;
+        if let Some(runtime) = read_runtime_file(paths)? {
+            if runtime_is_healthy(&runtime) {
+                ensure_runtime_matches_options(&runtime, options)?;
+                return Ok(runtime);
+            }
+            retire_incompatible_runtime(paths, &runtime)?;
         }
-        retire_incompatible_runtime(paths, &runtime)?;
     }
 
     let runtime = start_detached_server(paths, options)?;
@@ -317,10 +323,20 @@ fn start_detached_server(
         .stderr(Stdio::from(log_err))
         .spawn()?;
 
-    for _ in 0..20 {
-        thread::sleep(Duration::from_millis(50));
+    wait_for_detached_server_health(paths, &mut child, log_start, STARTUP_HEALTH_TIMEOUT)
+}
+
+fn wait_for_detached_server_health(
+    paths: &GlobalPaths,
+    child: &mut Child,
+    log_start: u64,
+    timeout: Duration,
+) -> anyhow::Result<ServerRuntime> {
+    let started_at = Instant::now();
+    while started_at.elapsed() < timeout {
+        thread::sleep(STARTUP_HEALTH_RETRY_DELAY);
         if let Some(runtime) = read_runtime_file(paths)? {
-            if runtime_is_healthy(&runtime) {
+            if runtime.pid == child.id() && runtime_is_healthy(&runtime) {
                 return Ok(runtime);
             }
         }
@@ -522,6 +538,10 @@ impl Drop for StartLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::Write,
+        net::{TcpListener, TcpStream},
+    };
 
     #[test]
     fn foreground_registration_respects_existing_start_lock() {
@@ -583,10 +603,94 @@ mod tests {
         let _ = fs::remove_dir_all(home);
     }
 
+    #[test]
+    fn detached_start_waits_for_runtime_that_becomes_healthy_after_one_second() {
+        let home = temp_home("stateful-detached-slow-health");
+        let paths = GlobalPaths::new(&home);
+        fs::create_dir_all(&paths.runtime_dir).expect("runtime dir should be creatable");
+        fs::write(&paths.server_log, "").expect("server log should be creatable");
+        let mut child = Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("sleep child should spawn");
+        let fake = FakeHttpServer::start(vec![
+            fake_response(200, "ok"),
+            fake_response(200, r#"{"status":"ok","current":{}}"#),
+            fake_response(
+                200,
+                format!(
+                    r#"{{"status":"ok","pid":{},"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}}"#,
+                    child.id()
+                ),
+            ),
+        ]);
+        let delayed_runtime = ServerRuntime::new(fake.base_url(), "token", "w1", child.id());
+        let delayed_paths = paths.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(1200));
+            write_global_runtime_file(&delayed_paths, &delayed_runtime)
+                .expect("delayed runtime should write");
+        });
+
+        let result = wait_for_detached_server_health(&paths, &mut child, 0, Duration::from_secs(3))
+            .expect("detached startup should tolerate slow health");
+
+        assert_eq!(result.pid, child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_dir_all(home);
+    }
+
     fn temp_home(name: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("temp home should be creatable");
         root
+    }
+
+    fn fake_response(status: u16, body: impl AsRef<str>) -> String {
+        let body = body.as_ref();
+        let reason = match status {
+            200 => "OK",
+            401 => "Unauthorized",
+            404 => "Not Found",
+            503 => "Service Unavailable",
+            _ => "OK",
+        };
+        format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    struct FakeHttpServer {
+        addr: std::net::SocketAddr,
+    }
+
+    impl FakeHttpServer {
+        fn start(responses: Vec<String>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("fake server should bind");
+            let addr = listener
+                .local_addr()
+                .expect("fake server addr should be known");
+            thread::spawn(move || {
+                for response in responses {
+                    if let Ok((mut stream, _addr)) = listener.accept() {
+                        read_request(&mut stream);
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                }
+            });
+            Self { addr }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+    }
+
+    fn read_request(stream: &mut TcpStream) {
+        let mut buffer = [0; 1024];
+        let _ = stream.read(&mut buffer);
     }
 }
