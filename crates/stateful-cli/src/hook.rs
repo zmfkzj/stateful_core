@@ -479,6 +479,11 @@ fn handle_pre_tool_use_with_runtime(
         tool_name if tool_name.starts_with("mcp__filesystem__") => Ok(HookOutcome::Deny {
             reason: "filesystem MCP writes require stateful authorization; read-only MCP calls are not yet classified".to_string(),
         }),
+        tool_name if is_remote_repository_mutation_tool(tool_name) => Ok(HookOutcome::Deny {
+            reason: format!(
+                "remote repository mutation tool {tool_name} is not covered by local stateful repo authorization; use local git/stateful workflows or an explicit external approval path"
+            ),
+        }),
         tool_name if is_safe_without_repo_write_authorization(tool_name) => Ok(HookOutcome::Allow),
         tool_name => Ok(HookOutcome::Deny {
             reason: format!(
@@ -489,9 +494,80 @@ fn handle_pre_tool_use_with_runtime(
 }
 
 fn is_safe_without_repo_write_authorization(tool_name: &str) -> bool {
+    is_builtin_safe_tool(tool_name)
+        || is_stateful_control_plane_tool(tool_name)
+        || is_github_metadata_tool(tool_name)
+        || is_teams_connector_tool(tool_name)
+}
+
+fn is_builtin_safe_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "Read" | "Grep" | "Glob" | "LS" | "NotebookRead" | "WebFetch" | "WebSearch" | "TodoWrite"
+        "Read"
+            | "Grep"
+            | "Glob"
+            | "LS"
+            | "NotebookRead"
+            | "WebFetch"
+            | "WebSearch"
+            | "TodoWrite"
+            | "update_plan"
+            | "tool_search"
+            | "tool_search_tool"
+            | "get_goal"
+            | "create_goal"
+            | "update_goal"
+            | "request_user_input"
+            | "view_image"
+            | "spawn_agent"
+            | "wait_agent"
+            | "send_input"
+            | "close_agent"
+            | "resume_agent"
+    )
+}
+
+fn is_stateful_control_plane_tool(tool_name: &str) -> bool {
+    tool_name.starts_with("mcp__stateful__")
+}
+
+fn is_github_metadata_tool(tool_name: &str) -> bool {
+    if !tool_name.starts_with("mcp__codex_apps__github__") {
+        return false;
+    }
+    matches!(
+        tool_suffix(tool_name),
+        "update_pull_request"
+            | "create_pull_request"
+            | "add_comment_to_issue"
+            | "fetch_file"
+            | "search_branches"
+            | "search_repositories"
+    )
+}
+
+fn is_teams_connector_tool(tool_name: &str) -> bool {
+    if !tool_name.starts_with("mcp__codex_apps__microsoft_teams__") {
+        return false;
+    }
+    matches!(tool_suffix(tool_name), "resolve_channel" | "send_message")
+}
+
+fn tool_suffix(tool_name: &str) -> &str {
+    tool_name
+        .rsplit("__")
+        .next()
+        .unwrap_or(tool_name)
+        .trim_start_matches('_')
+}
+
+fn is_remote_repository_mutation_tool(tool_name: &str) -> bool {
+    if !tool_name.starts_with("mcp__codex_apps__github__") {
+        return false;
+    }
+    matches!(
+        tool_suffix(tool_name),
+        "create_file" | "update_file" | "create_branch" | "update_ref"
     )
 }
 

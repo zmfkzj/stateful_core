@@ -1620,6 +1620,31 @@ fn pre_tool_use_allows_known_non_repo_write_tools_without_runtime() {
         "WebFetch",
         "WebSearch",
         "TodoWrite",
+        "update_plan",
+        "tool_search",
+        "tool_search_tool",
+        "get_goal",
+        "create_goal",
+        "update_goal",
+        "request_user_input",
+        "view_image",
+        "spawn_agent",
+        "wait_agent",
+        "send_input",
+        "close_agent",
+        "resume_agent",
+        "mcp__stateful__state_intent_declare",
+        "mcp__stateful__state_lease_acquire",
+        "mcp__stateful__state_current_read",
+        "mcp__stateful__state_context_render",
+        "mcp__codex_apps__github__update_pull_request",
+        "mcp__codex_apps__github__create_pull_request",
+        "mcp__codex_apps__github__add_comment_to_issue",
+        "mcp__codex_apps__github__fetch_file",
+        "mcp__codex_apps__github__search_branches",
+        "mcp__codex_apps__github__search_repositories",
+        "mcp__codex_apps__microsoft_teams__resolve_channel",
+        "mcp__codex_apps__microsoft_teams__send_message",
     ] {
         let input = serde_json::json!({
             "session_id": "s1",
@@ -1642,29 +1667,65 @@ fn pre_tool_use_allows_known_non_repo_write_tools_without_runtime() {
 
 #[test]
 fn pre_tool_use_denies_unclassified_tool_names() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "FutureWriteTool",
-      "tool_input": {
-        "file_path": "src/auth.ts"
-      }
-    }"#;
+    for tool_name in [
+        "FutureWriteTool",
+        "mcp__codex_apps__github__merge_pull_request",
+        "mcp__codex_apps__microsoft_teams__delete_message",
+    ] {
+        let input = serde_json::json!({
+          "session_id": "s1",
+          "cwd": "/repo",
+          "hook_event_name": "PreToolUse",
+          "tool_name": tool_name,
+          "tool_input": {
+            "file_path": "src/auth.ts"
+          }
+        })
+        .to_string();
 
-    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+        let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    let HookOutcome::Deny { reason } = outcome else {
-        panic!("unclassified tool should be denied");
-    };
-    assert!(
-        reason.contains("unclassified tool FutureWriteTool"),
-        "reason `{reason}` should name the unclassified tool"
-    );
-    assert!(
-        reason.contains("write or execute"),
-        "reason `{reason}` should explain why classification is required"
-    );
+        let HookOutcome::Deny { reason } = outcome else {
+            panic!("{tool_name} should be denied");
+        };
+        assert!(
+            reason.contains(&format!("unclassified tool {tool_name}")),
+            "reason `{reason}` should name the unclassified tool"
+        );
+        assert!(
+            reason.contains("write or execute"),
+            "reason `{reason}` should explain why classification is required"
+        );
+    }
+}
+
+#[test]
+fn pre_tool_use_denies_github_remote_repository_mutation_tools() {
+    for tool_name in [
+        "mcp__codex_apps__github__create_file",
+        "mcp__codex_apps__github__update_file",
+        "mcp__codex_apps__github__create_branch",
+        "mcp__codex_apps__github__update_ref",
+    ] {
+        let input = serde_json::json!({
+            "session_id": "s1",
+            "cwd": "/repo",
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool_name,
+            "tool_input": {}
+        })
+        .to_string();
+
+        let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+        let HookOutcome::Deny { reason } = outcome else {
+            panic!("{tool_name} should be denied");
+        };
+        assert!(
+            reason.contains("remote repository mutation"),
+            "reason `{reason}` should classify {tool_name} as remote repository mutation"
+        );
+    }
 }
 
 #[test]
