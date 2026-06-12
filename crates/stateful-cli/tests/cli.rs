@@ -1,10 +1,10 @@
 use clap::Parser;
 use stateful_cli::{
-    Cli, CodexSandboxMode, Command, ExternalRunCommand, HookCommand, InstallAgent, McpCommand,
-    NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand, SandboxFsProfile,
-    SandboxNetworkPolicy, ServerCommand,
+    Cli, CodexSandboxMode, Command, ExternalRunCommand, GlobalPaths, HookCommand, InstallAgent,
+    McpCommand, NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand,
+    SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, doctor_report_with_global,
 };
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 #[test]
 fn parses_sandbox_run_read_only_defaults() {
@@ -34,6 +34,39 @@ fn parses_sandbox_run_read_only_defaults() {
 }
 
 #[test]
+fn doctor_labels_legacy_hooks_json_without_counting_it_as_installed() {
+    let temp = std::env::temp_dir().join(format!(
+        "stateful-doctor-legacy-hooks-{}",
+        std::process::id()
+    ));
+    if temp.exists() {
+        fs::remove_dir_all(&temp).expect("old temp root should remove");
+    }
+    let repo = temp.join("repo");
+    let hooks_dir = repo.join(".codex");
+    fs::create_dir_all(&hooks_dir).expect("hooks dir should create");
+    fs::create_dir_all(repo.join(".stateful")).expect("stateful dir should create");
+    fs::write(hooks_dir.join("hooks.json"), "{}").expect("legacy hooks should write");
+    fs::create_dir_all(repo.join(".stateful_core")).expect("legacy state dir should create");
+    fs::write(repo.join(".stateful_core/state.db"), "legacy")
+        .expect("legacy repo state db should write");
+    fs::write(
+        repo.join(".stateful/config.yml"),
+        "protocol_version: stateful.v1\n",
+    )
+    .expect("repo config should write");
+
+    let paths = GlobalPaths::new(temp.join("home"));
+    let report = doctor_report_with_global(&repo, &paths);
+
+    assert!(report.legacy_hooks_json);
+    assert!(report.legacy_repo_state_db);
+    assert!(!report.installed);
+
+    fs::remove_dir_all(&temp).expect("temp root should remove");
+}
+
+#[test]
 fn parses_sandbox_run_write_targets_network_enabled() {
     let cli = Cli::try_parse_from([
         "stateful",
@@ -48,7 +81,7 @@ fn parses_sandbox_run_write_targets_network_enabled() {
         "--create-target",
         "docs/new.md",
         "--write-dir",
-        "target",
+        "tmp",
         "--timeout-seconds",
         "12",
         "--command",
@@ -70,7 +103,7 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(write_targets, vec!["README.md"]);
             assert_eq!(create_targets, vec!["docs/new.md"]);
-            assert_eq!(write_dirs, vec!["target"]);
+            assert_eq!(write_dirs, vec!["tmp"]);
             assert_eq!(command, "printf x > README.md");
             assert_eq!(timeout_seconds, Some(12));
         }
@@ -112,6 +145,45 @@ fn parses_sandbox_run_git_profile() {
             assert!(write_dirs.is_empty());
             assert_eq!(command, "git fetch --all");
             assert_eq!(timeout_seconds, Some(30));
+        }
+        other => panic!("expected sandbox run command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_sandbox_run_build_profile() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "run",
+        "--fs",
+        "build",
+        "--network",
+        "enabled",
+        "--timeout-seconds",
+        "60",
+        "--command",
+        "npm test",
+    ])
+    .expect("sandbox build profile should parse");
+
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Run {
+            fs,
+            network,
+            write_targets,
+            create_targets,
+            write_dirs,
+            command,
+            timeout_seconds,
+        }) => {
+            assert_eq!(fs, SandboxFsProfile::Build);
+            assert_eq!(network, SandboxNetworkPolicy::Enabled);
+            assert!(write_targets.is_empty());
+            assert!(create_targets.is_empty());
+            assert!(write_dirs.is_empty());
+            assert_eq!(command, "npm test");
+            assert_eq!(timeout_seconds, Some(60));
         }
         other => panic!("expected sandbox run command, got {other:?}"),
     }

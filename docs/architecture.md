@@ -17,17 +17,22 @@ Codex hooks observe and gate important agent actions. MCP tools give agents a
 structured way to read and update coordination state. The state server owns
 policy, persistence, TTLs, and conflict checks.
 
-The v1 MVP includes sandboxed test execution through `sandbox run --write-dir`
-after exact directory intent and a successful same-session directory lease, plus
-human-write reconciliation through `state.reconcile.ack`.
+The v1 MVP includes sandboxed test execution through `sandbox run --fs build`
+after exact `tmp/` directory intent and a successful same-session directory
+lease, plus explicit reconciliation acknowledgements through
+`state.reconcile.ack`. Automatic human-write observation and reconciliation
+blocks remain target behavior.
 
-V1 is local-only. It coordinates sessions, agents, subagents, and local human
-activity inside one machine/workspace boundary. Team-shared, cross-machine, or
-hosted synchronization is a later v1.5/v2 concern.
+V1 is local-only. It coordinates Codex sessions and agents inside one
+machine/workspace boundary. Subagent-specific lifecycle attribution, local human
+activity signals, and IDE integrations are future observer or adapter work.
+Team-shared, cross-machine, or hosted synchronization is a later v1.5/v2
+concern.
 
-The project is agent-runtime generic, but the first integration is Codex-first.
-The state server and policy API should not encode Codex-only assumptions beyond
-adapter metadata.
+The product direction is agent-runtime portability, but the shipped prototype is
+Codex-first. The state server and policy API should not add new Codex-only
+assumptions beyond adapter metadata, and non-Codex runtimes remain future
+integration work.
 
 Implementation defaults for API shape, SQLite tables, hook adapter behavior,
 runtime files, CLI commands, and tests are fixed in
@@ -47,8 +52,10 @@ Codex hooks and external observers
 -> MCP tools for agent access
 ```
 
-The event log is used for audit and replay. The materialized current-state view
-is optimized for fast reads, conflict checks, and prompt rendering.
+The event log is used for audit evidence and event-backed replay of accepted
+session and intent declaration events. The materialized current-state view is
+the active coordination source for fast reads, conflict checks, and prompt
+rendering.
 
 ## Persistence
 
@@ -63,11 +70,15 @@ The database should contain:
 
 JSONL alone is not the v1 persistence format because conflict checks, TTL
 expiration, outbox replay, and audit queries need indexed reads. The event log
-remains append-only inside SQLite so state can be replayed or inspected.
+remains append-only inside SQLite so shipped coordination events can be
+inspected and event-backed state can be replayed where supported.
 
-Event and audit history is retained for 14 days by default. This default keeps
-handoff evidence available without turning current-state coordination into
-long-term memory. Projects may configure a longer retention window.
+The shipped retention policy prunes event and audit history older than 14 days
+from the state server maintenance loop. This keeps handoff evidence available
+without turning current-state coordination into long-term memory. Pruning covers
+old events, reconciliations, conflicts, human observations, and expired
+notifications; it does not prune active current-state rows or outbox sync
+evidence.
 
 The v1 runtime database lives under user-level `GlobalPaths` in global server
 mode: `$STATEFUL_HOME/state.db`, or `$HOME/.stateful_core/state.db` when
@@ -123,20 +134,22 @@ enforcement path. A plugin can bundle hooks, MCP config, skills, and docs, but
 plugin hooks remain non-managed and require user trust. Managed hooks remain the
 long-term path for organization-level enforcement.
 
-Repo-local hook scripts must stay thin:
+Repo-local hook scripts must stay thin at the integration boundary:
 
 ```text
 parse Codex hook input
-extract action and targets
-call local HTTP state server
+classify tool call and extract action/targets when supported
+call local HTTP state server for store-backed coordination policy
+deny unclassified write/execute-capable tools in enabled repos
 translate decision into Codex hook output
 append local outbox event when observation cannot reach the server
 ```
 
-They must not own policy. In v1, these hook adapters are Rust commands from the
-compiled `stateful` binary. If the state server is unavailable, the hook follows
-the availability policy: agent writes and reconciliation fail closed;
-read/search/diff remains allowed.
+They must not own store-backed coordination policy. In v1, these hook adapters
+are Rust commands from the compiled `stateful` binary and include fail-closed
+tool classification plus Bash sandbox-wrapper validation. If the state server
+is unavailable, the hook follows the availability policy: agent writes and
+reconciliation fail closed; read/search/diff remains allowed.
 
 Hook scripts should resolve paths from the git root. Envelope-enforced routes
 include `protocol_version`; a major protocol mismatch fails closed on those
@@ -151,12 +164,12 @@ Currently implemented trigger sources:
 - Codex `PreToolUse`
 - Codex `PostToolUse`
 - Codex `Stop`
-- Codex subagent start/stop and tool activity
 - MCP calls from the agent
 - CLI and state server calls
 
 Target and future trigger sources:
 
+- Codex subagent start/stop and tool activity with separate attribution
 - git working tree or filesystem observation for conservative human activity
   detection
 - IDE extension events for human file open, dirty, save-attempt, and save
@@ -165,9 +178,10 @@ Target and future trigger sources:
 Each trigger should carry the session id, actor identity when known, workspace,
 branch, timestamp, and source reference.
 
-Subagents inherit write authorization only from the parent session's active
-valid intent scope. They still record activity and leases with their own
-`actor_id` so attribution stays precise.
+When subagent trigger sources are implemented, subagents inherit write
+authorization only from the parent session's active valid intent scope. They
+still record activity and leases with their own `actor_id` so attribution stays
+precise.
 
 ## Hook Responsibilities
 
@@ -188,16 +202,17 @@ valid intent scope. They still record activity and leases with their own
 - deny raw Bash and allow Bash only when the outer command is a single strict
   invocation of the trusted absolute `stateful` binary running
   `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
-  command-shaped inspection uses `--fs read-only --network disabled`;
-  command-shaped writes use `--fs write-targets` with explicit write/create
-  targets.
+  command-shaped inspection uses `--fs read-only --network disabled`; the hook
+  rejects `--fs read-only --network enabled`. Command-shaped writes use
+  `--fs write-targets` with explicit write/create targets.
 - check leases and planned edits for likely conflicts
 - return allow, warning context, or deny based on policy
 
 `PostToolUse`:
 
 - observe files, commands, and results from supported tool calls
-- refresh heartbeat and lease TTLs
+- refresh heartbeat timestamps and lease TTLs only for leases still covered by
+  active intent
 - update phase, touched resources, and last result
 
 `Stop`:
@@ -253,12 +268,12 @@ V1 enforcement is strict about write target extraction:
   outer command is a single strict invocation of the trusted absolute `stateful`
   binary running `<absolute-stateful-binary> sandbox run ... --command <cmd>`.
   Read-only command-shaped inspection uses `--fs read-only --network disabled`;
-  command-shaped writes use `--fs write-targets` with explicit
+  the read-only profile cannot enable network. Command-shaped writes use
+  `--fs write-targets` with explicit
   `--write-target` / `--create-target` values and target authorization.
 - Test execution: run only through sandboxed test actions such as
-  `stateful sandbox run --fs write-targets --write-dir target --command <cmd>`
-  after exact `target/` directory intent and a successful same-session
-  directory lease.
+  `stateful sandbox run --fs build --network enabled --command <cmd>` after
+  exact `tmp/` directory intent and a successful same-session directory lease.
 - Bash command text alone never authorizes tool use, even when it appears
   read-only.
 
@@ -269,7 +284,7 @@ for tests.
 MCP does not perform local command-shaped file writes. Hook-mediated shell
 execution uses `<absolute-stateful-binary> sandbox run ... --command <cmd>`;
 plain CLI-context usage outside hooks can use `stateful sandbox run`. The MVP
-ships `read-only` and `write-targets` profiles; `git-metadata` and `workspace`
+ships `read-only`, `write-targets`, `build`, and `git` profiles; `workspace`
 profiles are deferred and fail closed. `/dev/null` is writable in every sandbox
 profile so common shell and Git behavior works. Command text alone does not
 authorize `rg`, `git diff`, test runners, stateful operational commands, or any
@@ -278,19 +293,19 @@ other Bash command.
 ## Sandboxed Tests
 
 Agents cannot run raw Bash test commands through hooks. They call the trusted
-wrapper after exact `target/` directory intent and a successful same-session
+wrapper after exact `tmp/` directory intent and a successful same-session
 directory lease:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." target/
-stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
-stateful sandbox run --fs write-targets --network enabled --write-dir target --command <cmd>
+stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." tmp/
+stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"tmp/"}'
+stateful sandbox run --fs build --network enabled --command <cmd>
 ```
 
-The wrapper authorizes the `target/` artifact directory before execution and the
-OS sandbox limits writes to declared file targets, create targets, and the
-target artifact tree. Source-tree writes remain outside the allowed surface
-unless exact targets are declared and authorized.
+The wrapper authorizes the `tmp/` artifact directory before execution and the OS
+sandbox limits build/test writes to the tmp artifact tree. Source-tree writes
+remain outside the allowed surface unless exact targets are declared and
+authorized.
 
 The macOS Seatbelt backend is the release-verified first-class backend. Linux
 bubblewrap support is implemented but experimental until it is verified in a
@@ -302,9 +317,10 @@ The state server is responsible for:
 
 - appending coordination events
 - materializing active current state
-- expiring stale activity and leases
-- extending active intent TTL from heartbeat events within a 60-minute rolling
-  maximum
+- running background and lazy expiration for stale activity, intent, leases, and
+  reservations
+- extending active intent TTL from explicit heartbeats and authorize-time
+  implicit heartbeat events within a 60-minute rolling maximum
 - evaluating conflict policy
 - promoting FIFO wait queue reservations after explicit lease release,
   session/activity finalization, or lease expiry
@@ -329,7 +345,7 @@ authorize_action(input) -> decision
 The decision result should include:
 
 ```text
-decision: allow | warn | deny | error
+decision: allow | deny | error
 reason
 conflicts[]
 required_next_action
@@ -337,7 +353,12 @@ context_items[]
 audit_event
 ```
 
-The policy engine owns:
+`warn`, `conflicts[]`, `context_items[]`, and `audit_event` are target response
+vocabulary. The shipped `/v1/authorize` path returns allow/deny/error with
+optional `wait` or `reservation` details and appends `AuthorizationDenied` events
+for deny decisions.
+
+The target policy engine owns:
 
 - active intent checks
 - file and directory scope checks
@@ -346,8 +367,12 @@ The policy engine owns:
 - human-write reconciliation checks
 - state-server availability behavior
 
-Hooks and adapters only extract tool intent and targets, then call the policy
-engine. They should not implement separate policy branches.
+Hooks and adapters classify runtime-specific tool calls, extract tool intent and
+targets when supported, and call the policy API for store-backed coordination
+decisions. Adapter-local policy is limited to fail-closed classification and
+trusted wrapper validation for command-shaped execution. In the shipped
+prototype, `stateful-core` owns pure scope-policy primitives and
+`stateful-server::policy_service` owns store-backed authorization orchestration.
 
 ## IDE Soft Save Gate
 
@@ -367,7 +392,7 @@ The save gate does not grant agent override authority. If a human continues a
 conflicting save, later agent writes to that file should be denied or warned
 until the agent refreshes state and reconciles the change.
 
-V1 does not require the IDE extension. Human-write reconciliation in v1 is
+V1 does not require the IDE extension. Target human-write reconciliation is
 driven by conservative git working-tree or filesystem observation. The observer
 should prefer warnings and reconciliation blocks over pretending to know the
 human's intent.
@@ -386,7 +411,7 @@ During this blocked state, the agent may still:
 - read the affected file
 - search the repository
 - inspect diffs
-- run sandboxed tests with the authorized `target/` artifact tree
+- run sandboxed tests with the authorized `tmp/` artifact tree
 
 To resume writing, the agent must call:
 
@@ -413,25 +438,37 @@ Initial policy:
 - no active intent before supported write action: deny
 - intent without matching file or directory scope before supported write action:
   deny
-- expired intent or intent beyond its 60-minute rolling window: deny
-- blocked phase or finalized session before supported write action: deny
+- expired intent or intent beyond its 60-minute rolling window: deny as missing
+  active intent
+- blocked phase or finalized session before supported write action: target
+  phase-aware deny behavior
 - directory intent scope only permits targets up to depth 2 below that directory
+  for `write_file` authorization
+- `write_directory` requires exact directory intent, and a matching directory
+  lease fences the whole subtree because command-shaped `--write-dir` execution
+  can write anywhere below that directory
 - delete operation without exact file scope: deny
 - rename or move without exact file scope for both source and destination: deny
 - active lease in the hard conflict domain by another actor: deny unless the
   current session contains an explicit user override for that resource
-- planned edit in the same area: warn and add context
-- same `workspace_id` and same normalized `absolute_path`: treat as same-file
-  hard conflict
+- same `workspace_id` and same normalized `relative_path`: shipped hard conflict
+  domain for active lease and wait-queue checks
+- same normalized `absolute_path`: target physical-file hard conflict domain
+- planned edit in the same area: target warning context
 - same `repo_id` and same `relative_path` across different workspace, worktree,
-  or branch: warn as a soft repo-relative conflict
-- unknown repository identity: only same normalized absolute path can deny;
-  repo-relative similarity is an unknown-confidence warning
+  or branch: target soft repo-relative warning
+- unknown repository identity: target behavior is to hard-block only on same
+  normalized absolute path and render weaker matches as unknown-confidence
+  context
 - expired lease: allow and surface stale context
 - human working tree change near the target: warn before edits
 - human save observed after an agent lease or write: deny further agent writes
   until the agent acknowledges reconciliation or receives an explicit user
   instruction
+- current shipped hook path records file target observations on exact file lease
+  acquire, denies hook-originated writes when the leased file changes before
+  authorization, and refreshes that observation after same-session supported file
+  tools complete
 - unrelated reads and searches: allow
 - reads, searches, diffs, and sandboxed tests after human writes: allow
 - tests: allow only through trusted sandbox-run wrappers with authorized targets
@@ -443,10 +480,10 @@ specific resource override, for example: "Allow override for `src/auth.ts`."
 The user owns the judgment and responsibility for that exception.
 
 Overrides apply only to active lease conflicts. They do not bypass missing
-intent, expired intent, blocked/finalized state, file or directory scope
-matching, delete exact-scope rules, or rename/move exact-scope rules. V1
-overrides are scoped to the current session, current turn, and specific
-resource.
+intent, expired intent, target blocked/finalized state, file or directory scope
+matching, delete exact-scope rules, or rename/move exact-scope rules. Overrides
+are scoped to the current session, current turn, and specific resource when the
+target override policy is implemented.
 
 Overrides do not act as queue priority. They cannot reorder FIFO waiters,
 transfer a reservation, or let a later waiter take a resource ahead of the
@@ -476,16 +513,20 @@ The current server route renders store-backed live context from active intents,
 active leases, and queued or reserved wait records. The response includes
 summary counts, structured `items`, and prompt-ready `prompt_text`.
 
-The renderer should return both structured data and prompt-ready markdown:
+The shipped `/v1/context/render` route returns structured data and prompt-ready
+markdown:
 
 ```text
-status: clear | warn | blocked
+status: ok | error
 mode: brief | detailed
-generated_at
-scope
+current
 items[]
 prompt_text
 ```
+
+A separate context-package status enum such as `clear | warn | blocked` is target
+model vocabulary. The current route exposes block/warn/info state per item and
+uses the top-level `status` field for request success or failure.
 
 Prompt items must use this shape:
 
@@ -503,8 +544,10 @@ Block and warning items must include `next:`. `Required Next Action` appears
 immediately after `Blocking` so the agent sees the recovery path before nearby
 context.
 
-`Stale/Expired` is informational only. It can never be the sole reason for a
-live denial.
+The renderer can place stale or expired items supplied by callers under
+`Stale/Expired`, but the current store-backed route does not emit historical
+stale/finalized items. Target historical context windows for `Stale/Expired` are
+informational only and can never be the sole reason for a live denial.
 
 ## Failure Modes
 

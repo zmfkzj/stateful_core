@@ -10,9 +10,10 @@ use crate::runtime::read_current_session_file_for_mcp;
 use crate::{
     CurrentSession, GlobalPaths, HttpResponse, IntentCancelArgs, IntentClaimArgs,
     IntentDeclareArgs, IntentRequestArgs, RepoGate, RepoIdentity, ServerRuntime,
-    discover_runtime_with_global, ensure_server, get_json, intent_cancel_protocol_body,
-    intent_claim_protocol_body, intent_declare_protocol_body, intent_request_protocol_body,
-    post_json, repo_gate, repo_identity_for_enabled_repo, runtime_env_override_is_configured,
+    discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server, get_json,
+    intent_cancel_protocol_body, intent_claim_protocol_body, intent_declare_protocol_body,
+    intent_request_protocol_body, post_json, repo_gate, repo_identity_for_enabled_repo,
+    runtime_env_override_is_configured,
 };
 
 pub fn call_mcp_tool_in_repo(
@@ -394,25 +395,25 @@ fn enrich_arguments(
             | "state.intent.request"
             | "state.intent.claim"
             | "state.intent.cancel"
+            | "state.lease.acquire"
             | "state.context.render"
     ) {
-        object
-            .entry("workspace_id")
-            .or_insert_with(|| Value::String(runtime.workspace_id.clone()));
-        add_repo_identity(&mut object, paths, repo_root);
+        let identity = repo_identity_for_enabled_repo(paths, repo_root).ok();
+        object.entry("workspace_id").or_insert_with(|| {
+            Value::String(effective_workspace_id_for_repo(
+                &runtime.workspace_id,
+                identity.as_ref(),
+            ))
+        });
+        if let Some(identity) = identity {
+            add_repo_identity(&mut object, identity);
+        }
     }
 
     Value::Object(object)
 }
 
-fn add_repo_identity(
-    object: &mut serde_json::Map<String, Value>,
-    paths: &GlobalPaths,
-    repo_root: &Path,
-) {
-    let Ok(identity) = repo_identity_for_enabled_repo(paths, repo_root) else {
-        return;
-    };
+fn add_repo_identity(object: &mut serde_json::Map<String, Value>, identity: RepoIdentity) {
     object
         .entry("repo_id")
         .or_insert_with(|| Value::String(identity.repo_id));
@@ -629,4 +630,58 @@ fn write_mcp_message(
     }
     output.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::enable_repo;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn enrich_arguments_derives_workspace_for_default_shared_runtime() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "stateful-mcp-enrich-workspace-{}-{unique}",
+            std::process::id()
+        ));
+        if temp_root.exists() {
+            fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+        }
+        let repo_root = temp_root.join("repo");
+        fs::create_dir_all(repo_root.join(".git")).expect("repo marker should be creatable");
+        let paths = GlobalPaths::new(temp_root.join("home"));
+        enable_repo(&paths, &repo_root).expect("repo should enable");
+        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret-token", "shared", 42);
+
+        let enriched = enrich_arguments(
+            "state.intent.declare",
+            serde_json::json!({
+                "session_id": "s1",
+                "purpose": "Fix auth validation behavior.",
+                "files_planned": ["src/auth.ts"]
+            }),
+            &runtime,
+            &repo_root,
+            &paths,
+            None,
+        );
+
+        let workspace_id = enriched["workspace_id"]
+            .as_str()
+            .expect("workspace_id should be present");
+        assert!(workspace_id.starts_with("workspace-"));
+        assert_ne!(workspace_id, "shared");
+        assert!(
+            enriched["repo_id"]
+                .as_str()
+                .is_some_and(|repo_id| repo_id.starts_with("repo-"))
+        );
+
+        fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+    }
 }

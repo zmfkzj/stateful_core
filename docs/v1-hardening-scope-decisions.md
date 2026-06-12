@@ -25,6 +25,8 @@ POST /v1/intent/cancel
 
 `intent/request` creates or returns an idempotent request by `request_id`.
 Available requests may grant immediately. Conflicting requests queue FIFO.
+Retrying the same `request_id` after reservation expiry requeues the same waiter
+in place instead of creating a duplicate or permanently consuming the key.
 
 `intent/claim` is the official reservation claim path. It creates
 write-authorizing intent and active leases only for the reservation owner.
@@ -54,17 +56,17 @@ Raw Bash commands are not a write-authorizing or test execution path. Official
 test execution uses the trusted sandbox wrapper:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." target/
-stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
-stateful sandbox run --fs write-targets --network enabled --write-dir target --command <cmd>
+stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." tmp/
+stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"tmp/"}'
+stateful sandbox run --fs build --network enabled --command <cmd>
 ```
 
 Hook-mediated Bash must be a single strict invocation of the trusted absolute
 `stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
-<cmd>`. `--write-dir` is limited to the `target/` artifact tree; source-tree edits use native
-Codex edit tools such as `apply_patch` or Edit after exact intent declaration
-and a successful same-session file lease. Command-shaped source writes require exact
-`--write-target` or `--create-target` entries.
+<cmd>`. The build profile is limited to the `tmp/` artifact tree; source-tree
+edits use native Codex edit tools such as `apply_patch` or Edit after exact
+intent declaration and a successful same-session file lease. Command-shaped
+source writes require exact `--write-target` or `--create-target` entries.
 
 ## Protocol Envelope
 
@@ -157,8 +159,8 @@ edits.
 
 Command-shaped writes remain outside MCP and must use
 `stateful sandbox run --fs write-targets` with exact `--write-target` or
-`--create-target` entries. Artifact-producing tests use `--write-dir target`
-after exact `target/` intent and a successful same-session directory lease.
+`--create-target` entries. Artifact-producing tests use `--fs build` after
+exact `tmp/` intent and a successful same-session directory lease.
 
 Structured git writes should remain narrower than arbitrary git. `stateful
 commit` remains the default local wrapper, while MCP git tools can expose
@@ -166,28 +168,30 @@ specific staged/commit operations only after authorization.
 
 ## Expiration And Retention
 
-Add background expiration and retention pruning.
-
-Lazy expiration remains as the safety net, but a background worker should expire
-stale leases, stale reservations, and stale intent state. Expiration should
-promote eligible FIFO waiters and create notifications.
+Background expiration and retention pruning are shipped in the state server,
+with lazy expiration kept as the safety net on read/write paths. Expiration
+paths expire stale leases, stale reservations, and stale intent state, promote
+eligible FIFO waiters, and create notifications.
 
 Implement the full rolling maximum model for active write-authorizing intent.
 The default rolling maximum is 60 minutes unless a narrower profile or future
 policy overrides it.
 
-Retention pruning should preserve audit evidence needed for recent context,
-conflict explanation, and debugging while removing stale low-value rows.
+Retention pruning removes historical evidence older than the built-in 14-day
+window from events, reconciliations, conflicts, human observations, and expired
+notifications. It preserves active current-state rows, pending notifications,
+and outbox sync evidence.
 
 ## Runtime And Security Hardening
 
 Strengthen local runtime security while keeping the product local-only:
 
-- write runtime files with user-only permissions where supported
-- verify runtime identity before stopping or trusting an existing server
+- done: write runtime files with user-only permissions where supported
+- done: verify runtime identity before stopping or trusting an existing server
+- done: keep network binding local by default
+- done: reject non-loopback plain `http://` joins before sending bearer tokens
 - keep bearer token authentication for all non-health endpoints
 - reject stale or malformed runtime discovery files more aggressively
-- keep network binding local by default
 - document that local token auth is a trust guard, not an OS isolation boundary
 
 ## Doctor
@@ -235,7 +239,8 @@ distribution story for hook-capable agents:
 6. Done: enforce sandbox-run write-target policy semantics.
 7. Remaining: add IDE save gate API and harden native Codex edit hook target
    extraction.
-8. Remaining: add background expiration, retention pruning, and rolling maximum.
-9. Remaining: harden runtime files and local trust checks.
+8. Done: add background expiration, retention pruning, and active-intent rolling
+   maximum.
+9. Remaining: reject stale or malformed runtime discovery files more aggressively.
 10. Remaining: expand doctor diagnostics.
 11. Remaining: add managed hook and plugin deployment UX.

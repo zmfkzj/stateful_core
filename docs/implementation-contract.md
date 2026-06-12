@@ -12,11 +12,11 @@ semantics.
 
 V1 is Rust-only.
 
-The state server, policy engine, SQLite persistence, CLI, hook adapter commands,
-MCP adapter, sandbox wrapper, and implemented prompt/context endpoints live in
-the same Rust codebase. Watcher-driven human observation and richer
-store-backed prompt rendering remain design targets unless a section below says
-they are implemented.
+The state server, pure policy primitives, store-backed authorization service,
+SQLite persistence, CLI, hook adapter commands, MCP adapter, sandbox wrapper,
+and implemented prompt/context endpoints live in the same Rust codebase.
+Watcher-driven human observation and richer store-backed prompt rendering remain
+design targets unless a section below says they are implemented.
 
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --yes` configures global Codex hooks and MCP. `stateful enable`
@@ -35,8 +35,8 @@ one implementation and avoids policy drift.
 The `stateful.v1` envelope is the target request shape for side-effecting
 protocol calls. The current implementation enforces it for `/v1/authorize` and
 the intent declare/request/claim/cancel endpoints. Session, lease, activity,
-context, reconciliation, notification, resume, outbox, and read endpoints still
-use their current flat request bodies.
+conflicts/check, context, reconciliation, notification, resume, outbox, and read
+endpoints still use their current flat request bodies.
 
 Envelope-shaped requests include:
 
@@ -46,6 +46,7 @@ request_id
 session
 workspace
 source
+payload
 ```
 
 `protocol_version` uses `name.major` form. A major mismatch fails closed on
@@ -77,6 +78,8 @@ source:
   event
   tool_name
   source_ref
+payload:
+  endpoint-specific object
 ```
 
 Adapters may omit unknown nullable identity fields, but the server must record
@@ -99,6 +102,7 @@ POST /v1/intent/request
 POST /v1/intent/claim
 POST /v1/intent/cancel
 POST /v1/lease/acquire
+POST /v1/lease/refresh-observation
 POST /v1/lease/release
 POST /v1/activity/observe
 POST /v1/activity/finalize
@@ -116,15 +120,24 @@ GET  /v1/runtime/identity
 `/v1/conflicts/check` is a read-only dry-run wrapper around the same policy
 engine and must not create leases or write-authorizing state.
 `/v1/notifications/poll` returns pending coordination notifications for a
-session. `/v1/resume/next` returns the first active reservation that the session
-can claim after rereading the target. `/v1/intent/claim` is the explicit
+session and marks returned notifications as delivered so a later poll does not
+redeliver the same notification. `/v1/resume/next` is the durable recovery path:
+it returns the first active reservation that the session can claim after
+rereading the target, even if the reservation notification was already delivered
+or the client missed the poll response. `/v1/intent/claim` is the explicit
 reservation claim path; it creates write-authorizing intent and an active lease
 for the reservation owner. `/v1/authorize` must not claim reservations
-implicitly. `/v1/intent/request` creates or returns an idempotent queued or
-reserved request by `request_id`; `/v1/intent/cancel` cancels queued or reserved
-requests owned by the caller. `/v1/runtime/identity` is an authenticated server
-identity endpoint used by `stateful server stop` to verify that the runtime file
-and process id describe the same stateful server.
+implicitly. `/v1/lease/acquire` records the target existence and content hash
+when `root` is supplied; hook-originated native file writes compare that
+observation before each authorization. `/v1/lease/refresh-observation` refreshes
+the same-session exact file lease observation after a supported file tool has
+completed, so later same-session writes are compared against the session's own
+latest completed write rather than the original lease snapshot. `/v1/intent/request`
+creates or returns an idempotent queued or reserved request by `request_id`;
+`/v1/intent/cancel` cancels queued or reserved requests owned by the caller.
+`/v1/runtime/identity` is an authenticated server identity endpoint used by
+`stateful server stop` to verify that the runtime file and process id describe
+the same stateful server.
 
 MCP tools map directly onto these endpoints. MCP handlers do not implement
 policy branches; they validate tool arguments, call the HTTP API, and return the
@@ -141,31 +154,37 @@ Current envelope enforcement is limited to `/v1/authorize` and
 
 ```text
 action:
-  read | search | diff
   write_file | write_directory
   delete_file | rename_file | move_file
-  bash
-  reconcile_ack
-targets:
-  - operation: read | write | delete | rename | move
-    resource_type: file | directory | test | task | port | migration
-    path
-    old_path
-    new_path
+path
+old_path: required for rename_file | move_file
+new_path: required for rename_file | move_file
+queue_on_conflict: bool
+purpose: required when queue_on_conflict is true
 base_observations:
   - path
     exists
     content_hash
-command
-override_instruction
 ```
 
+The richer `targets[]` policy model, read/search/diff actions,
+command/override-instruction authorization, and reconciliation actions are target
+model vocabulary, not accepted `/v1/authorize` payload fields in the shipped v1
+server. Unknown or unsupported actions fail closed with `unsupported_action`.
+The shipped `/v1/intent/request` scheduling API accepts only `write_file` and
+`write_directory` requests with one `path`. Opportunistic `queue_on_conflict`
+from `/v1/authorize` does not queue `rename_file` or `move_file`, because those
+actions affect multiple paths and need the target all-or-nothing scheduler.
+
 Native Codex edit tools such as `apply_patch`, `Edit`, and `Write` expose
-targets to hooks. After exact intent and a successful same-session file lease, hooks call
-`/v1/authorize` with the operation-specific action before allowing the edit,
-including `write_file`, `delete_file`, and `move_file` with source `path` /
-`old_path` and destination `new_path`. For Bash, command text alone never
-authorizes tool use.
+targets to hooks. After exact intent and a successful same-session file lease,
+hooks call `/v1/authorize` with the operation-specific action before allowing
+the edit, including `write_file`, `delete_file`, and `move_file` with source
+`path` / `old_path` and destination `new_path`. PreToolUse authorization sends
+current `base_observations` for each affected target when the hook can read the
+workspace file state. PostToolUse refreshes the active same-session exact file
+lease observation for completed supported file tools. For Bash, command text
+alone never authorizes tool use.
 `/v1/authorize` accepts optional `base_observations` for OCC-style freshness
 checks. When supplied, each observation is compared against the current
 workspace file state under `workspace.root`; existence or `content_hash` changes
@@ -175,7 +194,8 @@ Raw Bash is denied by stateful hooks. Bash hook calls are allowed only when the
 outer command is a single strict invocation of the trusted absolute `stateful`
 binary running `<absolute-stateful-binary> sandbox run ... --command <cmd>`.
 Read-only command-shaped inspection uses `<absolute-stateful-binary> sandbox run
---fs read-only --network disabled --command <cmd>`. Command-shaped writes use
+--fs read-only --network disabled --command <cmd>`; the read-only profile rejects
+`--network enabled`. Command-shaped writes use
 `--fs write-targets` with explicit `--write-target` / `--create-target` values
 and target authorization.
 
@@ -186,7 +206,7 @@ such as `wait`, `reservation`, `current`, `items`, or `prompt_text`, and shipped
 responses may omit arrays that do not apply instead of returning empty arrays:
 
 ```text
-decision: allow | warn | deny | error
+decision: allow | deny | error
 reason_code
 message
 conflicts[]
@@ -195,22 +215,25 @@ context_items[]
 audit_event
 ```
 
-`deny` means the adapter must block the action. `warn` means the action may
-continue but the warning must be surfaced to the agent or human where the
-runtime allows it. `error` is used for state-server, protocol, or sandbox
-execution failures; write and reconciliation paths treat `error` as fail-closed.
+`deny` means the adapter must block the action. `error` is used for
+state-server, protocol, or sandbox execution failures; write and reconciliation
+paths treat `error` as fail-closed. A `warn` decision and response-level
+`conflicts[]`, `context_items[]`, or `audit_event` fields are target response
+vocabulary. The shipped `/v1/authorize` response returns allow/deny/error plus
+`wait` or `reservation` details when applicable, and it appends
+`AuthorizationDenied` events for deny decisions.
 
 For scheduling APIs, a hard conflict decision may produce a queued intent
 request instead of an immediate reservation. V1 queues only hard
-conflicts in the same `workspace_id` and normalized `absolute_path`. Soft
+conflicts in the same `workspace_id` and normalized `relative_path`. Soft
 repo-relative conflicts remain warning context because they signal future
 integration risk rather than immediate physical file overwrite.
 
-Queued requests are promoted FIFO. A request is reservable only when all
-requested resources are available. The server must not partially reserve a
-multi-resource request. Promotion is triggered by explicit lease release, session or activity
-finalization, or lease expiry. Promotion creates a short reservation and a
-pending notification for the waiting session.
+Queued requests are promoted FIFO. The shipped queue stores one requested path
+per wait request, and a request is reservable only when that requested resource
+is available. Promotion is triggered by explicit lease release, session or
+activity finalization, or lease/reservation expiry. Promotion creates a short
+reservation and a pending notification for the waiting session.
 
 Promotion creates a reservation first. A reservation is not active write
 authority. The waiting session must reread the target, then explicitly claim the
@@ -219,10 +242,14 @@ Only that claim creates write-authorizing intent and active same-session leases.
 The default reservation TTL is 120 seconds; the default lease TTL is 300 seconds
 and is refreshed by heartbeat.
 
-For multi-resource requests, the request is reservable only when it is the head
-entry for every requested resource queue and none of those resources has an
-active lease. `request_id` is the idempotency key: repeating a request with the
-same id returns the existing state and must not enqueue a duplicate.
+The target multi-resource model is atomic all-or-nothing: a multi-resource
+request is reservable only when it is the head entry for every requested resource
+queue and none of those resources has an active lease, and the server must not
+partially reserve it. `request_id` is the idempotency key for shipped single-path
+requests: repeating a request with the same id returns the existing state and
+must not enqueue a duplicate. Repeating an expired request requeues the same
+waiter in place, preserving its original FIFO row while requiring a new
+reservation and claim before writing.
 
 Full scheduling APIs return immediately with request state. Blocking waits can
 be implemented as a future client convenience by polling notifications or resume
@@ -265,19 +292,23 @@ human_observations
 outbox
 ```
 
-`events` is append-only and is the canonical audit log. Materialized tables are
-updated in the same transaction that appends the accepted event. If
-materialization fails, the event append must roll back.
+`events` is append-only audit history for shipped coordination events. Accepted
+session and intent declaration events materialize current-state rows in the same
+transaction as the event append. Lifecycle mutation APIs such as lease release,
+intent claim, intent cancel, and activity finalize update materialized tables
+directly and append their audit events in the same transaction. If the audit
+append or event-backed materialization fails, the surrounding mutation rolls
+back.
 
 Required indexes:
 
 ```text
 events(workspace_id, created_at)
-events(session_id, sequence)
+events(session_id, created_at)
 sessions(workspace_id, session_id)
 activities(workspace_id, expires_at)
 intents(session_id, status, expires_at)
-leases(workspace_id, absolute_path, status, expires_at)
+leases(workspace_id, relative_path, status)
 leases(repo_id, relative_path, status, expires_at)
 wait_queue(workspace_id, relative_path, status)
 wait_queue(session_id, status)
@@ -287,13 +318,23 @@ reconciliations(session_id, created_at)
 outbox(session_id, sequence, sync_status)
 ```
 
+The shipped schema may retain legacy or target-model columns and indexes such
+as `events.sequence` and `leases.absolute_path`; current v1 authorization and
+event queries must not rely on them until those columns are populated.
+
 `SessionHeartbeat` materialization refreshes the session timestamp, active lease
 expiry, active activity expiry, and active intent expiry. Intent refresh is
 capped at 60 minutes from `declared_at`.
 
-Expiration may run in a background loop and may also be triggered lazily by
-reads. Lazy expiration must be transactionally equivalent to background
-expiration.
+The shipped state server runs a background expiration loop while serving and
+also triggers expiration lazily from read/write paths. Expiration covers stale
+leases, stale reservations, and stale intent state, promotes eligible FIFO
+waiters, and must be transactionally equivalent in both paths.
+
+The same maintenance loop prunes old historical evidence after the built-in
+14-day retention window. Pruning deletes old events, reconciliations, conflicts,
+human observations, and expired notifications. It must not delete active
+current-state rows, pending notifications, or outbox sync evidence.
 
 ## Runtime Files
 
@@ -332,14 +373,24 @@ repo-local .stateful_core/runtime/server.json compatibility fallback
 ```
 
 `server.json` contains `base_url`, `token`, `pid`, `workspace_id`,
-`protocol_version`, and `started_at`. The prototype writes it with normal local
-filesystem defaults; user-only file permissions are a future hardening item.
+`protocol_version`, and `started_at`. Runtime discovery files are written with
+user read/write permissions (`0600`) on Unix platforms where file modes are
+available.
+When the runtime workspace id is a default placeholder (`local`, `shared`, or
+`unknown`), enabled-repo hooks, MCP calls, and CLI fallbacks derive the effective
+request workspace id from the enabled repo's canonical git root
+(`workspace-...`) so two different enabled repos do not share one conflict
+domain. Explicit non-default runtime or command `--workspace-id` values are
+preserved.
 
-`stateful server start` starts the HTTP runtime and always prints
+`stateful server start` starts the HTTP runtime and prints
 `stateful server join ...` commands. Binding to `0.0.0.0` makes the runtime
-LAN-reachable. `stateful server join` validates the host runtime, installs
-global stateful/Codex MCP configuration, writes global runtime discovery for the
-host server, and only enables the current repo when `--enable-repo` is supplied.
+LAN-reachable, but printed join commands target loopback so remote machines use
+an SSH tunnel before joining. `stateful server join` rejects non-loopback plain
+`http://` base URLs before runtime validation or config writes, validates the
+host runtime, installs global stateful/Codex MCP configuration, writes global
+runtime discovery for the host server, and only enables the current repo when
+`--enable-repo` is supplied.
 
 ## Local HTTP Trust
 
@@ -350,21 +401,30 @@ The token is a local trust guard, not a hard security boundary. It prevents
 casual spoofing by unrelated local processes but does not replace OS-level
 process isolation or managed hooks.
 
+CLI join never sends the bearer token to a non-loopback plain `http://` base
+URL. Use an SSH tunnel and join the loopback endpoint for remote runtimes.
+
 If the token is missing or invalid, write, reconciliation, intent, and lease
 paths fail closed. Read-only paths may return a minimal unauthorized error.
 
 ## Hook Adapter Contract
 
-Hook scripts are thin adapters:
+Hook scripts are thin integration adapters:
 
 ```text
 parse hook input
 derive session/workspace/source envelope
-extract action and targets
-call /v1/authorize or the relevant endpoint
+classify runtime-specific tool calls
+extract action and targets when supported
+call /v1/authorize or the relevant endpoint for store-backed policy
+deny unclassified write/execute-capable tools in enabled repos
 translate decision into hook output
 append outbox evidence when observation cannot reach the server
 ```
+
+Adapter-local policy is limited to fail-closed tool classification and trusted
+wrapper validation for command-shaped execution. Conflict, lease, intent,
+freshness, queue, and reconciliation decisions belong to the state server.
 
 Suggested hook timeouts:
 
@@ -443,10 +503,12 @@ opts a repo into enforcement and can install repo-local Codex hooks with
 `--repo-local-codex` as a compatibility fallback. `stateful server start`
 without `--foreground` uses the detached lazy lifecycle. Bare legacy
 `stateful server` and `stateful server start --foreground` run in the
-foreground and write runtime discovery. `stateful doctor` checks hook
-installation files, repo config files, global install fields, repo enabled
-status, and global path or registry errors. Active server reachability, config
-schema validation and SQLite migration inspection are future doctor extensions.
+foreground and write runtime discovery. `stateful doctor` checks current Codex
+config, repo config files, global install fields, repo enabled status, and
+global path or registry errors. Legacy `.codex/hooks.json` and repo-local
+`.stateful_core/state.db` artifacts are reported as legacy artifacts, not as
+installed-state evidence. Active server reachability, config schema validation
+and SQLite migration inspection are future doctor extensions.
 `stateful commit -m <message> -- <paths...>` is the structured commit wrapper.
 `stateful push [remote branch]` is the structured push wrapper. It requires a
 clean working tree, an attached current branch, either the current branch's
@@ -472,12 +534,17 @@ or enabling a repository.
 
 ## Config Defaults
 
-`.stateful/config.yml` documents repo-level defaults:
+`.stateful/config.yml` documents target repo-level defaults:
 
 ```text
+# stateful-core repo policy config
+# These are informational target defaults for this repository.
+# Runtime loading of these keys is not yet shipped.
 protocol_version: stateful.v1
 intent_ttl_seconds: 900
 intent_max_seconds: 3600
+lease_ttl_seconds: 300
+reservation_ttl_seconds: 120
 directory_scope_depth: 2
 delete_requires_exact_file_scope: true
 rename_requires_exact_file_scope: true
@@ -485,13 +552,18 @@ default_write_policy: deny
 event_retention_days: 14
 ```
 
-The current implementation uses built-in Rust defaults for these values. Runtime
-loading of every config key and event-retention pruning are future hardening
-work.
+The current implementation writes these keys as target repo-level defaults but
+does not load them at runtime. Intent, lease, reservation, directory-scope, and
+retention windows are built-in Rust constants today. The shipped server uses
+the built-in 14-day retention window for historical pruning; configurable
+runtime loading is future hardening work.
 
 Command-shaped tests and checks run through the trusted `stateful sandbox run`
-wrapper. Artifact writes are scoped with `--write-dir target` after exact
-`target/` directory intent and a successful same-session directory lease.
+wrapper. Build and test artifact writes are scoped with `--fs build` after
+exact `tmp/` directory intent and a successful same-session directory lease.
+The profile sets standard temp variables under `tmp/.stateful-tmp` and sets
+`CARGO_TARGET_DIR` to `tmp/target` so Cargo build output stays in the authorized
+artifact tree.
 
 Glob semantics should use gitignore-style path matching relative to the
 workspace root. Identity and policy checks still use normalized canonical paths
@@ -503,11 +575,18 @@ Implemented v1 behavior must have tests for:
 
 - policy decisions as table-driven unit tests
 - intent scope matching, including depth-2 directory behavior
+- directory lease conflict behavior, including whole-subtree fencing for
+  `write_directory` command-shaped writes
 - exact file scope for delete, rename, and move
 - Bash full-deny classification and sandbox-gated hook authorization
+- nested Codex benchmark sandbox hook authorization only when the
+  `codex-benchmark` cargo feature is enabled
 - native Codex edit hook authorization plus Bash sandbox fixtures
 - prompt renderer golden output for shipped store-backed rendering
-- heartbeat refresh of active leases, activities, and capped active intent TTL
+- heartbeat refresh of activities, capped active intent TTL, and active leases
+  still covered by active intent
+- background and lazy expiration of stale leases, reservations, and intents,
+  including FIFO waiter promotion after stale reservation expiry
 - missing purpose and empty `files_planned` rejection
 - SQLite event append plus materialized-view transaction behavior
 - sandbox-run execution with artifact writes limited to an authorized directory
@@ -516,9 +595,10 @@ Implemented v1 behavior must have tests for:
 - human-write reconciliation blocks and acknowledgements when human-write
   observation is shipped
 
-The policy engine should be testable without starting the HTTP server. HTTP,
-MCP, and hook tests should prove adapter correctness, not duplicate policy
-coverage.
+Pure scope-policy primitives should be testable without starting the HTTP
+server. The shipped store-backed authorization service is currently tested
+through server-level tests; future extractions should move reusable policy
+pieces into `stateful-core` without duplicating product policy in adapters.
 
 ## Migration Path
 
@@ -539,5 +619,5 @@ managed hooks for organization enforcement
 IDE extension for human save-gate signals
 ```
 
-No migration step may introduce a separate policy engine. New clients must call
-the same state server API.
+No migration step may introduce a separate adapter-local policy engine. New
+clients must call the same state server API.

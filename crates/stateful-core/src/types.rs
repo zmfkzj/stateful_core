@@ -70,56 +70,6 @@ pub struct SourceRef {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResourceType {
-    File,
-    Directory,
-    Test,
-    Task,
-    Port,
-    Migration,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TargetOperation {
-    Read,
-    Write,
-    Delete,
-    Rename,
-    Move,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionKind {
-    Read,
-    Search,
-    Diff,
-    WriteFile,
-    WriteDirectory,
-    EditFile,
-    ApplyPatch,
-    DeleteFile,
-    RenameFile,
-    MoveFile,
-    Bash,
-    ReconcileAck,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Target {
-    pub operation: TargetOperation,
-    pub resource_type: ResourceType,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub old_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DecisionKind {
     Allow,

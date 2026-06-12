@@ -92,6 +92,11 @@ fn external_run_request_guidance_summarizes_approval_inputs_by_flag() {
         timeout_seconds: Some(10),
     })
     .expect("request should be recorded");
+    let canonical_external_dir =
+        fs::canonicalize(&external_dir).expect("external dir should canonicalize");
+    let canonical_existing_file =
+        fs::canonicalize(&existing_file).expect("existing file should canonicalize");
+    let canonical_created_file = canonical_external_dir.join("stateful.new");
 
     assert!(approval.guidance.contains("External run request details:"));
     assert!(
@@ -99,21 +104,18 @@ fn external_run_request_guidance_summarizes_approval_inputs_by_flag() {
             .guidance
             .contains("--purpose: \"install rebuilt binaries\"")
     );
-    assert!(
-        approval
-            .guidance
-            .contains(&format!("--write-target: {}", existing_file.display()))
-    );
-    assert!(
-        approval
-            .guidance
-            .contains(&format!("--create-target: {}", created_file.display()))
-    );
-    assert!(
-        approval
-            .guidance
-            .contains(&format!("--write-dir: {}", external_dir.display()))
-    );
+    assert!(approval.guidance.contains(&format!(
+        "--write-target: {}",
+        canonical_existing_file.display()
+    )));
+    assert!(approval.guidance.contains(&format!(
+        "--create-target: {}",
+        canonical_created_file.display()
+    )));
+    assert!(approval.guidance.contains(&format!(
+        "--write-dir: {}",
+        canonical_external_dir.display()
+    )));
     assert!(
         approval
             .guidance

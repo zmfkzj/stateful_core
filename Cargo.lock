@@ -1062,6 +1062,7 @@ dependencies = [
  "stateful-mcp",
  "stateful-server",
  "stateful-store",
+ "time",
  "tokio",
  "uuid",
 ]
@@ -1094,6 +1095,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "rusqlite",
  "serde",
  "serde_json",
  "stateful-core",
@@ -1183,6 +1185,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
 dependencies = [
  "deranged",
+ "itoa",
  "num-conv",
  "powerfmt",
  "serde_core",

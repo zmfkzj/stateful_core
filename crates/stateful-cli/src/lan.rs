@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::runtime::runtime_base_url_is_localhost;
 use crate::{
     CodexInstallOptions, GlobalPaths, ServerRuntime, apply_codex_install, detect_git_root,
     enable_repo, runtime_from_remote, write_global_runtime_file,
@@ -42,6 +43,7 @@ pub struct ServerStartRuntimeResult {
 }
 
 pub fn join_server_runtime(options: ServerJoinOptions) -> anyhow::Result<ServerJoinResult> {
+    validate_server_join_base_url(&options.base_url)?;
     let runtime = runtime_from_remote(&options.base_url, &options.token, &options.workspace_id)?;
     apply_codex_install(CodexInstallOptions {
         yes: true,
@@ -87,6 +89,15 @@ where
 
 fn is_no_git_root_error(error: &anyhow::Error) -> bool {
     error.to_string().starts_with("no git root found from ")
+}
+
+fn validate_server_join_base_url(base_url: &str) -> anyhow::Result<()> {
+    if base_url.starts_with("http://") && !runtime_base_url_is_localhost(base_url) {
+        anyhow::bail!(
+            "plain http joins are only allowed for loopback addresses; use an SSH tunnel and join http://127.0.0.1:<port>"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -162,17 +173,15 @@ fn server_join_commands_with_workspace(
     token: &str,
     workspace_id: &str,
 ) -> Vec<String> {
-    addresses
-        .iter()
-        .map(|address| match address {
-            IpAddr::V4(address) => {
-                format_server_join_command(&address.to_string(), port, token, workspace_id)
-            }
-            IpAddr::V6(address) => {
-                format_server_join_command(&format!("[{address}]"), port, token, workspace_id)
-            }
-        })
-        .collect()
+    let mut commands = Vec::new();
+    for address in addresses {
+        let command_address = join_command_address(*address);
+        let command = format_server_join_command(&command_address, port, token, workspace_id);
+        if !commands.contains(&command) {
+            commands.push(command);
+        }
+    }
+    commands
 }
 
 pub fn start_server_runtime(
@@ -242,6 +251,14 @@ fn format_server_join_command(address: &str, port: u16, token: &str, workspace_i
         command.push_str(workspace_id);
     }
     command
+}
+
+fn join_command_address(address: IpAddr) -> String {
+    match address {
+        IpAddr::V4(address) if address.is_loopback() => address.to_string(),
+        IpAddr::V6(address) if address.is_loopback() => format!("[{address}]"),
+        _ => "127.0.0.1".to_string(),
+    }
 }
 
 fn detected_lan_addresses() -> Vec<IpAddr> {

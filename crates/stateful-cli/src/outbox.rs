@@ -147,7 +147,7 @@ pub(crate) fn queue_session_heartbeat_outbox(
         "actor_id": "unknown",
         "workspace_id": runtime_workspace_id,
         "sequence": sequence,
-        "created_at": "2026-05-31T00:00:00Z",
+        "created_at": now_rfc3339_timestamp(),
         "payload": {
             "reason": reason
         },
@@ -157,6 +157,12 @@ pub(crate) fn queue_session_heartbeat_outbox(
     let mut file = open_plain_outbox_append(&path, "outbox file")?;
     writeln!(file, "{record}")?;
     Ok(())
+}
+
+fn now_rfc3339_timestamp() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("UTC timestamp should format as RFC3339")
 }
 
 fn safe_file_stem(value: &str) -> String {

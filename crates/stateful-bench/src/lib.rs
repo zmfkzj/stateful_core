@@ -1055,10 +1055,37 @@ fn round3(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchmarkEvidenceKind {
+    PairedAgentRun,
+    SyntheticFixture,
+    Mixed,
+}
+
+impl Default for BenchmarkEvidenceKind {
+    fn default() -> Self {
+        Self::PairedAgentRun
+    }
+}
+
+impl std::fmt::Display for BenchmarkEvidenceKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::PairedAgentRun => "paired_agent_run",
+            Self::SyntheticFixture => "synthetic_fixture",
+            Self::Mixed => "mixed",
+        };
+        formatter.write_str(value)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunMetadata {
     pub run_id: String,
     pub mode: RunMode,
+    #[serde(default)]
+    pub evidence_kind: BenchmarkEvidenceKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1165,6 +1192,7 @@ pub fn run_pairs(options: RunOptions) -> Result<RunMetadata> {
     let metadata = RunMetadata {
         run_id: options.run_id.clone(),
         mode: options.mode,
+        evidence_kind: BenchmarkEvidenceKind::PairedAgentRun,
     };
     write_json_file(run_dir.join("run.json"), &metadata)?;
 
@@ -2228,6 +2256,7 @@ fn elapsed_ms(duration: Duration) -> u64 {
 pub struct RunReport {
     pub run_id: String,
     pub mode: RunMode,
+    pub evidence_kind: BenchmarkEvidenceKind,
     pub summary: ReportSummary,
     pub pairs: Vec<PairReport>,
 }
@@ -2253,11 +2282,15 @@ pub struct CompareOptions {
 pub struct ComparisonReport {
     pub stateful_run_id: String,
     pub no_state_run_id: String,
+    pub evidence_kind: BenchmarkEvidenceKind,
+    pub empirical_claim_allowed: bool,
+    pub evidence_notes: Vec<String>,
     pub manifest_path: String,
     pub manifest_pairs: usize,
     pub paired: PairedComparisonSummary,
     pub stateful: ModeComparisonSummary,
     pub no_state: ModeComparisonSummary,
+    pub coordination_effects: CoordinationEffectSummary,
     pub pairs: Vec<PairComparison>,
     pub excluded_pairs: Vec<ExcludedComparisonPair>,
 }
@@ -2282,6 +2315,22 @@ pub struct PairedComparisonSummary {
     pub no_state_functional_score: Option<f64>,
     pub paired_valid_functional_delta: Option<f64>,
     pub raw_manifest_functional_delta: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinationEffectSummary {
+    pub prevented_uncoordinated_same_file_collisions: i64,
+    pub prevented_lost_edit_events: i64,
+    pub additional_coordinated_blocks: i64,
+    pub additional_denied_writes: i64,
+    pub additional_scope_mismatches: i64,
+    pub additional_stale_intents: i64,
+    pub additional_timeouts: i64,
+    pub additional_long_idle_periods: i64,
+    pub additional_false_blocks: i64,
+    pub additional_manual_interventions: i64,
+    pub additional_coordination_friction_events: i64,
+    pub additional_wall_time_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2357,6 +2406,12 @@ pub fn compare_runs(options: CompareOptions) -> Result<ComparisonReport> {
     let no_state_reports = build_reports(&options.no_state_run_dir)?;
     let stateful_run_id = joined_run_ids(&stateful_reports);
     let no_state_run_id = joined_run_ids(&no_state_reports);
+    let evidence_kind = comparison_evidence_kind(
+        stateful_reports
+            .iter()
+            .chain(no_state_reports.iter())
+            .map(|report| report.evidence_kind),
+    );
     let stateful_by_pair = pair_report_map(&stateful_reports);
     let no_state_by_pair = pair_report_map(&no_state_reports);
 
@@ -2412,10 +2467,14 @@ pub fn compare_runs(options: CompareOptions) -> Result<ComparisonReport> {
     let raw_delta = (!pair_ids.is_empty()).then_some(round3(
         stateful.raw_manifest_score - no_state.raw_manifest_score,
     ));
+    let coordination_effects = summarize_coordination_effects(&stateful, &no_state);
 
     Ok(ComparisonReport {
         stateful_run_id,
         no_state_run_id,
+        evidence_kind,
+        empirical_claim_allowed: empirical_claim_allowed(evidence_kind),
+        evidence_notes: evidence_notes(evidence_kind),
         manifest_path: options.manifest.to_string_lossy().into_owned(),
         manifest_pairs: pair_ids.len(),
         paired: PairedComparisonSummary {
@@ -2427,9 +2486,110 @@ pub fn compare_runs(options: CompareOptions) -> Result<ComparisonReport> {
         },
         stateful,
         no_state,
+        coordination_effects,
         pairs,
         excluded_pairs,
     })
+}
+
+fn summarize_coordination_effects(
+    stateful: &ModeComparisonSummary,
+    no_state: &ModeComparisonSummary,
+) -> CoordinationEffectSummary {
+    CoordinationEffectSummary {
+        prevented_uncoordinated_same_file_collisions: signed_delta(
+            no_state.uncoordinated_same_file_collisions,
+            stateful.uncoordinated_same_file_collisions,
+        ),
+        prevented_lost_edit_events: signed_delta(
+            no_state.lost_edit_events,
+            stateful.lost_edit_events,
+        ),
+        additional_coordinated_blocks: signed_delta(
+            stateful.coordinated_blocks,
+            no_state.coordinated_blocks,
+        ),
+        additional_denied_writes: signed_delta(stateful.denied_writes, no_state.denied_writes),
+        additional_scope_mismatches: signed_delta(
+            stateful.scope_mismatches,
+            no_state.scope_mismatches,
+        ),
+        additional_stale_intents: signed_delta(stateful.stale_intents, no_state.stale_intents),
+        additional_timeouts: signed_delta(stateful.timeouts, no_state.timeouts),
+        additional_long_idle_periods: signed_delta(
+            stateful.long_idle_periods,
+            no_state.long_idle_periods,
+        ),
+        additional_false_blocks: signed_delta(
+            stateful.false_block_count,
+            no_state.false_block_count,
+        ),
+        additional_manual_interventions: signed_delta(
+            stateful.manual_intervention_count,
+            no_state.manual_intervention_count,
+        ),
+        additional_coordination_friction_events: signed_delta(
+            coordination_friction_events(stateful),
+            coordination_friction_events(no_state),
+        ),
+        additional_wall_time_ms: signed_delta(stateful.wall_time_ms, no_state.wall_time_ms),
+    }
+}
+
+fn coordination_friction_events(summary: &ModeComparisonSummary) -> u64 {
+    summary
+        .coordinated_blocks
+        .saturating_add(summary.denied_writes)
+        .saturating_add(summary.scope_mismatches)
+        .saturating_add(summary.stale_intents)
+        .saturating_add(summary.timeouts)
+        .saturating_add(summary.long_idle_periods)
+        .saturating_add(summary.false_block_count)
+        .saturating_add(summary.manual_intervention_count)
+}
+
+fn signed_delta(left: u64, right: u64) -> i64 {
+    let delta = i128::from(left) - i128::from(right);
+    delta.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+fn comparison_evidence_kind(
+    kinds: impl IntoIterator<Item = BenchmarkEvidenceKind>,
+) -> BenchmarkEvidenceKind {
+    let mut iter = kinds.into_iter();
+    let Some(first) = iter.next() else {
+        return BenchmarkEvidenceKind::PairedAgentRun;
+    };
+    if iter.all(|kind| kind == first) {
+        first
+    } else {
+        BenchmarkEvidenceKind::Mixed
+    }
+}
+
+fn empirical_claim_allowed(kind: BenchmarkEvidenceKind) -> bool {
+    matches!(kind, BenchmarkEvidenceKind::PairedAgentRun)
+}
+
+fn evidence_notes(kind: BenchmarkEvidenceKind) -> Vec<String> {
+    match kind {
+        BenchmarkEvidenceKind::PairedAgentRun => vec![
+            "paired_agent_run evidence comes from executed agent pairs; effect-size claims still require an overlap-focused manifest, enough paired-valid samples, and overhead reporting."
+                .to_string(),
+        ],
+        BenchmarkEvidenceKind::SyntheticFixture => vec![
+            "synthetic_fixture evidence is a scripted fixture for validating report plumbing; do not cite synthetic deltas as empirical product efficacy or performance evidence."
+                .to_string(),
+            "Run paired_agent_run comparisons on exact_file_overlap or same_directory manifests before claiming prevented conflicts."
+                .to_string(),
+        ],
+        BenchmarkEvidenceKind::Mixed => vec![
+            "mixed evidence combines scripted fixtures with executed paired-agent runs; do not aggregate it into empirical efficacy claims."
+                .to_string(),
+            "Report synthetic_fixture and paired_agent_run results separately, with wall-time and token overhead."
+                .to_string(),
+        ],
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2780,6 +2940,7 @@ fn write_synthetic_run(
         &RunMetadata {
             run_id: run_id.to_string(),
             mode,
+            evidence_kind: BenchmarkEvidenceKind::SyntheticFixture,
         },
     )?;
 
@@ -3092,7 +3253,20 @@ fn render_comparison_markdown(report: &ComparisonReport) -> String {
     output.push_str("# Stateful Bench Comparison\n\n");
     output.push_str(&format!("- Manifest pairs: {}\n", report.manifest_pairs));
     output.push_str(&format!("- Stateful run: {}\n", report.stateful_run_id));
-    output.push_str(&format!("- No-state run: {}\n\n", report.no_state_run_id));
+    output.push_str(&format!("- No-state run: {}\n", report.no_state_run_id));
+    output.push_str(&format!("- Evidence kind: {}\n", report.evidence_kind));
+    output.push_str(&format!(
+        "- Empirical claim allowed: {}\n",
+        if report.empirical_claim_allowed {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+    for note in &report.evidence_notes {
+        output.push_str(&format!("- Evidence note: {note}\n"));
+    }
+    output.push('\n');
 
     output.push_str("## Paired Valid\n\n");
     output.push_str("| Metric | Value |\n");
@@ -3116,6 +3290,62 @@ fn render_comparison_markdown(report: &ComparisonReport) -> String {
     output.push_str(&format!(
         "| Raw manifest functional delta | {} |\n\n",
         format_optional_score(report.paired.raw_manifest_functional_delta)
+    ));
+
+    output.push_str("## Coordination Effects\n\n");
+    output.push_str("| Metric | Delta |\n");
+    output.push_str("| --- | ---: |\n");
+    output.push_str(&format!(
+        "| Prevented uncoordinated same-file collisions | {} |\n",
+        report
+            .coordination_effects
+            .prevented_uncoordinated_same_file_collisions
+    ));
+    output.push_str(&format!(
+        "| Prevented lost edit events | {} |\n",
+        report.coordination_effects.prevented_lost_edit_events
+    ));
+    output.push_str(&format!(
+        "| Additional coordinated blocks | {} |\n",
+        report.coordination_effects.additional_coordinated_blocks
+    ));
+    output.push_str(&format!(
+        "| Additional denied writes | {} |\n",
+        report.coordination_effects.additional_denied_writes
+    ));
+    output.push_str(&format!(
+        "| Additional scope mismatches | {} |\n",
+        report.coordination_effects.additional_scope_mismatches
+    ));
+    output.push_str(&format!(
+        "| Additional stale intents | {} |\n",
+        report.coordination_effects.additional_stale_intents
+    ));
+    output.push_str(&format!(
+        "| Additional timeouts | {} |\n",
+        report.coordination_effects.additional_timeouts
+    ));
+    output.push_str(&format!(
+        "| Additional long idle periods | {} |\n",
+        report.coordination_effects.additional_long_idle_periods
+    ));
+    output.push_str(&format!(
+        "| Additional false blocks | {} |\n",
+        report.coordination_effects.additional_false_blocks
+    ));
+    output.push_str(&format!(
+        "| Additional manual interventions | {} |\n",
+        report.coordination_effects.additional_manual_interventions
+    ));
+    output.push_str(&format!(
+        "| Additional coordination friction events | {} |\n",
+        report
+            .coordination_effects
+            .additional_coordination_friction_events
+    ));
+    output.push_str(&format!(
+        "| Additional wall time ms | {} |\n\n",
+        report.coordination_effects.additional_wall_time_ms
     ));
 
     output.push_str("## Mode Metrics\n\n");
@@ -3381,6 +3611,7 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
     Ok(RunReport {
         run_id: metadata.run_id,
         mode: metadata.mode,
+        evidence_kind: metadata.evidence_kind,
         summary,
         pairs,
     })

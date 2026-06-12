@@ -50,12 +50,20 @@ not the right core primitive for coordinating coding agents in a repository.
 The system also does not replace:
 
 - Git branches, worktrees, review, or merge conflict handling
+- containers, sandboxed clones, or orchestrators that can partition work cleanly
 - editor ownership of human buffers
 - security sandboxes or access-control systems
+- OS advisory locks such as `flock` when the only problem is process-level
+  mutual exclusion on one machine
 - long-term memory or knowledge retrieval
 
 The product boundary is narrower: prevent or surface risky current-state
-collisions before supported actions mutate the workspace.
+collisions before supported actions mutate the workspace. Prefer the
+alternatives above when actors can work independently and reconcile later.
+Use intent-scoped concurrency control when the actors must share one live
+checkout because the environment is too expensive to duplicate, tasks need each
+other's uncommitted edits immediately, or a human is editing in the canonical
+workspace alongside agents.
 
 ## Model Name
 
@@ -91,8 +99,9 @@ Intent Declaration
 ```
 
 Intent is the authorization scope. Lease is the live claim. The effect log is
-the audit trail and replay source. Validation is post-effect evidence, not a
-substitute for authorization.
+the audit trail and target replay source; shipped v1 materializes selected
+session and intent events and appends audit events for lifecycle mutations.
+Validation is post-effect evidence, not a substitute for authorization.
 
 ## Implementation Status
 
@@ -143,12 +152,13 @@ Intent must be:
 - scoped to files or directories for write authorization
 - attached to a purpose
 - time-bound
-- replaceable when the active target set changes
+- extensible when the active target set grows
 
-Intent declarations replace the active file scope for the session in the
-workspace. They do not append silently. If a session expands from `src/auth.ts`
-to `src/auth.ts` plus `src/session.ts`, it must redeclare the complete intended
-scope.
+Intent declarations add to the active file scope for the session in the
+workspace. If a session expands from `src/auth.ts` to `src/auth.ts` plus
+`src/session.ts`, it may declare the new target without invalidating the
+existing one. If the same path is declared again, the latest matching active
+declaration supplies the purpose used for future lease acquisition.
 
 ## Scoped Lease
 
@@ -164,18 +174,24 @@ For v1, only file and directory leases authorize supported filesystem writes.
 Other resources, such as tasks, tests, ports, and migrations, can provide
 coordination context but do not authorize source-tree mutation by themselves.
 
-Leases are advisory as product semantics, but enforced where the runtime has a
+Leases are advisory as product semantics, but checked where the runtime has a
 reliable hook or sandbox boundary. This split is intentional:
 
 ```text
 planning and context: advisory
-write boundary: enforced
+write boundary: pre-tool authorization with observation checks
 ```
 
-A write authorization must validate the current lease identity, not merely that
-the session once held a lease. The active lease id acts as a fencing token: if a
-lease expires and another actor acquires the resource, the old actor cannot
-resume writing on stale authority.
+A write authorization validates the current same-session lease and rejects stale
+lease or base-file observations when the hook can supply them. This catches the
+common lost-update case where the file changed between lease acquisition,
+reread, and write authorization.
+
+Continuous post-authorization fencing is target behavior. The shipped v1 hook
+does not yet pass a lease id through the native write and confirm after
+`PostToolUse` that the same lease was continuously held until the write
+completed. Long sandboxed commands are authorized before execution and are not
+currently bounded by remaining lease TTL.
 
 At authorization time, the policy engine checks:
 

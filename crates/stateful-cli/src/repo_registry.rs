@@ -120,12 +120,12 @@ pub fn repo_identity_for_enabled_repo(
     paths: &GlobalPaths,
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<RepoIdentity> {
-    let repo_root = repo_root.as_ref();
+    let repo_root = detect_git_root(repo_root)?;
     let registry = RepoRegistry::load(paths)?;
     let entry = registry
-        .enabled_entry(repo_root)
+        .enabled_entry(&repo_root)
         .ok_or_else(|| anyhow::anyhow!("enabled repo metadata not found"))?;
-    let branch = current_branch(repo_root).unwrap_or_else(|| "unknown".to_string());
+    let branch = current_branch(&repo_root).unwrap_or_else(|| "unknown".to_string());
 
     Ok(RepoIdentity {
         repo_id: entry.repo_id.clone(),
@@ -133,6 +133,36 @@ pub fn repo_identity_for_enabled_repo(
         root: entry.root.to_string_lossy().into_owned(),
         branch,
     })
+}
+
+pub fn workspace_id_for_enabled_repo(
+    paths: &GlobalPaths,
+    repo_root: impl AsRef<Path>,
+) -> anyhow::Result<String> {
+    let repo_root = detect_git_root(repo_root)?;
+    let registry = RepoRegistry::load(paths)?;
+    let entry = registry
+        .enabled_entry(&repo_root)
+        .ok_or_else(|| anyhow::anyhow!("enabled repo metadata not found"))?;
+
+    Ok(workspace_id_for_repo_id(&entry.repo_id))
+}
+
+pub fn workspace_id_for_repo_identity(identity: &RepoIdentity) -> String {
+    workspace_id_for_repo_id(&identity.worktree_id)
+}
+
+pub fn effective_workspace_id_for_repo(
+    runtime_workspace_id: &str,
+    identity: Option<&RepoIdentity>,
+) -> String {
+    if matches!(runtime_workspace_id, "local" | "shared" | "unknown")
+        && let Some(identity) = identity
+    {
+        return workspace_id_for_repo_identity(identity);
+    }
+
+    runtime_workspace_id.to_string()
 }
 
 pub fn enable_repo(paths: &GlobalPaths, repo: impl AsRef<Path>) -> anyhow::Result<RepoEntry> {
@@ -265,6 +295,11 @@ fn repo_id_for_root(root: &Path) -> String {
     let first = fnv1a64(0xcbf29ce484222325, bytes.as_bytes());
     let second = fnv1a64(0x84222325cbf29ce4, bytes.as_bytes());
     format!("repo-{first:016x}{second:016x}")
+}
+
+fn workspace_id_for_repo_id(repo_id: &str) -> String {
+    let suffix = repo_id.strip_prefix("repo-").unwrap_or(repo_id);
+    format!("workspace-{suffix}")
 }
 
 fn current_branch(repo_root: &Path) -> Option<String> {

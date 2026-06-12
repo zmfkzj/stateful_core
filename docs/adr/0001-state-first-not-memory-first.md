@@ -54,8 +54,8 @@ Hook-mediated Bash must be a single strict invocation of the trusted absolute
 `apply_patch` or Edit after exact intent and a successful same-session file lease, where
 target paths can be checked before writing, or with `--fs write-targets` wrapper
 calls that declare explicit targets. Raw Bash test commands are not allowlisted;
-use `stateful sandbox run --fs write-targets --write-dir target --command <cmd>`
-after exact `target/` directory intent and a successful same-session directory
+use `stateful sandbox run --fs build --network enabled --command <cmd>` after
+exact `tmp/` directory intent and a successful same-session directory
 lease.
 
 Overrides are never automatic. A blocked write can proceed only when the user

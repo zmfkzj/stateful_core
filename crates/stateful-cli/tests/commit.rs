@@ -88,7 +88,7 @@ fn structured_commit_normalizes_current_dir_file_paths() {
     let result = run_structured_commit(CommitRequest {
         repo_root: root.path().to_path_buf(),
         message: "docs: add plan".to_string(),
-        paths: vec!["./docs/plan.md".to_string()],
+        paths: vec!["./docs/./plan.md".to_string()],
         session_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {

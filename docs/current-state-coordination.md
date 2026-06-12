@@ -69,7 +69,7 @@ workspace
 branch
 purpose
 goal
-phase: exploring | editing | testing | blocked | done | failed | idle
+phase: exploring | editing | testing | blocked | done | failed
 files_read
 files_editing
 files_planned
@@ -82,6 +82,9 @@ expires_at
 confidence
 source_refs
 ```
+
+The shipped phase vocabulary matches the policy enum. `idle` is target
+vocabulary for future activity summaries.
 
 The important fields are not only current edits. `next_intent` is often more
 valuable than `files_editing`, because it allows other actors to avoid future
@@ -142,15 +145,22 @@ waiter for the normalized workspace resource:
 workspace_id + relative_path + action
 ```
 
-The wait queue is FIFO. A queued hard-conflict request is promoted only when all
-requested resources are available. V1 reservation is atomic all-or-nothing: if one
-file or directory in a multi-resource request is still blocked, the whole
-request stays queued. For a multi-resource request, "available" means the
-request is at the head of every resource queue it participates in and every
-requested resource has no active lease.
+The wait queue is FIFO. A queued hard-conflict request is promoted only when the
+requested resource is available. The shipped queue stores one requested path
+per wait request, and `/v1/intent/request` accepts only `write_file` and
+`write_directory` scheduling requests. The target multi-resource reservation
+model is atomic all-or-nothing: if one file or directory in a multi-resource
+request is still blocked, the whole request stays queued. For a multi-resource
+request, "available" means the request is at the head of every resource queue it
+participates in and every requested resource has no active lease.
+
+`rename_file` and `move_file` remain immediate authorization actions only in the
+shipped v1 policy. They require exact source and destination file intent and
+leases, but conflicting rename/move attempts do not enqueue wait records until
+the multi-resource scheduler is implemented.
 
 The server promotes the first eligible queued waiter when one of these grant
-triggers makes the requested resources available:
+triggers makes the requested resource available:
 
 - explicit lease release
 - session or activity finalization
@@ -169,6 +179,9 @@ Resume is notification-driven rather than process-driven. The state server
 records a pending notification when it promotes a reservation. Agents and
 orchestrators discover that signal by polling notifications, asking for the
 next resumable reservation, or receiving that context from a lifecycle hook.
+Polling returns each pending notification once and marks it delivered; callers
+that miss or discard a poll response should use `stateful resume next` /
+`state.resume.next` to rediscover any still-active reservation.
 The state server does not wake a sleeping Codex process by itself; external
 orchestration can build on the notification and resume APIs.
 
@@ -188,11 +201,14 @@ arrays and empty or normalized-empty paths are rejected with `missing_scope`.
 Intent request also requires a non-empty `path`; empty or normalized-empty
 request paths are rejected with `missing_scope`. Repeating the same request id
 returns the existing request state and must not create duplicate queue entries or
-replace the original purpose. A queued
-or reserved request can be canceled explicitly with `state.intent.cancel` /
+replace the original purpose. Repeating an expired request requeues the same
+waiter in place, preserving its original FIFO row while requiring a new
+reservation and claim before writing. A queued or reserved request can be
+canceled explicitly with `state.intent.cancel` /
 `stateful intent cancel --request-id <id>`. Session or activity finalization
-currently releases that session's active leases; queued and reserved request
-cleanup remains explicit through cancellation.
+releases that session's active leases, cancels that session's queued and
+reserved requests, and promotes the next eligible waiter for any released or
+canceled resource.
 
 ## Enforcement Direction
 
@@ -244,10 +260,13 @@ location change. Plugin packaging is deferred to team beta for distribution and
 update UX, while managed hooks remain the long-term organization-enforcement
 path.
 
-Hook scripts are thin adapters. They parse Codex hook input, extract action and
-targets, call the local HTTP state server, and translate the policy decision
-back into Codex hook output. Policy stays in the state server. V1 implementation
-is Rust-only, so hooks invoke the compiled `stateful` binary.
+Hook scripts are thin integration adapters. They parse Codex hook input,
+classify runtime-specific tool calls, extract action and targets when
+supported, call the local HTTP state server for store-backed coordination
+policy, and translate the decision back into Codex hook output. Adapter-local
+policy is limited to fail-closed classification and trusted wrapper validation
+for command-shaped execution. V1 implementation is Rust-only, so hooks invoke
+the compiled `stateful` binary.
 
 Every hook request should include a `protocol_version`. A major protocol
 mismatch fails closed for write and reconciliation paths.
@@ -279,7 +298,8 @@ mismatch fails closed for write and reconciliation paths.
 
 - observe supported tool results
 - update files touched, phase, test results, and last result
-- refresh heartbeat and lease timestamps
+- refresh heartbeat timestamps and lease timestamps only for leases still
+  covered by active intent
 
 `Stop`:
 
@@ -345,8 +365,9 @@ It should:
 - expose current-state views for prompt rendering
 - retain historical activity as evidence after expiration
 
-The Codex integration should stay thin. Policy belongs in the state server, not
-inside hook scripts.
+The Codex integration should stay thin. Store-backed coordination policy belongs
+in the state server; hook-side policy is limited to tool classification,
+fail-closed unknown-tool handling, and trusted wrapper validation.
 
 V1 persistence is SQLite with append-only event tables and materialized
 current-state views. JSONL may be used for debugging exports, but not as the
@@ -362,8 +383,13 @@ Policy evaluation should use one entry point:
 authorize_action(input) -> decision
 ```
 
-The decision includes `allow`, `warn`, `deny`, or `error`, plus reason,
-conflicts, required next action, rendered context items, and an audit event.
+The shipped `/v1/authorize` decision includes `allow`, `deny`, or `error` plus a
+reason and required next action when needed. A `warn` decision, response-level
+conflicts, rendered context items, and response-level audit-event fields are
+target response vocabulary. Deny decisions are audited as
+`AuthorizationDenied`; shipped lifecycle mutations also append
+`LeaseReleased`, `IntentClaimed`, `IntentCanceled`, and `ActivityFinalized`
+events.
 
 ### Tool Classification
 
@@ -378,8 +404,8 @@ Bash read-only inspection -> require a strict trusted wrapper:
   --command <cmd>
 Bash command-shaped writes -> require the trusted wrapper with
   --fs write-targets plus explicit --write-target/--create-target values
-test execution -> run through sandbox run with an authorized --write-dir after
-  exact directory intent and a same-session directory lease
+test execution -> run through sandbox run --fs build after exact tmp/
+  directory intent and a same-session directory lease
 raw Bash or non-wrapper Bash -> deny
 ```
 
@@ -388,29 +414,33 @@ Bash denial should tell the agent to use
 --command <cmd>` for read-only inspection,
 `<absolute-stateful-binary> sandbox run --fs write-targets ... --command <cmd>`
 for command-shaped writes, native Codex edit tools for repo file edits, and
-`sandbox run --write-dir` wrappers for tests after exact directory intent and a
-same-session directory lease.
+`sandbox run --fs build` wrappers for tests after exact `tmp/` directory intent
+and a same-session directory lease.
+
+The read-only sandbox profile is a write-confinement profile. It does not
+provide full process containment, and it cannot be combined with
+`--network enabled`.
 
 There is no command-text authorization path. Command text alone does not
 authorize `rg`, `git diff`, test runners, stateful operational commands, or any
 other Bash command. Test commands should run through the trusted
-`stateful sandbox run --fs write-targets --write-dir target --command <cmd>`
-wrapper after exact `target/` directory intent and a successful same-session
-directory lease. Source-tree writes remain denied unless a later policy
+`stateful sandbox run --fs build --network enabled --command <cmd>` wrapper
+after exact `tmp/` directory intent and a successful same-session directory
+lease. Source-tree writes remain denied unless a later policy
 explicitly permits them.
 
 Minimum sandboxed test shape:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." target/
-stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"target/"}'
-stateful sandbox run --fs write-targets --network enabled --write-dir target --command <cmd>
+stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." tmp/
+stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"tmp/"}'
+stateful sandbox run --fs build --network enabled --command <cmd>
 ```
 
-`--write-dir` is limited to the `target/` artifact tree. Source-tree edits use native Codex
-edit tools such as `apply_patch` or Edit after exact intent declaration and a
-successful same-session file lease. Command-shaped source writes must use exact
-`--write-target` or `--create-target` entries.
+The build profile is limited to the `tmp/` artifact tree. Source-tree edits use
+native Codex edit tools such as `apply_patch` or Edit after exact intent
+declaration and a successful same-session file lease. Command-shaped source
+writes must use exact `--write-target` or `--create-target` entries.
 
 ## Conflict Policy
 
@@ -424,18 +454,24 @@ Initial policy should prefer advisory leases:
 - supported write outside matching file or directory scope: deny
 - raw Bash or a Bash call that is not a strict trusted
   `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper: deny
-- directory scope permits writes only up to depth 2 below that directory
+- directory scope permits `write_file` targets only up to depth 2 below that
+  directory
+- `write_directory` requires exact directory scope, and the matching directory
+  lease blocks the whole subtree because command-shaped `--write-dir` execution
+  receives writable access to that subtree
 - delete without exact file scope: deny
 - rename or move without exact file scope for both source and destination: deny
 - active lease in the hard conflict domain by another actor: deny unless the
   current session has an explicit user override for that resource
-- same area planned by another actor: warn and add context
-- same `workspace_id` and same normalized `absolute_path`: treat as same-file
-  hard conflict
+- same `workspace_id` and same normalized `relative_path`: shipped hard conflict
+  domain for active lease and wait-queue checks
+- same normalized `absolute_path`: target physical-file hard conflict domain
+- same area planned by another actor: target warning context
 - same `repo_id` and same `relative_path` across different workspace, worktree,
-  or branch: warn as a soft repo-relative conflict
-- unknown repository identity: only same normalized absolute path can deny;
-  repo-relative similarity is an unknown-confidence warning
+  or branch: target soft repo-relative warning
+- unknown repository identity: target behavior is to hard-block only on same
+  normalized absolute path and render weaker matches as unknown-confidence
+  context
 - expired lease: allow but surface stale-state context
 - test execution: allow only through trusted sandbox-run wrappers with
   authorized targets
@@ -446,32 +482,39 @@ Initial policy should prefer advisory leases:
   instruction
 - reads, searches, diffs, and sandboxed tests after human writes: allow
 
+The human-local-change and human-save bullets are target behavior for future
+watcher or IDE integrations. Shipped v1 covers external changes to files with
+active exact file leases by comparing the lease-time file observation at
+hook-originated write authorization.
+
 This avoids making the system too rigid while still preventing the highest-risk
 collisions.
 
 ## Collision Domains
 
-V1 should distinguish physical write collisions from repository-relative
-coordination risks.
+V1 should distinguish shipped physical write collisions from target
+repository-relative coordination risks.
 
-Hard conflict domain:
+Shipped hard conflict domain:
 
 ```text
-same workspace_id + same normalized absolute_path
+same workspace_id + same normalized relative_path
 ```
 
-This represents the same physical file in the same working tree. Supported writes
-in this domain should be denied when another actor has an active write lease,
-unless the current session has an explicit user override for that resource.
+This represents the same workspace-relative file in the same enabled workspace.
+Supported writes in this domain are denied when another actor has an active
+write lease or reservation. `absolute_path` is part of the target physical-file
+domain but is not populated for shipped lease conflict checks.
 
-Soft conflict domain:
+Target soft conflict domain:
 
 ```text
 same repo_id + same relative_path + different workspace/worktree/branch
 ```
 
 This represents likely future integration risk, not immediate file overwrite
-risk. V1 should warn and add context, but should not deny by default.
+risk. It should warn and add context, but should not deny by default. The shipped
+authorization path does not yet emit warn-tier decisions for these matches.
 
 Branch-aware warning:
 
@@ -483,8 +526,8 @@ This should be rendered prominently because merge conflicts are likely, but it
 should remain a warning unless a later policy explicitly promotes it.
 
 If `repo_id` cannot be determined, the state server should only hard-block on
-same normalized `absolute_path`. Any weaker match should be rendered as
-unknown-confidence context.
+same normalized `absolute_path` once that target domain is populated. Any weaker
+match should be rendered as unknown-confidence context.
 
 ## Human Activity
 
@@ -637,8 +680,10 @@ TurnLifecycle.before_stop -> state-server finalize check
 HeartbeatLoop -> state-server heartbeat
 ```
 
-The policy engine should still live in `stateful_core` so the fork stays small
-and easier to rebase.
+Target shared policy primitives should still live in `stateful_core` so the fork
+stays small and easier to rebase. The shipped prototype keeps store-backed
+authorization orchestration in `stateful-server::policy_service` and uses
+`stateful_core` for protocol types and pure scope-policy primitives.
 
 ## Initial Decision
 
@@ -646,28 +691,31 @@ Build the first version with Codex lifecycle hooks, MCP tools, and a
 `stateful_core` state server.
 
 The v1 MVP includes Codex hooks, MCP tools, the state server, sandboxed test
-execution, and human-write reconciliation.
+execution, and explicit reconciliation acknowledgements. Automatic
+human-write observation and reconciliation blocks remain target behavior.
 
 V1 is local-only. It coordinates one machine/workspace boundary. Team-shared,
 cross-machine, or hosted state sync is deferred to v1.5/v2.
 
-The project should remain agent-runtime generic, with Codex as the first
-integration target. Codex-specific behavior belongs in adapters, not in the
-policy model.
+The project should keep the policy model portable across agent runtimes, while
+the shipped implementation remains Codex-first. Codex-specific behavior belongs
+in adapters, and adding a non-Codex runtime is future integration work rather
+than current shipped behavior.
 
 V1 defaults to strict enforcement. Supported writes and reconciliation fail
 closed when state cannot be trusted. Usability comes from
 clear denial messages and diagnostics, not from silent grace periods.
 
-Event and audit history is retained for 14 days by default. Expired state may be
-shown as handoff evidence, but retention does not extend live write authority.
+The shipped retention policy prunes event and audit history older than 14 days.
+Expired state may be shown as handoff evidence until it leaves the retention
+window, but retention does not extend live write authority. Pruning preserves
+active current-state rows, pending notifications, and outbox sync evidence.
 
 The v1 hard block policy is:
 
 ```text
 supported write action + no active intent -> deny
-supported write action + expired intent -> deny
-supported write action + blocked phase or finalized session -> deny
+supported write action + expired intent -> deny as missing active intent
 supported write action + intent without file/directory scope -> deny
 supported write action + target outside intent scope -> deny
 raw Bash or non-wrapper Bash -> deny
@@ -681,8 +729,9 @@ the caller asks to queue on conflict. Queue promotion happens only after
 explicit release, session or activity finalization, or lease expiry. Soft
 repo-relative conflicts remain warning context in v1.
 
-Explicit overrides are target policy and are not implemented in the current
-server. When implemented, an explicit override can allow a direct write
+Explicit overrides and phase-aware authorization are target policy and are not
+implemented in the current server. When implemented, an explicit override can
+allow a direct write
 authorization exception for the current session and resource, but it must not
 reorder existing waiters, steal a reservation, or move the overriding session to
 the head of a queue.
@@ -709,11 +758,23 @@ Intent freshness defaults:
 default intent TTL: 15 minutes
 default lease TTL: 5 minutes
 default reservation TTL: 120 seconds
-heartbeat extension: allowed only for active exploring/editing/testing work
+heartbeat extension: shipped for explicit heartbeats and implicit authorize-time
+heartbeat events on active unexpired intent rows
 maximum rolling intent lifetime: 60 minutes from declared_at
-phase = blocked: visible but not write-authorizing
-finalization done/failed/blocked: intent finalized
+target phase gating: blocked is visible but not write-authorizing
+target finalization statuses: done/failed/blocked
 ```
+
+The shipped server does not persist or populate activity phase in store-backed
+authorization. Blocked-phase and finalized-session deny reasons are target
+policy behavior; current finalization completes active intents, so later writes
+fail because no active write-authorizing intent remains.
+
+The shipped hook path records target existence and content hash when an exact
+file lease is acquired with `root`, denies hook-originated native file writes
+when that file changes before authorization, and refreshes the same-session
+exact file lease observation after supported file tools complete. This is a
+per-lease freshness check, not a filesystem watcher or IDE human-save observer.
 
 Override policy:
 
@@ -722,7 +783,7 @@ automatic override: never allowed
 override authority: explicit user instruction only
 scope: current session + current turn + specific resource
 applies to: active lease conflict only
-does not bypass: missing intent, expired intent, blocked/finalized state
+does not bypass: missing intent, expired intent, target blocked/finalized state
 does not bypass: file/directory scope matching
 does not bypass: delete/rename/move exact-scope rules
 example: "Allow override for src/auth.ts."
@@ -748,16 +809,19 @@ The current server route renders store-backed live context from active intents,
 active leases, and queued or reserved wait records. The response includes
 summary counts, structured `items`, and prompt-ready `prompt_text`.
 
-The renderer returns structured data plus prompt-ready markdown:
+The shipped route returns structured data plus prompt-ready markdown:
 
 ```text
-status: clear | warn | blocked
+status: ok | error
 mode: brief | detailed
-generated_at
-scope
+current
 items[]
 prompt_text
 ```
+
+A separate context-level `clear | warn | blocked` status is target model
+vocabulary. The current route reports request success or failure in `status` and
+leaves block/warn/info semantics on individual items.
 
 Each rendered item uses:
 
@@ -776,10 +840,12 @@ When the block is an unreconciled human write, `Required Next Action` should tel
 the agent to reread the file, summarize the human change, decide whether to
 adopt, reapply, ask the user, or abandon, and call `state.reconcile.ack`.
 
-Expired and finalized state is shown only in `Stale/Expired`. It never blocks a
-live action by itself.
+The renderer can show supplied expired and finalized state only in
+`Stale/Expired`; the shipped store-backed route currently emits live intents,
+leases, and wait records only. Stale or finalized evidence never blocks a live
+action by itself.
 
-Summary windows:
+Target summary windows for future historical context:
 
 ```text
 brief: max 3 stale/expired items, resource-relevant only

@@ -83,6 +83,7 @@ pub fn run_nested_codex_benchmark_sandbox_in_repo(
         session_id: &current_session.session_id,
         workspace_id: &current_session.workspace_id,
         network: SandboxNetworkPolicy::Enabled,
+        fs_profile: "nested-codex-benchmark",
     };
     let authorization_path = sandbox_write_dir_display_path(&nested_paths.write_dir_relative);
     let response =

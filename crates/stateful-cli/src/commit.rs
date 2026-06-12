@@ -5,8 +5,11 @@ use std::{
     process::Command,
 };
 
+use stateful_core::normalize_relative_path;
+
 use crate::{
-    ProtocolEnvelopeArgs, discover_runtime_with_optional_global, post_json, protocol_envelope,
+    GlobalPaths, ProtocolEnvelopeArgs, RepoIdentity, discover_runtime_with_optional_global,
+    effective_workspace_id_for_repo, post_json, protocol_envelope, repo_identity_for_enabled_repo,
 };
 
 pub type AuthorizePath = Box<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
@@ -112,7 +115,10 @@ fn normalize_explicit_paths(repo_root: &Path, paths: &[String]) -> anyhow::Resul
         if is_broad_pathspec(repo_root, path) {
             anyhow::bail!("explicit file paths are required; rejected pathspec `{original_path}`");
         }
-        let normalized_path = path.replace('\\', "/");
+        let normalized_path = normalize_relative_path(path);
+        if is_broad_pathspec(repo_root, &normalized_path) {
+            anyhow::bail!("explicit file paths are required; rejected pathspec `{original_path}`");
+        }
         if matches_tracked_directory(repo_root, &normalized_path)? {
             anyhow::bail!("explicit file paths are required; rejected pathspec `{original_path}`");
         }
@@ -134,7 +140,6 @@ fn is_broad_pathspec(repo_root: &Path, path: &str) -> bool {
         || path.starts_with(':')
         || path.contains("..")
         || path.contains("//")
-        || path.contains("/./")
         || path.ends_with('/')
         || path.contains('\\')
         || path.contains('*')
@@ -193,16 +198,20 @@ fn authorize_path(request: &CommitRequest, target: &CommitTarget) -> anyhow::Res
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("stateful commit requires a current session id"))?;
     let runtime = discover_runtime_with_optional_global(&request.repo_root)?;
-    let workspace_id = request
-        .workspace_id
-        .as_deref()
-        .unwrap_or(runtime.workspace_id.as_str());
+    let identity = GlobalPaths::from_env()
+        .ok()
+        .and_then(|paths| repo_identity_for_enabled_repo(&paths, &request.repo_root).ok());
+    let workspace_id = commit_workspace_id(
+        request.workspace_id.as_deref(),
+        runtime.workspace_id.as_str(),
+        identity.as_ref(),
+    );
     let body = protocol_envelope(ProtocolEnvelopeArgs {
         runtime: &runtime,
         request_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.to_string(),
-        workspace_id: workspace_id.to_string(),
-        identity: None,
+        workspace_id,
+        identity,
         source_kind: "cli",
         event: "commit_authorize",
         source_ref: "stateful-commit",
@@ -233,6 +242,17 @@ fn authorize_path(request: &CommitRequest, target: &CommitTarget) -> anyhow::Res
     Ok(())
 }
 
+fn commit_workspace_id(
+    explicit_workspace_id: Option<&str>,
+    runtime_workspace_id: &str,
+    identity: Option<&RepoIdentity>,
+) -> String {
+    if let Some(workspace_id) = explicit_workspace_id {
+        return workspace_id.to_string();
+    }
+    effective_workspace_id_for_repo(runtime_workspace_id, identity)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommitTarget {
     path: String,
@@ -250,6 +270,46 @@ fn commit_target(repo_root: &Path, path: &str) -> anyhow::Result<CommitTarget> {
         path: path.to_string(),
         action,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repo_registry::RepoIdentity;
+
+    #[test]
+    fn commit_authorization_defaults_local_runtime_to_repo_workspace() {
+        let identity = RepoIdentity {
+            repo_id: "repo-abc123".to_string(),
+            worktree_id: "repo-abc123".to_string(),
+            root: "/repo".to_string(),
+            branch: "main".to_string(),
+        };
+
+        assert_eq!(
+            commit_workspace_id(None, "local", Some(&identity)),
+            "workspace-abc123"
+        );
+    }
+
+    #[test]
+    fn commit_authorization_preserves_explicit_workspace_and_derives_default_remote_workspace() {
+        let identity = RepoIdentity {
+            repo_id: "repo-abc123".to_string(),
+            worktree_id: "repo-abc123".to_string(),
+            root: "/repo".to_string(),
+            branch: "main".to_string(),
+        };
+
+        assert_eq!(
+            commit_workspace_id(Some("manual"), "local", Some(&identity)),
+            "manual"
+        );
+        assert_eq!(
+            commit_workspace_id(None, "shared", Some(&identity)),
+            "workspace-abc123"
+        );
+    }
 }
 
 fn is_missing_tracked_file(repo_root: &Path, path: &str) -> anyhow::Result<bool> {

@@ -1,6 +1,4 @@
-use stateful_core::{
-    ActionKind, ActorType, ProtocolVersion, RequestEnvelope, ResourceType, Target, TargetOperation,
-};
+use stateful_core::{ActorType, ProtocolVersion, RequestEnvelope};
 
 #[test]
 fn request_envelope_round_trips_protocol_version() {
@@ -19,35 +17,4 @@ fn request_envelope_round_trips_protocol_version() {
     assert_eq!(envelope.protocol_version, ProtocolVersion::V1);
     assert_eq!(envelope.session.actor_type, ActorType::Agent);
     assert_eq!(envelope.workspace.branch, "main");
-}
-
-#[test]
-fn authorization_target_round_trips_file_write_shape() {
-    let json = r#"{
-      "operation": "write",
-      "resource_type": "file",
-      "path": "src/auth.ts"
-    }"#;
-
-    let target: Target = serde_json::from_str(json).expect("target json should deserialize");
-
-    assert_eq!(target.operation, TargetOperation::Write);
-    assert_eq!(target.resource_type, ResourceType::File);
-    assert_eq!(target.path.as_deref(), Some("src/auth.ts"));
-}
-
-#[test]
-fn action_kind_uses_snake_case_protocol_names() {
-    let action: ActionKind =
-        serde_json::from_str(r#""write_file""#).expect("action should deserialize");
-
-    assert_eq!(action, ActionKind::WriteFile);
-    assert_eq!(
-        serde_json::to_string(&ActionKind::WriteDirectory).expect("action should serialize"),
-        r#""write_directory""#
-    );
-    assert_eq!(
-        serde_json::to_string(&ActionKind::ReconcileAck).expect("action should serialize"),
-        r#""reconcile_ack""#
-    );
 }

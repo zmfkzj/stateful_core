@@ -1,4 +1,4 @@
-use crate::Decision;
+use crate::{Decision, normalize_directory_path, normalize_relative_path};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,38 +70,14 @@ impl ScopeSet {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IntentPhase {
-    Exploring,
-    Editing,
-    Testing,
-    Blocked,
-    Done,
-    Failed,
-}
-
-impl IntentPhase {
-    fn is_write_authorizing(self) -> bool {
-        matches!(self, Self::Exploring | Self::Editing | Self::Testing)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyState {
     scopes: Option<ScopeSet>,
-    phase: IntentPhase,
-    finalized: bool,
-    expired: bool,
 }
 
 impl Default for PolicyState {
     fn default() -> Self {
-        Self {
-            scopes: None,
-            phase: IntentPhase::Editing,
-            finalized: false,
-            expired: false,
-        }
+        Self { scopes: None }
     }
 }
 
@@ -118,16 +94,6 @@ impl PolicyState {
 
     pub fn with_active_intent_scopes(mut self, scopes: Vec<IntentScope>) -> Self {
         self.scopes = Some(ScopeSet::new(scopes));
-        self
-    }
-
-    pub fn with_phase(mut self, phase: IntentPhase) -> Self {
-        self.phase = phase;
-        self
-    }
-
-    pub fn with_expired_intent(mut self) -> Self {
-        self.expired = true;
         self
     }
 }
@@ -176,36 +142,6 @@ impl AuthorizationInput {
 }
 
 pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decision {
-    if state.finalized {
-        return Decision::deny(
-            "finalized_session",
-            "Session is finalized and cannot authorize writes.",
-            "Declare a new intent in an active session before writing.",
-        );
-    }
-
-    if !state.phase.is_write_authorizing() {
-        return Decision::deny(
-            match state.phase {
-                IntentPhase::Blocked => "blocked_phase",
-                IntentPhase::Done | IntentPhase::Failed => "finalized_session",
-                IntentPhase::Exploring | IntentPhase::Editing | IntentPhase::Testing => {
-                    "invalid_phase"
-                }
-            },
-            "Current phase is not write-authorizing.",
-            "Move the session back to exploring, editing, or testing with active intent.",
-        );
-    }
-
-    if state.expired {
-        return Decision::deny(
-            "expired_intent",
-            "Active intent has expired.",
-            "Refresh or redeclare intent before writing.",
-        );
-    }
-
     let Some(scopes) = &state.scopes else {
         return Decision::deny(
             "missing_intent",
@@ -246,30 +182,6 @@ pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decis
             "Declare intent for the exact file, or for write-directory actions the exact directory scope.",
         ),
     }
-}
-
-fn normalize_directory_path(path: &str) -> String {
-    let normalized = normalize_relative_path(path);
-    if normalized.is_empty() {
-        normalized
-    } else {
-        format!("{normalized}/")
-    }
-}
-
-fn normalize_relative_path(path: &str) -> String {
-    path.replace('\\', "/")
-        .split('/')
-        .filter(|segment| !segment.is_empty() && *segment != ".")
-        .fold(Vec::new(), |mut segments, segment| {
-            if segment == ".." {
-                segments.pop();
-            } else {
-                segments.push(segment);
-            }
-            segments
-        })
-        .join("/")
 }
 
 fn directory_depth(scope: &str, target: &str) -> Option<usize> {

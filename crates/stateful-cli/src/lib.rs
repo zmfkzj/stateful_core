@@ -19,6 +19,7 @@ mod repo_registry;
 mod runtime;
 mod sandbox;
 mod server_lifecycle;
+mod shell_command;
 
 pub use codex_wrapper::{
     CodexInvocation, CodexSandboxMode, CodexWrapperOptions, build_codex_invocation, run_codex,
@@ -47,8 +48,9 @@ pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio
 pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime};
 pub use push::{PushRequest, PushResult, run_structured_push};
 pub use repo_registry::{
-    RepoEntry, RepoGate, RepoIdentity, RepoRegistry, detect_git_root, disable_repo, enable_repo,
-    repo_gate, repo_identity_for_enabled_repo,
+    RepoEntry, RepoGate, RepoIdentity, RepoRegistry, detect_git_root, disable_repo,
+    effective_workspace_id_for_repo, enable_repo, repo_gate, repo_identity_for_enabled_repo,
+    workspace_id_for_enabled_repo, workspace_id_for_repo_identity,
 };
 pub use runtime::{
     CurrentSession, HttpResponse, IntentCancelArgs, IntentClaimArgs, IntentDeclareArgs,
@@ -691,25 +693,8 @@ pub fn run() -> anyhow::Result<()> {
             files_planned,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let current_session = if session_id.is_none() || workspace_id.is_none() {
-                read_current_session_file(&repo_root).ok()
-            } else {
-                None
-            };
-            let session_id = session_id
-                .or_else(|| {
-                    current_session
-                        .as_ref()
-                        .map(|session| session.session_id.clone())
-                })
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "session id not provided and no current stateful session file was found"
-                    )
-                })?;
-            let workspace_id = workspace_id
-                .or_else(|| current_session.map(|session| session.workspace_id))
-                .unwrap_or_else(|| runtime.workspace_id.clone());
+            let (session_id, workspace_id) =
+                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
             declare_intent_via_http(
                 &runtime,
                 IntentDeclareArgs {
@@ -849,7 +834,15 @@ fn resolve_session_workspace(
         })?;
     let workspace_id = workspace_id
         .or_else(|| current_session.map(|session| session.workspace_id))
-        .unwrap_or_else(|| runtime.workspace_id.clone());
+        .unwrap_or_else(|| {
+            GlobalPaths::from_env()
+                .ok()
+                .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok())
+                .map(|identity| {
+                    effective_workspace_id_for_repo(&runtime.workspace_id, Some(&identity))
+                })
+                .unwrap_or_else(|| runtime.workspace_id.clone())
+        });
 
     Ok((session_id, workspace_id))
 }
@@ -879,6 +872,12 @@ fn run_server(
     let token = token.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let base_url = format!("http://{host}:{port}");
     let paths = GlobalPaths::from_env()?;
+    let options = ServerStartOptions {
+        host: host.clone(),
+        port,
+        token: Some(token.clone()),
+        workspace_id: workspace_id.clone(),
+    };
     let runtime = ServerRuntime::new(&base_url, &token, workspace_id, std::process::id());
     let store = stateful_store::Store::open(global_state_db_path(&paths))?;
 
@@ -886,7 +885,7 @@ fn run_server(
     let tokio_runtime = tokio::runtime::Runtime::new()?;
     tokio_runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        write_global_runtime_file(&paths, &runtime)?;
+        server_lifecycle::register_foreground_runtime(&paths, &runtime, &options)?;
         let result = server_start_runtime_result(runtime.clone(), &host, port);
         print_server_start_result(&result)?;
         stateful_server::serve_listener(
@@ -904,10 +903,10 @@ pub fn state_db_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DoctorReport {
     pub installed: bool,
-    pub hooks_json: bool,
+    pub legacy_hooks_json: bool,
     pub config_yml: bool,
     pub runtime_server_json: bool,
-    pub state_db: bool,
+    pub legacy_repo_state_db: bool,
     pub global_config_yml: bool,
     pub global_runtime_server_json: bool,
     pub global_state_db: bool,
@@ -931,7 +930,7 @@ pub fn doctor_report(repo_root: impl AsRef<Path>) -> DoctorReport {
 pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPaths) -> DoctorReport {
     let detected_root = detect_git_root(repo_root.as_ref()).ok();
     let repo_root = detected_root.as_deref().unwrap_or(repo_root.as_ref());
-    let hooks_json = repo_root.join(".codex").join("hooks.json").is_file();
+    let legacy_hooks_json = repo_root.join(".codex").join("hooks.json").is_file();
     let codex_config_toml = repo_root.join(".codex").join("config.toml").is_file();
     let config_yml = repo_root.join(".stateful").join("config.yml").is_file();
     let runtime_server_json = repo_root
@@ -939,18 +938,18 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
         .join("runtime")
         .join("server.json")
         .is_file();
-    let state_db = state_db_path(repo_root).is_file();
+    let legacy_repo_state_db = state_db_path(repo_root).is_file();
     let (repo_enabled, global_registry_error) = match RepoRegistry::load(paths) {
         Ok(registry) => (registry.is_enabled(repo_root), None),
         Err(error) => (false, Some(error.to_string())),
     };
 
     DoctorReport {
-        installed: (hooks_json || codex_config_toml || paths.config_yml.is_file()) && config_yml,
-        hooks_json,
+        installed: (codex_config_toml || paths.config_yml.is_file()) && config_yml,
+        legacy_hooks_json,
         config_yml,
         runtime_server_json,
-        state_db,
+        legacy_repo_state_db,
         global_config_yml: paths.config_yml.is_file(),
         global_runtime_server_json: paths.server_json.is_file(),
         global_state_db: paths.state_db.is_file(),
@@ -961,9 +960,14 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
 }
 
 fn default_config_yml() -> &'static str {
-    r#"protocol_version: stateful.v1
+    r#"# stateful-core repo policy config
+# These are informational target defaults for this repository.
+# Runtime loading of these keys is not yet shipped.
+protocol_version: stateful.v1
 intent_ttl_seconds: 900
 intent_max_seconds: 3600
+lease_ttl_seconds: 300
+reservation_ttl_seconds: 120
 directory_scope_depth: 2
 delete_requires_exact_file_scope: true
 rename_requires_exact_file_scope: true

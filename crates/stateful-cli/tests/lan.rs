@@ -32,7 +32,7 @@ fn server_join_writes_global_runtime_without_enabling_repo_by_default() {
     assert!(!result.repo_enabled);
     assert_eq!(result.runtime.base_url, host.base_url());
     assert_eq!(result.runtime.token, "secret-token");
-    assert_eq!(result.runtime.pid, 9876);
+    assert_eq!(result.runtime.pid, 0);
     assert_eq!(result.runtime.workspace_id, "shared");
     assert!(fixture.paths.server_json.is_file());
     assert!(fixture.codex_config.is_file());
@@ -44,7 +44,7 @@ fn server_join_writes_global_runtime_without_enabling_repo_by_default() {
 }
 
 #[test]
-fn server_join_to_localhost_records_runtime_identity_pid() {
+fn server_join_to_localhost_preserves_joined_runtime_pid_zero() {
     let fixture = TestFixture::new("join-localhost-pid");
     let host = FakeHttpServer::start(vec![identity_response_with_pid(200, 4321)]);
 
@@ -59,10 +59,10 @@ fn server_join_to_localhost_records_runtime_identity_pid() {
     })
     .expect("server join should succeed");
 
-    assert_eq!(result.runtime.pid, 4321);
+    assert_eq!(result.runtime.pid, 0);
     let contents =
         fs::read_to_string(&fixture.paths.server_json).expect("runtime should be written");
-    assert!(contents.contains("\"pid\": 4321"));
+    assert!(contents.contains("\"pid\": 0"));
 }
 
 #[test]
@@ -153,7 +153,32 @@ fn server_join_writes_requested_workspace_id() {
 }
 
 #[test]
-fn server_join_commands_render_one_command_per_address() {
+fn server_join_rejects_non_loopback_plain_http_before_writing() {
+    let fixture = TestFixture::new("join-non-loopback-http");
+
+    let error = join_server_runtime(ServerJoinOptions {
+        paths: fixture.paths.clone(),
+        codex_config_path: fixture.codex_config.clone(),
+        binary_path: "/opt/stateful/bin/stateful".to_string(),
+        base_url: "http://0.0.0.0:1".to_string(),
+        token: "secret-token".to_string(),
+        workspace_id: "shared".to_string(),
+        enable_repo_root: None,
+    })
+    .expect_err("non-loopback plain http joins should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("plain http joins are only allowed for loopback addresses"),
+        "unexpected error: {error}"
+    );
+    assert!(!fixture.paths.server_json.exists());
+    assert!(!fixture.codex_config.exists());
+}
+
+#[test]
+fn server_join_commands_render_loopback_tunnel_command_for_non_loopback_addresses() {
     let commands = server_join_commands(
         &[
             "192.168.0.23".parse().expect("ip should parse"),
@@ -165,24 +190,21 @@ fn server_join_commands_render_one_command_per_address() {
 
     assert_eq!(
         commands,
-        vec![
-            "stateful server join http://192.168.0.23:43873 --token secret-token",
-            "stateful server join http://10.0.0.7:43873 --token secret-token",
-        ]
+        vec!["stateful server join http://127.0.0.1:43873 --token secret-token"]
     );
 }
 
 #[test]
-fn server_join_commands_bracket_ipv6_addresses() {
+fn server_join_commands_bracket_loopback_ipv6_addresses() {
     let commands = server_join_commands(
-        &["fe80::1".parse().expect("ip should parse")],
+        &["::1".parse().expect("ip should parse")],
         43873,
         "secret-token",
     );
 
     assert_eq!(
         commands,
-        vec!["stateful server join http://[fe80::1]:43873 --token secret-token"]
+        vec!["stateful server join http://[::1]:43873 --token secret-token"]
     );
 }
 
