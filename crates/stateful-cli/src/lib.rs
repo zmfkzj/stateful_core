@@ -200,6 +200,8 @@ pub enum ServerCommand {
         #[arg(long, default_value = "shared")]
         workspace_id: String,
         #[arg(long)]
+        allow_plain_http: bool,
+        #[arg(long)]
         enable_repo: bool,
         #[arg(long)]
         binary: Option<String>,
@@ -424,6 +426,7 @@ pub fn run() -> anyhow::Result<()> {
                 base_url,
                 token,
                 workspace_id,
+                allow_plain_http,
                 enable_repo,
                 binary,
                 codex_config,
@@ -449,6 +452,7 @@ pub fn run() -> anyhow::Result<()> {
                     base_url,
                     token,
                     workspace_id,
+                    allow_plain_http,
                     enable_repo_root,
                 })?;
                 println!(

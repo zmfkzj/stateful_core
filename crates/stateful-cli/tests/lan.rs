@@ -24,6 +24,7 @@ fn server_join_writes_global_runtime_without_enabling_repo_by_default() {
         base_url: host.base_url(),
         token: "secret-token".to_string(),
         workspace_id: "shared".to_string(),
+        allow_plain_http: false,
         enable_repo_root: None,
     })
     .expect("server join should succeed");
@@ -55,6 +56,7 @@ fn server_join_to_localhost_preserves_joined_runtime_pid_zero() {
         base_url: host.base_url(),
         token: "secret-token".to_string(),
         workspace_id: "shared".to_string(),
+        allow_plain_http: false,
         enable_repo_root: None,
     })
     .expect("server join should succeed");
@@ -78,6 +80,7 @@ fn server_join_enable_repo_only_when_requested() {
         base_url: host.base_url(),
         token: "secret-token".to_string(),
         workspace_id: "shared".to_string(),
+        allow_plain_http: false,
         enable_repo_root: Some(fixture.repo.clone()),
     })
     .expect("server join should enable repo");
@@ -99,6 +102,7 @@ fn server_join_invalid_token_fails_before_writing() {
         base_url: host.base_url(),
         token: "bad-token".to_string(),
         workspace_id: "shared".to_string(),
+        allow_plain_http: false,
         enable_repo_root: None,
     })
     .expect_err("invalid token should fail");
@@ -124,6 +128,7 @@ fn server_join_missing_capability_fails_before_writing() {
         base_url: host.base_url(),
         token: "secret-token".to_string(),
         workspace_id: "shared".to_string(),
+        allow_plain_http: false,
         enable_repo_root: None,
     })
     .expect_err("missing capability should fail");
@@ -145,6 +150,7 @@ fn server_join_writes_requested_workspace_id() {
         base_url: host.base_url(),
         token: "secret-token".to_string(),
         workspace_id: "w1".to_string(),
+        allow_plain_http: false,
         enable_repo_root: None,
     })
     .expect("server join should succeed");
@@ -163,6 +169,7 @@ fn server_join_rejects_non_loopback_plain_http_before_writing() {
         base_url: "http://0.0.0.0:1".to_string(),
         token: "secret-token".to_string(),
         workspace_id: "shared".to_string(),
+        allow_plain_http: false,
         enable_repo_root: None,
     })
     .expect_err("non-loopback plain http joins should fail");
@@ -175,6 +182,38 @@ fn server_join_rejects_non_loopback_plain_http_before_writing() {
     );
     assert!(!fixture.paths.server_json.exists());
     assert!(!fixture.codex_config.exists());
+}
+
+#[test]
+fn server_join_allow_plain_http_bypasses_non_loopback_http_guard() {
+    let fixture = TestFixture::new("join-allow-plain-http");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+        .args([
+            "server",
+            "join",
+            "http://0.0.0.0:1",
+            "--token",
+            "secret-token",
+            "--allow-plain-http",
+            "--binary",
+            "/opt/stateful/bin/stateful",
+            "--codex-config",
+            fixture
+                .codex_config
+                .to_str()
+                .expect("codex config should be valid utf-8"),
+        ])
+        .env("STATEFUL_HOME", &fixture.paths.home)
+        .output()
+        .expect("stateful binary should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("plain http joins are only allowed for loopback addresses"),
+        "--allow-plain-http should bypass the non-loopback guard, got: {stderr}"
+    );
 }
 
 #[test]

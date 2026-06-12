@@ -860,6 +860,7 @@ fn parses_server_join_without_repo_enablement() {
                     base_url,
                     token,
                     workspace_id,
+                    allow_plain_http,
                     enable_repo,
                     binary,
                     codex_config,
@@ -869,10 +870,35 @@ fn parses_server_join_without_repo_enablement() {
             assert_eq!(base_url, "http://192.168.0.23:43873");
             assert_eq!(token, "secret-token");
             assert_eq!(workspace_id, "shared");
+            assert!(!allow_plain_http);
             assert!(!enable_repo);
             assert_eq!(binary, None);
             assert_eq!(codex_config, None);
         }
+        other => panic!("expected server join command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_server_join_allow_plain_http() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "server",
+        "join",
+        "http://192.168.0.23:43873",
+        "--token",
+        "secret-token",
+        "--allow-plain-http",
+    ])
+    .expect("server join should parse allow-plain-http");
+
+    match cli.command {
+        Command::Server {
+            command: Some(ServerCommand::Join {
+                allow_plain_http, ..
+            }),
+            ..
+        } => assert!(allow_plain_http),
         other => panic!("expected server join command, got {other:?}"),
     }
 }
@@ -903,6 +929,7 @@ fn parses_server_join_with_repo_enablement_and_install_overrides() {
                     base_url,
                     token,
                     workspace_id,
+                    allow_plain_http,
                     enable_repo,
                     binary,
                     codex_config,
@@ -912,6 +939,7 @@ fn parses_server_join_with_repo_enablement_and_install_overrides() {
             assert_eq!(base_url, "http://192.168.0.23:43873");
             assert_eq!(token, "secret-token");
             assert_eq!(workspace_id, "w1");
+            assert!(!allow_plain_http);
             assert!(enable_repo);
             assert_eq!(binary.as_deref(), Some("/opt/stateful/bin/stateful"));
             assert_eq!(
