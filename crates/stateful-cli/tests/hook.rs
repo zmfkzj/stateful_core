@@ -11,9 +11,10 @@ use std::{
 };
 
 use stateful_cli::{
-    CurrentSession, GlobalPaths, HookOutcome, STATEFUL_SESSION_ID_ENV, ServerRuntime, enable_repo,
-    handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
-    read_current_session_file_for_session, write_global_runtime_file,
+    CurrentSession, GlobalPaths, HookOutcome, STATEFUL_SESSION_ID_ENV, ServerRuntime,
+    allow_tool_for_repo, enable_repo, handle_post_tool_use_in_repo, handle_pre_tool_use,
+    handle_pre_tool_use_in_repo, read_current_session_file_for_session, tool_list_for_repo,
+    write_global_runtime_file,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -1620,6 +1621,31 @@ fn pre_tool_use_allows_known_non_repo_write_tools_without_runtime() {
         "WebFetch",
         "WebSearch",
         "TodoWrite",
+        "update_plan",
+        "tool_search",
+        "tool_search_tool",
+        "get_goal",
+        "create_goal",
+        "update_goal",
+        "request_user_input",
+        "view_image",
+        "spawn_agent",
+        "wait_agent",
+        "send_input",
+        "close_agent",
+        "resume_agent",
+        "mcp__stateful__state_intent_declare",
+        "mcp__stateful__state_lease_acquire",
+        "mcp__stateful__state_current_read",
+        "mcp__stateful__state_context_render",
+        "mcp__codex_apps__github__update_pull_request",
+        "mcp__codex_apps__github__create_pull_request",
+        "mcp__codex_apps__github__add_comment_to_issue",
+        "mcp__codex_apps__github__fetch_file",
+        "mcp__codex_apps__github__search_branches",
+        "mcp__codex_apps__github__search_repositories",
+        "mcp__codex_apps__microsoft_teams__resolve_channel",
+        "mcp__codex_apps__microsoft_teams__send_message",
     ] {
         let input = serde_json::json!({
             "session_id": "s1",
@@ -1642,29 +1668,182 @@ fn pre_tool_use_allows_known_non_repo_write_tools_without_runtime() {
 
 #[test]
 fn pre_tool_use_denies_unclassified_tool_names() {
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "FutureWriteTool",
-      "tool_input": {
-        "file_path": "src/auth.ts"
-      }
-    }"#;
+    for tool_name in [
+        "FutureWriteTool",
+        "mcp__codex_apps__github__merge_pull_request",
+        "mcp__codex_apps__microsoft_teams__delete_message",
+    ] {
+        let input = serde_json::json!({
+          "session_id": "s1",
+          "cwd": "/repo",
+          "hook_event_name": "PreToolUse",
+          "tool_name": tool_name,
+          "tool_input": {
+            "file_path": "src/auth.ts"
+          }
+        })
+        .to_string();
 
-    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+        let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    let HookOutcome::Deny { reason } = outcome else {
-        panic!("unclassified tool should be denied");
-    };
+        let HookOutcome::Deny { reason } = outcome else {
+            panic!("{tool_name} should be denied");
+        };
+        assert!(
+            reason.contains(&format!("unclassified tool {tool_name}")),
+            "reason `{reason}` should name the unclassified tool"
+        );
+        assert!(
+            reason.contains("write or execute"),
+            "reason `{reason}` should explain why classification is required"
+        );
+    }
+}
+
+#[test]
+fn pre_tool_use_denies_github_remote_repository_mutation_tools() {
+    for tool_name in [
+        "mcp__codex_apps__github__create_file",
+        "mcp__codex_apps__github__update_file",
+        "mcp__codex_apps__github__create_branch",
+        "mcp__codex_apps__github__update_ref",
+    ] {
+        let input = serde_json::json!({
+            "session_id": "s1",
+            "cwd": "/repo",
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool_name,
+            "tool_input": {}
+        })
+        .to_string();
+
+        let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+        let HookOutcome::Deny { reason } = outcome else {
+            panic!("{tool_name} should be denied");
+        };
+        assert!(
+            reason.contains("remote repository mutation"),
+            "reason `{reason}` should classify {tool_name} as remote repository mutation"
+        );
+    }
+}
+
+#[test]
+fn pre_tool_use_records_unclassified_tools_for_tools_list() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-unclassified-tools-list-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "FutureWriteTool",
+        "tool_input": {}
+    })
+    .to_string();
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+
     assert!(
-        reason.contains("unclassified tool FutureWriteTool"),
-        "reason `{reason}` should name the unclassified tool"
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
+    assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
+
+    let list = tool_list_for_repo(&paths, &repo_root).expect("tool list should load");
+    assert_eq!(list.unclassified_tools, vec!["FutureWriteTool"]);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_allows_repo_tool_allowlist_but_preserves_hard_denies() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-tool-allowlist-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    allow_tool_for_repo(
+        &paths,
+        &repo_root,
+        "mcp__codex_apps__github__merge_pull_request",
+    )
+    .expect("unclassified tool should be user-allowed");
+    allow_tool_for_repo(&paths, &repo_root, "mcp__filesystem__write_file")
+        .expect("hard-denied tool name can be stored but must not override hard deny");
+    let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let allowed_input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "mcp__codex_apps__github__merge_pull_request",
+        "tool_input": {}
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "pre-tool-use"],
+        &allowed_input,
     );
     assert!(
-        reason.contains("write or execute"),
-        "reason `{reason}` should explain why classification is required"
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        output.stdout.is_empty(),
+        "allowed hook outcome should not print a denial, got {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let denied_input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "mcp__filesystem__write_file",
+        "tool_input": {}
+    })
+    .to_string();
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &denied_input);
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
+    assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(
+        json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("reason should be string")
+            .contains("filesystem MCP")
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]

@@ -17,8 +17,9 @@ use crate::shell_command::{
 use crate::{
     CurrentSession, GlobalPaths, HookCommand, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
     ServerRuntime, discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server,
-    get_json, post_json, protocol_envelope, repo_gate, repo_identity_for_enabled_repo,
-    runtime_env_override_is_configured, write_current_session_file_for_current_stateful_session,
+    get_json, post_json, protocol_envelope, record_unclassified_tool_for_repo, repo_gate,
+    repo_identity_for_enabled_repo, runtime_env_override_is_configured,
+    tool_allowed_for_enabled_repo, write_current_session_file_for_current_stateful_session,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,9 +462,10 @@ fn handle_pre_tool_use_with_runtime(
     cwd: Option<&Path>,
 ) -> anyhow::Result<HookOutcome> {
     let input: PreToolUseInput = serde_json::from_str(input)?;
+    let global_paths = GlobalPaths::from_env().ok();
     let identity = repo_root.and_then(|repo_root| {
-        GlobalPaths::from_env()
-            .ok()
+        global_paths
+            .as_ref()
             .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok())
     });
 
@@ -479,19 +481,125 @@ fn handle_pre_tool_use_with_runtime(
         tool_name if tool_name.starts_with("mcp__filesystem__") => Ok(HookOutcome::Deny {
             reason: "filesystem MCP writes require stateful authorization; read-only MCP calls are not yet classified".to_string(),
         }),
-        tool_name if is_safe_without_repo_write_authorization(tool_name) => Ok(HookOutcome::Allow),
-        tool_name => Ok(HookOutcome::Deny {
+        tool_name if is_remote_repository_mutation_tool(tool_name) => Ok(HookOutcome::Deny {
             reason: format!(
-                "unclassified tool {tool_name} may write or execute and requires explicit stateful classification before it can run in an enabled repository"
+                "remote repository mutation tool {tool_name} is not covered by local stateful repo authorization; use local git/stateful workflows or an explicit external approval path"
             ),
         }),
+        tool_name if is_safe_without_repo_write_authorization(tool_name) => Ok(HookOutcome::Allow),
+        tool_name if is_user_allowed_tool(global_paths.as_ref(), repo_root, tool_name) => {
+            Ok(HookOutcome::Allow)
+        }
+        tool_name => {
+            record_unclassified_tool(global_paths.as_ref(), repo_root, tool_name);
+            Ok(HookOutcome::Deny {
+                reason: format!(
+                    "unclassified tool {tool_name} may write or execute and requires explicit stateful classification before it can run in an enabled repository"
+                ),
+            })
+        }
     }
 }
 
+fn is_user_allowed_tool(
+    paths: Option<&GlobalPaths>,
+    repo_root: Option<&Path>,
+    tool_name: &str,
+) -> bool {
+    let (Some(paths), Some(repo_root)) = (paths, repo_root) else {
+        return false;
+    };
+
+    tool_allowed_for_enabled_repo(paths, repo_root, tool_name).unwrap_or(false)
+}
+
+fn record_unclassified_tool(
+    paths: Option<&GlobalPaths>,
+    repo_root: Option<&Path>,
+    tool_name: &str,
+) {
+    let (Some(paths), Some(repo_root)) = (paths, repo_root) else {
+        return;
+    };
+
+    let _ = record_unclassified_tool_for_repo(paths, repo_root, tool_name);
+}
+
 fn is_safe_without_repo_write_authorization(tool_name: &str) -> bool {
+    is_builtin_safe_tool(tool_name)
+        || is_stateful_control_plane_tool(tool_name)
+        || is_github_metadata_tool(tool_name)
+        || is_teams_connector_tool(tool_name)
+}
+
+fn is_builtin_safe_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "Read" | "Grep" | "Glob" | "LS" | "NotebookRead" | "WebFetch" | "WebSearch" | "TodoWrite"
+        "Read"
+            | "Grep"
+            | "Glob"
+            | "LS"
+            | "NotebookRead"
+            | "WebFetch"
+            | "WebSearch"
+            | "TodoWrite"
+            | "update_plan"
+            | "tool_search"
+            | "tool_search_tool"
+            | "get_goal"
+            | "create_goal"
+            | "update_goal"
+            | "request_user_input"
+            | "view_image"
+            | "spawn_agent"
+            | "wait_agent"
+            | "send_input"
+            | "close_agent"
+            | "resume_agent"
+    )
+}
+
+fn is_stateful_control_plane_tool(tool_name: &str) -> bool {
+    tool_name.starts_with("mcp__stateful__")
+}
+
+fn is_github_metadata_tool(tool_name: &str) -> bool {
+    if !tool_name.starts_with("mcp__codex_apps__github__") {
+        return false;
+    }
+    matches!(
+        tool_suffix(tool_name),
+        "update_pull_request"
+            | "create_pull_request"
+            | "add_comment_to_issue"
+            | "fetch_file"
+            | "search_branches"
+            | "search_repositories"
+    )
+}
+
+fn is_teams_connector_tool(tool_name: &str) -> bool {
+    if !tool_name.starts_with("mcp__codex_apps__microsoft_teams__") {
+        return false;
+    }
+    matches!(tool_suffix(tool_name), "resolve_channel" | "send_message")
+}
+
+fn tool_suffix(tool_name: &str) -> &str {
+    tool_name
+        .rsplit("__")
+        .next()
+        .unwrap_or(tool_name)
+        .trim_start_matches('_')
+}
+
+fn is_remote_repository_mutation_tool(tool_name: &str) -> bool {
+    if !tool_name.starts_with("mcp__codex_apps__github__") {
+        return false;
+    }
+    matches!(
+        tool_suffix(tool_name),
+        "create_file" | "update_file" | "create_branch" | "update_ref"
     )
 }
 

@@ -86,6 +86,16 @@ pub struct RepoEntry {
     pub enabled: bool,
     pub enabled_at: String,
     pub policy_config_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unclassified_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepoToolList {
+    pub allowed_tools: Vec<String>,
+    pub unclassified_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,16 +178,31 @@ pub fn effective_workspace_id_for_repo(
 pub fn enable_repo(paths: &GlobalPaths, repo: impl AsRef<Path>) -> anyhow::Result<RepoEntry> {
     let root = detect_git_root(repo)?;
     ensure_repo_configs(&root)?;
+    let repo_id = repo_id_for_root(&root);
+    let mut registry = RepoRegistry::load(paths)?;
+    let allowed_tools = registry
+        .repos
+        .iter()
+        .find(|existing| existing.repo_id == repo_id || existing.root == root)
+        .map(|existing| existing.allowed_tools.clone())
+        .unwrap_or_default();
+    let unclassified_tools = registry
+        .repos
+        .iter()
+        .find(|existing| existing.repo_id == repo_id || existing.root == root)
+        .map(|existing| existing.unclassified_tools.clone())
+        .unwrap_or_default();
 
     let entry = RepoEntry {
-        repo_id: repo_id_for_root(&root),
+        repo_id,
         root: root.clone(),
         enabled: true,
         enabled_at: current_unix_timestamp()?,
         policy_config_path: root.join(".stateful/config.yml"),
+        allowed_tools,
+        unclassified_tools,
     };
 
-    let mut registry = RepoRegistry::load(paths)?;
     if let Some(existing) = registry
         .repos
         .iter_mut()
@@ -210,6 +235,108 @@ pub fn disable_repo(paths: &GlobalPaths, repo: impl AsRef<Path>) -> anyhow::Resu
     Ok(disabled)
 }
 
+pub fn allow_tool_for_repo(
+    paths: &GlobalPaths,
+    repo: impl AsRef<Path>,
+    tool_name: &str,
+) -> anyhow::Result<RepoEntry> {
+    update_tool_allowlist(paths, repo, tool_name, ToolAllowlistUpdate::Allow)
+}
+
+pub fn deny_tool_for_repo(
+    paths: &GlobalPaths,
+    repo: impl AsRef<Path>,
+    tool_name: &str,
+) -> anyhow::Result<RepoEntry> {
+    update_tool_allowlist(paths, repo, tool_name, ToolAllowlistUpdate::Deny)
+}
+
+pub fn allowed_tools_for_repo(
+    paths: &GlobalPaths,
+    repo: impl AsRef<Path>,
+) -> anyhow::Result<Vec<String>> {
+    Ok(tool_list_for_repo(paths, repo)?.allowed_tools)
+}
+
+pub fn tool_list_for_repo(
+    paths: &GlobalPaths,
+    repo: impl AsRef<Path>,
+) -> anyhow::Result<RepoToolList> {
+    let root = detect_git_root(repo)?;
+    let registry = RepoRegistry::load(paths)?;
+    let entry = registry
+        .repos
+        .iter()
+        .find(|entry| entry.root == root)
+        .ok_or_else(|| anyhow::anyhow!("repo is not registered: {}", root.display()))?;
+
+    let unclassified_tools = entry
+        .unclassified_tools
+        .iter()
+        .filter(|tool| {
+            !entry
+                .allowed_tools
+                .iter()
+                .any(|allowed_tool| allowed_tool == *tool)
+        })
+        .cloned()
+        .collect();
+
+    Ok(RepoToolList {
+        allowed_tools: entry.allowed_tools.clone(),
+        unclassified_tools,
+    })
+}
+
+pub fn tool_allowed_for_enabled_repo(
+    paths: &GlobalPaths,
+    repo_root: impl AsRef<Path>,
+    tool_name: &str,
+) -> anyhow::Result<bool> {
+    let root = detect_git_root(repo_root)?;
+    let registry = RepoRegistry::load(paths)?;
+    let Some(entry) = registry.enabled_entry(&root) else {
+        return Ok(false);
+    };
+    Ok(entry
+        .allowed_tools
+        .iter()
+        .any(|allowed| allowed == tool_name))
+}
+
+pub fn record_unclassified_tool_for_repo(
+    paths: &GlobalPaths,
+    repo: impl AsRef<Path>,
+    tool_name: &str,
+) -> anyhow::Result<RepoEntry> {
+    let root = detect_git_root(repo)?;
+    let tool_name = normalized_tool_name(tool_name)?;
+    let mut registry = RepoRegistry::load(paths)?;
+    let entry = registry
+        .repos
+        .iter_mut()
+        .find(|entry| entry.root == root)
+        .ok_or_else(|| anyhow::anyhow!("repo is not registered: {}", root.display()))?;
+
+    if !entry
+        .allowed_tools
+        .iter()
+        .any(|allowed| allowed == &tool_name)
+        && !entry
+            .unclassified_tools
+            .iter()
+            .any(|unclassified| unclassified == &tool_name)
+    {
+        entry.unclassified_tools.push(tool_name);
+    }
+
+    let updated = entry.clone();
+    registry.save(paths)?;
+    write_repo_metadata(paths, &updated)?;
+
+    Ok(updated)
+}
+
 pub fn detect_git_root(start: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
     let start = start.as_ref();
     let canonical_start = start
@@ -232,6 +359,64 @@ pub fn detect_git_root(start: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
             anyhow::bail!("no git root found from {}", start.display());
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolAllowlistUpdate {
+    Allow,
+    Deny,
+}
+
+fn update_tool_allowlist(
+    paths: &GlobalPaths,
+    repo: impl AsRef<Path>,
+    tool_name: &str,
+    update: ToolAllowlistUpdate,
+) -> anyhow::Result<RepoEntry> {
+    let root = detect_git_root(repo)?;
+    let tool_name = normalized_tool_name(tool_name)?;
+    let mut registry = RepoRegistry::load(paths)?;
+    let entry = registry
+        .repos
+        .iter_mut()
+        .find(|entry| entry.root == root)
+        .ok_or_else(|| anyhow::anyhow!("repo is not registered: {}", root.display()))?;
+
+    match update {
+        ToolAllowlistUpdate::Allow => {
+            if !entry
+                .allowed_tools
+                .iter()
+                .any(|allowed| allowed == &tool_name)
+            {
+                entry.allowed_tools.push(tool_name.clone());
+            }
+            entry
+                .unclassified_tools
+                .retain(|unclassified| unclassified != &tool_name);
+        }
+        ToolAllowlistUpdate::Deny => {
+            entry.allowed_tools.retain(|allowed| allowed != &tool_name);
+        }
+    }
+
+    let updated = entry.clone();
+    registry.save(paths)?;
+    write_repo_metadata(paths, &updated)?;
+
+    Ok(updated)
+}
+
+fn normalized_tool_name(tool_name: &str) -> anyhow::Result<String> {
+    let tool_name = tool_name.trim();
+    if tool_name.is_empty() {
+        anyhow::bail!("tool name must not be empty");
+    }
+    if tool_name.chars().any(char::is_control) {
+        anyhow::bail!("tool name must not contain control characters");
+    }
+
+    Ok(tool_name.to_string())
 }
 
 fn ensure_repo_configs(root: &Path) -> anyhow::Result<()> {

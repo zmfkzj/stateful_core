@@ -1,8 +1,9 @@
 use std::fs;
 
 use stateful_cli::{
-    GlobalPaths, RepoRegistry, detect_git_root, disable_repo, enable_repo,
-    workspace_id_for_enabled_repo,
+    GlobalPaths, RepoRegistry, allow_tool_for_repo, deny_tool_for_repo, detect_git_root,
+    disable_repo, enable_repo, record_unclassified_tool_for_repo, tool_allowed_for_enabled_repo,
+    tool_list_for_repo, workspace_id_for_enabled_repo,
 };
 
 #[test]
@@ -128,6 +129,102 @@ fn workspace_id_is_stable_for_enabled_repo_and_distinct_per_root() {
     assert!(workspace_a.starts_with("workspace-"));
     assert_ne!(workspace_a, "local");
     assert_ne!(workspace_b, "local");
+}
+
+#[test]
+fn tool_allowlist_is_repo_scoped_deduplicated_and_preserved() {
+    let fixture = TestFixture::new("tool-allowlist");
+    let repo_a = fixture.create_repo("repo-a");
+    let repo_b = fixture.create_repo("repo-b");
+    let nested_a = repo_a.join("src");
+    fs::create_dir_all(&nested_a).expect("nested repo directory should be creatable");
+
+    enable_repo(&fixture.paths, &repo_a).expect("repo a should enable");
+    enable_repo(&fixture.paths, &repo_b).expect("repo b should enable");
+
+    assert!(
+        !tool_allowed_for_enabled_repo(&fixture.paths, &nested_a, "FutureWriteTool")
+            .expect("allow lookup should work before allow")
+    );
+
+    let entry = allow_tool_for_repo(&fixture.paths, &nested_a, "FutureWriteTool")
+        .expect("tool should be allowed for repo a");
+    assert_eq!(entry.allowed_tools, vec!["FutureWriteTool".to_string()]);
+
+    allow_tool_for_repo(&fixture.paths, &repo_a, "FutureWriteTool")
+        .expect("duplicate allow should be idempotent");
+    let registry = RepoRegistry::load(&fixture.paths).expect("registry should reload");
+    let repo_a_entry = registry
+        .repos
+        .iter()
+        .find(|entry| entry.root == repo_a.canonicalize().expect("repo a should canonicalize"))
+        .expect("repo a should be registered");
+    assert_eq!(repo_a_entry.allowed_tools, vec!["FutureWriteTool"]);
+
+    assert!(
+        tool_allowed_for_enabled_repo(&fixture.paths, &nested_a, "FutureWriteTool")
+            .expect("allow lookup should work for repo a")
+    );
+    assert!(
+        !tool_allowed_for_enabled_repo(&fixture.paths, &repo_b, "FutureWriteTool")
+            .expect("allow lookup should work for repo b")
+    );
+
+    enable_repo(&fixture.paths, &repo_a).expect("re-enable should preserve allowlist");
+    assert!(
+        tool_allowed_for_enabled_repo(&fixture.paths, &repo_a, "FutureWriteTool")
+            .expect("allow lookup should survive re-enable")
+    );
+
+    let entry = deny_tool_for_repo(&fixture.paths, &repo_a, "FutureWriteTool")
+        .expect("tool should be removed from repo allowlist");
+    assert!(entry.allowed_tools.is_empty());
+    assert!(
+        !tool_allowed_for_enabled_repo(&fixture.paths, &repo_a, "FutureWriteTool")
+            .expect("allow lookup should work after deny")
+    );
+}
+
+#[test]
+fn tool_list_includes_recorded_unclassified_tools() {
+    let fixture = TestFixture::new("tool-list-unclassified");
+    let repo = fixture.create_repo("repo");
+    let nested = repo.join("src");
+    fs::create_dir_all(&nested).expect("nested repo directory should be creatable");
+    enable_repo(&fixture.paths, &repo).expect("repo should enable");
+
+    allow_tool_for_repo(&fixture.paths, &repo, "KnownTool").expect("known tool should be allowed");
+    record_unclassified_tool_for_repo(&fixture.paths, &nested, "FutureWriteTool")
+        .expect("unclassified tool should be recorded");
+    record_unclassified_tool_for_repo(&fixture.paths, &repo, "FutureWriteTool")
+        .expect("duplicate unclassified record should be idempotent");
+
+    let list = tool_list_for_repo(&fixture.paths, &repo).expect("tool list should load");
+    assert_eq!(list.allowed_tools, vec!["KnownTool"]);
+    assert_eq!(list.unclassified_tools, vec!["FutureWriteTool"]);
+
+    allow_tool_for_repo(&fixture.paths, &repo, "FutureWriteTool")
+        .expect("allowing a tool should remove it from unclassified tools");
+    let list = tool_list_for_repo(&fixture.paths, &repo).expect("tool list should reload");
+    assert_eq!(list.allowed_tools, vec!["KnownTool", "FutureWriteTool"]);
+    assert!(list.unclassified_tools.is_empty());
+}
+
+#[test]
+fn tool_allowlist_rejects_empty_or_control_character_tool_names() {
+    let fixture = TestFixture::new("tool-allowlist-invalid");
+    let repo = fixture.create_repo("repo");
+    enable_repo(&fixture.paths, &repo).expect("repo should enable");
+
+    let empty = allow_tool_for_repo(&fixture.paths, &repo, "  ")
+        .expect_err("empty tool name should be rejected")
+        .to_string();
+    assert!(empty.contains("tool name must not be empty"));
+
+    let control = allow_tool_for_repo(&fixture.paths, &repo, "tool\nname")
+        .expect_err("control character tool name should be rejected")
+        .to_string();
+    assert!(control.contains("tool name must not contain control characters"));
 }
 
 struct TestFixture {

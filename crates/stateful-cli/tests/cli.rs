@@ -2,9 +2,10 @@ use clap::Parser;
 use stateful_cli::{
     Cli, CodexSandboxMode, Command, ExternalRunCommand, GlobalPaths, HookCommand, InstallAgent,
     McpCommand, NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand,
-    SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, doctor_report_with_global,
+    SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, ToolsCommand, allow_tool_for_repo,
+    doctor_report_with_global, enable_repo, record_unclassified_tool_for_repo,
 };
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, process::Command as ProcessCommand};
 
 #[test]
 fn parses_sandbox_run_read_only_defaults() {
@@ -510,6 +511,82 @@ fn parses_repos_list_command() {
 }
 
 #[test]
+fn parses_tools_allow_list_and_deny_commands() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "tools",
+        "allow",
+        "mcp__codex_apps__github__merge_pull_request",
+        "--repo",
+        "/workspace/repo",
+    ])
+    .expect("tools allow command should parse");
+    assert!(matches!(
+        cli.command,
+        Command::Tools(ToolsCommand::Allow {
+            ref tool_name,
+            ref repo,
+        }) if tool_name == "mcp__codex_apps__github__merge_pull_request"
+            && repo.as_deref() == Some(std::path::Path::new("/workspace/repo"))
+    ));
+
+    let cli = Cli::try_parse_from(["stateful", "tools", "list"])
+        .expect("tools list command should parse");
+    assert!(matches!(
+        cli.command,
+        Command::Tools(ToolsCommand::List { repo: None })
+    ));
+
+    let cli = Cli::try_parse_from(["stateful", "tools", "deny", "spawn_agent"])
+        .expect("tools deny command should parse");
+    assert!(matches!(
+        cli.command,
+        Command::Tools(ToolsCommand::Deny {
+            ref tool_name,
+            repo: None,
+        }) if tool_name == "spawn_agent"
+    ));
+}
+
+#[test]
+fn tools_list_prints_allowed_and_unclassified_tools() {
+    let root = std::env::temp_dir().join(format!("stateful-tools-list-{}", std::process::id()));
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("old fixture root should be removable");
+    }
+    let paths = GlobalPaths::new(root.join("home"));
+    let repo = root.join("repo");
+    fs::create_dir_all(repo.join(".git")).expect("git directory should be creatable");
+    enable_repo(&paths, &repo).expect("repo should enable");
+    allow_tool_for_repo(&paths, &repo, "KnownTool").expect("tool should be allowed");
+    record_unclassified_tool_for_repo(&paths, &repo, "FutureWriteTool")
+        .expect("unclassified tool should record");
+
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_stateful"))
+        .args(["tools", "list", "--repo"])
+        .arg(&repo)
+        .env_clear()
+        .env("STATEFUL_HOME", &paths.home)
+        .output()
+        .expect("tools list should run");
+
+    assert!(
+        output.status.success(),
+        "tools list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("tools list should print json");
+    assert_eq!(json["allowed_tools"], serde_json::json!(["KnownTool"]));
+    assert_eq!(
+        json["unclassified_tools"],
+        serde_json::json!(["FutureWriteTool"])
+    );
+
+    fs::remove_dir_all(&root).expect("fixture root should be removable");
+}
+
+#[test]
 fn parses_notifications_poll_command() {
     let cli = Cli::try_parse_from([
         "stateful",
@@ -860,6 +937,7 @@ fn parses_server_join_without_repo_enablement() {
                     base_url,
                     token,
                     workspace_id,
+                    allow_plain_http,
                     enable_repo,
                     binary,
                     codex_config,
@@ -869,10 +947,35 @@ fn parses_server_join_without_repo_enablement() {
             assert_eq!(base_url, "http://192.168.0.23:43873");
             assert_eq!(token, "secret-token");
             assert_eq!(workspace_id, "shared");
+            assert!(!allow_plain_http);
             assert!(!enable_repo);
             assert_eq!(binary, None);
             assert_eq!(codex_config, None);
         }
+        other => panic!("expected server join command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_server_join_allow_plain_http() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "server",
+        "join",
+        "http://192.168.0.23:43873",
+        "--token",
+        "secret-token",
+        "--allow-plain-http",
+    ])
+    .expect("server join should parse allow-plain-http");
+
+    match cli.command {
+        Command::Server {
+            command: Some(ServerCommand::Join {
+                allow_plain_http, ..
+            }),
+            ..
+        } => assert!(allow_plain_http),
         other => panic!("expected server join command, got {other:?}"),
     }
 }
@@ -903,6 +1006,7 @@ fn parses_server_join_with_repo_enablement_and_install_overrides() {
                     base_url,
                     token,
                     workspace_id,
+                    allow_plain_http,
                     enable_repo,
                     binary,
                     codex_config,
@@ -912,6 +1016,7 @@ fn parses_server_join_with_repo_enablement_and_install_overrides() {
             assert_eq!(base_url, "http://192.168.0.23:43873");
             assert_eq!(token, "secret-token");
             assert_eq!(workspace_id, "w1");
+            assert!(!allow_plain_http);
             assert!(enable_repo);
             assert_eq!(binary.as_deref(), Some("/opt/stateful/bin/stateful"));
             assert_eq!(

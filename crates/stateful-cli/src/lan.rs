@@ -17,6 +17,7 @@ pub struct ServerJoinOptions {
     pub base_url: String,
     pub token: String,
     pub workspace_id: String,
+    pub allow_plain_http: bool,
     pub enable_repo_root: Option<PathBuf>,
 }
 
@@ -43,7 +44,7 @@ pub struct ServerStartRuntimeResult {
 }
 
 pub fn join_server_runtime(options: ServerJoinOptions) -> anyhow::Result<ServerJoinResult> {
-    validate_server_join_base_url(&options.base_url)?;
+    validate_server_join_base_url(&options.base_url, options.allow_plain_http)?;
     let runtime = runtime_from_remote(&options.base_url, &options.token, &options.workspace_id)?;
     apply_codex_install(CodexInstallOptions {
         yes: true,
@@ -91,8 +92,11 @@ fn is_no_git_root_error(error: &anyhow::Error) -> bool {
     error.to_string().starts_with("no git root found from ")
 }
 
-fn validate_server_join_base_url(base_url: &str) -> anyhow::Result<()> {
-    if base_url.starts_with("http://") && !runtime_base_url_is_localhost(base_url) {
+fn validate_server_join_base_url(base_url: &str, allow_plain_http: bool) -> anyhow::Result<()> {
+    if !allow_plain_http
+        && base_url.starts_with("http://")
+        && !runtime_base_url_is_localhost(base_url)
+    {
         anyhow::bail!(
             "plain http joins are only allowed for loopback addresses; use an SSH tunnel and join http://127.0.0.1:<port>"
         );
