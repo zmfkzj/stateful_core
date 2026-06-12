@@ -88,6 +88,14 @@ pub struct RepoEntry {
     pub policy_config_path: PathBuf,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unclassified_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepoToolList {
+    pub allowed_tools: Vec<String>,
+    pub unclassified_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +186,12 @@ pub fn enable_repo(paths: &GlobalPaths, repo: impl AsRef<Path>) -> anyhow::Resul
         .find(|existing| existing.repo_id == repo_id || existing.root == root)
         .map(|existing| existing.allowed_tools.clone())
         .unwrap_or_default();
+    let unclassified_tools = registry
+        .repos
+        .iter()
+        .find(|existing| existing.repo_id == repo_id || existing.root == root)
+        .map(|existing| existing.unclassified_tools.clone())
+        .unwrap_or_default();
 
     let entry = RepoEntry {
         repo_id,
@@ -186,6 +200,7 @@ pub fn enable_repo(paths: &GlobalPaths, repo: impl AsRef<Path>) -> anyhow::Resul
         enabled_at: current_unix_timestamp()?,
         policy_config_path: root.join(".stateful/config.yml"),
         allowed_tools,
+        unclassified_tools,
     };
 
     if let Some(existing) = registry
@@ -240,6 +255,13 @@ pub fn allowed_tools_for_repo(
     paths: &GlobalPaths,
     repo: impl AsRef<Path>,
 ) -> anyhow::Result<Vec<String>> {
+    Ok(tool_list_for_repo(paths, repo)?.allowed_tools)
+}
+
+pub fn tool_list_for_repo(
+    paths: &GlobalPaths,
+    repo: impl AsRef<Path>,
+) -> anyhow::Result<RepoToolList> {
     let root = detect_git_root(repo)?;
     let registry = RepoRegistry::load(paths)?;
     let entry = registry
@@ -248,7 +270,22 @@ pub fn allowed_tools_for_repo(
         .find(|entry| entry.root == root)
         .ok_or_else(|| anyhow::anyhow!("repo is not registered: {}", root.display()))?;
 
-    Ok(entry.allowed_tools.clone())
+    let unclassified_tools = entry
+        .unclassified_tools
+        .iter()
+        .filter(|tool| {
+            !entry
+                .allowed_tools
+                .iter()
+                .any(|allowed_tool| allowed_tool == *tool)
+        })
+        .cloned()
+        .collect();
+
+    Ok(RepoToolList {
+        allowed_tools: entry.allowed_tools.clone(),
+        unclassified_tools,
+    })
 }
 
 pub fn tool_allowed_for_enabled_repo(
@@ -265,6 +302,39 @@ pub fn tool_allowed_for_enabled_repo(
         .allowed_tools
         .iter()
         .any(|allowed| allowed == tool_name))
+}
+
+pub fn record_unclassified_tool_for_repo(
+    paths: &GlobalPaths,
+    repo: impl AsRef<Path>,
+    tool_name: &str,
+) -> anyhow::Result<RepoEntry> {
+    let root = detect_git_root(repo)?;
+    let tool_name = normalized_tool_name(tool_name)?;
+    let mut registry = RepoRegistry::load(paths)?;
+    let entry = registry
+        .repos
+        .iter_mut()
+        .find(|entry| entry.root == root)
+        .ok_or_else(|| anyhow::anyhow!("repo is not registered: {}", root.display()))?;
+
+    if !entry
+        .allowed_tools
+        .iter()
+        .any(|allowed| allowed == &tool_name)
+        && !entry
+            .unclassified_tools
+            .iter()
+            .any(|unclassified| unclassified == &tool_name)
+    {
+        entry.unclassified_tools.push(tool_name);
+    }
+
+    let updated = entry.clone();
+    registry.save(paths)?;
+    write_repo_metadata(paths, &updated)?;
+
+    Ok(updated)
 }
 
 pub fn detect_git_root(start: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
@@ -319,8 +389,11 @@ fn update_tool_allowlist(
                 .iter()
                 .any(|allowed| allowed == &tool_name)
             {
-                entry.allowed_tools.push(tool_name);
+                entry.allowed_tools.push(tool_name.clone());
             }
+            entry
+                .unclassified_tools
+                .retain(|unclassified| unclassified != &tool_name);
         }
         ToolAllowlistUpdate::Deny => {
             entry.allowed_tools.retain(|allowed| allowed != &tool_name);

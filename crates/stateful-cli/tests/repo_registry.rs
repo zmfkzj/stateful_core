@@ -2,7 +2,8 @@ use std::fs;
 
 use stateful_cli::{
     GlobalPaths, RepoRegistry, allow_tool_for_repo, deny_tool_for_repo, detect_git_root,
-    disable_repo, enable_repo, tool_allowed_for_enabled_repo, workspace_id_for_enabled_repo,
+    disable_repo, enable_repo, record_unclassified_tool_for_repo, tool_allowed_for_enabled_repo,
+    tool_list_for_repo, workspace_id_for_enabled_repo,
 };
 
 #[test]
@@ -182,6 +183,31 @@ fn tool_allowlist_is_repo_scoped_deduplicated_and_preserved() {
         !tool_allowed_for_enabled_repo(&fixture.paths, &repo_a, "FutureWriteTool")
             .expect("allow lookup should work after deny")
     );
+}
+
+#[test]
+fn tool_list_includes_recorded_unclassified_tools() {
+    let fixture = TestFixture::new("tool-list-unclassified");
+    let repo = fixture.create_repo("repo");
+    let nested = repo.join("src");
+    fs::create_dir_all(&nested).expect("nested repo directory should be creatable");
+    enable_repo(&fixture.paths, &repo).expect("repo should enable");
+
+    allow_tool_for_repo(&fixture.paths, &repo, "KnownTool").expect("known tool should be allowed");
+    record_unclassified_tool_for_repo(&fixture.paths, &nested, "FutureWriteTool")
+        .expect("unclassified tool should be recorded");
+    record_unclassified_tool_for_repo(&fixture.paths, &repo, "FutureWriteTool")
+        .expect("duplicate unclassified record should be idempotent");
+
+    let list = tool_list_for_repo(&fixture.paths, &repo).expect("tool list should load");
+    assert_eq!(list.allowed_tools, vec!["KnownTool"]);
+    assert_eq!(list.unclassified_tools, vec!["FutureWriteTool"]);
+
+    allow_tool_for_repo(&fixture.paths, &repo, "FutureWriteTool")
+        .expect("allowing a tool should remove it from unclassified tools");
+    let list = tool_list_for_repo(&fixture.paths, &repo).expect("tool list should reload");
+    assert_eq!(list.allowed_tools, vec!["KnownTool", "FutureWriteTool"]);
+    assert!(list.unclassified_tools.is_empty());
 }
 
 #[test]

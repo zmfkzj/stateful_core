@@ -2,9 +2,10 @@ use clap::Parser;
 use stateful_cli::{
     Cli, CodexSandboxMode, Command, ExternalRunCommand, GlobalPaths, HookCommand, InstallAgent,
     McpCommand, NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand,
-    SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, ToolsCommand, doctor_report_with_global,
+    SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, ToolsCommand, allow_tool_for_repo,
+    doctor_report_with_global, enable_repo, record_unclassified_tool_for_repo,
 };
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, process::Command as ProcessCommand};
 
 #[test]
 fn parses_sandbox_run_read_only_defaults() {
@@ -545,6 +546,44 @@ fn parses_tools_allow_list_and_deny_commands() {
             repo: None,
         }) if tool_name == "spawn_agent"
     ));
+}
+
+#[test]
+fn tools_list_prints_allowed_and_unclassified_tools() {
+    let root = std::env::temp_dir().join(format!("stateful-tools-list-{}", std::process::id()));
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("old fixture root should be removable");
+    }
+    let paths = GlobalPaths::new(root.join("home"));
+    let repo = root.join("repo");
+    fs::create_dir_all(repo.join(".git")).expect("git directory should be creatable");
+    enable_repo(&paths, &repo).expect("repo should enable");
+    allow_tool_for_repo(&paths, &repo, "KnownTool").expect("tool should be allowed");
+    record_unclassified_tool_for_repo(&paths, &repo, "FutureWriteTool")
+        .expect("unclassified tool should record");
+
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_stateful"))
+        .args(["tools", "list", "--repo"])
+        .arg(&repo)
+        .env_clear()
+        .env("STATEFUL_HOME", &paths.home)
+        .output()
+        .expect("tools list should run");
+
+    assert!(
+        output.status.success(),
+        "tools list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("tools list should print json");
+    assert_eq!(json["allowed_tools"], serde_json::json!(["KnownTool"]));
+    assert_eq!(
+        json["unclassified_tools"],
+        serde_json::json!(["FutureWriteTool"])
+    );
+
+    fs::remove_dir_all(&root).expect("fixture root should be removable");
 }
 
 #[test]

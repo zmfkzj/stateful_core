@@ -13,7 +13,8 @@ use std::{
 use stateful_cli::{
     CurrentSession, GlobalPaths, HookOutcome, STATEFUL_SESSION_ID_ENV, ServerRuntime,
     allow_tool_for_repo, enable_repo, handle_post_tool_use_in_repo, handle_pre_tool_use,
-    handle_pre_tool_use_in_repo, read_current_session_file_for_session, write_global_runtime_file,
+    handle_pre_tool_use_in_repo, read_current_session_file_for_session, tool_list_for_repo,
+    write_global_runtime_file,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -1726,6 +1727,47 @@ fn pre_tool_use_denies_github_remote_repository_mutation_tools() {
             "reason `{reason}` should classify {tool_name} as remote repository mutation"
         );
     }
+}
+
+#[test]
+fn pre_tool_use_records_unclassified_tools_for_tools_list() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-unclassified-tools-list-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "FutureWriteTool",
+        "tool_input": {}
+    })
+    .to_string();
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
+    assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
+
+    let list = tool_list_for_repo(&paths, &repo_root).expect("tool list should load");
+    assert_eq!(list.unclassified_tools, vec!["FutureWriteTool"]);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]

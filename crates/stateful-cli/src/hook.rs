@@ -17,9 +17,9 @@ use crate::shell_command::{
 use crate::{
     CurrentSession, GlobalPaths, HookCommand, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
     ServerRuntime, discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server,
-    get_json, post_json, protocol_envelope, repo_gate, repo_identity_for_enabled_repo,
-    runtime_env_override_is_configured, tool_allowed_for_enabled_repo,
-    write_current_session_file_for_current_stateful_session,
+    get_json, post_json, protocol_envelope, record_unclassified_tool_for_repo, repo_gate,
+    repo_identity_for_enabled_repo, runtime_env_override_is_configured,
+    tool_allowed_for_enabled_repo, write_current_session_file_for_current_stateful_session,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -490,11 +490,14 @@ fn handle_pre_tool_use_with_runtime(
         tool_name if is_user_allowed_tool(global_paths.as_ref(), repo_root, tool_name) => {
             Ok(HookOutcome::Allow)
         }
-        tool_name => Ok(HookOutcome::Deny {
-            reason: format!(
-                "unclassified tool {tool_name} may write or execute and requires explicit stateful classification before it can run in an enabled repository"
-            ),
-        }),
+        tool_name => {
+            record_unclassified_tool(global_paths.as_ref(), repo_root, tool_name);
+            Ok(HookOutcome::Deny {
+                reason: format!(
+                    "unclassified tool {tool_name} may write or execute and requires explicit stateful classification before it can run in an enabled repository"
+                ),
+            })
+        }
     }
 }
 
@@ -508,6 +511,18 @@ fn is_user_allowed_tool(
     };
 
     tool_allowed_for_enabled_repo(paths, repo_root, tool_name).unwrap_or(false)
+}
+
+fn record_unclassified_tool(
+    paths: Option<&GlobalPaths>,
+    repo_root: Option<&Path>,
+    tool_name: &str,
+) {
+    let (Some(paths), Some(repo_root)) = (paths, repo_root) else {
+        return;
+    };
+
+    let _ = record_unclassified_tool_for_repo(paths, repo_root, tool_name);
 }
 
 fn is_safe_without_repo_write_authorization(tool_name: &str) -> bool {
