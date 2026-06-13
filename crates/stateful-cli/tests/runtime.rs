@@ -77,14 +77,11 @@ fn current_session_file_child_probe() {
             assert_eq!(session.session_id, "legacy-session");
             assert_eq!(session.workspace_id, "w1");
         }
-        "read_rejects_ambiguous_legacy_session" => {
-            let error = read_current_session_file(&repo_root)
-                .expect_err("ambiguous legacy session should fail");
-            assert!(
-                error
-                    .to_string()
-                    .contains("multiple session-bound current-session files")
-            );
+        "read_uses_verified_legacy_session_with_stale_sibling" => {
+            let session =
+                read_current_session_file(&repo_root).expect("current session should read");
+            assert_eq!(session.session_id, "legacy-session");
+            assert_eq!(session.workspace_id, "w1");
         }
         "read_rejects_unverified_legacy_session" => {
             let error = read_current_session_file(&repo_root)
@@ -218,7 +215,7 @@ fn current_session_file_ignores_codex_aliases_without_stateful_session_id() {
 }
 
 #[test]
-fn current_session_file_rejects_ambiguous_legacy_alias_without_stateful_session_id() {
+fn current_session_file_uses_verified_legacy_alias_with_stale_session_bound_file() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-current-session-ambiguous-legacy-test-{}",
         std::process::id()
@@ -251,7 +248,7 @@ fn current_session_file_rejects_ambiguous_legacy_alias_without_stateful_session_
         .env_clear()
         .env(
             CURRENT_SESSION_CHILD_CASE,
-            "read_rejects_ambiguous_legacy_session",
+            "read_uses_verified_legacy_session_with_stale_sibling",
         )
         .env(CURRENT_SESSION_CHILD_ROOT, &temp_root)
         .output()

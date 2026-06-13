@@ -334,31 +334,28 @@ fn read_verified_legacy_current_session_file(
         &legacy_session.session_id,
         "current session file session_id",
     )?;
-    let session_file_count = session_bound_current_session_file_count(repo_root)?;
-    if session_file_count > 1 {
-        anyhow::bail!(
-            "multiple session-bound current-session files exist and STATEFUL_SESSION_ID is unset; set STATEFUL_SESSION_ID to the active session id before using session-bound tools"
-        );
-    }
-    if session_file_count == 0
-        && matches!(
-            fallback,
-            LegacySessionFallback::AllowWithoutSessionBoundFile
-        )
-    {
-        return Ok(legacy_session);
-    }
 
-    let session_bound = read_current_session_file_for_session(
+    let session_bound = match read_current_session_file_for_session(
         repo_root,
         &legacy_session.session_id,
-    )
-    .map_err(|error| {
-        anyhow::anyhow!(
-            "current session file session_id `{}` has no matching session-bound file: {error}",
-            legacy_session.session_id
-        )
-    })?;
+    ) {
+        Ok(session_bound) => session_bound,
+        Err(error) => {
+            if is_not_found_error(&error)
+                && matches!(
+                    fallback,
+                    LegacySessionFallback::AllowWithoutSessionBoundFile
+                )
+                && session_bound_current_session_file_count(repo_root)? == 0
+            {
+                return Ok(legacy_session);
+            }
+            return Err(anyhow::anyhow!(
+                "current session file session_id `{}` has no matching session-bound file: {error}",
+                legacy_session.session_id
+            ));
+        }
+    };
     if session_bound != legacy_session {
         anyhow::bail!(
             "current session file session_id `{}` does not match its session-bound file",

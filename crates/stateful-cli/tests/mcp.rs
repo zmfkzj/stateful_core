@@ -1346,7 +1346,7 @@ fn mcp_lease_acquire_ignores_codex_env_aliases_without_stateful_session_id() {
         json["result"]["content"][0]["text"]
             .as_str()
             .unwrap_or_default()
-            .contains("multiple session-bound current-session files")
+            .contains("has no matching session-bound file")
     );
     assert!(
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
@@ -1410,13 +1410,13 @@ fn mcp_lease_acquire_without_stateful_session_id_uses_verified_legacy_session() 
 }
 
 #[test]
-fn mcp_lease_acquire_without_stateful_session_id_rejects_ambiguous_session_bound_files() {
+fn mcp_lease_acquire_without_stateful_session_id_uses_verified_legacy_session_with_stale_sibling() {
     let temp_root = temp_root("stateful-mcp-session-ambiguous-fallback");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
-    let (runtime, rx) = spawn_fake_stateful_server(r#"{\"status\":\"ok\"}"#);
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
     write_current_session_file_for_session(
         &repo_root,
@@ -1440,7 +1440,7 @@ fn mcp_lease_acquire_without_stateful_session_id_rejects_ambiguous_session_bound
         &paths,
         r#"{
           "jsonrpc":"2.0",
-          "id":13,
+          "id":14,
           "method":"tools/call",
           "params":{
             "name":"state_lease_acquire",
@@ -1451,20 +1451,19 @@ fn mcp_lease_acquire_without_stateful_session_id_rejects_ambiguous_session_bound
         }"#,
     );
 
+    let request = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("lease acquire request should arrive");
+    assert!(request.contains("POST /v1/lease/acquire HTTP/1.1"));
+    let body = request_json_body(&request);
+    assert_eq!(body["session_id"], "session-a");
+    assert_eq!(body["workspace_id"], "workspace-a");
+    assert_eq!(body["path"], "src/auth.ts");
+
     let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
     assert_eq!(json["jsonrpc"], "2.0");
-    assert_eq!(json["id"], 13);
-    assert_eq!(json["result"]["isError"], true);
-    assert!(
-        json["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("multiple session-bound current-session files")
-    );
-    assert!(
-        rx.recv_timeout(Duration::from_millis(200)).is_err(),
-        "ambiguous session fallback should fail before HTTP"
-    );
+    assert_eq!(json["id"], 14);
+    assert_eq!(json["result"]["isError"], false);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
