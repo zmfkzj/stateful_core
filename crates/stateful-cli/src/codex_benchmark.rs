@@ -1,17 +1,22 @@
+#[cfg(any(target_os = "macos", test))]
+use std::process::Command;
 use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
-    process::Command,
     time::Duration,
 };
 
+#[cfg(any(target_os = "macos", test))]
+use crate::sandbox::apply_sandbox_temp_env;
+#[cfg(target_os = "macos")]
+use crate::sandbox::run_command_with_timeout;
 use crate::sandbox::{
     STATEFUL_SANDBOX_RUN_ACTIVE_ENV, SandboxAuthorizationDenied, SandboxAuthorizeContext,
     SandboxAuthorizeDecision, SandboxCommandResult, SandboxNetworkPolicy, SandboxRunOutput,
-    SandboxWritablePath, SandboxWritablePathKind, apply_sandbox_temp_env, authorize_sandbox_write,
+    SandboxWritablePath, SandboxWritablePathKind, authorize_sandbox_write,
     classify_sandbox_authorize_response, enrich_sandbox_write_dir_denial, ensure_repo_dir_target,
-    normalize_sandbox_target_path, resolve_sandbox_cwd, run_command_with_timeout, sandbox_temp_dir,
+    normalize_sandbox_target_path, resolve_sandbox_cwd, sandbox_temp_dir,
     sandbox_write_dir_display_path, seatbelt_escape,
 };
 use crate::{
@@ -215,7 +220,14 @@ fn run_nested_codex_benchmark_sandboxed_command(
 
     #[cfg(target_os = "linux")]
     {
-        let _ = (command, cwd, writable_paths, codex_home_root, timeout);
+        let _ = (
+            command,
+            cwd,
+            writable_paths,
+            codex_home_root,
+            timeout,
+            temp_dir,
+        );
         anyhow::bail!(
             "stateful sandbox run-nested-codex-benchmark is currently supported only on macOS"
         );
@@ -223,13 +235,21 @@ fn run_nested_codex_benchmark_sandboxed_command(
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (command, cwd, writable_paths, codex_home_root, timeout);
+        let _ = (
+            command,
+            cwd,
+            writable_paths,
+            codex_home_root,
+            timeout,
+            temp_dir,
+        );
         anyhow::bail!(
             "stateful sandbox run-nested-codex-benchmark is currently supported only on macOS"
         );
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn apply_nested_codex_benchmark_env(
     command: &mut Command,
     temp_dir: &Path,
