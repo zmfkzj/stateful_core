@@ -56,14 +56,47 @@ pub fn parse_denovo_condition(input: &str) -> Result<DeNovoCondition> {
             bail!("invalid DeNovoSWE condition part `{part}`; expected key:value");
         };
         match key {
-            "stateful" => stateful = Some(parse_axis(value).context("invalid stateful axis")?),
-            "subagent" => subagent = Some(parse_axis(value).context("invalid subagent axis")?),
-            "config" => config_path = Some(PathBuf::from(value)),
+            "stateful" => {
+                if stateful
+                    .replace(parse_axis(value).context("invalid stateful axis")?)
+                    .is_some()
+                {
+                    bail!("duplicate DeNovoSWE condition key `stateful`");
+                }
+            }
+            "subagent" => {
+                if subagent
+                    .replace(parse_axis(value).context("invalid subagent axis")?)
+                    .is_some()
+                {
+                    bail!("duplicate DeNovoSWE condition key `subagent`");
+                }
+            }
+            "config" => {
+                if config_path.is_some() {
+                    bail!("duplicate DeNovoSWE condition key `config`");
+                }
+                if value.is_empty() {
+                    bail!("empty DeNovoSWE config path");
+                }
+                config_path = Some(PathBuf::from(value));
+            }
             "env" => {
                 let Some((env_key, env_value)) = value.split_once('=') else {
                     bail!("invalid DeNovoSWE env override `{value}`; expected KEY=VALUE");
                 };
-                env.insert(env_key.to_string(), env_value.to_string());
+                if env_key.is_empty() {
+                    bail!("empty DeNovoSWE env key");
+                }
+                if env_value.is_empty() {
+                    bail!("empty DeNovoSWE env value for `{env_key}`");
+                }
+                if env
+                    .insert(env_key.to_string(), env_value.to_string())
+                    .is_some()
+                {
+                    bail!("duplicate DeNovoSWE env key `{env_key}`");
+                }
             }
             other => bail!("unknown DeNovoSWE condition key `{other}`"),
         }
@@ -124,10 +157,10 @@ pub struct DeNovoConditionReport {
     pub run_id: String,
     pub condition_id: String,
     pub condition: DeNovoCondition,
-    pub stateful: bool,
-    pub subagent: bool,
     pub total_instances: usize,
     pub completed_instances: usize,
+    pub scored_instances: usize,
+    pub pass_rate_instances: usize,
     pub success_count: usize,
     pub error_count: usize,
     pub success_rate: Option<f64>,
@@ -144,6 +177,12 @@ pub struct DeNovoConditionReport {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeNovoComparisonReport {
     pub conditions: Vec<DeNovoConditionReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duplicate_axis_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_axis_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub condition_id_mismatches: Vec<String>,
     pub stateful_score_delta_without_subagent: Option<f64>,
     pub subagent_score_delta_without_stateful: Option<f64>,
     pub combined_interaction_score_delta: Option<f64>,
@@ -184,6 +223,8 @@ pub fn build_denovo_condition_report(
                 .and_then(|details| details.pass_rate)
         })
         .collect::<Vec<_>>();
+    let scored_instances = scores.len();
+    let pass_rate_instances = pass_rates.len();
     let correct_count = scores.iter().filter(|score| **score >= 1.0).count();
     let almost_correct_count = scores
         .iter()
@@ -191,17 +232,15 @@ pub fn build_denovo_condition_report(
         .count();
 
     let condition_id = condition.id();
-    let stateful = condition.stateful;
-    let subagent = condition.subagent;
 
     DeNovoConditionReport {
         run_id: run_id.into(),
         condition_id,
         condition,
-        stateful,
-        subagent,
         total_instances,
         completed_instances,
+        scored_instances,
+        pass_rate_instances,
         success_count,
         error_count,
         success_rate: ratio(success_count, total_instances),
@@ -224,10 +263,31 @@ pub fn compare_denovo_reports(reports: Vec<DeNovoConditionReport>) -> DeNovoComp
         .iter()
         .map(|report| report.running_time_ms)
         .sum::<u64>();
-    let by_axes = reports
+    let mut by_axes: BTreeMap<(bool, bool), Vec<&DeNovoConditionReport>> = BTreeMap::new();
+    let mut condition_id_mismatches = Vec::new();
+    for report in &reports {
+        let expected_condition_id = report.condition.id();
+        if report.condition_id != expected_condition_id {
+            condition_id_mismatches.push(format!(
+                "{} != {}",
+                report.condition_id, expected_condition_id
+            ));
+        }
+        by_axes
+            .entry((report.condition.stateful, report.condition.subagent))
+            .or_default()
+            .push(report);
+    }
+    let duplicate_axis_ids = by_axes
         .iter()
-        .map(|report| ((report.stateful, report.subagent), report))
-        .collect::<BTreeMap<_, _>>();
+        .filter(|(_, reports)| reports.len() > 1)
+        .map(|((stateful, subagent), _)| DeNovoCondition::new(*stateful, *subagent).id())
+        .collect::<Vec<_>>();
+    let missing_axis_ids = default_denovo_conditions()
+        .into_iter()
+        .filter(|condition| !by_axes.contains_key(&(condition.stateful, condition.subagent)))
+        .map(|condition| condition.id())
+        .collect::<Vec<_>>();
 
     let off_off = score_for(&by_axes, false, false);
     let on_off = score_for(&by_axes, true, false);
@@ -236,6 +296,9 @@ pub fn compare_denovo_reports(reports: Vec<DeNovoConditionReport>) -> DeNovoComp
 
     DeNovoComparisonReport {
         conditions: reports,
+        duplicate_axis_ids,
+        missing_axis_ids,
+        condition_id_mismatches,
         stateful_score_delta_without_subagent: delta(on_off, off_off),
         subagent_score_delta_without_stateful: delta(off_on, off_off),
         combined_interaction_score_delta: match (on_on, on_off, off_on, off_off) {
@@ -249,13 +312,19 @@ pub fn compare_denovo_reports(reports: Vec<DeNovoConditionReport>) -> DeNovoComp
 }
 
 fn score_for(
-    conditions: &BTreeMap<(bool, bool), &DeNovoConditionReport>,
+    conditions: &BTreeMap<(bool, bool), Vec<&DeNovoConditionReport>>,
     stateful: bool,
     subagent: bool,
 ) -> Option<f64> {
-    conditions
-        .get(&(stateful, subagent))
-        .and_then(|report| report.average_score)
+    let reports = conditions.get(&(stateful, subagent))?;
+    if reports.len() != 1 {
+        return None;
+    }
+    let report = reports[0];
+    if report.condition_id != report.condition.id() {
+        return None;
+    }
+    report.average_score
 }
 
 fn delta(value: Option<f64>, baseline: Option<f64>) -> Option<f64> {

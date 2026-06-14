@@ -67,7 +67,7 @@ fn denovo_official_result_deserializer_accepts_extra_fields() {
           "success": true,
           "score": 0.96,
           "eval_result": {
-            "details": {"pass_rate": 0.958, "passed": 92, "failed": 4}
+            "details": {"pass_rate": 0.958, "passed": 92, "failed": 4, "duration_ms": 12}
           },
           "new_field_from_aweagent": {"kept": true}
         }"#,
@@ -79,11 +79,28 @@ fn denovo_official_result_deserializer_accepts_extra_fields() {
     assert_eq!(result.score, Some(0.96));
     assert_eq!(
         result
+            .extra
+            .get("new_field_from_aweagent")
+            .and_then(|value| value.get("kept"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        result
             .eval_result
             .as_ref()
             .and_then(|eval| eval.details.as_ref())
             .and_then(|details| details.pass_rate),
         Some(0.958)
+    );
+    assert_eq!(
+        result
+            .eval_result
+            .as_ref()
+            .and_then(|eval| eval.details.as_ref())
+            .and_then(|details| details.extra.get("duration_ms"))
+            .and_then(serde_json::Value::as_u64),
+        Some(12)
     );
 }
 
@@ -121,6 +138,8 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
     assert_eq!(report.condition_id, "stateful-on_subagent-off");
     assert_eq!(report.total_instances, 3);
     assert_eq!(report.completed_instances, 2);
+    assert_eq!(report.scored_instances, 2);
+    assert_eq!(report.pass_rate_instances, 2);
     assert_eq!(report.success_count, 1);
     assert_eq!(report.error_count, 1);
     assert_eq!(report.success_rate, Some(0.333));
@@ -170,4 +189,82 @@ fn denovo_comparison_indexes_reports_by_condition_and_computes_deltas() {
     assert_eq!(comparison.subagent_score_delta_without_stateful, Some(0.2));
     assert_eq!(comparison.combined_interaction_score_delta, Some(-0.1));
     assert_eq!(comparison.total_running_time_ms, 5500);
+}
+
+#[test]
+fn denovo_condition_parser_rejects_duplicate_and_empty_values() {
+    let duplicate = parse_denovo_condition("stateful:on,stateful:off,subagent:on")
+        .expect_err("duplicate singleton axis should fail");
+    assert!(
+        duplicate
+            .to_string()
+            .contains("duplicate DeNovoSWE condition key")
+    );
+
+    let empty_config = parse_denovo_condition("stateful:on,subagent:off,config:")
+        .expect_err("empty config should fail");
+    assert!(
+        empty_config
+            .to_string()
+            .contains("empty DeNovoSWE config path")
+    );
+
+    let empty_env_key = parse_denovo_condition("stateful:on,subagent:off,env:=value")
+        .expect_err("empty env key should fail");
+    assert!(
+        empty_env_key
+            .to_string()
+            .contains("empty DeNovoSWE env key")
+    );
+}
+
+#[test]
+fn denovo_comparison_reports_duplicate_missing_and_mismatched_axes() {
+    let baseline = build_denovo_condition_report(
+        "baseline",
+        DeNovoCondition::new(false, false),
+        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.5}"#).unwrap()],
+        1000,
+        None,
+    );
+    let mut duplicate_baseline = build_denovo_condition_report(
+        "duplicate-baseline",
+        DeNovoCondition::new(false, false),
+        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.9}"#).unwrap()],
+        1000,
+        None,
+    );
+    duplicate_baseline.condition_id = "wrong-condition-id".to_string();
+    let stateful = build_denovo_condition_report(
+        "stateful",
+        DeNovoCondition::new(true, false),
+        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.8}"#).unwrap()],
+        1500,
+        None,
+    );
+    let combined = build_denovo_condition_report(
+        "combined",
+        DeNovoCondition::new(true, true),
+        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.95}"#).unwrap()],
+        1800,
+        None,
+    );
+
+    let comparison = compare_denovo_reports(vec![baseline, duplicate_baseline, stateful, combined]);
+
+    assert_eq!(
+        comparison.duplicate_axis_ids,
+        vec!["stateful-off_subagent-off"]
+    );
+    assert_eq!(
+        comparison.missing_axis_ids,
+        vec!["stateful-off_subagent-on"]
+    );
+    assert_eq!(
+        comparison.condition_id_mismatches,
+        vec!["wrong-condition-id != stateful-off_subagent-off"]
+    );
+    assert_eq!(comparison.stateful_score_delta_without_subagent, None);
+    assert_eq!(comparison.subagent_score_delta_without_stateful, None);
+    assert_eq!(comparison.combined_interaction_score_delta, None);
 }
