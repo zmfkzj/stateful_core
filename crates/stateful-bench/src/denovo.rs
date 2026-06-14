@@ -124,6 +124,8 @@ pub struct DeNovoConditionReport {
     pub run_id: String,
     pub condition_id: String,
     pub condition: DeNovoCondition,
+    pub stateful: bool,
+    pub subagent: bool,
     pub total_instances: usize,
     pub completed_instances: usize,
     pub success_count: usize,
@@ -136,12 +138,12 @@ pub struct DeNovoConditionReport {
     pub running_time_ms: u64,
     pub average_running_time_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub official_commit: Option<String>,
+    pub aweagent_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeNovoComparisonReport {
-    pub conditions: BTreeMap<String, DeNovoConditionReport>,
+    pub conditions: Vec<DeNovoConditionReport>,
     pub stateful_score_delta_without_subagent: Option<f64>,
     pub subagent_score_delta_without_stateful: Option<f64>,
     pub combined_interaction_score_delta: Option<f64>,
@@ -153,7 +155,7 @@ pub fn build_denovo_condition_report(
     condition: DeNovoCondition,
     results: Vec<DeNovoOfficialResult>,
     running_time_ms: u64,
-    official_commit: Option<String>,
+    aweagent_commit: Option<String>,
 ) -> DeNovoConditionReport {
     let total_instances = results.len();
     let completed_instances = results
@@ -188,10 +190,16 @@ pub fn build_denovo_condition_report(
         .filter(|score| **score >= 0.75 && **score < 1.0)
         .count();
 
+    let condition_id = condition.id();
+    let stateful = condition.stateful;
+    let subagent = condition.subagent;
+
     DeNovoConditionReport {
         run_id: run_id.into(),
-        condition_id: condition.id(),
+        condition_id,
         condition,
+        stateful,
+        subagent,
         total_instances,
         completed_instances,
         success_count,
@@ -207,7 +215,7 @@ pub fn build_denovo_condition_report(
         } else {
             Some(round_three(running_time_ms as f64 / total_instances as f64))
         },
-        official_commit,
+        aweagent_commit,
     }
 }
 
@@ -216,18 +224,18 @@ pub fn compare_denovo_reports(reports: Vec<DeNovoConditionReport>) -> DeNovoComp
         .iter()
         .map(|report| report.running_time_ms)
         .sum::<u64>();
-    let conditions = reports
-        .into_iter()
-        .map(|report| (report.condition_id.clone(), report))
+    let by_axes = reports
+        .iter()
+        .map(|report| ((report.stateful, report.subagent), report))
         .collect::<BTreeMap<_, _>>();
 
-    let off_off = score_for(&conditions, false, false);
-    let on_off = score_for(&conditions, true, false);
-    let off_on = score_for(&conditions, false, true);
-    let on_on = score_for(&conditions, true, true);
+    let off_off = score_for(&by_axes, false, false);
+    let on_off = score_for(&by_axes, true, false);
+    let off_on = score_for(&by_axes, false, true);
+    let on_on = score_for(&by_axes, true, true);
 
     DeNovoComparisonReport {
-        conditions,
+        conditions: reports,
         stateful_score_delta_without_subagent: delta(on_off, off_off),
         subagent_score_delta_without_stateful: delta(off_on, off_off),
         combined_interaction_score_delta: match (on_on, on_off, off_on, off_off) {
@@ -241,12 +249,12 @@ pub fn compare_denovo_reports(reports: Vec<DeNovoConditionReport>) -> DeNovoComp
 }
 
 fn score_for(
-    conditions: &BTreeMap<String, DeNovoConditionReport>,
+    conditions: &BTreeMap<(bool, bool), &DeNovoConditionReport>,
     stateful: bool,
     subagent: bool,
 ) -> Option<f64> {
     conditions
-        .get(&DeNovoCondition::new(stateful, subagent).id())
+        .get(&(stateful, subagent))
         .and_then(|report| report.average_score)
 }
 
