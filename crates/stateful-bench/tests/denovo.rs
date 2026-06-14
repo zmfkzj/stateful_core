@@ -1,10 +1,11 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
 use stateful_bench::{
-    DeNovoCondition, DeNovoConditionRunOptions, DeNovoExtractRecipeOptions, DeNovoOfficialResult,
-    DeNovoRunMode, DeNovoRunRecipeOptions, build_denovo_condition_report,
-    build_denovo_extract_recipe_command, build_denovo_run_recipe_command, compare_denovo_reports,
-    default_denovo_conditions, parse_denovo_condition, run_denovo_condition,
+    DeNovoComparisonReport, DeNovoCondition, DeNovoConditionRunOptions, DeNovoExtractRecipeOptions,
+    DeNovoMatrixRunOptions, DeNovoOfficialResult, DeNovoRunMode, DeNovoRunRecipeOptions,
+    build_denovo_condition_report, build_denovo_extract_recipe_command,
+    build_denovo_run_recipe_command, compare_denovo_reports, default_denovo_conditions,
+    parse_denovo_condition, run_denovo_condition, run_denovo_matrix,
 };
 
 #[test]
@@ -442,6 +443,75 @@ out.mkdir(parents=True, exist_ok=True)
             .join("conditions/stateful-on_subagent-off/official/_/results.jsonl")
             .is_file()
     );
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn denovo_matrix_run_writes_condition_reports_and_comparison() {
+    let root = temp_root("stateful-bench-denovo-matrix");
+    let aweagent = root.join("AweAgent");
+    let recipe_dir = aweagent.join("recipes/denovo_swe");
+    fs::create_dir_all(&recipe_dir).expect("recipe dir should exist");
+    fs::write(
+        recipe_dir.join("run.py"),
+        r#"#!/usr/bin/env python3
+import argparse
+import json
+from pathlib import Path
+parser = argparse.ArgumentParser()
+parser.add_argument("--output")
+parser.add_argument("--config")
+args, extra = parser.parse_known_args()
+out = Path(args.output) / "_"
+out.mkdir(parents=True, exist_ok=True)
+score = 1.0 if "stateful" in args.config else 0.5
+(out / "results.jsonl").write_text(json.dumps({"instance_id":"fake-a","success":score == 1.0,"score":score,"eval_result":{"details":{"pass_rate":score}}}) + "\n")
+"#,
+    )
+    .expect("fake run.py should write");
+
+    let run_dir = root.join("runs/dev-denovo");
+    let reports = run_denovo_matrix(DeNovoMatrixRunOptions {
+        run_id: "dev-denovo".to_string(),
+        aweagent_root: aweagent,
+        python: "python3".to_string(),
+        data_file: "denovoswe_with_patches.jsonl".into(),
+        run_dir: run_dir.clone(),
+        base_config: "configs/tasks/denovoswe.yaml".into(),
+        conditions: vec![
+            parse_denovo_condition("stateful:off,subagent:off,config:configs/tasks/denovoswe.yaml")
+                .unwrap(),
+            parse_denovo_condition(
+                "stateful:on,subagent:off,config:configs/tasks/denovoswe-stateful.yaml",
+            )
+            .unwrap(),
+        ],
+        mode: DeNovoRunMode::Batch,
+        instance_ids: Vec::new(),
+        llm_config: None,
+        model: None,
+        max_steps: None,
+        max_concurrent: None,
+        search_override: None,
+        skip_eval: false,
+        validate_run: false,
+        eval_iters: 1,
+        del_done_images: false,
+        dump_clean_snapshot: None,
+        prompt_version: "v2".to_string(),
+        verbose: false,
+    })
+    .expect("matrix should run");
+
+    assert_eq!(reports.len(), 2);
+    assert!(run_dir.join("run.json").is_file());
+    assert!(run_dir.join("comparison.json").is_file());
+    let comparison: DeNovoComparisonReport = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("comparison.json")).expect("comparison should exist"),
+    )
+    .expect("comparison should parse");
+    assert_eq!(comparison.conditions.len(), 2);
 
     fs::remove_dir_all(root).expect("temp root should clean up");
 }

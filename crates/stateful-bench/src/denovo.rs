@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    env,
     fs::{self, File},
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
@@ -136,13 +137,93 @@ pub fn search_override(enable_search: bool, no_search: bool) -> Option<bool> {
 
 pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
     match command {
-        DeNovoCommand::Extract { .. }
-        | DeNovoCommand::Run { .. }
-        | DeNovoCommand::Report { .. }
-        | DeNovoCommand::Compare { .. } => {
-            bail!("DeNovoSWE command execution is implemented in Tasks 4, 5, and 6")
+        DeNovoCommand::Extract { .. } => {
+            bail!("DeNovoSWE extract execution is implemented in Task 6")
+        }
+        DeNovoCommand::Run {
+            aweagent_root,
+            python,
+            data_file,
+            output_dir,
+            run_id,
+            config,
+            mode,
+            condition,
+            llm_config,
+            model,
+            max_steps,
+            max_concurrent,
+            instance_id,
+            eval_iters,
+            prompt_version,
+            enable_search,
+            no_search,
+            skip_eval,
+            validate_run,
+            del_done_images,
+            dump_clean_snapshot,
+            verbose,
+        } => {
+            let aweagent_root = resolve_aweagent_root(aweagent_root)?;
+            let conditions = condition
+                .iter()
+                .map(|condition| parse_denovo_condition(condition))
+                .collect::<Result<Vec<_>>>()?;
+            let reports = run_denovo_matrix(DeNovoMatrixRunOptions {
+                run_id: run_id.clone(),
+                aweagent_root,
+                python,
+                data_file,
+                run_dir: output_dir.join(run_id),
+                base_config: config,
+                conditions,
+                mode,
+                instance_ids: instance_id,
+                llm_config,
+                model,
+                max_steps,
+                max_concurrent,
+                search_override: search_override(enable_search, no_search),
+                skip_eval,
+                validate_run,
+                eval_iters,
+                del_done_images,
+                dump_clean_snapshot,
+                prompt_version,
+                verbose,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&reports)?);
+        }
+        DeNovoCommand::Report {
+            run_dir,
+            format,
+            output,
+        } => {
+            let reports = read_condition_reports(&run_dir)?;
+            let rendered = match format {
+                ReportFormat::Json => serde_json::to_string_pretty(&reports)?,
+                ReportFormat::Markdown => render_denovo_report_markdown(&reports),
+            };
+            write_or_print(output.as_deref(), &rendered)?;
+        }
+        DeNovoCommand::Compare {
+            report,
+            format,
+            output,
+        } => {
+            let reports = report
+                .iter()
+                .map(read_json_file::<DeNovoConditionReport>)
+                .collect::<Result<Vec<_>>>()?;
+            let comparison = compare_denovo_reports(reports);
+            let rendered = match format {
+                ReportFormat::Json => serde_json::to_string_pretty(&comparison)?,
+                ReportFormat::Markdown => render_denovo_comparison_markdown(&comparison),
+            };
+            write_or_print(output.as_deref(), &rendered)?;
         }
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +534,159 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
     Ok(metadata)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeNovoMatrixRunOptions {
+    pub run_id: String,
+    pub aweagent_root: PathBuf,
+    pub python: String,
+    pub data_file: PathBuf,
+    pub run_dir: PathBuf,
+    pub base_config: PathBuf,
+    pub conditions: Vec<DeNovoCondition>,
+    pub mode: DeNovoRunMode,
+    pub instance_ids: Vec<String>,
+    pub llm_config: Option<PathBuf>,
+    pub model: Option<String>,
+    pub max_steps: Option<usize>,
+    pub max_concurrent: Option<usize>,
+    pub search_override: Option<bool>,
+    pub skip_eval: bool,
+    pub validate_run: bool,
+    pub eval_iters: usize,
+    pub del_done_images: bool,
+    pub dump_clean_snapshot: Option<PathBuf>,
+    pub prompt_version: String,
+    pub verbose: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct DeNovoMatrixRunMetadata {
+    run_id: String,
+    run_dir: PathBuf,
+    condition_ids: Vec<String>,
+    started_at_ms: u64,
+    finished_at_ms: u64,
+    running_time_ms: u64,
+}
+
+pub fn run_denovo_matrix(options: DeNovoMatrixRunOptions) -> Result<Vec<DeNovoConditionReport>> {
+    fs::create_dir_all(&options.run_dir)
+        .with_context(|| format!("failed to create {}", options.run_dir.display()))?;
+    let conditions = if options.conditions.is_empty() {
+        default_denovo_conditions()
+    } else {
+        options.conditions.clone()
+    };
+    let started_at_ms = unix_ms();
+    let started = Instant::now();
+    let mut reports = Vec::new();
+    for condition in &conditions {
+        let metadata = run_denovo_condition(DeNovoConditionRunOptions {
+            run_id: options.run_id.clone(),
+            aweagent_root: options.aweagent_root.clone(),
+            python: options.python.clone(),
+            data_file: options.data_file.clone(),
+            run_dir: options.run_dir.clone(),
+            base_config: options.base_config.clone(),
+            condition: condition.clone(),
+            mode: options.mode,
+            instance_ids: options.instance_ids.clone(),
+            llm_config: options.llm_config.clone(),
+            model: options.model.clone(),
+            max_steps: options.max_steps,
+            max_concurrent: options.max_concurrent,
+            search_override: options.search_override,
+            skip_eval: options.skip_eval,
+            validate_run: options.validate_run,
+            eval_iters: options.eval_iters,
+            del_done_images: options.del_done_images,
+            dump_clean_snapshot: options.dump_clean_snapshot.clone(),
+            prompt_version: options.prompt_version.clone(),
+            verbose: options.verbose,
+        })?;
+        let report_path = metadata
+            .report_json
+            .as_ref()
+            .context("condition run completed without report_json metadata")?;
+        reports.push(read_json_file::<DeNovoConditionReport>(report_path)?);
+    }
+
+    let comparison = compare_denovo_reports(reports.clone());
+    write_json_file(options.run_dir.join("comparison.json"), &comparison)?;
+    let metadata = DeNovoMatrixRunMetadata {
+        run_id: options.run_id,
+        run_dir: options.run_dir.clone(),
+        condition_ids: reports
+            .iter()
+            .map(|report| report.condition_id.clone())
+            .collect(),
+        started_at_ms,
+        finished_at_ms: unix_ms(),
+        running_time_ms: elapsed_ms(started),
+    };
+    write_json_file(options.run_dir.join("run.json"), &metadata)?;
+    Ok(reports)
+}
+
+pub fn render_denovo_report_markdown(reports: &[DeNovoConditionReport]) -> String {
+    let mut output = String::from(
+        "# DeNovoSWE Report\n\n| Condition | Stateful | Subagent | Instances | Success rate | Average score | Running time ms |\n| --- | --- | --- | ---: | ---: | ---: | ---: |\n",
+    );
+    for report in reports {
+        output.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            report.condition_id,
+            axis_label(report.condition.stateful),
+            axis_label(report.condition.subagent),
+            report.total_instances,
+            optional_float(report.success_rate),
+            optional_float(report.average_score),
+            report.running_time_ms
+        ));
+    }
+    output
+}
+
+pub fn render_denovo_comparison_markdown(report: &DeNovoComparisonReport) -> String {
+    let mut output = render_denovo_report_markdown(&report.conditions);
+    output.push_str("\n## Comparison\n\n");
+    output.push_str(&format!(
+        "- Stateful delta without subagent: {}\n",
+        optional_float(report.stateful_score_delta_without_subagent)
+    ));
+    output.push_str(&format!(
+        "- Subagent delta without stateful: {}\n",
+        optional_float(report.subagent_score_delta_without_stateful)
+    ));
+    output.push_str(&format!(
+        "- Combined interaction delta: {}\n",
+        optional_float(report.combined_interaction_score_delta)
+    ));
+    output.push_str(&format!(
+        "- Total running time ms: {}\n",
+        report.total_running_time_ms
+    ));
+    if !report.missing_axis_ids.is_empty() {
+        output.push_str(&format!(
+            "- Missing axes: {}\n",
+            report.missing_axis_ids.join(", ")
+        ));
+    }
+    if !report.duplicate_axis_ids.is_empty() {
+        output.push_str(&format!(
+            "- Duplicate axes: {}\n",
+            report.duplicate_axis_ids.join(", ")
+        ));
+    }
+    if !report.condition_id_mismatches.is_empty() {
+        output.push_str(&format!(
+            "- Condition ID mismatches: {}\n",
+            report.condition_id_mismatches.join(", ")
+        ));
+    }
+    output
+}
+
 fn execute_recipe_command(command: &RecipeCommand) -> Result<()> {
     let status = ProcessCommand::new(&command.program)
         .args(&command.args)
@@ -547,6 +781,77 @@ where
     serde_json::to_writer_pretty(file, value)
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
+}
+
+fn read_json_file<T>(path: impl AsRef<Path>) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let path = path.as_ref();
+    let input = fs::read_to_string(path)
+        .with_context(|| format!("failed to read JSON file {}", path.display()))?;
+    serde_json::from_str(&input)
+        .with_context(|| format!("failed to parse JSON file {}", path.display()))
+}
+
+fn resolve_aweagent_root(aweagent_root: Option<PathBuf>) -> Result<PathBuf> {
+    let root = match aweagent_root {
+        Some(root) => root,
+        None => env::var_os("AWEAGENT_ROOT")
+            .map(PathBuf::from)
+            .context("provide --aweagent-root or set AWEAGENT_ROOT")?,
+    };
+    if !root.is_dir() {
+        bail!("AweAgent root does not exist: {}", root.display());
+    }
+    Ok(root)
+}
+
+fn read_condition_reports(run_dir: &Path) -> Result<Vec<DeNovoConditionReport>> {
+    let conditions_dir = run_dir.join("conditions");
+    let mut report_paths = fs::read_dir(&conditions_dir)
+        .with_context(|| format!("failed to read {}", conditions_dir.display()))?
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .map(|entry| entry.path().join("denovo-report.json"))
+        })
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    report_paths.sort();
+    let reports = report_paths
+        .iter()
+        .map(read_json_file::<DeNovoConditionReport>)
+        .collect::<Result<Vec<_>>>()?;
+    if reports.is_empty() {
+        bail!(
+            "no DeNovoSWE condition reports found under {}",
+            conditions_dir.display()
+        );
+    }
+    Ok(reports)
+}
+
+fn write_or_print(output: Option<&Path>, rendered: &str) -> Result<()> {
+    if let Some(output) = output {
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(output, rendered)?;
+    } else {
+        println!("{rendered}");
+    }
+    Ok(())
+}
+
+fn axis_label(enabled: bool) -> &'static str {
+    if enabled { "on" } else { "off" }
+}
+
+fn optional_float(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.3}"))
+        .unwrap_or_else(|| "n/a".to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
