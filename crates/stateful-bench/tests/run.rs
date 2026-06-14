@@ -96,19 +96,9 @@ fn run_pairs_executes_manifest_agents_in_one_workspace_and_reports_harness_resul
 fn run_pairs_templates_use_absolute_paths_when_output_dir_is_relative() {
     let root = temp_root("stateful-bench-run-relative-output");
     let pairs_path = root.join("pairs.jsonl");
-    let output_dir = PathBuf::from(format!(
-        "../../target/stateful-bench-run-relative-output-{}/runs",
-        std::process::id()
-    ));
-    let output_root = std::env::current_dir()
-        .expect("current dir should resolve")
-        .join(format!(
-            "../../target/stateful-bench-run-relative-output-{}",
-            std::process::id()
-        ));
-    if output_root.exists() {
-        fs::remove_dir_all(&output_root).expect("old relative output root should clean up");
-    }
+    let output_root = target_temp_dir("stateful-bench-run-relative-output");
+    let current_dir = std::env::current_dir().expect("current dir should resolve");
+    let output_dir = relative_path_from(&current_dir, &output_root).join("runs");
     write_jsonl(&pairs_path, &[pair()]).expect("pair manifest should write");
 
     run_pairs(RunOptions {
@@ -756,6 +746,38 @@ fn temp_root(name: &str) -> std::path::PathBuf {
         fs::remove_dir_all(&root).expect("old temp root should clean up");
     }
     root
+}
+
+fn target_temp_dir(name: &str) -> PathBuf {
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    let root = target_dir.join(format!("{name}-{}", std::process::id()));
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("old target temp root should clean up");
+    }
+    root
+}
+
+fn relative_path_from(base: &Path, target: &Path) -> PathBuf {
+    let base_components = base.components().collect::<Vec<_>>();
+    let target_components = target.components().collect::<Vec<_>>();
+    let mut shared = 0;
+    while shared < base_components.len()
+        && shared < target_components.len()
+        && base_components[shared] == target_components[shared]
+    {
+        shared += 1;
+    }
+
+    let mut relative = PathBuf::new();
+    for _ in shared..base_components.len() {
+        relative.push("..");
+    }
+    for component in &target_components[shared..] {
+        relative.push(component.as_os_str());
+    }
+    relative
 }
 
 fn fake_stateful_binary(root: &Path) -> PathBuf {

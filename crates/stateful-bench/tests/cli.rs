@@ -973,9 +973,10 @@ fn command_contains(command: &[serde_json::Value], expected: &str) -> bool {
 }
 
 fn target_temp_dir(name: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target")
-        .join(format!("{name}-{}", std::process::id()));
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    let dir = target_dir.join(format!("{name}-{}", std::process::id()));
     if dir.exists() {
         fs::remove_dir_all(&dir).expect("old temp dir should clean up");
     }
