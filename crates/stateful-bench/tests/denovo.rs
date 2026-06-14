@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
 use stateful_bench::{
-    DeNovoComparisonReport, DeNovoCondition, DeNovoConditionRunOptions, DeNovoExtractRecipeOptions,
-    DeNovoMatrixRunOptions, DeNovoOfficialResult, DeNovoRunMode, DeNovoRunRecipeOptions,
-    build_denovo_condition_report, build_denovo_extract_recipe_command,
+    DeNovoComparisonReport, DeNovoCondition, DeNovoConditionRunOptions, DeNovoExtractOptions,
+    DeNovoExtractRecipeOptions, DeNovoMatrixRunOptions, DeNovoOfficialResult, DeNovoRunMode,
+    DeNovoRunRecipeOptions, build_denovo_condition_report, build_denovo_extract_recipe_command,
     build_denovo_run_recipe_command, compare_denovo_reports, default_denovo_conditions,
-    parse_denovo_condition, run_denovo_condition, run_denovo_matrix,
+    parse_denovo_condition, run_denovo_condition, run_denovo_extract, run_denovo_matrix,
 };
 
 #[test]
@@ -512,6 +512,52 @@ score = 1.0 if "stateful" in args.config else 0.5
     )
     .expect("comparison should parse");
     assert_eq!(comparison.conditions.len(), 2);
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn denovo_extract_executes_fake_official_extract_recipe() {
+    let root = temp_root("stateful-bench-denovo-extract");
+    let aweagent = root.join("AweAgent");
+    let recipe_dir = aweagent.join("recipes/denovo_swe");
+    fs::create_dir_all(&recipe_dir).expect("recipe dir should exist");
+    fs::write(
+        recipe_dir.join("extract_patch.py"),
+        r#"#!/usr/bin/env python3
+import argparse
+import json
+from pathlib import Path
+parser = argparse.ArgumentParser()
+parser.add_argument("--input")
+parser.add_argument("--output")
+parser.add_argument("--config")
+args, extra = parser.parse_known_args()
+out = Path(args.output) / "extract_patch_fake"
+out.mkdir(parents=True, exist_ok=True)
+(out / "results.jsonl").write_text(json.dumps({"instance_id":"fake-a","test_patch":"diff --git a/test.py b/test.py\n","test_binary_archive_b64":"","test_binary_files":[]}) + "\n")
+(out / "status.jsonl").write_text(json.dumps({"instance_id":"fake-a","status":"success"}) + "\n")
+"#,
+    )
+    .expect("fake extract_patch.py should write");
+
+    let metadata = run_denovo_extract(DeNovoExtractOptions {
+        aweagent_root: aweagent,
+        python: "python3".to_string(),
+        input: "ready_denovoswe.jsonl".into(),
+        output: root.join("extracts"),
+        config: "configs/tasks/denovoswe.yaml".into(),
+        max_concurrent: None,
+        instance_ids: Vec::new(),
+        dry_run: false,
+        del_done_images: false,
+        no_extract_package_info: false,
+    })
+    .expect("extract should run");
+
+    assert!(metadata.running_time_ms > 0);
+    assert!(metadata.results_jsonl.is_file());
+    assert!(root.join("extracts/denovo-extract.json").is_file());
 
     fs::remove_dir_all(root).expect("temp root should clean up");
 }

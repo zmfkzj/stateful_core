@@ -137,8 +137,31 @@ pub fn search_override(enable_search: bool, no_search: bool) -> Option<bool> {
 
 pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
     match command {
-        DeNovoCommand::Extract { .. } => {
-            bail!("DeNovoSWE extract execution is implemented in Task 6")
+        DeNovoCommand::Extract {
+            aweagent_root,
+            python,
+            input,
+            output,
+            config,
+            max_concurrent,
+            instance_id,
+            dry_run,
+            del_done_images,
+            no_extract_package_info,
+        } => {
+            let metadata = run_denovo_extract(DeNovoExtractOptions {
+                aweagent_root: resolve_aweagent_root(aweagent_root)?,
+                python,
+                input,
+                output,
+                config,
+                max_concurrent,
+                instance_ids: instance_id,
+                dry_run,
+                del_done_images,
+                no_extract_package_info,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&metadata)?);
         }
         DeNovoCommand::Run {
             aweagent_root,
@@ -626,6 +649,83 @@ pub fn run_denovo_matrix(options: DeNovoMatrixRunOptions) -> Result<Vec<DeNovoCo
     };
     write_json_file(options.run_dir.join("run.json"), &metadata)?;
     Ok(reports)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeNovoExtractOptions {
+    pub aweagent_root: PathBuf,
+    pub python: String,
+    pub input: PathBuf,
+    pub output: PathBuf,
+    pub config: PathBuf,
+    pub max_concurrent: Option<usize>,
+    pub instance_ids: Vec<String>,
+    pub dry_run: bool,
+    pub del_done_images: bool,
+    pub no_extract_package_info: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeNovoExtractMetadata {
+    pub aweagent_root: PathBuf,
+    pub output: PathBuf,
+    pub command: RecipeCommand,
+    pub results_jsonl: PathBuf,
+    pub started_at_ms: u64,
+    pub finished_at_ms: u64,
+    pub running_time_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aweagent_commit: Option<String>,
+}
+
+pub fn run_denovo_extract(options: DeNovoExtractOptions) -> Result<DeNovoExtractMetadata> {
+    let recipe = options
+        .aweagent_root
+        .join("recipes/denovo_swe/extract_patch.py");
+    if !recipe.is_file() {
+        bail!(
+            "official DeNovoSWE extract recipe not found at {}",
+            recipe.display()
+        );
+    }
+    fs::create_dir_all(&options.output)
+        .with_context(|| format!("failed to create {}", options.output.display()))?;
+
+    let command = build_denovo_extract_recipe_command(DeNovoExtractRecipeOptions {
+        aweagent_root: options.aweagent_root.clone(),
+        python: options.python,
+        input: options.input,
+        output: options.output.clone(),
+        config: options.config,
+        max_concurrent: options.max_concurrent,
+        instance_ids: options.instance_ids,
+        dry_run: options.dry_run,
+        del_done_images: options.del_done_images,
+        no_extract_package_info: options.no_extract_package_info,
+    })?;
+    let started_at_ms = unix_ms();
+    let started = Instant::now();
+    execute_recipe_command(&command)?;
+    let running_time_ms = elapsed_ms(started);
+    let finished_at_ms = unix_ms();
+    let results_jsonl = find_results_jsonl(&options.output).with_context(|| {
+        format!(
+            "failed to locate extract results.jsonl under {}",
+            options.output.display()
+        )
+    })?;
+    let metadata = DeNovoExtractMetadata {
+        aweagent_root: options.aweagent_root.clone(),
+        output: options.output.clone(),
+        command,
+        results_jsonl,
+        started_at_ms,
+        finished_at_ms,
+        running_time_ms,
+        aweagent_commit: read_aweagent_commit(&options.aweagent_root),
+    };
+    write_json_file(options.output.join("denovo-extract.json"), &metadata)?;
+    Ok(metadata)
 }
 
 pub fn render_denovo_report_markdown(reports: &[DeNovoConditionReport]) -> String {
