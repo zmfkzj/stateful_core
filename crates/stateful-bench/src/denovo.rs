@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs::{self, File},
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Subcommand, ValueEnum};
@@ -139,7 +145,7 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipeCommand {
     pub program: String,
     pub args: Vec<String>,
@@ -300,6 +306,247 @@ fn push_repeated(args: &mut Vec<String>, flag: &str, values: Vec<String>) {
 
 fn path_arg(path: &PathBuf) -> String {
     path.to_string_lossy().into_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeNovoConditionRunOptions {
+    pub run_id: String,
+    pub aweagent_root: PathBuf,
+    pub python: String,
+    pub data_file: PathBuf,
+    pub run_dir: PathBuf,
+    pub base_config: PathBuf,
+    pub condition: DeNovoCondition,
+    pub mode: DeNovoRunMode,
+    pub instance_ids: Vec<String>,
+    pub llm_config: Option<PathBuf>,
+    pub model: Option<String>,
+    pub max_steps: Option<usize>,
+    pub max_concurrent: Option<usize>,
+    pub search_override: Option<bool>,
+    pub skip_eval: bool,
+    pub validate_run: bool,
+    pub eval_iters: usize,
+    pub del_done_images: bool,
+    pub dump_clean_snapshot: Option<PathBuf>,
+    pub prompt_version: String,
+    pub verbose: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeNovoConditionMetadata {
+    pub run_id: String,
+    pub condition_id: String,
+    pub condition: DeNovoCondition,
+    pub command: RecipeCommand,
+    pub official_dir: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results_jsonl: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_json: Option<PathBuf>,
+    pub started_at_ms: u64,
+    pub finished_at_ms: u64,
+    pub running_time_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aweagent_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovoConditionMetadata> {
+    let recipe = options.aweagent_root.join("recipes/denovo_swe/run.py");
+    if !recipe.is_file() {
+        bail!(
+            "official DeNovoSWE run recipe not found at {}",
+            recipe.display()
+        );
+    }
+
+    let condition_id = options.condition.id();
+    let condition_dir = options.run_dir.join("conditions").join(&condition_id);
+    let official_dir = condition_dir.join("official");
+    fs::create_dir_all(&official_dir)
+        .with_context(|| format!("failed to create {}", official_dir.display()))?;
+
+    let command = build_denovo_run_recipe_command(DeNovoRunRecipeOptions {
+        aweagent_root: options.aweagent_root.clone(),
+        python: options.python,
+        data_file: options.data_file,
+        output: official_dir.clone(),
+        base_config: options.base_config,
+        condition: options.condition.clone(),
+        mode: options.mode,
+        instance_ids: options.instance_ids,
+        llm_config: options.llm_config,
+        model: options.model,
+        max_steps: options.max_steps,
+        max_concurrent: options.max_concurrent,
+        search_override: options.search_override,
+        skip_eval: options.skip_eval,
+        validate_run: options.validate_run,
+        eval_iters: options.eval_iters,
+        del_done_images: options.del_done_images,
+        dump_clean_snapshot: options.dump_clean_snapshot,
+        prompt_version: options.prompt_version,
+        verbose: options.verbose,
+    })?;
+
+    let started_at_ms = unix_ms();
+    let started = Instant::now();
+    let execution = execute_recipe_command(&command);
+    let running_time_ms = elapsed_ms(started);
+    let finished_at_ms = unix_ms();
+    let aweagent_commit = read_aweagent_commit(&options.aweagent_root);
+    let metadata_path = condition_dir.join("condition.json");
+
+    if let Err(error) = execution {
+        let metadata = DeNovoConditionMetadata {
+            run_id: options.run_id,
+            condition_id,
+            condition: options.condition,
+            command,
+            official_dir,
+            results_jsonl: None,
+            report_json: None,
+            started_at_ms,
+            finished_at_ms,
+            running_time_ms,
+            aweagent_commit,
+            error: Some(error.to_string()),
+        };
+        write_json_file(&metadata_path, &metadata)?;
+        return Err(error);
+    }
+
+    let results_jsonl = find_results_jsonl(&official_dir).with_context(|| {
+        format!(
+            "failed to locate results.jsonl under {}",
+            official_dir.display()
+        )
+    })?;
+    let results = crate::read_jsonl::<DeNovoOfficialResult>(&results_jsonl)?;
+    let report = build_denovo_condition_report(
+        options.run_id.clone(),
+        options.condition.clone(),
+        results,
+        running_time_ms,
+        aweagent_commit.clone(),
+    );
+    let report_json = condition_dir.join("denovo-report.json");
+    write_json_file(&report_json, &report)?;
+
+    let metadata = DeNovoConditionMetadata {
+        run_id: options.run_id,
+        condition_id,
+        condition: options.condition,
+        command,
+        official_dir,
+        results_jsonl: Some(results_jsonl),
+        report_json: Some(report_json),
+        started_at_ms,
+        finished_at_ms,
+        running_time_ms,
+        aweagent_commit,
+        error: None,
+    };
+    write_json_file(&metadata_path, &metadata)?;
+    Ok(metadata)
+}
+
+fn execute_recipe_command(command: &RecipeCommand) -> Result<()> {
+    let status = ProcessCommand::new(&command.program)
+        .args(&command.args)
+        .current_dir(&command.cwd)
+        .envs(&command.env)
+        .status()
+        .with_context(|| format!("failed to execute {}", command_line(command)))?;
+    if !status.success() {
+        bail!(
+            "official DeNovoSWE recipe failed with status {status}: {}",
+            command_line(command)
+        );
+    }
+    Ok(())
+}
+
+fn find_results_jsonl(official_dir: &Path) -> Result<PathBuf> {
+    let preferred = official_dir.join("_").join("results.jsonl");
+    if preferred.is_file() {
+        return Ok(preferred);
+    }
+    find_file_named(official_dir, "results.jsonl").context("results.jsonl not found")
+}
+
+fn find_file_named(root: &Path, file_name: &str) -> Option<PathBuf> {
+    let mut entries = fs::read_dir(root)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect::<Vec<_>>();
+    entries.sort();
+    for path in entries {
+        if path.is_file() && path.file_name().and_then(|name| name.to_str()) == Some(file_name) {
+            return Some(path);
+        }
+        if path.is_dir()
+            && let Some(found) = find_file_named(&path, file_name)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn read_aweagent_commit(aweagent_root: &Path) -> Option<String> {
+    let output = ProcessCommand::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(aweagent_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let commit = String::from_utf8(output.stdout).ok()?;
+    let commit = commit.trim();
+    if commit.is_empty() {
+        None
+    } else {
+        Some(commit.to_string())
+    }
+}
+
+fn command_line(command: &RecipeCommand) -> String {
+    std::iter::once(command.program.as_str())
+        .chain(command.args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn unix_ms() -> u64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    let millis = started.elapsed().as_millis().max(1);
+    u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+fn write_json_file<T>(path: impl AsRef<Path>, value: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    serde_json::to_writer_pretty(file, value)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
