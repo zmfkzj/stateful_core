@@ -1,0 +1,173 @@
+use std::collections::BTreeMap;
+
+use stateful_bench::{
+    DeNovoCondition, DeNovoOfficialResult, build_denovo_condition_report, compare_denovo_reports,
+    default_denovo_conditions, parse_denovo_condition,
+};
+
+#[test]
+fn denovo_condition_parser_accepts_axes_config_and_env() {
+    let condition = parse_denovo_condition(
+        "stateful:on,subagent:off,config:configs/tasks/denovoswe-stateful.yaml,env:STATEFUL_HOME=/tmp/stateful,env:MODE=stateful",
+    )
+    .expect("condition should parse");
+
+    assert!(condition.stateful);
+    assert!(!condition.subagent);
+    assert_eq!(
+        condition.config_path.as_deref(),
+        Some(std::path::Path::new(
+            "configs/tasks/denovoswe-stateful.yaml"
+        ))
+    );
+    assert_eq!(
+        condition.env.get("STATEFUL_HOME").map(String::as_str),
+        Some("/tmp/stateful")
+    );
+    assert_eq!(
+        condition.env.get("MODE").map(String::as_str),
+        Some("stateful")
+    );
+    assert_eq!(condition.id(), "stateful-on_subagent-off");
+}
+
+#[test]
+fn denovo_condition_parser_rejects_unknown_keys() {
+    let error = parse_denovo_condition("stateful:on,subagent:off,unknown:value")
+        .expect_err("unknown key should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("unknown DeNovoSWE condition key")
+    );
+}
+
+#[test]
+fn default_denovo_conditions_cover_four_axis_combinations() {
+    assert_eq!(
+        default_denovo_conditions()
+            .iter()
+            .map(DeNovoCondition::id)
+            .collect::<Vec<_>>(),
+        vec![
+            "stateful-off_subagent-off",
+            "stateful-on_subagent-off",
+            "stateful-off_subagent-on",
+            "stateful-on_subagent-on",
+        ]
+    );
+}
+
+#[test]
+fn denovo_official_result_deserializer_accepts_extra_fields() {
+    let result: DeNovoOfficialResult = serde_json::from_str(
+        r#"{
+          "instance_id": "PyCQA_pep8_pr970",
+          "success": true,
+          "score": 0.96,
+          "eval_result": {
+            "details": {"pass_rate": 0.958, "passed": 92, "failed": 4}
+          },
+          "new_field_from_aweagent": {"kept": true}
+        }"#,
+    )
+    .expect("official result should deserialize");
+
+    assert_eq!(result.instance_id, "PyCQA_pep8_pr970");
+    assert_eq!(result.success, Some(true));
+    assert_eq!(result.score, Some(0.96));
+    assert_eq!(
+        result
+            .eval_result
+            .as_ref()
+            .and_then(|eval| eval.details.as_ref())
+            .and_then(|details| details.pass_rate),
+        Some(0.958)
+    );
+}
+
+#[test]
+fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
+    let condition = DeNovoCondition {
+        stateful: true,
+        subagent: false,
+        config_path: Some("configs/tasks/denovoswe-stateful.yaml".into()),
+        env: BTreeMap::new(),
+    };
+    let results = vec![
+        serde_json::from_str::<DeNovoOfficialResult>(
+            r#"{"instance_id":"a","success":true,"score":1.0,"eval_result":{"details":{"pass_rate":1.0}}}"#,
+        )
+        .expect("result a"),
+        serde_json::from_str::<DeNovoOfficialResult>(
+            r#"{"instance_id":"b","success":false,"score":0.75,"eval_result":{"details":{"pass_rate":0.5}}}"#,
+        )
+        .expect("result b"),
+        serde_json::from_str::<DeNovoOfficialResult>(
+            r#"{"instance_id":"c","success":false,"error":"agent failed"}"#,
+        )
+        .expect("result c"),
+    ];
+
+    let report = build_denovo_condition_report(
+        "denovo-dev",
+        condition,
+        results,
+        9000,
+        Some("abc123".to_string()),
+    );
+
+    assert_eq!(report.condition_id, "stateful-on_subagent-off");
+    assert_eq!(report.total_instances, 3);
+    assert_eq!(report.completed_instances, 2);
+    assert_eq!(report.success_count, 1);
+    assert_eq!(report.error_count, 1);
+    assert_eq!(report.success_rate, Some(0.333));
+    assert_eq!(report.average_score, Some(0.875));
+    assert_eq!(report.average_pass_rate, Some(0.75));
+    assert_eq!(report.correct_rate, Some(0.333));
+    assert_eq!(report.almost_correct_rate, Some(0.333));
+    assert_eq!(report.running_time_ms, 9000);
+    assert_eq!(report.average_running_time_ms, Some(3000.0));
+}
+
+#[test]
+fn denovo_comparison_indexes_reports_by_condition_and_computes_deltas() {
+    let off_off = build_denovo_condition_report(
+        "baseline",
+        DeNovoCondition::new(false, false),
+        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.5}"#).unwrap()],
+        1000,
+        None,
+    );
+    let on_off = build_denovo_condition_report(
+        "stateful",
+        DeNovoCondition::new(true, false),
+        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.8}"#).unwrap()],
+        1500,
+        None,
+    );
+    let off_on = build_denovo_condition_report(
+        "subagent",
+        DeNovoCondition::new(false, true),
+        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.7}"#).unwrap()],
+        1200,
+        None,
+    );
+    let on_on = build_denovo_condition_report(
+        "combined",
+        DeNovoCondition::new(true, true),
+        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.9}"#).unwrap()],
+        1800,
+        None,
+    );
+
+    let comparison = compare_denovo_reports(vec![off_off, on_off, off_on, on_on]);
+
+    assert_eq!(comparison.conditions.len(), 4);
+    assert_eq!(comparison.stateful_score_delta_without_subagent, Some(0.3));
+    assert_eq!(comparison.subagent_score_delta_without_stateful, Some(0.2));
+    assert_eq!(comparison.combined_interaction_score_delta, Some(-0.1));
+    assert_eq!(comparison.total_running_time_ms, 5500);
+}

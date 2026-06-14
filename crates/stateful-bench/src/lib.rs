@@ -1,3 +1,11 @@
+pub mod denovo;
+
+pub use denovo::{
+    DeNovoComparisonReport, DeNovoCondition, DeNovoConditionReport, DeNovoEvalDetails,
+    DeNovoEvalResult, DeNovoOfficialResult, build_denovo_condition_report, compare_denovo_reports,
+    default_denovo_conditions, parse_denovo_condition,
+};
+
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
