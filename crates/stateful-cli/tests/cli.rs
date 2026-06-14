@@ -46,6 +46,7 @@ fn doctor_labels_legacy_hooks_json_without_counting_it_as_installed() {
     let repo = temp.join("repo");
     let hooks_dir = repo.join(".codex");
     fs::create_dir_all(&hooks_dir).expect("hooks dir should create");
+    fs::create_dir_all(repo.join(".git")).expect("fixture git dir should create");
     fs::create_dir_all(repo.join(".stateful")).expect("stateful dir should create");
     fs::write(hooks_dir.join("hooks.json"), "{}").expect("legacy hooks should write");
     fs::create_dir_all(repo.join(".stateful_core")).expect("legacy state dir should create");
