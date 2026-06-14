@@ -139,6 +139,169 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipeCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeNovoExtractRecipeOptions {
+    pub aweagent_root: PathBuf,
+    pub python: String,
+    pub input: PathBuf,
+    pub output: PathBuf,
+    pub config: PathBuf,
+    pub max_concurrent: Option<usize>,
+    pub instance_ids: Vec<String>,
+    pub dry_run: bool,
+    pub del_done_images: bool,
+    pub no_extract_package_info: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeNovoRunRecipeOptions {
+    pub aweagent_root: PathBuf,
+    pub python: String,
+    pub data_file: PathBuf,
+    pub output: PathBuf,
+    pub base_config: PathBuf,
+    pub condition: DeNovoCondition,
+    pub mode: DeNovoRunMode,
+    pub instance_ids: Vec<String>,
+    pub llm_config: Option<PathBuf>,
+    pub model: Option<String>,
+    pub max_steps: Option<usize>,
+    pub max_concurrent: Option<usize>,
+    pub search_override: Option<bool>,
+    pub skip_eval: bool,
+    pub validate_run: bool,
+    pub eval_iters: usize,
+    pub del_done_images: bool,
+    pub dump_clean_snapshot: Option<PathBuf>,
+    pub prompt_version: String,
+    pub verbose: bool,
+}
+
+pub fn build_denovo_extract_recipe_command(
+    options: DeNovoExtractRecipeOptions,
+) -> Result<RecipeCommand> {
+    let mut args = vec![
+        "recipes/denovo_swe/extract_patch.py".to_string(),
+        "--input".to_string(),
+        path_arg(&options.input),
+        "--output".to_string(),
+        path_arg(&options.output),
+        "--config".to_string(),
+        path_arg(&options.config),
+    ];
+    push_optional_usize(&mut args, "--max-concurrent", options.max_concurrent);
+    push_repeated(&mut args, "--instance-id", options.instance_ids);
+    push_flag(&mut args, "--dry-run", options.dry_run);
+    push_flag(&mut args, "--del-done-images", options.del_done_images);
+    push_flag(
+        &mut args,
+        "--no-extract-package-info",
+        options.no_extract_package_info,
+    );
+
+    Ok(RecipeCommand {
+        program: options.python,
+        args,
+        cwd: options.aweagent_root,
+        env: BTreeMap::new(),
+    })
+}
+
+pub fn build_denovo_run_recipe_command(options: DeNovoRunRecipeOptions) -> Result<RecipeCommand> {
+    let config = options
+        .condition
+        .config_path
+        .as_ref()
+        .unwrap_or(&options.base_config);
+    let mut args = vec![
+        "recipes/denovo_swe/run.py".to_string(),
+        "--data-file".to_string(),
+        path_arg(&options.data_file),
+        "--config".to_string(),
+        path_arg(config),
+        "--mode".to_string(),
+        options.mode.as_str().to_string(),
+        "--output".to_string(),
+        path_arg(&options.output),
+        "--eval-iters".to_string(),
+        options.eval_iters.to_string(),
+        "--prompt-version".to_string(),
+        options.prompt_version,
+    ];
+    push_optional_path(&mut args, "--llm-config", options.llm_config.as_ref());
+    push_optional_string(&mut args, "--model", options.model.as_deref());
+    push_optional_usize(&mut args, "--max-steps", options.max_steps);
+    push_optional_usize(&mut args, "--max-concurrent", options.max_concurrent);
+    push_repeated(&mut args, "--instance-id", options.instance_ids);
+    match options.search_override {
+        Some(true) => args.push("--enable-search".to_string()),
+        Some(false) => args.push("--no-search".to_string()),
+        None => {}
+    }
+    push_flag(&mut args, "--skip-eval", options.skip_eval);
+    push_flag(&mut args, "--validate-run", options.validate_run);
+    push_flag(&mut args, "--del-done-images", options.del_done_images);
+    push_optional_path(
+        &mut args,
+        "--dump-clean-snapshot",
+        options.dump_clean_snapshot.as_ref(),
+    );
+    push_flag(&mut args, "--verbose", options.verbose);
+
+    Ok(RecipeCommand {
+        program: options.python,
+        args,
+        cwd: options.aweagent_root,
+        env: options.condition.env,
+    })
+}
+
+fn push_flag(args: &mut Vec<String>, flag: &str, enabled: bool) {
+    if enabled {
+        args.push(flag.to_string());
+    }
+}
+
+fn push_optional_usize(args: &mut Vec<String>, flag: &str, value: Option<usize>) {
+    if let Some(value) = value {
+        args.push(flag.to_string());
+        args.push(value.to_string());
+    }
+}
+
+fn push_optional_path(args: &mut Vec<String>, flag: &str, value: Option<&PathBuf>) {
+    if let Some(value) = value {
+        args.push(flag.to_string());
+        args.push(path_arg(value));
+    }
+}
+
+fn push_optional_string(args: &mut Vec<String>, flag: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        args.push(flag.to_string());
+        args.push(value.to_string());
+    }
+}
+
+fn push_repeated(args: &mut Vec<String>, flag: &str, values: Vec<String>) {
+    for value in values {
+        args.push(flag.to_string());
+        args.push(value);
+    }
+}
+
+fn path_arg(path: &PathBuf) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeNovoCondition {
     pub stateful: bool,

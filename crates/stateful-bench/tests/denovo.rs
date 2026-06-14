@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
 use stateful_bench::{
-    DeNovoCondition, DeNovoOfficialResult, build_denovo_condition_report, compare_denovo_reports,
-    default_denovo_conditions, parse_denovo_condition,
+    DeNovoCondition, DeNovoExtractRecipeOptions, DeNovoOfficialResult, DeNovoRunMode,
+    DeNovoRunRecipeOptions, build_denovo_condition_report, build_denovo_extract_recipe_command,
+    build_denovo_run_recipe_command, compare_denovo_reports, default_denovo_conditions,
+    parse_denovo_condition,
 };
 
 #[test]
@@ -267,4 +269,101 @@ fn denovo_comparison_reports_duplicate_missing_and_mismatched_axes() {
     assert_eq!(comparison.stateful_score_delta_without_subagent, None);
     assert_eq!(comparison.subagent_score_delta_without_stateful, None);
     assert_eq!(comparison.combined_interaction_score_delta, None);
+}
+
+#[test]
+fn denovo_extract_command_uses_official_extract_patch_recipe() {
+    let command = build_denovo_extract_recipe_command(DeNovoExtractRecipeOptions {
+        aweagent_root: "../AweAgent".into(),
+        python: "python3".to_string(),
+        input: "ready_denovoswe.jsonl".into(),
+        output: ".stateful_bench/denovo/extracts".into(),
+        config: "configs/tasks/denovoswe.yaml".into(),
+        max_concurrent: Some(10),
+        instance_ids: vec!["PyCQA_pep8_pr970".to_string()],
+        dry_run: true,
+        del_done_images: true,
+        no_extract_package_info: true,
+    })
+    .expect("extract command should build");
+
+    assert_eq!(command.program, "python3");
+    assert_eq!(command.cwd, std::path::PathBuf::from("../AweAgent"));
+    assert_eq!(command.args[0], "recipes/denovo_swe/extract_patch.py");
+    assert!(command.args.contains(&"--input".to_string()));
+    assert!(command.args.contains(&"ready_denovoswe.jsonl".to_string()));
+    assert!(command.args.contains(&"--dry-run".to_string()));
+    assert!(command.args.contains(&"--del-done-images".to_string()));
+    assert!(
+        command
+            .args
+            .contains(&"--no-extract-package-info".to_string())
+    );
+}
+
+#[test]
+fn denovo_run_command_uses_official_run_recipe_and_condition_config() {
+    let mut condition = DeNovoCondition::new(true, false);
+    condition.config_path = Some("configs/tasks/denovoswe-stateful.yaml".into());
+    condition
+        .env
+        .insert("STATEFUL_HOME".to_string(), "/tmp/stateful".to_string());
+
+    let command = build_denovo_run_recipe_command(DeNovoRunRecipeOptions {
+        aweagent_root: "../AweAgent".into(),
+        python: "python3".to_string(),
+        data_file: "denovoswe_with_patches.jsonl".into(),
+        output: ".stateful_bench/denovo/runs/dev/official".into(),
+        base_config: "configs/tasks/denovoswe.yaml".into(),
+        condition,
+        mode: DeNovoRunMode::Batch,
+        instance_ids: vec!["PyCQA_pep8_pr970".to_string()],
+        llm_config: Some("configs/llm/openai.yaml".into()),
+        model: Some("gpt-5".to_string()),
+        max_steps: Some(500),
+        max_concurrent: Some(4),
+        search_override: Some(false),
+        skip_eval: false,
+        validate_run: true,
+        eval_iters: 2,
+        del_done_images: true,
+        dump_clean_snapshot: Some("snapshots.jsonl".into()),
+        prompt_version: "v2".to_string(),
+        verbose: true,
+    })
+    .expect("run command should build");
+
+    assert_eq!(command.program, "python3");
+    assert_eq!(command.cwd, std::path::PathBuf::from("../AweAgent"));
+    assert_eq!(command.args[0], "recipes/denovo_swe/run.py");
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--config", "configs/tasks/denovoswe-stateful.yaml"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--data-file", "denovoswe_with_patches.jsonl"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--mode", "batch"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--eval-iters", "2"])
+    );
+    assert!(command.args.contains(&"--no-search".to_string()));
+    assert!(command.args.contains(&"--validate-run".to_string()));
+    assert_eq!(
+        command.env.get("STATEFUL_HOME").map(String::as_str),
+        Some("/tmp/stateful")
+    );
 }

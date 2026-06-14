@@ -2,9 +2,10 @@ pub mod denovo;
 
 pub use denovo::{
     DeNovoCommand, DeNovoComparisonReport, DeNovoCondition, DeNovoConditionReport,
-    DeNovoEvalDetails, DeNovoEvalResult, DeNovoOfficialResult, DeNovoRunMode,
-    build_denovo_condition_report, compare_denovo_reports, default_denovo_conditions,
-    parse_denovo_condition,
+    DeNovoEvalDetails, DeNovoEvalResult, DeNovoExtractRecipeOptions, DeNovoOfficialResult,
+    DeNovoRunMode, DeNovoRunRecipeOptions, RecipeCommand, build_denovo_condition_report,
+    build_denovo_extract_recipe_command, build_denovo_run_recipe_command, compare_denovo_reports,
+    default_denovo_conditions, parse_denovo_condition,
 };
 
 use std::{
