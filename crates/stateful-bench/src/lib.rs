@@ -1,9 +1,10 @@
 pub mod denovo;
 
 pub use denovo::{
-    DeNovoComparisonReport, DeNovoCondition, DeNovoConditionReport, DeNovoEvalDetails,
-    DeNovoEvalResult, DeNovoOfficialResult, build_denovo_condition_report, compare_denovo_reports,
-    default_denovo_conditions, parse_denovo_condition,
+    DeNovoCommand, DeNovoComparisonReport, DeNovoCondition, DeNovoConditionReport,
+    DeNovoEvalDetails, DeNovoEvalResult, DeNovoOfficialResult, DeNovoRunMode,
+    build_denovo_condition_report, compare_denovo_reports, default_denovo_conditions,
+    parse_denovo_condition,
 };
 
 use std::{
@@ -152,6 +153,10 @@ pub enum Command {
         format: ReportFormat,
         #[arg(long)]
         output: Option<PathBuf>,
+    },
+    Denovo {
+        #[command(subcommand)]
+        command: denovo::DeNovoCommand,
     },
 }
 
@@ -306,6 +311,9 @@ pub fn run_cli() -> Result<()> {
             } else {
                 println!("{rendered}");
             }
+        }
+        Command::Denovo { command } => {
+            denovo::run_denovo_cli(command)?;
         }
     }
 

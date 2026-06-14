@@ -1,8 +1,143 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
+use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::ReportFormat;
+
+const DEFAULT_DENOVO_CONFIG: &str = "configs/tasks/denovoswe.yaml";
+const DEFAULT_DENOVO_EXTRACTS: &str = ".stateful_bench/denovo/extracts";
+const DEFAULT_DENOVO_RUNS: &str = ".stateful_bench/denovo/runs";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum DeNovoRunMode {
+    Batch,
+    Single,
+}
+
+impl DeNovoRunMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Batch => "batch",
+            Self::Single => "single",
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DeNovoCommand {
+    Extract {
+        #[arg(long)]
+        aweagent_root: Option<PathBuf>,
+        #[arg(long, default_value = "python3")]
+        python: String,
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long, default_value = DEFAULT_DENOVO_EXTRACTS)]
+        output: PathBuf,
+        #[arg(long, default_value = DEFAULT_DENOVO_CONFIG)]
+        config: PathBuf,
+        #[arg(long)]
+        max_concurrent: Option<usize>,
+        #[arg(long = "instance-id")]
+        instance_id: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        del_done_images: bool,
+        #[arg(long)]
+        no_extract_package_info: bool,
+    },
+    Run {
+        #[arg(long)]
+        aweagent_root: Option<PathBuf>,
+        #[arg(long, default_value = "python3")]
+        python: String,
+        #[arg(long)]
+        data_file: PathBuf,
+        #[arg(long, default_value = DEFAULT_DENOVO_RUNS)]
+        output_dir: PathBuf,
+        #[arg(long, default_value_t = default_denovo_run_id())]
+        run_id: String,
+        #[arg(long, default_value = DEFAULT_DENOVO_CONFIG)]
+        config: PathBuf,
+        #[arg(long, value_enum, default_value_t = DeNovoRunMode::Batch)]
+        mode: DeNovoRunMode,
+        #[arg(long)]
+        condition: Vec<String>,
+        #[arg(long)]
+        llm_config: Option<PathBuf>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        max_steps: Option<usize>,
+        #[arg(long)]
+        max_concurrent: Option<usize>,
+        #[arg(long = "instance-id")]
+        instance_id: Vec<String>,
+        #[arg(long, default_value_t = 1)]
+        eval_iters: usize,
+        #[arg(long, default_value = "v1")]
+        prompt_version: String,
+        #[arg(long)]
+        enable_search: bool,
+        #[arg(long)]
+        no_search: bool,
+        #[arg(long)]
+        skip_eval: bool,
+        #[arg(long)]
+        validate_run: bool,
+        #[arg(long)]
+        del_done_images: bool,
+        #[arg(long)]
+        dump_clean_snapshot: Option<PathBuf>,
+        #[arg(long)]
+        verbose: bool,
+    },
+    Report {
+        #[arg(long)]
+        run_dir: PathBuf,
+        #[arg(long, value_enum, default_value_t = ReportFormat::Json)]
+        format: ReportFormat,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    Compare {
+        #[arg(long, required = true)]
+        report: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = ReportFormat::Json)]
+        format: ReportFormat,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+}
+
+fn default_denovo_run_id() -> String {
+    format!("denovo-{}", uuid::Uuid::new_v4())
+}
+
+pub fn search_override(enable_search: bool, no_search: bool) -> Option<bool> {
+    match (enable_search, no_search) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
+    }
+}
+
+pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
+    match command {
+        DeNovoCommand::Extract { .. }
+        | DeNovoCommand::Run { .. }
+        | DeNovoCommand::Report { .. }
+        | DeNovoCommand::Compare { .. } => {
+            bail!("DeNovoSWE command execution is implemented in Tasks 4, 5, and 6")
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeNovoCondition {

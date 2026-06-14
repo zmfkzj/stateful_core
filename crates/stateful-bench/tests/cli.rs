@@ -1,5 +1,5 @@
 use clap::Parser;
-use stateful_bench::{Cli, Command, ReportFormat, RunMode};
+use stateful_bench::{Cli, Command, DeNovoCommand, DeNovoRunMode, ReportFormat, RunMode};
 use std::{fs, path::PathBuf, process::Command as ProcessCommand};
 
 #[test]
@@ -71,6 +71,167 @@ fn run_command_parses_mode_and_agent_template() {
             && budget_check_cmd_template.as_deref() == Some("test -n \"$STATEFUL_BENCH_BUDGET_OK\"")
             && pair_id == &vec!["pair-1/pair-2".to_string(), "pair-3/pair-4".to_string()]
             && jobs == 4
+    ));
+}
+
+#[test]
+fn denovo_extract_command_parses_official_recipe_options() {
+    let cli = Cli::try_parse_from([
+        "stateful-bench",
+        "denovo",
+        "extract",
+        "--aweagent-root",
+        "../AweAgent",
+        "--input",
+        "ready_denovoswe.jsonl",
+        "--output",
+        ".stateful_bench/denovo/extracts",
+        "--config",
+        "configs/tasks/denovoswe.yaml",
+        "--max-concurrent",
+        "10",
+        "--instance-id",
+        "PyCQA_pep8_pr970",
+        "--dry-run",
+        "--del-done-images",
+        "--no-extract-package-info",
+    ])
+    .expect("denovo extract command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Denovo {
+            command: DeNovoCommand::Extract {
+                ref aweagent_root,
+                ref input,
+                ref output,
+                ref config,
+                max_concurrent: Some(10),
+                ref instance_id,
+                dry_run: true,
+                del_done_images: true,
+                no_extract_package_info: true,
+                ..
+            }
+        } if aweagent_root.as_deref() == Some(std::path::Path::new("../AweAgent"))
+            && input.to_string_lossy() == "ready_denovoswe.jsonl"
+            && output.to_string_lossy() == ".stateful_bench/denovo/extracts"
+            && config.to_string_lossy() == "configs/tasks/denovoswe.yaml"
+            && instance_id == &vec!["PyCQA_pep8_pr970".to_string()]
+    ));
+}
+
+#[test]
+fn denovo_run_command_parses_condition_matrix_and_official_options() {
+    let cli = Cli::try_parse_from([
+        "stateful-bench",
+        "denovo",
+        "run",
+        "--aweagent-root",
+        "../AweAgent",
+        "--data-file",
+        ".stateful_bench/denovo/extracts/dev/results.jsonl",
+        "--output-dir",
+        ".stateful_bench/denovo/runs",
+        "--run-id",
+        "dev-denovo",
+        "--mode",
+        "batch",
+        "--condition",
+        "stateful:on,subagent:off,config:configs/tasks/denovoswe-stateful.yaml",
+        "--llm-config",
+        "configs/llm/openai.yaml",
+        "--model",
+        "gpt-5",
+        "--max-steps",
+        "500",
+        "--max-concurrent",
+        "4",
+        "--instance-id",
+        "PyCQA_pep8_pr970",
+        "--eval-iters",
+        "2",
+        "--prompt-version",
+        "v2",
+        "--no-search",
+    ])
+    .expect("denovo run command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Denovo {
+            command: DeNovoCommand::Run {
+                mode: DeNovoRunMode::Batch,
+                ref run_id,
+                ref condition,
+                ref llm_config,
+                ref model,
+                max_steps: Some(500),
+                max_concurrent: Some(4),
+                ref instance_id,
+                eval_iters: 2,
+                ref prompt_version,
+                enable_search: false,
+                no_search: true,
+                ..
+            }
+        } if run_id == "dev-denovo"
+            && condition == &vec!["stateful:on,subagent:off,config:configs/tasks/denovoswe-stateful.yaml".to_string()]
+            && llm_config.as_deref() == Some(std::path::Path::new("configs/llm/openai.yaml"))
+            && model.as_deref() == Some("gpt-5")
+            && instance_id == &vec!["PyCQA_pep8_pr970".to_string()]
+            && prompt_version == "v2"
+    ));
+}
+
+#[test]
+fn denovo_report_and_compare_commands_parse_outputs() {
+    let report_cli = Cli::try_parse_from([
+        "stateful-bench",
+        "denovo",
+        "report",
+        "--run-dir",
+        ".stateful_bench/denovo/runs/dev-denovo",
+        "--output",
+        ".stateful_bench/denovo/runs/dev-denovo/report.json",
+    ])
+    .expect("denovo report command should parse");
+
+    assert!(matches!(
+        report_cli.command,
+        Command::Denovo {
+            command: DeNovoCommand::Report {
+                ref run_dir,
+                ref output,
+                ..
+            }
+        } if run_dir.to_string_lossy() == ".stateful_bench/denovo/runs/dev-denovo"
+            && output.as_ref().is_some_and(|path| path.to_string_lossy() == ".stateful_bench/denovo/runs/dev-denovo/report.json")
+    ));
+
+    let compare_cli = Cli::try_parse_from([
+        "stateful-bench",
+        "denovo",
+        "compare",
+        "--report",
+        ".stateful_bench/denovo/runs/dev-denovo/conditions/stateful-off_subagent-off/denovo-report.json",
+        "--report",
+        ".stateful_bench/denovo/runs/dev-denovo/conditions/stateful-on_subagent-off/denovo-report.json",
+        "--output",
+        ".stateful_bench/denovo/runs/dev-denovo/comparison.json",
+    ])
+    .expect("denovo compare command should parse");
+
+    assert!(matches!(
+        compare_cli.command,
+        Command::Denovo {
+            command: DeNovoCommand::Compare {
+                ref report,
+                ref output,
+                ..
+            }
+        } if report.len() == 2
+            && output.as_ref().is_some_and(|path| path.to_string_lossy() == ".stateful_bench/denovo/runs/dev-denovo/comparison.json")
     ));
 }
 
