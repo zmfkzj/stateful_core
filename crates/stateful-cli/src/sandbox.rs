@@ -1686,6 +1686,7 @@ fn bubblewrap_args(
     network: SandboxNetworkPolicy,
 ) -> Vec<OsString> {
     let mut args = bubblewrap_base_args(cwd, writable_paths, network);
+    args.push(OsString::from("--"));
     args.push(OsString::from("/bin/sh"));
     args.push(OsString::from("-c"));
     args.push(OsString::from(command));
@@ -1705,6 +1706,7 @@ fn bubblewrap_git_args(
         args.push(protected_path.path.as_os_str().to_owned());
         args.push(protected_path.path.as_os_str().to_owned());
     }
+    args.push(OsString::from("--"));
     args.push(OsString::from("git"));
     args.extend(words.iter().skip(1).map(OsString::from));
     args
@@ -1745,7 +1747,6 @@ fn bubblewrap_base_args(
 
     args.push(OsString::from("--chdir"));
     args.push(cwd.as_os_str().to_owned());
-    args.push(OsString::from("--"));
     args
 }
 
@@ -2182,17 +2183,28 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
+        let command_separator_index = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("bubblewrap args should include a command separator");
+        let config_rebind_index = args
+            .windows(3)
+            .position(|window| {
+                window[0] == "--ro-bind" && window[1] == config && window[2] == config
+            })
+            .expect("git config should be rebound read-only");
+        let hooks_rebind_index = args
+            .windows(3)
+            .position(|window| window[0] == "--ro-bind" && window[1] == hooks && window[2] == hooks)
+            .expect("git hooks should be rebound read-only");
+
         assert!(args.windows(3).any(|window| {
             window[0] == "--bind"
                 && window[1] == repo_root.to_string_lossy()
                 && window[2] == repo_root.to_string_lossy()
         }));
-        assert!(args.windows(3).any(|window| {
-            window[0] == "--ro-bind" && window[1] == config && window[2] == config
-        }));
-        assert!(args.windows(3).any(|window| {
-            window[0] == "--ro-bind" && window[1] == hooks && window[2] == hooks
-        }));
+        assert!(config_rebind_index < command_separator_index);
+        assert!(hooks_rebind_index < command_separator_index);
 
         fs::remove_dir_all(&repo_root).expect("temp root should be removable");
     }
