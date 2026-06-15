@@ -93,22 +93,65 @@ fn run_pairs_executes_manifest_agents_in_one_workspace_and_reports_harness_resul
 }
 
 #[test]
+fn run_pairs_records_codex_token_usage_from_agent_json_logs() {
+    let root = temp_root("stateful-bench-run-codex-token-usage");
+    let pairs_path = root.join("pairs.jsonl");
+    let output_dir = root.join("runs");
+    write_jsonl(&pairs_path, &[pair()]).expect("pair manifest should write");
+
+    let token_event = r#"{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":5,"reasoning_output_tokens":2,"total_tokens":15}}}"#;
+    run_pairs(RunOptions {
+        pairs: pairs_path,
+        mode: RunMode::NoState,
+        run_id: "synthetic-codex-token-usage".to_string(),
+        agent_cmd_template: format!(
+            "printf '%s\n' '{token_event}' && printf changed-{{agent_id}} > {{workspace}}/{{agent_id}}.txt"
+        ),
+        output_dir: output_dir.clone(),
+        timeout_seconds: 10,
+        max_pairs: None,
+        pair_ids: Vec::new(),
+        jobs: 1,
+        auth_check_cmd_template: None,
+        budget_check_cmd_template: None,
+        setup_cmd_template: Some(
+            "git init {workspace} && git -C {workspace} config user.email test@example.invalid && git -C {workspace} config user.name test && printf initial > {workspace}/agent-a.txt && printf initial > {workspace}/agent-b.txt && git -C {workspace} add . && git -C {workspace} commit -m initial"
+                .to_string(),
+        ),
+        harness_cmd_template: Some(
+            "printf '%s\n' '{\"task_results\":[{\"status\":\"passed\"},{\"status\":\"passed\"}]}'"
+                .to_string(),
+        ),
+        stateful_binary: "stateful".to_string(),
+    })
+    .expect("synthetic run should complete");
+
+    let run_dir = output_dir.join("synthetic-codex-token-usage");
+    let pair_run: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("pair-1-pair-2/pair-run.json"))
+            .expect("pair run should exist"),
+    )
+    .expect("pair run should parse");
+    assert_eq!(pair_run["agent_a"]["token_count"], 15);
+    assert_eq!(pair_run["agent_a"]["input_token_count"], 10);
+    assert_eq!(pair_run["agent_a"]["cached_input_token_count"], 3);
+    assert_eq!(pair_run["agent_a"]["output_token_count"], 5);
+    assert_eq!(pair_run["agent_a"]["reasoning_output_token_count"], 2);
+
+    let report = build_report(&run_dir).expect("report should build");
+    assert_eq!(report.pairs[0].token_count, Some(30));
+    assert_eq!(report.summary.token_count, Some(30));
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
 fn run_pairs_templates_use_absolute_paths_when_output_dir_is_relative() {
     let root = temp_root("stateful-bench-run-relative-output");
     let pairs_path = root.join("pairs.jsonl");
-    let output_dir = PathBuf::from(format!(
-        "../../target/stateful-bench-run-relative-output-{}/runs",
-        std::process::id()
-    ));
-    let output_root = std::env::current_dir()
-        .expect("current dir should resolve")
-        .join(format!(
-            "../../target/stateful-bench-run-relative-output-{}",
-            std::process::id()
-        ));
-    if output_root.exists() {
-        fs::remove_dir_all(&output_root).expect("old relative output root should clean up");
-    }
+    let output_root = target_temp_dir("stateful-bench-run-relative-output");
+    let current_dir = std::env::current_dir().expect("current dir should resolve");
+    let output_dir = relative_path_from(&current_dir, &output_root).join("runs");
     write_jsonl(&pairs_path, &[pair()]).expect("pair manifest should write");
 
     run_pairs(RunOptions {
@@ -756,6 +799,38 @@ fn temp_root(name: &str) -> std::path::PathBuf {
         fs::remove_dir_all(&root).expect("old temp root should clean up");
     }
     root
+}
+
+fn target_temp_dir(name: &str) -> PathBuf {
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    let root = target_dir.join(format!("{name}-{}", std::process::id()));
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("old target temp root should clean up");
+    }
+    root
+}
+
+fn relative_path_from(base: &Path, target: &Path) -> PathBuf {
+    let base_components = base.components().collect::<Vec<_>>();
+    let target_components = target.components().collect::<Vec<_>>();
+    let mut shared = 0;
+    while shared < base_components.len()
+        && shared < target_components.len()
+        && base_components[shared] == target_components[shared]
+    {
+        shared += 1;
+    }
+
+    let mut relative = PathBuf::new();
+    for _ in shared..base_components.len() {
+        relative.push("..");
+    }
+    for component in &target_components[shared..] {
+        relative.push(component.as_os_str());
+    }
+    relative
 }
 
 fn fake_stateful_binary(root: &Path) -> PathBuf {

@@ -19,6 +19,7 @@ mod repo_registry;
 mod runtime;
 mod sandbox;
 mod server_lifecycle;
+mod shadow_guard;
 mod shell_command;
 
 pub use codex_wrapper::{

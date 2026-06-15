@@ -5,6 +5,7 @@
 !.env.example
 
 target/
+tmp/
 .worktrees/
 *.log
 __pycache__/

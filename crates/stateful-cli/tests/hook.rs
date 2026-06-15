@@ -2629,6 +2629,64 @@ fn pre_tool_use_apply_patch_denies_when_server_denies() {
 }
 
 #[test]
+fn pre_tool_use_denies_new_dependency_shadowing_python_root_before_authorize() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-shadow-dependency-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    fs::write(
+        repo_root.join("pyproject.toml"),
+        r#"
+[project]
+name = "example-project"
+dependencies = ["langchain-core>=0.3"]
+"#,
+    )
+    .expect("pyproject should write");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "apply_patch",
+        "tool_input": {
+            "command": "*** Begin Patch\n*** Add File: langchain_core/__init__.py\n+\"\"\"local shim\"\"\"\n*** End Patch\n"
+        }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook should return a structured denial, not crash: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"permissionDecision\":\"deny\""));
+    assert!(stdout.contains("dependency shadowing guard"));
+    assert!(stdout.contains("langchain_core"));
+    assert!(stdout.contains("langchain-core"));
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "shadowing guard should deny before posting /v1/authorize"
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn pre_tool_use_apply_patch_denial_includes_wait_id_guidance() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-deny-wait-id-test-{}",

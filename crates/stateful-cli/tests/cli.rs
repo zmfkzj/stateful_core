@@ -46,6 +46,7 @@ fn doctor_labels_legacy_hooks_json_without_counting_it_as_installed() {
     let repo = temp.join("repo");
     let hooks_dir = repo.join(".codex");
     fs::create_dir_all(&hooks_dir).expect("hooks dir should create");
+    fs::create_dir_all(repo.join(".git")).expect("fixture git dir should create");
     fs::create_dir_all(repo.join(".stateful")).expect("stateful dir should create");
     fs::write(hooks_dir.join("hooks.json"), "{}").expect("legacy hooks should write");
     fs::create_dir_all(repo.join(".stateful_core")).expect("legacy state dir should create");
@@ -577,7 +578,17 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
     );
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("tools list should print json");
-    assert_eq!(json["allowed_tools"], serde_json::json!(["KnownTool"]));
+    assert_eq!(
+        json["allowed_tools"],
+        serde_json::json!([
+            "multi_agent_v1wait_agent",
+            "multi_agent_v1close_agent",
+            "mcp__openaiDeveloperDocs__fetch_openai_doc",
+            "mcp__openaiDeveloperDocs__search_openai_docs",
+            "multi_agent_v1send_input",
+            "KnownTool"
+        ])
+    );
     assert_eq!(
         json["unclassified_tools"],
         serde_json::json!(["FutureWriteTool"])

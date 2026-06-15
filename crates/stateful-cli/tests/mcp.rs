@@ -413,6 +413,58 @@ fn sandbox_run_build_profile_sets_cargo_target_dir_under_tmp() {
 }
 
 #[test]
+fn sandbox_run_build_profile_denies_dependency_shadowing_before_command_runs() {
+    let temp_root = temp_root("stateful-sandbox-run-build-shadowing");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("langchain_core")).expect("shadow root should be creatable");
+    fs::write(
+        repo_root.join("pyproject.toml"),
+        r#"
+[project]
+name = "example-project"
+dependencies = ["langchain-core>=0.3"]
+"#,
+    )
+    .expect("pyproject should write");
+    fs::write(
+        repo_root.join("langchain_core/__init__.py"),
+        "\"\"\"local shim\"\"\"\n",
+    )
+    .expect("shadow package should write");
+    enable_test_repo(&paths, &repo_root);
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "build",
+            "--command",
+            "printf should-not-run > tmp/shadow-audit-ran.txt",
+        ],
+    );
+
+    assert!(!output.status.success(), "shadowing audit should fail");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(combined.contains("dependency shadowing guard"));
+    assert!(combined.contains("langchain_core"));
+    assert!(combined.contains("langchain-core"));
+    assert!(
+        !repo_root.join("tmp/shadow-audit-ran.txt").exists(),
+        "build command must not run when import resolution audit fails"
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn sandbox_run_write_dir_rejects_source_tree_directory_before_authorize() {
     let temp_root = temp_root("stateful-sandbox-run-write-dir-source");
     let paths = GlobalPaths::new(temp_root.join("home"));

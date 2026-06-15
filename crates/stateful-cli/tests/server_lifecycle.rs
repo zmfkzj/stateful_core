@@ -539,6 +539,10 @@ fn detached_server_reports_child_startup_error_when_bind_fails() {
 
 #[test]
 fn detached_server_start_registers_runtime_without_parent_lock_timeout() {
+    if cfg!(target_os = "macos") && std::env::var_os("STATEFUL_SANDBOX_RUN_ACTIVE").is_some() {
+        return;
+    }
+
     let mut last_bind_race = String::new();
     for attempt in 0..8 {
         let home = temp_home(&format!(

@@ -11,6 +11,7 @@ use stateful_core::normalize_relative_path;
 
 use crate::outbox::queue_session_heartbeat_outbox;
 use crate::sandbox::{parse_sandbox_run_bash_invocation, validate_sandbox_run_request_shape};
+use crate::shadow_guard;
 use crate::shell_command::{
     first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
 };
@@ -1125,6 +1126,17 @@ fn authorize_targets(
     targets: Vec<PatchTarget>,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<HookOutcome> {
+    if let Some(repo_root) = repo_root
+        && let Err(error) = shadow_guard::check_paths_for_dependency_shadowing(
+            repo_root,
+            shadow_write_paths(&targets),
+        )
+    {
+        return Ok(HookOutcome::Deny {
+            reason: error.to_string(),
+        });
+    }
+
     let Some(runtime) = runtime else {
         return Ok(HookOutcome::Deny {
             reason: format!(
@@ -1202,6 +1214,14 @@ fn authorize_targets(
     }
 
     Ok(HookOutcome::Allow)
+}
+
+fn shadow_write_paths(targets: &[PatchTarget]) -> impl Iterator<Item = &str> {
+    targets.iter().filter_map(|target| match target.action {
+        "write_file" => Some(target.path.as_str()),
+        "move_file" => target.new_path.as_deref(),
+        _ => None,
+    })
 }
 
 fn authorization_unavailable_reason(error: &dyn std::fmt::Display) -> String {
