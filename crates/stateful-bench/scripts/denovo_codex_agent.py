@@ -35,6 +35,10 @@ from codex_pair_agent import (  # noqa: E402
 )
 
 
+OFFICIAL_BENCHMARK_PROTOCOL = "denovo_swe_single_rollout"
+RESUME_POLICY_CONTEXT_OR_TOKEN_ONLY = "context_or_token_failure_only"
+
+
 @dataclass
 class InstanceResult:
     instance_id: str
@@ -335,6 +339,11 @@ def profile_metadata(agent_mode: str, subagent: str) -> dict[str, Any]:
         "agent_kind": "codex-cli",
         "agent_mode": agent_mode,
         "subagent": subagent,
+        "official_benchmark_protocol": OFFICIAL_BENCHMARK_PROTOCOL,
+        "agent_rollouts_per_instance": 1,
+        "eval_feedback_loop": False,
+        "eval_feedback_attempts": 0,
+        "resume_policy": RESUME_POLICY_CONTEXT_OR_TOKEN_ONLY,
         "ignore_user_config": agent_mode == "no-state",
         "ignore_rules": True,
         "bundled_skills_disabled": True,
@@ -759,6 +768,8 @@ async def run_real_instances_async(args: argparse.Namespace) -> int:
             "benchmark_model_context_window": args.benchmark_model_context_window,
             "benchmark_temperature": args.benchmark_temperature,
             "benchmark_max_turns": args.benchmark_max_turns,
+            "max_resumes": args.max_resumes,
+            "eval_iters": args.eval_iters,
         },
     )
     return adapter_exit_code_after_results(results)

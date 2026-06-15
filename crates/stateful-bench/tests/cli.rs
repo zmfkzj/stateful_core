@@ -1058,6 +1058,36 @@ print(json.dumps({{
 }
 
 #[test]
+fn denovo_codex_agent_metadata_marks_official_single_rollout_protocol() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_protocol_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+print(json.dumps(module.profile_metadata("stateful", "on"), sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(
+        output["official_benchmark_protocol"],
+        "denovo_swe_single_rollout"
+    );
+    assert_eq!(output["agent_rollouts_per_instance"], 1);
+    assert_eq!(output["eval_feedback_loop"], false);
+    assert_eq!(output["eval_feedback_attempts"], 0);
+    assert_eq!(output["resume_policy"], "context_or_token_failure_only");
+    assert_eq!(output["stateful_mcp"], true);
+}
+
+#[test]
 fn denovo_codex_agent_validate_run_skips_codex() {
     let script = format!(
         r#"

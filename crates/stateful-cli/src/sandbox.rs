@@ -1634,9 +1634,10 @@ fn seatbelt_profile(
     writable_paths: &[SandboxWritablePath],
     network: SandboxNetworkPolicy,
 ) -> String {
-    let mut profile = String::from(
-        "(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n(allow sysctl-read)\n(allow file-write* (literal \"/dev/null\")",
-    );
+    let mut profile =
+        String::from("(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n");
+    push_seatbelt_device_read_allows(&mut profile);
+    profile.push_str("(allow sysctl-read)\n(allow file-write* (literal \"/dev/null\")");
     for writable_path in writable_paths {
         profile.push_str(match writable_path.kind {
             SandboxWritablePathKind::File => " (literal \"",
@@ -1650,6 +1651,13 @@ fn seatbelt_profile(
         profile.push_str("(allow network*)\n");
     }
     profile
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn push_seatbelt_device_read_allows(profile: &mut String) {
+    profile.push_str(
+        "(allow file-read* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/urandom\"))\n",
+    );
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -1745,6 +1753,12 @@ fn bubblewrap_base_args(
         OsString::from("--dev-bind"),
         OsString::from("/dev/null"),
         OsString::from("/dev/null"),
+        OsString::from("--ro-bind"),
+        OsString::from("/dev/zero"),
+        OsString::from("/dev/zero"),
+        OsString::from("--ro-bind"),
+        OsString::from("/dev/urandom"),
+        OsString::from("/dev/urandom"),
     ]);
 
     for writable_path in writable_paths {
@@ -2043,7 +2057,7 @@ mod tests {
     }
 
     #[test]
-    fn bubblewrap_read_only_uses_unshare_net_and_dev_null_device() {
+    fn bubblewrap_read_only_uses_unshare_net_and_device_policy() {
         let args = bubblewrap_args(
             "rg auth src",
             Path::new("/repo"),
@@ -2060,6 +2074,24 @@ mod tests {
         assert!(
             args.windows(3)
                 .any(|window| { window == ["--dev-bind", "/dev/null", "/dev/null"] })
+        );
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--ro-bind", "/dev/zero", "/dev/zero"] })
+        );
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--ro-bind", "/dev/urandom", "/dev/urandom"] })
+        );
+        assert!(
+            !args
+                .windows(3)
+                .any(|window| { window == ["--dev-bind", "/dev/zero", "/dev/zero"] })
+        );
+        assert!(
+            !args
+                .windows(3)
+                .any(|window| { window == ["--dev-bind", "/dev/urandom", "/dev/urandom"] })
         );
         assert!(args.ends_with(&[
             "--".to_string(),
@@ -2087,7 +2119,7 @@ mod tests {
     }
 
     #[test]
-    fn bubblewrap_write_targets_bind_authorized_files_and_dev_null() {
+    fn bubblewrap_write_targets_bind_authorized_files_and_devices() {
         let writable_paths = vec![
             SandboxWritablePath::file(PathBuf::from("/repo/src/allowed.ts")),
             SandboxWritablePath::file(PathBuf::from("/repo/src/new.ts")),
@@ -2118,6 +2150,24 @@ mod tests {
         assert!(
             args.windows(3)
                 .any(|window| { window == ["--dev-bind", "/dev/null", "/dev/null"] })
+        );
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--ro-bind", "/dev/zero", "/dev/zero"] })
+        );
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--ro-bind", "/dev/urandom", "/dev/urandom"] })
+        );
+        assert!(
+            !args
+                .windows(3)
+                .any(|window| { window == ["--dev-bind", "/dev/zero", "/dev/zero"] })
+        );
+        assert!(
+            !args
+                .windows(3)
+                .any(|window| { window == ["--dev-bind", "/dev/urandom", "/dev/urandom"] })
         );
         assert!(args.contains(&"--unshare-net".to_string()));
         assert!(!args.contains(&"--share-net".to_string()));
@@ -2354,7 +2404,7 @@ mod tests {
     }
 
     #[test]
-    fn seatbelt_profile_allows_dev_null_exact_targets_and_directory_subpaths() {
+    fn seatbelt_profile_allows_device_reads_dev_null_writes_and_targets() {
         let profile = seatbelt_profile(
             &[
                 SandboxWritablePath::file(PathBuf::from("/repo/src/allowed.ts")),
@@ -2367,7 +2417,20 @@ mod tests {
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("(allow file-read*)"));
         assert!(profile.contains("(allow sysctl-read)"));
-        assert!(profile.contains("(literal \"/dev/null\")"));
+        assert!(profile.contains(
+            "(allow file-read* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/urandom\"))"
+        ));
+        let write_rules = profile
+            .lines()
+            .filter(|line| line.starts_with("(allow file-write*"))
+            .collect::<Vec<_>>();
+        assert!(
+            write_rules
+                .iter()
+                .any(|line| line.contains("(literal \"/dev/null\")"))
+        );
+        assert!(!write_rules.iter().any(|line| line.contains("/dev/zero")));
+        assert!(!write_rules.iter().any(|line| line.contains("/dev/urandom")));
         assert!(profile.contains("(literal \"/repo/src/allowed.ts\")"));
         assert!(profile.contains("(literal \"/repo/src/quoted\\\"path.ts\")"));
         assert!(profile.contains("(subpath \"/repo/tmp\")"));

@@ -109,7 +109,11 @@ pub enum DeNovoCommand {
         benchmark_temperature: String,
         #[arg(long, default_value_t = DEFAULT_CODEX_MAX_TURNS)]
         benchmark_max_turns: usize,
-        #[arg(long, default_value_t = DEFAULT_CODEX_MAX_RESUMES)]
+        #[arg(
+            long,
+            default_value_t = DEFAULT_CODEX_MAX_RESUMES,
+            help = "Resume Codex only after context/token limit failures; official eval failures are not fed back to the agent"
+        )]
         max_resumes: usize,
         #[arg(long, default_value_t = DEFAULT_CODEX_TIMEOUT_SECONDS)]
         codex_timeout_seconds: u64,

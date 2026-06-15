@@ -16,8 +16,8 @@ use crate::sandbox::{
     SandboxAuthorizeDecision, SandboxCommandResult, SandboxNetworkPolicy, SandboxRunOutput,
     SandboxWritablePath, SandboxWritablePathKind, authorize_sandbox_write,
     classify_sandbox_authorize_response, enrich_sandbox_write_dir_denial, ensure_repo_dir_target,
-    normalize_sandbox_target_path, resolve_sandbox_cwd, sandbox_temp_dir,
-    sandbox_write_dir_display_path, seatbelt_escape,
+    normalize_sandbox_target_path, push_seatbelt_device_read_allows, resolve_sandbox_cwd,
+    sandbox_temp_dir, sandbox_write_dir_display_path, seatbelt_escape,
 };
 use crate::{
     CurrentSession, GlobalPaths, RepoGate, discover_runtime_with_global, ensure_server,
@@ -282,8 +282,11 @@ fn nested_codex_benchmark_seatbelt_command(
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn nested_codex_benchmark_seatbelt_profile(writable_paths: &[SandboxWritablePath]) -> String {
-    let mut profile = String::from(
-        "(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n(allow sysctl-read)\n(allow network*)\n(allow file-write* (literal \"/dev/null\")",
+    let mut profile =
+        String::from("(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n");
+    push_seatbelt_device_read_allows(&mut profile);
+    profile.push_str(
+        "(allow sysctl-read)\n(allow network*)\n(allow file-write* (literal \"/dev/null\")",
     );
     for writable_path in writable_paths {
         profile.push_str(match writable_path.kind {
@@ -382,6 +385,20 @@ mod tests {
         ]);
 
         assert!(profile.contains("(allow network*)"));
+        assert!(profile.contains(
+            "(allow file-read* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/urandom\"))"
+        ));
+        let write_rules = profile
+            .lines()
+            .filter(|line| line.starts_with("(allow file-write*"))
+            .collect::<Vec<_>>();
+        assert!(
+            write_rules
+                .iter()
+                .any(|line| line.contains("(literal \"/dev/null\")"))
+        );
+        assert!(!write_rules.iter().any(|line| line.contains("/dev/zero")));
+        assert!(!write_rules.iter().any(|line| line.contains("/dev/urandom")));
         assert!(profile.contains("(subpath \"/repo/target\")"));
         assert!(profile.contains("(subpath \"/repo/target/nested-codex-homes/run-1\")"));
         assert!(!profile.contains("(subpath \"/repo\")"));
