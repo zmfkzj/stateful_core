@@ -578,7 +578,17 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
     );
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("tools list should print json");
-    assert_eq!(json["allowed_tools"], serde_json::json!(["KnownTool"]));
+    assert_eq!(
+        json["allowed_tools"],
+        serde_json::json!([
+            "multi_agent_v1wait_agent",
+            "multi_agent_v1close_agent",
+            "mcp__openaiDeveloperDocs__fetch_openai_doc",
+            "mcp__openaiDeveloperDocs__search_openai_docs",
+            "multi_agent_v1send_input",
+            "KnownTool"
+        ])
+    );
     assert_eq!(
         json["unclassified_tools"],
         serde_json::json!(["FutureWriteTool"])

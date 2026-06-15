@@ -1,11 +1,17 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use stateful_bench::{
-    DeNovoComparisonReport, DeNovoCondition, DeNovoConditionRunOptions, DeNovoExtractOptions,
-    DeNovoExtractRecipeOptions, DeNovoMatrixRunOptions, DeNovoOfficialResult, DeNovoRunMode,
-    DeNovoRunRecipeOptions, build_denovo_condition_report, build_denovo_extract_recipe_command,
-    build_denovo_run_recipe_command, compare_denovo_reports, default_denovo_conditions,
-    parse_denovo_condition, run_denovo_condition, run_denovo_extract, run_denovo_matrix,
+    DeNovoAgentKind, DeNovoCodexRunOptions, DeNovoComparisonReport, DeNovoCondition,
+    DeNovoConditionRunOptions, DeNovoExtractOptions, DeNovoExtractRecipeOptions,
+    DeNovoMatrixRunOptions, DeNovoOfficialResult, DeNovoRunMode, DeNovoRunRecipeOptions,
+    build_denovo_codex_adapter_command, build_denovo_condition_report,
+    build_denovo_extract_recipe_command, build_denovo_run_recipe_command, compare_denovo_reports,
+    default_denovo_conditions, parse_denovo_condition, run_denovo_condition, run_denovo_extract,
+    run_denovo_matrix,
 };
 
 #[test]
@@ -370,6 +376,85 @@ fn denovo_run_command_uses_official_run_recipe_and_condition_config() {
 }
 
 #[test]
+fn denovo_codex_adapter_command_uses_stateful_adapter_and_condition_axes() {
+    let command = build_denovo_codex_adapter_command(DeNovoCodexRunOptions {
+        aweagent_root: "../AweAgent".into(),
+        python: "python3".to_string(),
+        data_file: "denovoswe_with_patches.jsonl".into(),
+        output: "target/stateful-bench/denovo/runs/dev/codex-cli".into(),
+        base_config: "configs/tasks/denovoswe.yaml".into(),
+        condition: DeNovoCondition::new(true, true),
+        mode: DeNovoRunMode::Batch,
+        instance_ids: vec!["PyCQA_pep8_pr970".to_string()],
+        max_steps: Some(500),
+        max_concurrent: Some(1),
+        skip_eval: false,
+        validate_run: true,
+        eval_iters: 1,
+        del_done_images: false,
+        dump_clean_snapshot: None,
+        prompt_version: "v1".to_string(),
+        verbose: true,
+        codex_bin: "/opt/homebrew/bin/codex".to_string(),
+        stateful_binary: "/Users/arthur/.cargo/bin/stateful".to_string(),
+        benchmark_model: "gpt-5.4-mini".to_string(),
+        benchmark_reasoning_effort: "low".to_string(),
+        benchmark_model_context_window: 256000,
+        benchmark_temperature: "1".to_string(),
+        benchmark_max_turns: 500,
+        max_resumes: 2,
+        codex_timeout_seconds: 7200,
+        adapter_script: Some("crates/stateful-bench/scripts/denovo_codex_agent.py".into()),
+    })
+    .expect("codex adapter command should build");
+
+    assert_eq!(command.program, "python3");
+    assert_eq!(command.cwd, std::path::PathBuf::from("../AweAgent"));
+    assert_eq!(
+        command.args[0],
+        "crates/stateful-bench/scripts/denovo_codex_agent.py"
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--agent-mode", "stateful"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--subagent", "on"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--benchmark-model-context-window", "256000"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--benchmark-temperature", "1"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--benchmark-max-turns", "500"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--instance-id", "PyCQA_pep8_pr970"])
+    );
+    assert!(command.args.contains(&"--validate-run".to_string()));
+    assert!(command.args.contains(&"--verbose".to_string()));
+}
+
+#[test]
 fn denovo_condition_run_executes_fake_recipe_and_writes_metadata() {
     let root = temp_root("stateful-bench-denovo-fake-recipe");
     let aweagent = root.join("AweAgent");
@@ -409,6 +494,17 @@ out.mkdir(parents=True, exist_ok=True)
         run_dir: run_dir.clone(),
         base_config: "configs/tasks/denovoswe.yaml".into(),
         condition,
+        agent: DeNovoAgentKind::Official,
+        codex_bin: "codex".to_string(),
+        stateful_binary: "stateful".to_string(),
+        benchmark_model: "gpt-5.4-mini".to_string(),
+        benchmark_reasoning_effort: "low".to_string(),
+        benchmark_model_context_window: 256000,
+        benchmark_temperature: "1".to_string(),
+        benchmark_max_turns: 500,
+        max_resumes: 1,
+        codex_timeout_seconds: 7200,
+        codex_adapter_script: None,
         mode: DeNovoRunMode::Batch,
         instance_ids: Vec::new(),
         llm_config: None,
@@ -427,6 +523,7 @@ out.mkdir(parents=True, exist_ok=True)
     .expect("condition should run");
 
     assert_eq!(metadata.condition_id, "stateful-on_subagent-off");
+    assert_eq!(metadata.agent, DeNovoAgentKind::Official);
     assert!(metadata.running_time_ms > 0);
     assert!(
         run_dir
@@ -443,6 +540,260 @@ out.mkdir(parents=True, exist_ok=True)
             .join("conditions/stateful-on_subagent-off/official/_/results.jsonl")
             .is_file()
     );
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn denovo_condition_run_routes_codex_cli_to_adapter_and_writes_metadata() {
+    let root = temp_root("stateful-bench-denovo-codex-cli-adapter");
+    let aweagent = root.join("AweAgent");
+    fs::create_dir_all(&aweagent).expect("AweAgent dir should exist");
+    let adapter = root.join("denovo_codex_agent.py");
+    fs::write(
+        &adapter,
+        r#"#!/usr/bin/env python3
+import argparse
+import json
+from pathlib import Path
+parser = argparse.ArgumentParser(allow_abbrev=False)
+parser.add_argument("--output")
+parser.add_argument("--agent-mode")
+parser.add_argument("--subagent")
+parser.add_argument("--llm-config")
+parser.add_argument("--model")
+args, extra = parser.parse_known_args()
+out = Path(args.output) / "_"
+out.mkdir(parents=True, exist_ok=True)
+(out / "results.jsonl").write_text(json.dumps({"instance_id":"fake-a","success":True,"score":1.0,"finish_reason":"fake","eval_result":{"details":{"pass_rate":1.0}}}) + "\n")
+(out / "adapter_args.json").write_text(json.dumps({"agent_mode": args.agent_mode, "subagent": args.subagent, "llm_config": args.llm_config, "model": args.model, "extra": extra}))
+"#,
+    )
+    .expect("fake adapter should write");
+
+    let run_dir = root.join("runs/dev-denovo-codex");
+    let metadata = run_denovo_condition(DeNovoConditionRunOptions {
+        run_id: "dev-denovo-codex".to_string(),
+        aweagent_root: aweagent.clone(),
+        python: "python3".to_string(),
+        data_file: "denovoswe_with_patches.jsonl".into(),
+        run_dir: run_dir.clone(),
+        base_config: "configs/tasks/denovoswe.yaml".into(),
+        condition: DeNovoCondition::new(false, true),
+        agent: DeNovoAgentKind::CodexCli,
+        codex_bin: "codex".to_string(),
+        stateful_binary: "stateful".to_string(),
+        benchmark_model: "gpt-5.4-mini".to_string(),
+        benchmark_reasoning_effort: "low".to_string(),
+        benchmark_model_context_window: 256000,
+        benchmark_temperature: "1".to_string(),
+        benchmark_max_turns: 500,
+        max_resumes: 1,
+        codex_timeout_seconds: 7200,
+        codex_adapter_script: Some(adapter),
+        mode: DeNovoRunMode::Batch,
+        instance_ids: Vec::new(),
+        llm_config: Some("configs/llm/should-not-be-forwarded.yaml".into()),
+        model: Some("should-not-be-forwarded".to_string()),
+        max_steps: None,
+        max_concurrent: None,
+        search_override: None,
+        skip_eval: false,
+        validate_run: false,
+        eval_iters: 1,
+        del_done_images: false,
+        dump_clean_snapshot: None,
+        prompt_version: "v2".to_string(),
+        verbose: false,
+    })
+    .expect("Codex CLI adapter should run");
+
+    assert_eq!(metadata.agent, DeNovoAgentKind::CodexCli);
+    assert_eq!(metadata.condition_id, "stateful-off_subagent-on");
+    assert_eq!(metadata.command.cwd, aweagent);
+    assert!(metadata.official_dir.ends_with("codex-cli"));
+    assert!(
+        run_dir
+            .join("conditions/stateful-off_subagent-on/codex-cli/_/results.jsonl")
+            .is_file()
+    );
+    assert!(
+        run_dir
+            .join("conditions/stateful-off_subagent-on/denovo-report.json")
+            .is_file()
+    );
+    let result: DeNovoOfficialResult = serde_json::from_str(
+        fs::read_to_string(
+            run_dir.join("conditions/stateful-off_subagent-on/codex-cli/_/results.jsonl"),
+        )
+        .expect("results jsonl should exist")
+        .lines()
+        .next()
+        .expect("results jsonl should contain a row"),
+    )
+    .expect("fake result should parse");
+    assert_eq!(
+        result.extra.get("finish_reason"),
+        Some(&serde_json::Value::String("fake".to_string()))
+    );
+    assert_eq!(
+        result
+            .eval_result
+            .as_ref()
+            .and_then(|eval| eval.details.as_ref())
+            .and_then(|details| details.pass_rate),
+        Some(1.0)
+    );
+    let adapter_args: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            run_dir.join("conditions/stateful-off_subagent-on/codex-cli/_/adapter_args.json"),
+        )
+        .expect("adapter args should exist"),
+    )
+    .expect("adapter args should parse");
+    assert_eq!(adapter_args["agent_mode"], "no-state");
+    assert_eq!(adapter_args["subagent"], "on");
+    assert_eq!(adapter_args["llm_config"], serde_json::Value::Null);
+    assert_eq!(adapter_args["model"], serde_json::Value::Null);
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn denovo_condition_run_resolves_relative_codex_adapter_script_from_caller_cwd() {
+    let root = PathBuf::from("../..").join("tmp/target").join(format!(
+        "stateful-bench-denovo-relative-adapter-{}",
+        std::process::id()
+    ));
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("old temp root should clean up");
+    }
+    let aweagent = root.join("AweAgent");
+    fs::create_dir_all(&aweagent).expect("AweAgent dir should exist");
+    let adapter = root.join("relative_denovo_adapter.py");
+    fs::write(
+        &adapter,
+        r#"#!/usr/bin/env python3
+import argparse
+import json
+from pathlib import Path
+parser = argparse.ArgumentParser(allow_abbrev=False)
+parser.add_argument("--output")
+parser.add_argument("--agent-mode")
+parser.add_argument("--subagent")
+args, extra = parser.parse_known_args()
+out = Path(args.output) / "_"
+out.mkdir(parents=True, exist_ok=True)
+(out / "results.jsonl").write_text(json.dumps({"instance_id":"fake-relative","success":True,"score":1.0,"finish_reason":"fake","eval_result":{"details":{"pass_rate":1.0}}}) + "\n")
+"#,
+    )
+    .expect("fake relative adapter should write");
+
+    let run_dir = root.join("runs/dev-denovo-codex-relative");
+    let metadata = run_denovo_condition(DeNovoConditionRunOptions {
+        run_id: "dev-denovo-codex-relative".to_string(),
+        aweagent_root: aweagent.clone(),
+        python: "python3".to_string(),
+        data_file: "denovoswe_with_patches.jsonl".into(),
+        run_dir: run_dir.clone(),
+        base_config: "configs/tasks/denovoswe.yaml".into(),
+        condition: DeNovoCondition::new(false, true),
+        agent: DeNovoAgentKind::CodexCli,
+        codex_bin: "codex".to_string(),
+        stateful_binary: "stateful".to_string(),
+        benchmark_model: "gpt-5.4-mini".to_string(),
+        benchmark_reasoning_effort: "low".to_string(),
+        benchmark_model_context_window: 256000,
+        benchmark_temperature: "1".to_string(),
+        benchmark_max_turns: 500,
+        max_resumes: 1,
+        codex_timeout_seconds: 7200,
+        codex_adapter_script: Some(adapter.clone()),
+        mode: DeNovoRunMode::Batch,
+        instance_ids: Vec::new(),
+        llm_config: None,
+        model: None,
+        max_steps: None,
+        max_concurrent: None,
+        search_override: None,
+        skip_eval: false,
+        validate_run: false,
+        eval_iters: 1,
+        del_done_images: false,
+        dump_clean_snapshot: None,
+        prompt_version: "v2".to_string(),
+        verbose: false,
+    })
+    .expect("relative Codex CLI adapter should run from caller cwd");
+
+    assert_eq!(metadata.command.cwd, aweagent);
+    assert!(
+        Path::new(&metadata.command.args[0]).is_absolute(),
+        "adapter script path should be absolutized before changing cwd"
+    );
+    assert!(
+        run_dir
+            .join("conditions/stateful-off_subagent-on/denovo-report.json")
+            .is_file()
+    );
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn denovo_condition_run_reports_neutral_command_failure_for_codex_adapter() {
+    let root = temp_root("stateful-bench-denovo-codex-cli-failure");
+    let aweagent = root.join("AweAgent");
+    fs::create_dir_all(&aweagent).expect("AweAgent dir should exist");
+    let adapter = root.join("denovo_codex_agent.py");
+    fs::write(
+        &adapter,
+        r#"#!/usr/bin/env python3
+import sys
+sys.exit(2)
+"#,
+    )
+    .expect("fake adapter should write");
+
+    let error = run_denovo_condition(DeNovoConditionRunOptions {
+        run_id: "dev-denovo-codex-failure".to_string(),
+        aweagent_root: aweagent,
+        python: "python3".to_string(),
+        data_file: "denovoswe_with_patches.jsonl".into(),
+        run_dir: root.join("runs/dev-denovo-codex-failure"),
+        base_config: "configs/tasks/denovoswe.yaml".into(),
+        condition: DeNovoCondition::new(false, true),
+        agent: DeNovoAgentKind::CodexCli,
+        codex_bin: "codex".to_string(),
+        stateful_binary: "stateful".to_string(),
+        benchmark_model: "gpt-5.4-mini".to_string(),
+        benchmark_reasoning_effort: "low".to_string(),
+        benchmark_model_context_window: 256000,
+        benchmark_temperature: "1".to_string(),
+        benchmark_max_turns: 500,
+        max_resumes: 1,
+        codex_timeout_seconds: 7200,
+        codex_adapter_script: Some(adapter),
+        mode: DeNovoRunMode::Batch,
+        instance_ids: Vec::new(),
+        llm_config: None,
+        model: None,
+        max_steps: None,
+        max_concurrent: None,
+        search_override: None,
+        skip_eval: false,
+        validate_run: false,
+        eval_iters: 1,
+        del_done_images: false,
+        dump_clean_snapshot: None,
+        prompt_version: "v2".to_string(),
+        verbose: false,
+    })
+    .expect_err("Codex adapter failure should propagate");
+
+    let message = error.to_string();
+    assert!(message.contains("DeNovoSWE command failed with status"));
+    assert!(!message.contains("official DeNovoSWE recipe failed"));
 
     fs::remove_dir_all(root).expect("temp root should clean up");
 }
@@ -487,6 +838,17 @@ score = 1.0 if "stateful" in args.config else 0.5
             )
             .unwrap(),
         ],
+        agent: DeNovoAgentKind::Official,
+        codex_bin: "codex".to_string(),
+        stateful_binary: "stateful".to_string(),
+        benchmark_model: "gpt-5.4-mini".to_string(),
+        benchmark_reasoning_effort: "low".to_string(),
+        benchmark_model_context_window: 256000,
+        benchmark_temperature: "1".to_string(),
+        benchmark_max_turns: 500,
+        max_resumes: 1,
+        codex_timeout_seconds: 7200,
+        codex_adapter_script: None,
         mode: DeNovoRunMode::Batch,
         instance_ids: Vec::new(),
         llm_config: None,
@@ -558,6 +920,75 @@ out.mkdir(parents=True, exist_ok=True)
     assert!(metadata.running_time_ms > 0);
     assert!(metadata.results_jsonl.is_file());
     assert!(root.join("extracts/denovo-extract.json").is_file());
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn denovo_extract_relative_paths_are_resolved_from_caller_cwd() {
+    let root = PathBuf::from("../..").join("tmp/target").join(format!(
+        "stateful-bench-denovo-extract-relative-{}",
+        std::process::id()
+    ));
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("old temp root should clean up");
+    }
+    let aweagent = root.join("AweAgent");
+    let recipe_dir = aweagent.join("recipes/denovo_swe");
+    fs::create_dir_all(&recipe_dir).expect("recipe dir should exist");
+    fs::write(
+        recipe_dir.join("extract_patch.py"),
+        r#"#!/usr/bin/env python3
+import argparse
+import json
+from pathlib import Path
+parser = argparse.ArgumentParser()
+parser.add_argument("--input")
+parser.add_argument("--output")
+parser.add_argument("--config")
+args, extra = parser.parse_known_args()
+out = Path(args.output) / "extract_patch_fake"
+out.mkdir(parents=True, exist_ok=True)
+(out / "results.jsonl").write_text(json.dumps({"instance_id":"fake-a","test_patch":"diff --git a/test.py b/test.py\n","test_binary_archive_b64":"","test_binary_files":[]}) + "\n")
+(out / "received.json").write_text(json.dumps({"input": args.input, "output": args.output, "config": args.config}))
+"#,
+    )
+    .expect("fake extract_patch.py should write");
+
+    let input = root.join("ready_denovoswe.jsonl");
+    let output = root.join("extracts");
+    let config = root.join("configs/tasks/denovoswe.yaml");
+    fs::create_dir_all(config.parent().expect("config should have parent"))
+        .expect("config dir should exist");
+    fs::write(&input, "{}\n").expect("input should exist");
+    fs::write(&config, "config: true\n").expect("config should exist");
+
+    let metadata = run_denovo_extract(DeNovoExtractOptions {
+        aweagent_root: aweagent,
+        python: "python3".to_string(),
+        input: input.clone(),
+        output: output.clone(),
+        config: config.clone(),
+        max_concurrent: None,
+        instance_ids: Vec::new(),
+        dry_run: false,
+        del_done_images: false,
+        no_extract_package_info: false,
+    })
+    .expect("extract should run");
+
+    assert!(metadata.results_jsonl.starts_with(&output));
+    assert!(output.join("extract_patch_fake/results.jsonl").is_file());
+    assert!(!root.join("AweAgent").join(&output).exists());
+
+    let received: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(output.join("extract_patch_fake/received.json"))
+            .expect("received args should exist"),
+    )
+    .expect("received args should parse");
+    assert!(Path::new(received["input"].as_str().expect("input should be text")).is_absolute());
+    assert!(Path::new(received["output"].as_str().expect("output should be text")).is_absolute());
+    assert!(Path::new(received["config"].as_str().expect("config should be text")).is_absolute());
 
     fs::remove_dir_all(root).expect("temp root should clean up");
 }

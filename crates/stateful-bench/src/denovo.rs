@@ -35,6 +35,23 @@ impl DeNovoRunMode {
     }
 }
 
+const DEFAULT_CODEX_BIN: &str = "codex";
+const DEFAULT_CODEX_MODEL: &str = "gpt-5.4-mini";
+const DEFAULT_CODEX_REASONING_EFFORT: &str = "low";
+const DEFAULT_CODEX_MODEL_CONTEXT_WINDOW: usize = 256000;
+const DEFAULT_CODEX_TEMPERATURE: &str = "1";
+const DEFAULT_CODEX_MAX_TURNS: usize = 500;
+const DEFAULT_CODEX_MAX_RESUMES: usize = 1;
+const DEFAULT_CODEX_TIMEOUT_SECONDS: u64 = 7200;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum DeNovoAgentKind {
+    Official,
+    CodexCli,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum DeNovoCommand {
     Extract {
@@ -76,6 +93,28 @@ pub enum DeNovoCommand {
         mode: DeNovoRunMode,
         #[arg(long)]
         condition: Vec<String>,
+        #[arg(long, value_enum, default_value_t = DeNovoAgentKind::Official)]
+        agent: DeNovoAgentKind,
+        #[arg(long, default_value = DEFAULT_CODEX_BIN)]
+        codex_bin: String,
+        #[arg(long, default_value = "stateful")]
+        stateful_binary: String,
+        #[arg(long, default_value = DEFAULT_CODEX_MODEL)]
+        benchmark_model: String,
+        #[arg(long, default_value = DEFAULT_CODEX_REASONING_EFFORT)]
+        benchmark_reasoning_effort: String,
+        #[arg(long, default_value_t = DEFAULT_CODEX_MODEL_CONTEXT_WINDOW)]
+        benchmark_model_context_window: usize,
+        #[arg(long, default_value = DEFAULT_CODEX_TEMPERATURE)]
+        benchmark_temperature: String,
+        #[arg(long, default_value_t = DEFAULT_CODEX_MAX_TURNS)]
+        benchmark_max_turns: usize,
+        #[arg(long, default_value_t = DEFAULT_CODEX_MAX_RESUMES)]
+        max_resumes: usize,
+        #[arg(long, default_value_t = DEFAULT_CODEX_TIMEOUT_SECONDS)]
+        codex_timeout_seconds: u64,
+        #[arg(long)]
+        codex_adapter_script: Option<PathBuf>,
         #[arg(long)]
         llm_config: Option<PathBuf>,
         #[arg(long)]
@@ -172,6 +211,17 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
             config,
             mode,
             condition,
+            agent,
+            codex_bin,
+            stateful_binary,
+            benchmark_model,
+            benchmark_reasoning_effort,
+            benchmark_model_context_window,
+            benchmark_temperature,
+            benchmark_max_turns,
+            max_resumes,
+            codex_timeout_seconds,
+            codex_adapter_script,
             llm_config,
             model,
             max_steps,
@@ -200,6 +250,17 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
                 run_dir: output_dir.join(run_id),
                 base_config: config,
                 conditions,
+                agent,
+                codex_bin,
+                stateful_binary,
+                benchmark_model,
+                benchmark_reasoning_effort,
+                benchmark_model_context_window,
+                benchmark_temperature,
+                benchmark_max_turns,
+                max_resumes,
+                codex_timeout_seconds,
+                codex_adapter_script,
                 mode,
                 instance_ids: instance_id,
                 llm_config,
@@ -295,6 +356,37 @@ pub struct DeNovoRunRecipeOptions {
     pub verbose: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeNovoCodexRunOptions {
+    pub aweagent_root: PathBuf,
+    pub python: String,
+    pub data_file: PathBuf,
+    pub output: PathBuf,
+    pub base_config: PathBuf,
+    pub condition: DeNovoCondition,
+    pub mode: DeNovoRunMode,
+    pub instance_ids: Vec<String>,
+    pub max_steps: Option<usize>,
+    pub max_concurrent: Option<usize>,
+    pub skip_eval: bool,
+    pub validate_run: bool,
+    pub eval_iters: usize,
+    pub del_done_images: bool,
+    pub dump_clean_snapshot: Option<PathBuf>,
+    pub prompt_version: String,
+    pub verbose: bool,
+    pub codex_bin: String,
+    pub stateful_binary: String,
+    pub benchmark_model: String,
+    pub benchmark_reasoning_effort: String,
+    pub benchmark_model_context_window: usize,
+    pub benchmark_temperature: String,
+    pub benchmark_max_turns: usize,
+    pub max_resumes: usize,
+    pub codex_timeout_seconds: u64,
+    pub adapter_script: Option<PathBuf>,
+}
+
 pub fn build_denovo_extract_recipe_command(
     options: DeNovoExtractRecipeOptions,
 ) -> Result<RecipeCommand> {
@@ -374,6 +466,85 @@ pub fn build_denovo_run_recipe_command(options: DeNovoRunRecipeOptions) -> Resul
     })
 }
 
+pub fn build_denovo_codex_adapter_command(options: DeNovoCodexRunOptions) -> Result<RecipeCommand> {
+    let config = options
+        .condition
+        .config_path
+        .as_ref()
+        .unwrap_or(&options.base_config);
+    let script = options
+        .adapter_script
+        .unwrap_or_else(default_denovo_codex_adapter_script);
+    let agent_mode = if options.condition.stateful {
+        "stateful"
+    } else {
+        "no-state"
+    };
+    let subagent = if options.condition.subagent {
+        "on"
+    } else {
+        "off"
+    };
+    let mut args = vec![
+        path_arg(&script),
+        "--data-file".to_string(),
+        path_arg(&options.data_file),
+        "--config".to_string(),
+        path_arg(config),
+        "--mode".to_string(),
+        options.mode.as_str().to_string(),
+        "--output".to_string(),
+        path_arg(&options.output),
+        "--agent-mode".to_string(),
+        agent_mode.to_string(),
+        "--subagent".to_string(),
+        subagent.to_string(),
+        "--aweagent-root".to_string(),
+        path_arg(&options.aweagent_root),
+        "--codex-bin".to_string(),
+        options.codex_bin,
+        "--stateful-binary".to_string(),
+        options.stateful_binary,
+        "--benchmark-model".to_string(),
+        options.benchmark_model,
+        "--benchmark-reasoning-effort".to_string(),
+        options.benchmark_reasoning_effort,
+        "--benchmark-model-context-window".to_string(),
+        options.benchmark_model_context_window.to_string(),
+        "--benchmark-temperature".to_string(),
+        options.benchmark_temperature,
+        "--benchmark-max-turns".to_string(),
+        options.benchmark_max_turns.to_string(),
+        "--max-resumes".to_string(),
+        options.max_resumes.to_string(),
+        "--codex-timeout-seconds".to_string(),
+        options.codex_timeout_seconds.to_string(),
+        "--eval-iters".to_string(),
+        options.eval_iters.to_string(),
+        "--prompt-version".to_string(),
+        options.prompt_version,
+    ];
+    push_optional_usize(&mut args, "--max-steps", options.max_steps);
+    push_optional_usize(&mut args, "--max-concurrent", options.max_concurrent);
+    push_repeated(&mut args, "--instance-id", options.instance_ids);
+    push_flag(&mut args, "--skip-eval", options.skip_eval);
+    push_flag(&mut args, "--validate-run", options.validate_run);
+    push_flag(&mut args, "--del-done-images", options.del_done_images);
+    push_optional_path(
+        &mut args,
+        "--dump-clean-snapshot",
+        options.dump_clean_snapshot.as_ref(),
+    );
+    push_flag(&mut args, "--verbose", options.verbose);
+
+    Ok(RecipeCommand {
+        program: options.python,
+        args,
+        cwd: options.aweagent_root,
+        env: options.condition.env,
+    })
+}
+
 fn push_flag(args: &mut Vec<String>, flag: &str, enabled: bool) {
     if enabled {
         args.push(flag.to_string());
@@ -412,6 +583,18 @@ fn path_arg(path: &PathBuf) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn absolute_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(env::current_dir()?.join(path))
+    }
+}
+
+fn default_denovo_codex_adapter_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/denovo_codex_agent.py")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeNovoConditionRunOptions {
     pub run_id: String,
@@ -421,6 +604,17 @@ pub struct DeNovoConditionRunOptions {
     pub run_dir: PathBuf,
     pub base_config: PathBuf,
     pub condition: DeNovoCondition,
+    pub agent: DeNovoAgentKind,
+    pub codex_bin: String,
+    pub stateful_binary: String,
+    pub benchmark_model: String,
+    pub benchmark_reasoning_effort: String,
+    pub benchmark_model_context_window: usize,
+    pub benchmark_temperature: String,
+    pub benchmark_max_turns: usize,
+    pub max_resumes: usize,
+    pub codex_timeout_seconds: u64,
+    pub codex_adapter_script: Option<PathBuf>,
     pub mode: DeNovoRunMode,
     pub instance_ids: Vec<String>,
     pub llm_config: Option<PathBuf>,
@@ -442,6 +636,7 @@ pub struct DeNovoConditionMetadata {
     pub run_id: String,
     pub condition_id: String,
     pub condition: DeNovoCondition,
+    pub agent: DeNovoAgentKind,
     pub command: RecipeCommand,
     pub official_dir: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -458,42 +653,86 @@ pub struct DeNovoConditionMetadata {
 }
 
 pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovoConditionMetadata> {
-    let recipe = options.aweagent_root.join("recipes/denovo_swe/run.py");
-    if !recipe.is_file() {
-        bail!(
-            "official DeNovoSWE run recipe not found at {}",
-            recipe.display()
-        );
+    if options.agent == DeNovoAgentKind::Official {
+        let recipe = options.aweagent_root.join("recipes/denovo_swe/run.py");
+        if !recipe.is_file() {
+            bail!(
+                "official DeNovoSWE run recipe not found at {}",
+                recipe.display()
+            );
+        }
     }
 
     let condition_id = options.condition.id();
     let condition_dir = options.run_dir.join("conditions").join(&condition_id);
-    let official_dir = condition_dir.join("official");
-    fs::create_dir_all(&official_dir)
-        .with_context(|| format!("failed to create {}", official_dir.display()))?;
+    let agent_dir_name = match options.agent {
+        DeNovoAgentKind::Official => "official",
+        DeNovoAgentKind::CodexCli => "codex-cli",
+    };
+    let agent_output_dir = condition_dir.join(agent_dir_name);
+    fs::create_dir_all(&agent_output_dir)
+        .with_context(|| format!("failed to create {}", agent_output_dir.display()))?;
+    let command_data_file = absolute_path(&options.data_file)?;
+    let command_output_dir = absolute_path(&agent_output_dir)?;
+    let command_adapter_script = options
+        .codex_adapter_script
+        .as_ref()
+        .map(|path| absolute_path(path))
+        .transpose()?;
 
-    let command = build_denovo_run_recipe_command(DeNovoRunRecipeOptions {
-        aweagent_root: options.aweagent_root.clone(),
-        python: options.python,
-        data_file: options.data_file,
-        output: official_dir.clone(),
-        base_config: options.base_config,
-        condition: options.condition.clone(),
-        mode: options.mode,
-        instance_ids: options.instance_ids,
-        llm_config: options.llm_config,
-        model: options.model,
-        max_steps: options.max_steps,
-        max_concurrent: options.max_concurrent,
-        search_override: options.search_override,
-        skip_eval: options.skip_eval,
-        validate_run: options.validate_run,
-        eval_iters: options.eval_iters,
-        del_done_images: options.del_done_images,
-        dump_clean_snapshot: options.dump_clean_snapshot,
-        prompt_version: options.prompt_version,
-        verbose: options.verbose,
-    })?;
+    let command = match options.agent {
+        DeNovoAgentKind::Official => build_denovo_run_recipe_command(DeNovoRunRecipeOptions {
+            aweagent_root: options.aweagent_root.clone(),
+            python: options.python,
+            data_file: command_data_file,
+            output: command_output_dir,
+            base_config: options.base_config,
+            condition: options.condition.clone(),
+            mode: options.mode,
+            instance_ids: options.instance_ids,
+            llm_config: options.llm_config,
+            model: options.model,
+            max_steps: options.max_steps,
+            max_concurrent: options.max_concurrent,
+            search_override: options.search_override,
+            skip_eval: options.skip_eval,
+            validate_run: options.validate_run,
+            eval_iters: options.eval_iters,
+            del_done_images: options.del_done_images,
+            dump_clean_snapshot: options.dump_clean_snapshot,
+            prompt_version: options.prompt_version,
+            verbose: options.verbose,
+        }),
+        DeNovoAgentKind::CodexCli => build_denovo_codex_adapter_command(DeNovoCodexRunOptions {
+            aweagent_root: options.aweagent_root.clone(),
+            python: options.python,
+            data_file: command_data_file,
+            output: command_output_dir,
+            base_config: options.base_config,
+            condition: options.condition.clone(),
+            mode: options.mode,
+            instance_ids: options.instance_ids,
+            max_steps: options.max_steps,
+            max_concurrent: options.max_concurrent,
+            skip_eval: options.skip_eval,
+            validate_run: options.validate_run,
+            eval_iters: options.eval_iters,
+            del_done_images: options.del_done_images,
+            dump_clean_snapshot: options.dump_clean_snapshot,
+            prompt_version: options.prompt_version,
+            verbose: options.verbose,
+            codex_bin: options.codex_bin,
+            stateful_binary: options.stateful_binary,
+            benchmark_model: options.benchmark_model,
+            benchmark_reasoning_effort: options.benchmark_reasoning_effort,
+            benchmark_model_context_window: options.benchmark_model_context_window,
+            benchmark_temperature: options.benchmark_temperature,
+            benchmark_max_turns: options.benchmark_max_turns,
+            max_resumes: options.max_resumes,
+            codex_timeout_seconds: options.codex_timeout_seconds,
+            adapter_script: command_adapter_script,
+        }),
+    }?;
 
     let started_at_ms = unix_ms();
     let started = Instant::now();
@@ -508,8 +747,9 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
             run_id: options.run_id,
             condition_id,
             condition: options.condition,
+            agent: options.agent,
             command,
-            official_dir,
+            official_dir: agent_output_dir,
             results_jsonl: None,
             report_json: None,
             started_at_ms,
@@ -522,10 +762,10 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
         return Err(error);
     }
 
-    let results_jsonl = find_results_jsonl(&official_dir).with_context(|| {
+    let results_jsonl = find_results_jsonl(&agent_output_dir).with_context(|| {
         format!(
             "failed to locate results.jsonl under {}",
-            official_dir.display()
+            agent_output_dir.display()
         )
     })?;
     let results = crate::read_jsonl::<DeNovoOfficialResult>(&results_jsonl)?;
@@ -543,8 +783,9 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
         run_id: options.run_id,
         condition_id,
         condition: options.condition,
+        agent: options.agent,
         command,
-        official_dir,
+        official_dir: agent_output_dir,
         results_jsonl: Some(results_jsonl),
         report_json: Some(report_json),
         started_at_ms,
@@ -566,6 +807,17 @@ pub struct DeNovoMatrixRunOptions {
     pub run_dir: PathBuf,
     pub base_config: PathBuf,
     pub conditions: Vec<DeNovoCondition>,
+    pub agent: DeNovoAgentKind,
+    pub codex_bin: String,
+    pub stateful_binary: String,
+    pub benchmark_model: String,
+    pub benchmark_reasoning_effort: String,
+    pub benchmark_model_context_window: usize,
+    pub benchmark_temperature: String,
+    pub benchmark_max_turns: usize,
+    pub max_resumes: usize,
+    pub codex_timeout_seconds: u64,
+    pub codex_adapter_script: Option<PathBuf>,
     pub mode: DeNovoRunMode,
     pub instance_ids: Vec<String>,
     pub llm_config: Option<PathBuf>,
@@ -612,6 +864,17 @@ pub fn run_denovo_matrix(options: DeNovoMatrixRunOptions) -> Result<Vec<DeNovoCo
             run_dir: options.run_dir.clone(),
             base_config: options.base_config.clone(),
             condition: condition.clone(),
+            agent: options.agent,
+            codex_bin: options.codex_bin.clone(),
+            stateful_binary: options.stateful_binary.clone(),
+            benchmark_model: options.benchmark_model.clone(),
+            benchmark_reasoning_effort: options.benchmark_reasoning_effort.clone(),
+            benchmark_model_context_window: options.benchmark_model_context_window,
+            benchmark_temperature: options.benchmark_temperature.clone(),
+            benchmark_max_turns: options.benchmark_max_turns,
+            max_resumes: options.max_resumes,
+            codex_timeout_seconds: options.codex_timeout_seconds,
+            codex_adapter_script: options.codex_adapter_script.clone(),
             mode: options.mode,
             instance_ids: options.instance_ids.clone(),
             llm_config: options.llm_config.clone(),
@@ -690,13 +953,16 @@ pub fn run_denovo_extract(options: DeNovoExtractOptions) -> Result<DeNovoExtract
     }
     fs::create_dir_all(&options.output)
         .with_context(|| format!("failed to create {}", options.output.display()))?;
+    let command_input = absolute_path(&options.input)?;
+    let command_output = absolute_path(&options.output)?;
+    let command_config = absolute_path(&options.config)?;
 
     let command = build_denovo_extract_recipe_command(DeNovoExtractRecipeOptions {
         aweagent_root: options.aweagent_root.clone(),
         python: options.python,
-        input: options.input,
-        output: options.output.clone(),
-        config: options.config,
+        input: command_input,
+        output: command_output,
+        config: command_config,
         max_concurrent: options.max_concurrent,
         instance_ids: options.instance_ids,
         dry_run: options.dry_run,
@@ -796,7 +1062,7 @@ fn execute_recipe_command(command: &RecipeCommand) -> Result<()> {
         .with_context(|| format!("failed to execute {}", command_line(command)))?;
     if !status.success() {
         bail!(
-            "official DeNovoSWE recipe failed with status {status}: {}",
+            "DeNovoSWE command failed with status {status}: {}",
             command_line(command)
         );
     }

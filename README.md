@@ -655,9 +655,15 @@ bundled.
 - `run`: execute no-state or stateful paired-agent runs.
 - `report` and `compare`: summarize one run or compare stateful/no-state runs.
 - `synthetic`: run the built-in synthetic coordination benchmark.
-- `denovo`: wrap the official AweAgent DeNovoSWE recipe for extract, run,
-  report, and compare workflows while recording `stateful`, `subagent`, and
-  `running_time_ms` comparison axes.
+- `denovo`: wrap AweAgent DeNovoSWE extract/evaluation workflows and run either
+  the official AweAgent agent recipe or a host Codex CLI adapter while recording
+  `stateful`, `subagent`, and `running_time_ms` comparison axes.
+
+For Codex-backed paired-agent runs, `stateful-bench run --mode stateful`
+starts a per-pair stateful server and prepares each isolated nested Codex home
+with the stateful MCP server config, lifecycle hooks, and
+`stateful-command-policy` skill. `--mode no-state` does not write those Codex
+integration files, keeping the stateful on/off benchmark axis separate.
 
 The synthetic benchmark is a deterministic fixture for exercising report and
 comparison plumbing. Treat its positive delta as a smoke test for the metric
@@ -710,6 +716,38 @@ stateful-bench denovo run \
   --max-concurrent 4 \
   --eval-iters 1
 ```
+
+Run with the Codex CLI adapter when you want the agent step to use host
+`codex exec` authentication. This mode uses Codex OAuth credentials from
+`auth.json` instead of an AweAgent LLM API key:
+
+```bash
+stateful-bench denovo run \
+  --agent codex-cli \
+  --aweagent-root ../AweAgent \
+  --data-file .stateful_bench/denovo/extracts/dev/extract_patch_*/results.jsonl \
+  --output-dir target/stateful-bench/denovo/runs \
+  --run-id dev-denovo-codex \
+  --condition stateful:off,subagent:on \
+  --condition stateful:on,subagent:on \
+  --mode batch \
+  --max-concurrent 1 \
+  --benchmark-model gpt-5.4-mini \
+  --benchmark-reasoning-effort low \
+  --benchmark-model-context-window 256000 \
+  --benchmark-temperature 1 \
+  --benchmark-max-turns 500 \
+  --stateful-binary /Users/arthur/.cargo/bin/stateful
+```
+
+The Codex CLI adapter uses isolated `CODEX_HOME` directories for both profiles:
+
+- `stateful:off`: isolated `CODEX_HOME` seeded with auth only, `codex exec` uses
+  `--ignore-user-config`, `--ignore-rules`, bundled skills disabled, no
+  generated MCP config/hooks/skills.
+- `stateful:on`: isolated `CODEX_HOME` seeded with auth plus generated stateful
+  `config.toml`, stateful MCP server config, lifecycle hooks, and
+  `stateful-command-policy` skill; does not pass `--ignore-user-config`.
 
 Generate reports:
 

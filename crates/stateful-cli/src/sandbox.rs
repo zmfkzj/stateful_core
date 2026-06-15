@@ -20,7 +20,7 @@ use crate::{
     CurrentSession, GlobalPaths, HttpResponse, ProtocolEnvelopeArgs, RepoGate, ServerRuntime,
     discover_runtime_with_global, ensure_server, post_json, protocol_envelope,
     read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
-    runtime_env_override_is_configured,
+    runtime_env_override_is_configured, shadow_guard,
     shell_command::{
         first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
     },
@@ -165,6 +165,14 @@ pub fn run_sandbox_in_repo(
     let create_targets = shape.create_targets;
     let write_dirs = shape.write_dirs;
     let git_command_words = shape.git_command_words;
+    if request.fs == SandboxFsProfile::Build {
+        shadow_guard::audit_dependency_shadowing(&repo_root)?;
+    } else if request.fs == SandboxFsProfile::WriteTargets {
+        shadow_guard::check_paths_for_dependency_shadowing(
+            &repo_root,
+            create_targets.iter().map(String::as_str),
+        )?;
+    }
     let runtime = if sandbox_profile_requires_runtime(request.fs) {
         if !runtime_env_override_is_configured() {
             ensure_server(paths)?;
