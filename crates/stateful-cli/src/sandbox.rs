@@ -1753,11 +1753,15 @@ fn bubblewrap_base_args(
         OsString::from("--dev-bind"),
         OsString::from("/dev/null"),
         OsString::from("/dev/null"),
-        OsString::from("--ro-bind"),
+        OsString::from("--dev-bind"),
         OsString::from("/dev/zero"),
         OsString::from("/dev/zero"),
-        OsString::from("--ro-bind"),
+        OsString::from("--remount-ro"),
+        OsString::from("/dev/zero"),
+        OsString::from("--dev-bind"),
         OsString::from("/dev/urandom"),
+        OsString::from("/dev/urandom"),
+        OsString::from("--remount-ro"),
         OsString::from("/dev/urandom"),
     ]);
 
@@ -2077,21 +2081,41 @@ mod tests {
         );
         assert!(
             args.windows(3)
+                .any(|window| { window == ["--dev-bind", "/dev/zero", "/dev/zero"] })
+        );
+        assert!(args.windows(5).any(|window| {
+            window
+                == [
+                    "--dev-bind",
+                    "/dev/zero",
+                    "/dev/zero",
+                    "--remount-ro",
+                    "/dev/zero",
+                ]
+        }));
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--dev-bind", "/dev/urandom", "/dev/urandom"] })
+        );
+        assert!(args.windows(5).any(|window| {
+            window
+                == [
+                    "--dev-bind",
+                    "/dev/urandom",
+                    "/dev/urandom",
+                    "--remount-ro",
+                    "/dev/urandom",
+                ]
+        }));
+        assert!(
+            !args
+                .windows(3)
                 .any(|window| { window == ["--ro-bind", "/dev/zero", "/dev/zero"] })
         );
         assert!(
-            args.windows(3)
+            !args
+                .windows(3)
                 .any(|window| { window == ["--ro-bind", "/dev/urandom", "/dev/urandom"] })
-        );
-        assert!(
-            !args
-                .windows(3)
-                .any(|window| { window == ["--dev-bind", "/dev/zero", "/dev/zero"] })
-        );
-        assert!(
-            !args
-                .windows(3)
-                .any(|window| { window == ["--dev-bind", "/dev/urandom", "/dev/urandom"] })
         );
         assert!(args.ends_with(&[
             "--".to_string(),
@@ -2153,24 +2177,76 @@ mod tests {
         );
         assert!(
             args.windows(3)
+                .any(|window| { window == ["--dev-bind", "/dev/zero", "/dev/zero"] })
+        );
+        assert!(args.windows(5).any(|window| {
+            window
+                == [
+                    "--dev-bind",
+                    "/dev/zero",
+                    "/dev/zero",
+                    "--remount-ro",
+                    "/dev/zero",
+                ]
+        }));
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--dev-bind", "/dev/urandom", "/dev/urandom"] })
+        );
+        assert!(args.windows(5).any(|window| {
+            window
+                == [
+                    "--dev-bind",
+                    "/dev/urandom",
+                    "/dev/urandom",
+                    "--remount-ro",
+                    "/dev/urandom",
+                ]
+        }));
+        assert!(
+            !args
+                .windows(3)
                 .any(|window| { window == ["--ro-bind", "/dev/zero", "/dev/zero"] })
         );
         assert!(
-            args.windows(3)
+            !args
+                .windows(3)
                 .any(|window| { window == ["--ro-bind", "/dev/urandom", "/dev/urandom"] })
-        );
-        assert!(
-            !args
-                .windows(3)
-                .any(|window| { window == ["--dev-bind", "/dev/zero", "/dev/zero"] })
-        );
-        assert!(
-            !args
-                .windows(3)
-                .any(|window| { window == ["--dev-bind", "/dev/urandom", "/dev/urandom"] })
         );
         assert!(args.contains(&"--unshare-net".to_string()));
         assert!(!args.contains(&"--share-net".to_string()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bubblewrap_read_only_profile_can_read_required_devices() {
+        if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
+            return;
+        }
+        if Command::new("bwrap").arg("--version").status().is_err() {
+            return;
+        }
+
+        let output = run_command_with_timeout(
+            bubblewrap_command(
+                "dd if=/dev/zero of=/dev/null bs=1 count=1 >/dev/null 2>&1 && dd if=/dev/urandom of=/dev/null bs=1 count=1 >/dev/null 2>&1 && ! sh -c 'printf x > /dev/zero' && ! sh -c 'printf x > /dev/urandom'",
+                Path::new("/"),
+                &[],
+                None,
+                SandboxNetworkPolicy::Disabled,
+            ),
+            Duration::from_secs(10),
+        )
+        .expect("bubblewrap command should run");
+
+        assert_eq!(output.status, "exited");
+        assert_eq!(
+            output.exit_code,
+            Some(0),
+            "device reads should succeed and writes should fail: stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
     }
 
     #[test]
