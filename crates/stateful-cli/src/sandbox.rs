@@ -1756,12 +1756,8 @@ fn bubblewrap_base_args(
         OsString::from("--dev-bind"),
         OsString::from("/dev/zero"),
         OsString::from("/dev/zero"),
-        OsString::from("--remount-ro"),
-        OsString::from("/dev/zero"),
         OsString::from("--dev-bind"),
         OsString::from("/dev/urandom"),
-        OsString::from("/dev/urandom"),
-        OsString::from("--remount-ro"),
         OsString::from("/dev/urandom"),
     ]);
 
@@ -2083,7 +2079,7 @@ mod tests {
             args.windows(3)
                 .any(|window| { window == ["--dev-bind", "/dev/zero", "/dev/zero"] })
         );
-        assert!(args.windows(5).any(|window| {
+        assert!(!args.windows(5).any(|window| {
             window
                 == [
                     "--dev-bind",
@@ -2097,7 +2093,7 @@ mod tests {
             args.windows(3)
                 .any(|window| { window == ["--dev-bind", "/dev/urandom", "/dev/urandom"] })
         );
-        assert!(args.windows(5).any(|window| {
+        assert!(!args.windows(5).any(|window| {
             window
                 == [
                     "--dev-bind",
@@ -2179,7 +2175,7 @@ mod tests {
             args.windows(3)
                 .any(|window| { window == ["--dev-bind", "/dev/zero", "/dev/zero"] })
         );
-        assert!(args.windows(5).any(|window| {
+        assert!(!args.windows(5).any(|window| {
             window
                 == [
                     "--dev-bind",
@@ -2193,7 +2189,7 @@ mod tests {
             args.windows(3)
                 .any(|window| { window == ["--dev-bind", "/dev/urandom", "/dev/urandom"] })
         );
-        assert!(args.windows(5).any(|window| {
+        assert!(!args.windows(5).any(|window| {
             window
                 == [
                     "--dev-bind",
@@ -2229,7 +2225,7 @@ mod tests {
 
         let output = run_command_with_timeout(
             bubblewrap_command(
-                "dd if=/dev/zero of=/dev/null bs=1 count=1 >/dev/null 2>&1 && dd if=/dev/urandom of=/dev/null bs=1 count=1 >/dev/null 2>&1 && ! sh -c 'printf x > /dev/zero' && ! sh -c 'printf x > /dev/urandom'",
+                "dd if=/dev/zero of=/dev/null bs=1 count=1 >/dev/null 2>&1 && dd if=/dev/urandom of=/dev/null bs=1 count=1 >/dev/null 2>&1",
                 Path::new("/"),
                 &[],
                 None,
@@ -2243,7 +2239,7 @@ mod tests {
         assert_eq!(
             output.exit_code,
             Some(0),
-            "device reads should succeed and writes should fail: stdout={} stderr={}",
+            "device reads should succeed: stdout={} stderr={}",
             output.stdout,
             output.stderr
         );
