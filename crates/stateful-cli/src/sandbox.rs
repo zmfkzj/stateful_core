@@ -125,6 +125,12 @@ struct GitProfileIdentity {
     email: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct GitProfileConfig {
+    identity: Option<GitProfileIdentity>,
+    credential_helpers: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SandboxWritablePathKind {
     File,
@@ -576,7 +582,7 @@ fn run_sandboxed_git_command(
     network: SandboxNetworkPolicy,
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
-    let identity = discover_git_profile_identity(cwd);
+    let config = discover_git_profile_config(cwd);
 
     #[cfg(target_os = "macos")]
     {
@@ -587,7 +593,7 @@ fn run_sandboxed_git_command(
                 writable_paths,
                 temp_dir,
                 hooks_dir,
-                identity.as_ref(),
+                &config,
                 network,
             ),
             timeout,
@@ -603,7 +609,7 @@ fn run_sandboxed_git_command(
                 writable_paths,
                 temp_dir,
                 hooks_dir,
-                identity.as_ref(),
+                &config,
                 network,
             ),
             timeout,
@@ -1598,7 +1604,7 @@ fn seatbelt_git_command(
     writable_paths: &[SandboxWritablePath],
     temp_dir: &Path,
     hooks_dir: &Path,
-    identity: Option<&GitProfileIdentity>,
+    config: &GitProfileConfig,
     network: SandboxNetworkPolicy,
 ) -> Command {
     let profile = seatbelt_git_profile(writable_paths, cwd, network);
@@ -1609,7 +1615,7 @@ fn seatbelt_git_command(
         .arg("git")
         .args(&words[1..])
         .current_dir(cwd);
-    apply_git_profile_env(&mut sandbox, temp_dir, hooks_dir, identity);
+    apply_git_profile_env(&mut sandbox, temp_dir, hooks_dir, config);
     sandbox
 }
 
@@ -1711,12 +1717,12 @@ fn bubblewrap_git_command(
     writable_paths: &[SandboxWritablePath],
     temp_dir: &Path,
     hooks_dir: &Path,
-    identity: Option<&GitProfileIdentity>,
+    config: &GitProfileConfig,
     network: SandboxNetworkPolicy,
 ) -> Command {
     let mut bwrap = Command::new("bwrap");
     bwrap.args(bubblewrap_git_args(words, cwd, writable_paths, network));
-    apply_git_profile_env(&mut bwrap, temp_dir, hooks_dir, identity);
+    apply_git_profile_env(&mut bwrap, temp_dir, hooks_dir, config);
     bwrap
 }
 
@@ -1798,6 +1804,13 @@ fn bubblewrap_base_args(
     args
 }
 
+fn discover_git_profile_config(cwd: &Path) -> GitProfileConfig {
+    GitProfileConfig {
+        identity: discover_git_profile_identity(cwd),
+        credential_helpers: discover_git_profile_credential_helpers(cwd),
+    }
+}
+
 fn discover_git_profile_identity(cwd: &Path) -> Option<GitProfileIdentity> {
     let name = git_profile_config_value(cwd, "user.name")?;
     let email = git_profile_config_value(cwd, "user.email")?;
@@ -1805,22 +1818,55 @@ fn discover_git_profile_identity(cwd: &Path) -> Option<GitProfileIdentity> {
 }
 
 fn git_profile_config_value(cwd: &Path, key: &str) -> Option<String> {
+    git_profile_config_values(cwd, key).into_iter().last()
+}
+
+fn discover_git_profile_credential_helpers(cwd: &Path) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    git_profile_config_values(cwd, "credential.helper")
+        .into_iter()
+        .filter_map(|helper| allowed_git_profile_credential_helper(&helper))
+        .filter(|helper| seen.insert(helper.clone()))
+        .collect()
+}
+
+fn git_profile_config_values(cwd: &Path, key: &str) -> Vec<String> {
     let mut command = Command::new("git");
     remove_git_profile_env(&mut command);
     command
         .arg("-C")
         .arg(cwd)
         .arg("config")
-        .arg("--get")
+        .arg("--get-all")
         .arg(key)
         .env("GIT_TERMINAL_PROMPT", "0");
-    let output = command.output().ok()?;
+    let Some(output) = command.output().ok() else {
+        return Vec::new();
+    };
     if !output.status.success() {
-        return None;
+        return Vec::new();
     }
-    let value = String::from_utf8(output.stdout).ok()?;
-    let value = value.trim_end_matches(&['\r', '\n'][..]).to_string();
-    if value.is_empty() { None } else { Some(value) }
+    let Some(output) = String::from_utf8(output.stdout).ok() else {
+        return Vec::new();
+    };
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn allowed_git_profile_credential_helper(helper: &str) -> Option<String> {
+    match helper.trim() {
+        "store" => Some("store".to_string()),
+        "cache" => Some("cache".to_string()),
+        "osxkeychain" => Some("osxkeychain".to_string()),
+        "!gh auth git-credential" | "! gh auth git-credential" => {
+            Some("!gh auth git-credential".to_string())
+        }
+        _ => None,
+    }
 }
 
 fn remove_git_profile_env(command: &mut Command) {
@@ -1840,41 +1886,43 @@ fn apply_git_profile_env(
     command: &mut Command,
     temp_dir: &Path,
     hooks_dir: &Path,
-    identity: Option<&GitProfileIdentity>,
+    config: &GitProfileConfig,
 ) {
     apply_sandbox_temp_env(command, Some(temp_dir));
     remove_git_profile_env(command);
-    let config_count = if identity.is_some() { "9" } else { "7" };
+    let mut config_entries = vec![
+        ("core.hooksPath", hooks_dir.as_os_str().to_owned()),
+        ("core.fsmonitor", OsString::from("false")),
+        ("diff.external", OsString::from("")),
+        ("interactive.diffFilter", OsString::from("")),
+        ("protocol.ext.allow", OsString::from("never")),
+        ("branch.autoSetupMerge", OsString::from("false")),
+        ("branch.autoSetupRebase", OsString::from("never")),
+    ];
+    if let Some(identity) = &config.identity {
+        config_entries.push(("user.name", OsString::from(&identity.name)));
+        config_entries.push(("user.email", OsString::from(&identity.email)));
+    }
+    config_entries.extend(
+        config
+            .credential_helpers
+            .iter()
+            .map(|helper| ("credential.helper", OsString::from(helper))),
+    );
     command
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_COUNT", config_count)
-        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
-        .env("GIT_CONFIG_VALUE_0", hooks_dir)
-        .env("GIT_CONFIG_KEY_1", "core.fsmonitor")
-        .env("GIT_CONFIG_VALUE_1", "false")
-        .env("GIT_CONFIG_KEY_2", "diff.external")
-        .env("GIT_CONFIG_VALUE_2", "")
-        .env("GIT_CONFIG_KEY_3", "interactive.diffFilter")
-        .env("GIT_CONFIG_VALUE_3", "")
-        .env("GIT_CONFIG_KEY_4", "protocol.ext.allow")
-        .env("GIT_CONFIG_VALUE_4", "never")
-        .env("GIT_CONFIG_KEY_5", "branch.autoSetupMerge")
-        .env("GIT_CONFIG_VALUE_5", "false")
-        .env("GIT_CONFIG_KEY_6", "branch.autoSetupRebase")
-        .env("GIT_CONFIG_VALUE_6", "never")
+        .env("GIT_CONFIG_COUNT", config_entries.len().to_string())
         .env("GIT_LFS_SKIP_SMUDGE", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", ":")
         .env("GIT_SEQUENCE_EDITOR", ":")
         .env("GIT_PAGER", "cat")
         .env("PAGER", "cat");
-    if let Some(identity) = identity {
+    for (index, (key, value)) in config_entries.into_iter().enumerate() {
         command
-            .env("GIT_CONFIG_KEY_7", "user.name")
-            .env("GIT_CONFIG_VALUE_7", &identity.name)
-            .env("GIT_CONFIG_KEY_8", "user.email")
-            .env("GIT_CONFIG_VALUE_8", &identity.email);
+            .env(format!("GIT_CONFIG_KEY_{index}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{index}"), value);
     }
 }
 
@@ -2624,7 +2672,7 @@ mod tests {
             &writable_paths,
             Path::new("/repo/.git/stateful/.stateful-tmp"),
             Path::new("/repo/.git/stateful/hooks-disabled"),
-            None,
+            &GitProfileConfig::default(),
             SandboxNetworkPolicy::Enabled,
         );
         let args = command
@@ -2728,7 +2776,7 @@ mod tests {
             &mut command,
             Path::new("/repo/.git/stateful/.stateful-tmp"),
             Path::new("/repo/.git/stateful/hooks-disabled"),
-            None,
+            &GitProfileConfig::default(),
         );
         let envs = command
             .get_envs()
@@ -2759,15 +2807,18 @@ mod tests {
     #[test]
     fn git_profile_env_injects_discovered_commit_identity() {
         let mut command = Command::new("git");
-        let identity = GitProfileIdentity {
-            name: "Stateful User".into(),
-            email: "stateful@example.invalid".into(),
+        let config = GitProfileConfig {
+            identity: Some(GitProfileIdentity {
+                name: "Stateful User".into(),
+                email: "stateful@example.invalid".into(),
+            }),
+            credential_helpers: vec![],
         };
         apply_git_profile_env(
             &mut command,
             Path::new("/repo/.git/stateful/.stateful-tmp"),
             Path::new("/repo/.git/stateful/hooks-disabled"),
-            Some(&identity),
+            &config,
         );
         let envs = command
             .get_envs()
@@ -2794,6 +2845,76 @@ mod tests {
         assert_eq!(
             envs.get("GIT_CONFIG_VALUE_8"),
             Some(&"stateful@example.invalid".to_string())
+        );
+    }
+
+    #[test]
+    fn git_profile_env_injects_allowed_credential_helpers() {
+        let mut command = Command::new("git");
+        let config = GitProfileConfig {
+            identity: None,
+            credential_helpers: vec!["store".into(), "!gh auth git-credential".into()],
+        };
+        apply_git_profile_env(
+            &mut command,
+            Path::new("/repo/.git/stateful/.stateful-tmp"),
+            Path::new("/repo/.git/stateful/hooks-disabled"),
+            &config,
+        );
+        let envs = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(envs.get("GIT_CONFIG_COUNT"), Some(&"9".to_string()));
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_7"),
+            Some(&"credential.helper".to_string())
+        );
+        assert_eq!(envs.get("GIT_CONFIG_VALUE_7"), Some(&"store".to_string()));
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_8"),
+            Some(&"credential.helper".to_string())
+        );
+        assert_eq!(
+            envs.get("GIT_CONFIG_VALUE_8"),
+            Some(&"!gh auth git-credential".to_string())
+        );
+    }
+
+    #[test]
+    fn git_profile_credential_helper_filter_allows_only_safe_helpers() {
+        assert_eq!(
+            allowed_git_profile_credential_helper("store"),
+            Some("store".to_string())
+        );
+        assert_eq!(
+            allowed_git_profile_credential_helper("osxkeychain"),
+            Some("osxkeychain".to_string())
+        );
+        assert_eq!(
+            allowed_git_profile_credential_helper("!gh auth git-credential"),
+            Some("!gh auth git-credential".to_string())
+        );
+        assert_eq!(
+            allowed_git_profile_credential_helper("! gh auth git-credential"),
+            Some("!gh auth git-credential".to_string())
+        );
+        assert_eq!(
+            allowed_git_profile_credential_helper("!curl example.test"),
+            None
+        );
+        assert_eq!(allowed_git_profile_credential_helper("/tmp/helper"), None);
+        assert_eq!(
+            allowed_git_profile_credential_helper("store --file=/tmp/x"),
+            None
         );
     }
 
@@ -2826,6 +2947,50 @@ mod tests {
                 name: "Config User".to_string(),
                 email: "config@example.invalid".to_string(),
             }
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_profile_config_discovers_allowed_credential_helpers() {
+        let root = std::env::temp_dir().join(format!(
+            "stateful-git-profile-credentials-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp repo should be created");
+        let run_git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .expect("git should run");
+            assert!(status.success(), "git {args:?} should succeed");
+        };
+        run_git(&["init"]);
+        run_git(&["config", "user.name", "Config User"]);
+        run_git(&["config", "user.email", "config@example.invalid"]);
+        run_git(&["config", "--add", "credential.helper", "store"]);
+        run_git(&[
+            "config",
+            "--add",
+            "credential.helper",
+            "!gh auth git-credential",
+        ]);
+        run_git(&["config", "--add", "credential.helper", "!curl example.test"]);
+
+        let config = discover_git_profile_config(&root);
+
+        assert!(config.credential_helpers.contains(&"store".to_string()));
+        assert!(
+            config
+                .credential_helpers
+                .contains(&"!gh auth git-credential".to_string())
+        );
+        assert!(
+            !config
+                .credential_helpers
+                .contains(&"!curl example.test".to_string())
         );
         let _ = fs::remove_dir_all(&root);
     }
