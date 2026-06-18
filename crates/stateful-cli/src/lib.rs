@@ -242,6 +242,8 @@ pub enum SandboxCommand {
         write_dir: String,
         #[arg(long = "codex-home-root")]
         codex_home_root: String,
+        #[arg(long = "docker-socket")]
+        docker_socket: Option<PathBuf>,
         #[arg(long)]
         command: String,
         #[arg(long)]
@@ -630,6 +632,7 @@ pub fn run() -> anyhow::Result<()> {
             purpose,
             write_dir,
             codex_home_root,
+            docker_socket,
             command,
             timeout_seconds,
         }) => {
@@ -642,6 +645,7 @@ pub fn run() -> anyhow::Result<()> {
                     purpose,
                     write_dir,
                     codex_home_root,
+                    docker_socket,
                     command,
                     timeout_seconds,
                 },

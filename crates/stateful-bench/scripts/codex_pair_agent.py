@@ -17,6 +17,7 @@ from pathlib import Path
 
 DEFAULT_BENCHMARK_MODEL = "gpt-5.4-mini"
 DEFAULT_BENCHMARK_REASONING_EFFORT = "low"
+DEFAULT_NATIVE_SUBAGENT_MIN_COUNT = 3
 STATEFUL_INTEGRATION_FULL = "hooks-mcp-skill"
 STATEFUL_INTEGRATION_HOOKS_ONLY = "hooks-only"
 STATEFUL_INTEGRATION_NONE = "none"
@@ -42,6 +43,23 @@ Continue the same benchmark task from the current workspace state. Re-read the
 task file and relevant source files if needed, then finish the task while
 preserving the benchmark constraints already given in this session.
 """
+
+
+def native_subagent_prompt_instruction(
+    enable_native_subagent: bool,
+    subagent_min_count: int = DEFAULT_NATIVE_SUBAGENT_MIN_COUNT,
+) -> str:
+    if not enable_native_subagent:
+        return ""
+    return f"""
+
+Native Codex subagent requirements:
+- MUST use native Codex subagents for this task.
+- Spawn at least {subagent_min_count} native subagents before finishing.
+- Use all {subagent_min_count} native subagents for repository editing.
+- Do not leave any native subagent as analysis-only; each one must inspect, edit, and verify the workspace.
+- Wait for each spawned subagent and incorporate its work or findings into the final workspace.
+""".rstrip()
 
 
 class SeededAuth:
@@ -115,7 +133,7 @@ def stateful_codex_config(stateful_binary: str, include_mcp: bool = True) -> str
 [mcp_servers.stateful]
 command = {toml_string(stateful_binary)}
 args = ["mcp", "serve"]
-env_vars = ["STATEFUL_SESSION_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
+env_vars = ["STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN", "STATEFUL_SESSION_ID"]
 startup_timeout_sec = 20
 default_tools_approval_mode = "approve"
 """
@@ -535,6 +553,11 @@ def path_fragment(value: str) -> str:
     return fragment or "item"
 
 
+def path_scope_digest(*values: Path | str) -> str:
+    normalized = [str(Path(value).expanduser().resolve(strict=False)) for value in values]
+    return hashlib.sha256("\0".join(normalized).encode("utf-8")).hexdigest()[:16]
+
+
 def codex_environment(
     task_path: Path,
     workspace: Path,
@@ -546,9 +569,11 @@ def codex_environment(
         return None
 
     env = dict(source_env)
+    env.pop("STATEFUL_SESSION_ID", None)
     pair_fragment = path_fragment(workspace.parent.name or workspace.name)
     agent_fragment = path_fragment(task_path.stem)
-    home = Path(root) / pair_fragment / agent_fragment / "home"
+    scope_digest = path_scope_digest(task_path, workspace)
+    home = Path(root) / pair_fragment / agent_fragment / scope_digest / "home"
     env["HOME"] = str(home)
     env["CODEX_HOME"] = str(home / ".codex")
     env["XDG_CONFIG_HOME"] = str(home / ".config")
@@ -567,6 +592,7 @@ def benchmark_source_env(
     base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     env = dict(os.environ if base_env is None else base_env)
+    env.pop("STATEFUL_SESSION_ID", None)
     if mode == "stateful":
         if not session_id:
             raise ValueError("session_id is required in stateful mode")
@@ -703,6 +729,11 @@ def main() -> int:
     parser.add_argument("--benchmark-model-context-window", type=int)
     parser.add_argument("--benchmark-max-turns", type=int)
     parser.add_argument("--enable-native-subagent", action="store_true")
+    parser.add_argument(
+        "--subagent-min-count",
+        type=int,
+        default=DEFAULT_NATIVE_SUBAGENT_MIN_COUNT,
+    )
     parser.add_argument("--disable-bundled-skills", action="store_true")
     parser.add_argument(
         "--stateful-integration",
@@ -720,6 +751,8 @@ def main() -> int:
         parser.error("--session-id and --workspace-id are required in stateful mode")
     if args.max_resumes < 0:
         parser.error("--max-resumes must be non-negative")
+    if args.subagent_min_count < 1:
+        parser.error("--subagent-min-count must be at least 1")
 
     task_path = Path(args.task_json).resolve()
     workspace = Path(args.workspace).resolve()
@@ -729,16 +762,19 @@ def main() -> int:
     if args.mode == "stateful":
         stateful_instruction = f"""
 Before any file modification, inspect the code enough to identify the production
-file or files you plan to edit, then run:
-
-    {args.stateful_binary} intent declare --session-id {args.session_id} --workspace-id {args.workspace_id} --purpose "<purpose inferred from the benchmark task>" <planned production files>
-
-Use this exact session id and workspace id. If intent declaration fails, stop
+file or files you plan to edit, then use the stateful MCP tools to declare
+exact file intent and acquire same-session file leases for the planned files.
+Do not pass a manual session id; use the current Codex thread session provided
+by the stateful hooks. If intent declaration or lease acquisition fails, stop
 without editing.
 """
     max_turns_instruction = ""
     if args.benchmark_max_turns is not None:
         max_turns_instruction = f"\n- Benchmark max turns: {args.benchmark_max_turns}.\n"
+    subagent_instruction = native_subagent_prompt_instruction(
+        args.enable_native_subagent,
+        args.subagent_min_count,
+    )
 
     prompt = f"""
 You are one of two concurrent agents in a shared SWE-bench workspace.
@@ -759,6 +795,7 @@ Constraints:
   shell redirection to modify code.
 - Bash is allowed for read-only inspection and test commands.
 {max_turns_instruction}
+{subagent_instruction}
 {stateful_instruction}
 When finished, leave the working tree with only the production code fix for this
 task.

@@ -27,6 +27,7 @@ use crate::{
 };
 
 pub(crate) const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
+pub(crate) const STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV: &str = "STATEFUL_ALLOW_NESTED_SANDBOX_RUN";
 const BUILD_PROFILE_WRITE_DIR: &str = "tmp";
 #[cfg(unix)]
 const SIGTERM: i32 = 15;
@@ -550,6 +551,11 @@ fn run_sandboxed_command(
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
     let temp_dir = sandbox_temp_dir(writable_paths);
+    if allow_direct_nested_sandbox_run() {
+        let mut command = direct_shell_command(command, cwd);
+        apply_sandbox_temp_env(&mut command, temp_dir.as_deref());
+        return run_command_with_timeout(command, timeout);
+    }
     #[cfg(target_os = "macos")]
     {
         run_command_with_timeout(
@@ -583,6 +589,12 @@ fn run_sandboxed_git_command(
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
     let config = discover_git_profile_config(cwd);
+
+    if allow_direct_nested_sandbox_run() {
+        let mut command = direct_git_command(words, cwd);
+        apply_git_profile_env(&mut command, temp_dir, hooks_dir, &config);
+        return run_command_with_timeout(command, timeout);
+    }
 
     #[cfg(target_os = "macos")]
     {
@@ -629,6 +641,28 @@ fn run_sandboxed_git_command(
         );
         anyhow::bail!("stateful sandbox run is only supported on macOS and Linux");
     }
+}
+
+fn allow_direct_nested_sandbox_run() -> bool {
+    std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some()
+        && matches!(
+            std::env::var_os(STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV)
+                .as_deref()
+                .and_then(|value| value.to_str()),
+            Some("1")
+        )
+}
+
+fn direct_shell_command(command: &str, cwd: &Path) -> Command {
+    let mut direct = Command::new("/bin/sh");
+    direct.arg("-c").arg(command).current_dir(cwd);
+    direct
+}
+
+fn direct_git_command(words: &[String], cwd: &Path) -> Command {
+    let mut direct = Command::new("git");
+    direct.args(&words[1..]).current_dir(cwd);
+    direct
 }
 
 fn prepare_external_writable_paths(

@@ -53,7 +53,7 @@ fn read_legacy_current_session_file(repo_root: &Path) -> CurrentSession {
 }
 
 #[test]
-fn session_start_records_current_session_under_runtime_session_id() {
+fn session_start_records_current_session_under_thread_id_when_present() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-session-start-session-id-test-{}",
         std::process::id()
@@ -69,8 +69,8 @@ fn session_start_records_current_session_under_runtime_session_id() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "claude-session-1",
-      "thread_id": "legacy-thread-1",
+      "session_id": "parent-session-1",
+      "thread_id": "codex-thread-1",
       "transcript_path": "/tmp/transcript.jsonl",
       "cwd": "/repo",
       "hook_event_name": "SessionStart"
@@ -85,10 +85,10 @@ fn session_start_records_current_session_under_runtime_session_id() {
     );
     let request = rx.recv().expect("session register request should arrive");
     assert!(request.contains("POST /v1/session/register HTTP/1.1"));
-    assert!(request.contains("\"session_id\":\"claude-session-1\""));
-    let session = read_current_session_file_for_session(&repo_root, "claude-session-1")
-        .expect("current session should be keyed by runtime session id");
-    assert_eq!(session.session_id, "claude-session-1");
+    assert!(request.contains("\"session_id\":\"codex-thread-1\""));
+    let session = read_current_session_file_for_session(&repo_root, "codex-thread-1")
+        .expect("current session should be keyed by thread id");
+    assert_eq!(session.session_id, "codex-thread-1");
     assert_eq!(session.workspace_id, "w1");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -113,7 +113,7 @@ fn session_start_derives_workspace_id_for_default_local_runtime() {
 
     let input = r#"{
       "session_id": "derived-session",
-      "thread_id": "legacy-thread-1",
+      "thread_id": "derived-thread-1",
       "transcript_path": "/tmp/transcript.jsonl",
       "cwd": "/repo",
       "hook_event_name": "SessionStart"
@@ -134,9 +134,11 @@ fn session_start_derives_workspace_id_for_default_local_runtime() {
     assert!(workspace_id.starts_with("workspace-"));
     assert_ne!(workspace_id, "local");
 
-    let session = read_current_session_file_for_session(&repo_root, "derived-session")
-        .expect("current session should be keyed by runtime session id");
-    assert_eq!(session.session_id, "derived-session");
+    assert_eq!(body["session_id"], "derived-thread-1");
+
+    let session = read_current_session_file_for_session(&repo_root, "derived-thread-1")
+        .expect("current session should be keyed by thread id");
+    assert_eq!(session.session_id, "derived-thread-1");
     assert_eq!(session.workspace_id, workspace_id);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -161,7 +163,7 @@ fn session_start_derives_workspace_id_for_default_shared_runtime() {
 
     let input = r#"{
       "session_id": "derived-shared-session",
-      "thread_id": "legacy-thread-1",
+      "thread_id": "derived-shared-thread-1",
       "transcript_path": "/tmp/transcript.jsonl",
       "cwd": "/repo",
       "hook_event_name": "SessionStart"
@@ -182,16 +184,18 @@ fn session_start_derives_workspace_id_for_default_shared_runtime() {
     assert!(workspace_id.starts_with("workspace-"));
     assert_ne!(workspace_id, "shared");
 
-    let session = read_current_session_file_for_session(&repo_root, "derived-shared-session")
-        .expect("current session should be keyed by runtime session id");
-    assert_eq!(session.session_id, "derived-shared-session");
+    assert_eq!(body["session_id"], "derived-shared-thread-1");
+
+    let session = read_current_session_file_for_session(&repo_root, "derived-shared-thread-1")
+        .expect("current session should be keyed by thread id");
+    assert_eq!(session.session_id, "derived-shared-thread-1");
     assert_eq!(session.workspace_id, workspace_id);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn pre_tool_use_authorization_uses_runtime_session_id() {
+fn pre_tool_use_authorization_uses_thread_id_when_present() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-pre-tool-session-id-test-{}",
         std::process::id()
@@ -203,14 +207,13 @@ fn pre_tool_use_authorization_uses_runtime_session_id() {
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
-    let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-    );
+    let (runtime, rx) =
+        spawn_fake_stateful_server(r#"{"status":"ok","prompt_text":"Nearby Activity\n- none"}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "claude-session-1",
-      "thread_id": "legacy-thread-1",
+      "session_id": "parent-session-1",
+      "thread_id": "codex-thread-1",
       "transcript_path": "/tmp/transcript.jsonl",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
@@ -220,13 +223,7 @@ fn pre_tool_use_authorization_uses_runtime_session_id() {
       }
     }"#;
 
-    let output = run_hook_subprocess_with_extra_env(
-        &repo_root,
-        &paths,
-        &["hook", "pre-tool-use"],
-        input,
-        &[(STATEFUL_SESSION_ID_ENV, "claude-session-1")],
-    );
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
 
     assert!(
         output.status.success(),
@@ -235,7 +232,7 @@ fn pre_tool_use_authorization_uses_runtime_session_id() {
     );
     let request = rx.recv().expect("captured request should arrive");
     let body = request_json_body(&request);
-    assert_eq!(body["session"]["session_id"], "claude-session-1");
+    assert_eq!(body["session"]["session_id"], "codex-thread-1");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -517,6 +514,28 @@ fn pre_tool_use_allows_nested_codex_benchmark_sandbox_with_feature() {
         "tool_input": {
             "command": format!(
                 "{stateful} sandbox run-nested-codex-benchmark --purpose 'run nested Codex chaos benchmark' --write-dir target --codex-home-root target/nested-codex-homes/run-1 --timeout-seconds 120 --command 'cargo run -p stateful-bench -- run'"
+            )
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+#[cfg(feature = "codex-benchmark")]
+fn pre_tool_use_allows_nested_codex_benchmark_sandbox_with_docker_socket() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!(
+                "{stateful} sandbox run-nested-codex-benchmark --purpose bench --write-dir target --codex-home-root target/nested-codex-homes/run-1 --docker-socket /Users/arthur/.colima/default/docker.sock --command true"
             )
         }
     })
@@ -1630,10 +1649,15 @@ fn pre_tool_use_allows_known_non_repo_write_tools_without_runtime() {
         "request_user_input",
         "view_image",
         "spawn_agent",
+        "multi_agent_v1spawn_agent",
         "wait_agent",
+        "multi_agent_v1wait_agent",
         "send_input",
+        "multi_agent_v1send_input",
         "close_agent",
+        "multi_agent_v1close_agent",
         "resume_agent",
+        "multi_agent_v1resume_agent",
         "mcp__stateful__state_intent_declare",
         "mcp__stateful__state_lease_acquire",
         "mcp__stateful__state_current_read",
@@ -1992,6 +2016,73 @@ fn pre_tool_use_edit_denies_when_authorize_connection_drops() {
 }
 
 #[test]
+fn pre_tool_use_edit_posts_authorize_and_renders_live_context_when_server_allows() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-edit-allow-context-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    fs::write(repo_root.join("src/auth.ts"), b"old contents\n")
+        .expect("observed file should be writable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared intent for src/auth.ts."}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": "src/auth.ts",
+            "old_string": "old",
+            "new_string": "new"
+        }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("POST /v1/authorize HTTP/1.1"));
+    assert!(request.contains("\"action\":\"write_file\""));
+    assert!(request.contains("\"path\":\"src/auth.ts\""));
+    let context_request = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("Edit should render live context after authorization");
+    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
+    assert!(context_request.contains("\"session_id\":\"s1\""));
+    assert!(context_request.contains("\"mode\":\"brief\""));
+    let rendered: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("allow outcome should serialize");
+    assert_eq!(
+        rendered["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+    assert!(
+        rendered["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("allow reason should contain rendered context")
+            .contains("Nearby Activity")
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn pre_tool_use_edit_relative_path_is_resolved_from_payload_cwd() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-edit-cwd-test-{}",
@@ -2202,9 +2293,10 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
-    let (runtime, rx) = spawn_fake_stateful_server(
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-    );
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared intent for src/auth.ts."}"#,
+    ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
@@ -2262,6 +2354,24 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     assert_eq!(body["payload"]["queue_on_conflict"], true);
     assert_eq!(body["payload"]["purpose"], "Fix auth validation behavior.");
     assert!(body.get("action").is_none());
+    let context_request = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("apply_patch should render live context after authorization");
+    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
+    assert!(context_request.contains("\"session_id\":\"s1\""));
+    assert!(context_request.contains("\"mode\":\"brief\""));
+    let rendered: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("allow outcome should serialize");
+    assert_eq!(
+        rendered["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+    assert!(
+        rendered["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("allow reason should contain rendered context")
+            .contains("Nearby Activity")
+    );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -2678,9 +2788,17 @@ dependencies = ["langchain-core>=0.3"]
     assert!(stdout.contains("dependency shadowing guard"));
     assert!(stdout.contains("langchain_core"));
     assert!(stdout.contains("langchain-core"));
+    let context_request = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("apply_patch should render live context even when locally denied");
+    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
+    assert!(
+        !context_request.contains("POST /v1/authorize HTTP/1.1"),
+        "shadowing guard should deny before posting /v1/authorize"
+    );
     assert!(
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
-        "shadowing guard should deny before posting /v1/authorize"
+        "shadowing guard should not post /v1/authorize after live context render"
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -3029,8 +3147,10 @@ fn user_prompt_submit_posts_context_render() {
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
-    let (runtime, rx) =
-        spawn_fake_stateful_server(r#"{"status":"ok","prompt_text":"Nearby Activity\n- none"}"#);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- none"}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- should not render twice"}"#,
+    ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
@@ -3061,11 +3181,28 @@ fn user_prompt_submit_posts_context_render() {
     assert!(request.contains("\"worktree_id\""));
     assert!(request.contains("\"root\""));
 
+    let second_output =
+        run_hook_subprocess(&repo_root, &paths, &["hook", "user-prompt-submit"], input);
+    assert!(
+        second_output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&second_output.stderr)
+    );
+    assert!(
+        second_output.stdout.is_empty(),
+        "second UserPromptSubmit for the same session should not print context: {}",
+        String::from_utf8_lossy(&second_output.stdout)
+    );
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "second UserPromptSubmit should not call /v1/context/render"
+    );
+
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn stop_posts_activity_observe_without_finalizing() {
+fn stop_posts_activity_finalize() {
     let temp_root =
         std::env::temp_dir().join(format!("stateful-hook-stop-test-{}", std::process::id()));
     if temp_root.exists() {
@@ -3091,7 +3228,7 @@ fn stop_posts_activity_observe_without_finalizing() {
     );
 
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/activity/observe HTTP/1.1"));
+    assert!(request.contains("POST /v1/activity/finalize HTTP/1.1"));
     assert!(request.contains("\"session_id\":\"s1\""));
     assert!(request.contains("\"workspace_id\":\"w1\""));
 

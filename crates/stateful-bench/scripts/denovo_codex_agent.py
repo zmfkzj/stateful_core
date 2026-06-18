@@ -8,11 +8,13 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -27,8 +29,8 @@ from codex_pair_agent import (  # noqa: E402
     STATEFUL_INTEGRATION_NONE,
     UnsafeNestedCodexHome,
     cleanup_seeded_auth,
-    codex_environment,
     path_fragment,
+    path_scope_digest,
     prepare_codex_environment,
     run_codex_with_resume,
     toml_string,
@@ -37,6 +39,9 @@ from codex_pair_agent import (  # noqa: E402
 
 OFFICIAL_BENCHMARK_PROTOCOL = "denovo_swe_single_rollout"
 RESUME_POLICY_CONTEXT_OR_TOKEN_ONLY = "context_or_token_failure_only"
+DEFAULT_SUBAGENT_MIN_COUNT = 3
+DEFAULT_MIN_FREE_DISK_GB = 20.0
+BYTES_PER_GIB = 1024**3
 
 
 @dataclass
@@ -47,6 +52,8 @@ class InstanceResult:
     finish_reason: str | None
     error: str | None
     eval_result: dict[str, Any] | None
+    subagent_used: bool | None = None
+    subagent_usage: dict[str, Any] | None = None
 
 
 class CodexTimeoutError(TimeoutError):
@@ -63,14 +70,31 @@ class StatefulRepoEnableCleanup:
     created_policy_config: bool
 
 
+def native_subagent_prompt_instruction(subagent: str, subagent_min_count: int) -> str:
+    if subagent != "on":
+        return ""
+    return f"""
+
+Native Codex subagent requirements:
+- MUST use native Codex subagents for this benchmark condition.
+- Spawn at least {subagent_min_count} native subagents before finishing.
+- Use all {subagent_min_count} native subagents for repository editing.
+- Do not leave any native subagent as analysis-only; each one must inspect, edit, and verify the workspace.
+- Wait for each spawned subagent and incorporate its work or findings into the final workspace.
+""".rstrip()
+
+
 def build_codex_prompt(
     instance_id: str,
     document: str,
     benchmark_max_turns: int,
     max_steps: int | None,
     prompt_version: str,
+    subagent: str = "off",
+    subagent_min_count: int = DEFAULT_SUBAGENT_MIN_COUNT,
 ) -> str:
     step_line = f"- Maximum task steps: {max_steps}.\n" if max_steps is not None else ""
+    subagent_instruction = native_subagent_prompt_instruction(subagent, subagent_min_count)
     return f"""
 You are solving one DeNovoSWE benchmark instance.
 
@@ -87,6 +111,7 @@ Constraints:
 - Leave the workspace containing the final code changes.
 - Benchmark max turns: {benchmark_max_turns}.
 {step_line}- Prompt version: {prompt_version}.
+{subagent_instruction}
 """.strip()
 
 
@@ -112,6 +137,16 @@ def git_diff(workspace: Path) -> str:
     )
     if diff_completed.returncode != 0:
         raise RuntimeError(diff_completed.stderr.strip() or "git diff --cached --binary failed")
+    reset_completed = subprocess.run(
+        ["git", "reset", "-q", "HEAD"],
+        cwd=workspace,
+        text=True,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if reset_completed.returncode != 0:
+        raise RuntimeError(reset_completed.stderr.strip() or "git reset -q HEAD failed")
     return diff_completed.stdout
 
 
@@ -157,12 +192,37 @@ def add_aweagent_to_path(aweagent_root: Path) -> None:
 
 def _safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
     destination_root = destination.resolve()
+
+    def inside_destination(path: Path) -> bool:
+        resolved = path.resolve()
+        return resolved == destination_root or destination_root in resolved.parents
+
     for member in tar.getmembers():
-        if member.issym() or member.islnk():
-            raise RuntimeError(f"unsafe archive link: {member.name} -> {member.linkname}")
         target = (destination / member.name).resolve()
-        if target != destination_root and destination_root not in target.parents:
+        if not inside_destination(target):
             raise RuntimeError(f"unsafe archive member: {member.name}")
+        if member.issym():
+            link_target = Path(member.linkname)
+            resolved_link = (
+                link_target.resolve()
+                if link_target.is_absolute()
+                else (target.parent / link_target).resolve()
+            )
+            if not inside_destination(resolved_link):
+                raise RuntimeError(
+                    f"unsafe archive link: {member.name} -> {member.linkname}"
+                )
+        elif member.islnk():
+            link_target = Path(member.linkname)
+            resolved_link = (
+                link_target.resolve()
+                if link_target.is_absolute()
+                else (destination / link_target).resolve()
+            )
+            if not inside_destination(resolved_link):
+                raise RuntimeError(
+                    f"unsafe archive link: {member.name} -> {member.linkname}"
+                )
     tar.extractall(destination)
 
 
@@ -194,9 +254,184 @@ async def export_session_workspace(session: Any, remote_workdir: str, workspace:
 
             exported_root = extract_path / Path(remote_workdir).name
             source = exported_root if exported_root.is_dir() else extract_path
-            shutil.copytree(source, workspace)
+            copy_exported_workspace(source, workspace)
 
     await asyncio.to_thread(_export)
+
+
+def copy_exported_workspace(source: Path, workspace: Path) -> None:
+    shutil.copytree(source, workspace, symlinks=True)
+
+
+def runtime_backend(runtime_config: Any) -> str:
+    return str(getattr(runtime_config, "backend", ""))
+
+
+def runtime_pull_policy(runtime_config: Any) -> str:
+    docker_config = getattr(runtime_config, "docker", None)
+    return str(getattr(docker_config, "pull_policy", "if_not_present"))
+
+
+def runtime_config_with_pull_policy(runtime_config: Any, pull_policy: str) -> Any:
+    if runtime_backend(runtime_config) != "docker":
+        return runtime_config
+    docker_config = getattr(runtime_config, "docker", None)
+    if docker_config is None:
+        return runtime_config
+    docker_copy = (
+        docker_config.model_copy(update={"pull_policy": pull_policy})
+        if hasattr(docker_config, "model_copy")
+        else docker_config
+    )
+    if not hasattr(docker_config, "model_copy"):
+        setattr(docker_copy, "pull_policy", pull_policy)
+    return runtime_config.model_copy(update={"docker": docker_copy})
+
+
+def runtime_config_for_local_image(
+    runtime_config: Any,
+    image: str,
+    workdir: str,
+) -> Any:
+    configured = runtime_config.model_copy(update={"image": image, "workdir": workdir})
+    return runtime_config_with_pull_policy(configured, "never")
+
+
+def docker_client_from_env() -> Any:
+    import docker
+
+    return docker.from_env()
+
+
+async def ensure_runtime_image_available(
+    runtime_config: Any,
+    image: str,
+    client_factory: Any = docker_client_from_env,
+) -> bool:
+    if runtime_backend(runtime_config) != "docker" or not image:
+        return False
+
+    pull_policy = runtime_pull_policy(runtime_config)
+
+    def _ensure() -> bool:
+        client = client_factory()
+        if pull_policy == "always":
+            client.images.pull(image)
+            return True
+        if pull_policy == "never":
+            client.images.get(image)
+            return False
+        if pull_policy != "if_not_present":
+            raise ValueError(f"unsupported Docker pull policy: {pull_policy}")
+        try:
+            client.images.get(image)
+            return False
+        except Exception:
+            client.images.pull(image)
+            return True
+
+    return await asyncio.to_thread(_ensure)
+
+
+async def delete_runtime_image_after_instance(
+    runtime_config: Any,
+    image: str | None,
+    enabled: bool,
+    client_factory: Any = docker_client_from_env,
+) -> bool:
+    if not enabled or runtime_backend(runtime_config) != "docker" or not image:
+        return False
+
+    def _delete() -> bool:
+        client = client_factory()
+        client.images.remove(image, force=True)
+        return True
+
+    try:
+        return await asyncio.to_thread(_delete)
+    except Exception:
+        return False
+
+
+def cleanup_codex_home_caches(env: dict[str, str]) -> list[str]:
+    home_text = env.get("HOME")
+    if not home_text:
+        return []
+
+    home = Path(home_text)
+    home_resolved = home.resolve(strict=False)
+    candidates = [
+        Path(env["XDG_CACHE_HOME"]) if env.get("XDG_CACHE_HOME") else home / ".cache",
+        home / "Library" / "Caches",
+    ]
+    removed = []
+    seen = set()
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved == home_resolved or not resolved.is_relative_to(home_resolved):
+            continue
+        if not candidate.exists():
+            continue
+        if candidate.is_dir() and not candidate.is_symlink():
+            shutil.rmtree(candidate, ignore_errors=True)
+        else:
+            try:
+                candidate.unlink()
+            except OSError:
+                continue
+        if not candidate.exists():
+            removed.append(str(candidate))
+    return removed
+
+
+def disk_usage_probe_path(path: Path) -> Path:
+    probe = path
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    return probe
+
+
+def low_disk_space_result(
+    instance_id: str,
+    output: Path,
+    min_free_bytes: int,
+    disk_usage: Any = shutil.disk_usage,
+) -> InstanceResult | None:
+    if min_free_bytes <= 0:
+        return None
+    probe = disk_usage_probe_path(output)
+    free_bytes = disk_usage(probe).free
+    if free_bytes >= min_free_bytes:
+        return None
+    return InstanceResult(
+        instance_id,
+        False,
+        None,
+        "disk-space-low",
+        (
+            f"free disk space {free_bytes} bytes is below required "
+            f"{min_free_bytes} bytes at {probe}"
+        ),
+        None,
+    )
+
+
+def build_denovo_evaluator(
+    evaluator_cls: Any,
+    args: argparse.Namespace,
+    config: Any,
+) -> Any:
+    # The adapter owns image cleanup so all eval iterations/test cases for an
+    # instance can finish before the image is removed once.
+    return evaluator_cls(
+        timeout=config.eval.timeout,
+        validate_run=args.validate_run,
+        del_done_images=False,
+        eval_iters=args.eval_iters,
+    )
 
 
 def codex_command_for_profile(
@@ -255,18 +490,20 @@ def denovo_codex_environment(
     task_path: Path,
     workspace: Path,
     base_env: dict[str, str] | None = None,
+    preserve_stateful_session: bool = False,
 ) -> dict[str, str]:
-    nested_env = codex_environment(
-        task_path=task_path,
-        workspace=workspace,
-        base_env=base_env,
-    )
-    if nested_env is not None:
-        return nested_env
-
     source_env = os.environ if base_env is None else base_env
     env = dict(source_env)
-    home = output / "codex-homes" / path_fragment(instance_id) / "home"
+    if not preserve_stateful_session:
+        env.pop("STATEFUL_SESSION_ID", None)
+    nested_root = source_env.get(NESTED_CODEX_HOME_ROOT_ENV)
+    if nested_root:
+        output_scope_parts = output.parts[-4:] if len(output.parts) >= 4 else output.parts
+        output_scope = path_fragment("--".join(output_scope_parts))
+        scope_digest = path_scope_digest(output, workspace, task_path)
+        home = Path(nested_root) / output_scope / path_fragment(instance_id) / scope_digest / "home"
+    else:
+        home = output / "codex-homes" / path_fragment(instance_id) / "home"
     env["HOME"] = str(home)
     env["CODEX_HOME"] = str(home / ".codex")
     env["XDG_CONFIG_HOME"] = str(home / ".config")
@@ -277,6 +514,26 @@ def denovo_codex_environment(
         env["SSL_CERT_FILE"] = str(system_cert)
 
     return env
+
+
+def native_subagent_usage(
+    subagent: str,
+    subagent_min_count: int,
+    codex_home: Path,
+) -> dict[str, Any]:
+    native_usage = annotate_native_subagent_usage(
+        detect_native_subagent_usage(codex_home),
+        subagent_min_count,
+    )
+    spawn_count = native_usage["subagent_spawn_count"]
+    requirement_met = subagent != "on" or spawn_count >= subagent_min_count
+    return {
+        "mode": "native_codex_subagents" if subagent == "on" else "off",
+        "subagent_min_count": subagent_min_count,
+        "subagent_used": bool(native_usage["subagent_used"]),
+        "subagent_requirement_met": requirement_met,
+        "native_subagent": native_usage,
+    }
 
 
 def enable_stateful_repo(
@@ -334,13 +591,21 @@ def cleanup_stateful_repo_enable(
             pass
 
 
-def profile_metadata(agent_mode: str, subagent: str) -> dict[str, Any]:
+def profile_metadata(
+    agent_mode: str,
+    subagent: str,
+    subagent_min_count: int = DEFAULT_SUBAGENT_MIN_COUNT,
+) -> dict[str, Any]:
     return {
         "agent_kind": "codex-cli",
         "agent_mode": agent_mode,
         "subagent": subagent,
+        "subagent_required": subagent == "on",
+        "subagent_min_count": subagent_min_count,
+        "subagent_mode": "native_codex_subagents" if subagent == "on" else "off",
         "official_benchmark_protocol": OFFICIAL_BENCHMARK_PROTOCOL,
         "agent_rollouts_per_instance": 1,
+        "native_subagent_required": subagent == "on",
         "eval_feedback_loop": False,
         "eval_feedback_attempts": 0,
         "resume_policy": RESUME_POLICY_CONTEXT_OR_TOKEN_ONLY,
@@ -369,6 +634,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--benchmark-model-context-window", type=int, required=True)
     parser.add_argument("--benchmark-temperature", required=True)
     parser.add_argument("--benchmark-max-turns", type=int, required=True)
+    parser.add_argument("--subagent-min-count", type=positive_int, default=DEFAULT_SUBAGENT_MIN_COUNT)
     parser.add_argument("--max-resumes", type=int, required=True)
     parser.add_argument("--codex-timeout-seconds", type=int, required=True)
     parser.add_argument("--max-steps", type=int)
@@ -376,12 +642,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--instance-id", action="append", default=[])
     parser.add_argument("--skip-eval", action="store_true")
     parser.add_argument("--validate-run", action="store_true")
-    parser.add_argument("--del-done-images", action="store_true")
+    parser.add_argument("--del-done-images", dest="del_done_images", action="store_true", default=True)
+    parser.add_argument("--keep-done-images", dest="del_done_images", action="store_false")
     parser.add_argument("--dump-clean-snapshot")
     parser.add_argument("--eval-iters", type=int, required=True)
     parser.add_argument("--prompt-version", required=True)
+    parser.add_argument("--min-free-disk-gb", type=float, default=DEFAULT_MIN_FREE_DISK_GB)
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args(argv)
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -409,6 +684,178 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
             handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
 
 
+def append_jsonl(path: Path, row: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+
+
+SUBAGENT_TABLES = (
+    "agent_jobs",
+    "agent_job_items",
+    "thread_spawn_edges",
+    "thread_dynamic_tools",
+)
+SUBAGENT_TOOL_NAMES = {
+    "spawn_agent": "spawn_agent_calls",
+    "multi_agent_v1spawn_agent": "spawn_agent_calls",
+    "multi_agent_v1.spawn_agent": "spawn_agent_calls",
+    "multi_agent_v1__spawn_agent": "spawn_agent_calls",
+    "wait_agent": "wait_agent_calls",
+    "multi_agent_v1wait_agent": "wait_agent_calls",
+    "multi_agent_v1.wait_agent": "wait_agent_calls",
+    "multi_agent_v1__wait_agent": "wait_agent_calls",
+    "send_input": "send_input_calls",
+    "multi_agent_v1send_input": "send_input_calls",
+    "multi_agent_v1.send_input": "send_input_calls",
+    "multi_agent_v1__send_input": "send_input_calls",
+    "close_agent": "close_agent_calls",
+    "multi_agent_v1close_agent": "close_agent_calls",
+    "multi_agent_v1.close_agent": "close_agent_calls",
+    "multi_agent_v1__close_agent": "close_agent_calls",
+}
+
+
+def empty_subagent_usage_counts() -> dict[str, int]:
+    counts = {table: 0 for table in SUBAGENT_TABLES}
+    counts.update(
+        {
+            "spawn_agent_calls": 0,
+            "wait_agent_calls": 0,
+            "send_input_calls": 0,
+            "close_agent_calls": 0,
+        }
+    )
+    return counts
+
+
+def sqlite_table_count(db_path: Path, table: str) -> int:
+    try:
+        with sqlite3.connect(db_path) as connection:
+            row = connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
+    except sqlite3.Error:
+        return 0
+    return int(row[0]) if row else 0
+
+
+def response_item_function_name(event: dict[str, Any]) -> str | None:
+    candidates = [event, event.get("payload"), event.get("item")]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        call_type = candidate.get("type")
+        if call_type in {"function_call", "custom_tool_call"}:
+            name = candidate.get("name")
+            if isinstance(name, str):
+                return name
+        function_call = candidate.get("function_call")
+        if isinstance(function_call, dict):
+            name = function_call.get("name")
+            if isinstance(name, str):
+                return name
+    return None
+
+
+def detect_native_subagent_usage(codex_home: Path) -> dict[str, Any]:
+    counts = empty_subagent_usage_counts()
+    sources: set[str] = set()
+
+    for db_path in sorted(codex_home.glob("state*.sqlite")):
+        for table in SUBAGENT_TABLES:
+            table_count = sqlite_table_count(db_path, table)
+            counts[table] += table_count
+            if table_count and table != "thread_dynamic_tools":
+                sources.add("codex_state_db")
+
+    sessions_dir = codex_home / "sessions"
+    if sessions_dir.is_dir():
+        for session_log in sorted(sessions_dir.rglob("*.jsonl")):
+            try:
+                lines = session_log.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                name = response_item_function_name(event)
+                count_key = SUBAGENT_TOOL_NAMES.get(name or "")
+                if count_key is not None:
+                    counts[count_key] += 1
+                    sources.add("codex_session_log")
+
+    used_keys = (
+        "agent_jobs",
+        "agent_job_items",
+        "thread_spawn_edges",
+        "spawn_agent_calls",
+        "wait_agent_calls",
+        "send_input_calls",
+        "close_agent_calls",
+    )
+    return {
+        "subagent_used": any(counts[key] > 0 for key in used_keys),
+        "sources": sorted(sources),
+        "counts": counts,
+    }
+
+
+def native_subagent_spawn_count(usage: dict[str, Any]) -> int:
+    counts = usage.get("counts", {})
+    if not isinstance(counts, dict):
+        return 0
+    return max(
+        int(counts.get("spawn_agent_calls", 0) or 0),
+        int(counts.get("thread_spawn_edges", 0) or 0),
+        int(counts.get("agent_jobs", 0) or 0),
+    )
+
+
+def native_subagent_wait_count(usage: dict[str, Any]) -> int:
+    counts = usage.get("counts", {})
+    if not isinstance(counts, dict):
+        return 0
+    return int(counts.get("wait_agent_calls", 0) or 0)
+
+
+def annotate_native_subagent_usage(
+    usage: dict[str, Any],
+    subagent_min_count: int,
+) -> dict[str, Any]:
+    annotated = dict(usage)
+    annotated["subagent_spawn_count"] = native_subagent_spawn_count(usage)
+    annotated["subagent_wait_count"] = native_subagent_wait_count(usage)
+    annotated["subagent_min_count"] = subagent_min_count
+    return annotated
+
+
+def subagent_usage_metadata(
+    results: list[InstanceResult],
+    subagent_min_count: int = DEFAULT_SUBAGENT_MIN_COUNT,
+) -> dict[str, Any]:
+    observed = [result for result in results if result.subagent_used is not None]
+    used_count = sum(1 for result in observed if result.subagent_used)
+    requirement_met_count = sum(
+        1
+        for result in observed
+        if result.subagent_usage
+        and result.subagent_usage.get("subagent_requirement_met") is not False
+    )
+    return {
+        "subagent_min_count": subagent_min_count,
+        "subagent_observed_instances": len(observed),
+        "subagent_used_count": used_count,
+        "subagent_used_any": used_count > 0,
+        "subagent_requirement_met_count": requirement_met_count,
+        "subagent_requirement_met_any": requirement_met_count > 0,
+    }
+
+
 def instance_result_row(result: InstanceResult) -> dict[str, Any]:
     row = {
         "instance_id": result.instance_id,
@@ -420,7 +867,53 @@ def instance_result_row(result: InstanceResult) -> dict[str, Any]:
     }
     if result.eval_result is not None:
         row["eval_result"] = result.eval_result
+    if result.subagent_used is not None:
+        row["subagent_used"] = result.subagent_used
+    if result.subagent_usage is not None:
+        row["subagent_usage"] = result.subagent_usage
     return row
+
+
+def append_result_jsonl(path: Path, result: InstanceResult) -> None:
+    append_jsonl(path, instance_result_row(result))
+
+
+def missing_runtime_image_name(error: BaseException) -> str | None:
+    text = repr(error)
+    if "ImageNotFound" in text and "/images/" in text and "/json" in text:
+        marker = "/images/"
+        start = text.find(marker)
+        end = text.find("/json", start)
+        if start != -1 and end != -1:
+            return urllib.parse.unquote(text[start + len(marker) : end])
+
+    if "/images/create?" in text:
+        start = text.find("/images/create?")
+        end = text.find("'", start)
+        query = text[start + len("/images/create?") : end if end != -1 else None]
+        params = urllib.parse.parse_qs(query)
+        from_image = params.get("fromImage", [""])[0]
+        tag = params.get("tag", [""])[0]
+        if from_image and tag:
+            return f"{from_image}:{tag}"
+    return None
+
+
+def instance_setup_exception_result(
+    instance_id: str,
+    error: BaseException,
+) -> InstanceResult:
+    missing_image = missing_runtime_image_name(error)
+    if missing_image is not None:
+        return InstanceResult(
+            instance_id,
+            False,
+            None,
+            "missing-runtime-image",
+            f"runtime image unavailable: {missing_image}; {repr(error)}",
+            None,
+        )
+    return InstanceResult(instance_id, False, None, "adapter-error", repr(error), None)
 
 
 def adapter_exit_code_after_results(results: list[InstanceResult]) -> int:
@@ -473,7 +966,8 @@ def run_fake_instances(args: argparse.Namespace) -> int:
     write_adapter_metadata(
         output,
         {
-            **profile_metadata(args.agent_mode, args.subagent),
+            **profile_metadata(args.agent_mode, args.subagent, args.subagent_min_count),
+            **subagent_usage_metadata([], args.subagent_min_count),
             "fake": True,
             "results": len(result_rows),
         },
@@ -492,6 +986,11 @@ async def run_one_instance_async(
     from aweagent.core.task.runner import runtime_registry
     from aweagent.tasks.denovo_swe.evaluator import DeNovoSWEEvaluator
 
+    min_free_bytes = int(args.min_free_disk_gb * BYTES_PER_GIB)
+    disk_guard = low_disk_space_result(inst.id, output, min_free_bytes)
+    if disk_guard is not None:
+        return disk_guard
+
     instance_dir = output / "instances" / path_fragment(inst.id)
     workspace = instance_dir / "workspace"
     write_json(
@@ -507,12 +1006,14 @@ async def run_one_instance_async(
 
     seeded_auth = None
     stateful_repo_cleanup = None
+    codex_env = None
+    image = None
+
     try:
         source_env = dict(os.environ)
         image = task.get_image(inst)
-        runtime_config = config.runtime.model_copy(
-            update={"image": image, "workdir": inst.workdir},
-        )
+        await ensure_runtime_image_available(config.runtime, image)
+        runtime_config = runtime_config_for_local_image(config.runtime, image, inst.workdir)
         runtime_cls = runtime_registry.get(config.runtime.backend)
         runtime = runtime_cls(runtime_config)
 
@@ -528,6 +1029,8 @@ async def run_one_instance_async(
             benchmark_max_turns=args.benchmark_max_turns,
             max_steps=args.max_steps,
             prompt_version=args.prompt_version,
+            subagent=args.subagent,
+            subagent_min_count=args.subagent_min_count,
         )
         write_json(instance_dir / "prompt.json", {"prompt": prompt})
 
@@ -544,16 +1047,9 @@ async def run_one_instance_async(
                     {"details": {"pass_rate": 1.0}},
                 )
             eval_runtime = runtime_cls(
-                config.runtime.model_copy(
-                    update={"image": image, "workdir": inst.workdir},
-                ),
+                runtime_config_for_local_image(config.runtime, image, inst.workdir),
             )
-            evaluator = DeNovoSWEEvaluator(
-                timeout=config.eval.timeout,
-                validate_run=args.validate_run,
-                del_done_images=args.del_done_images,
-                eval_iters=args.eval_iters,
-            )
+            evaluator = build_denovo_evaluator(DeNovoSWEEvaluator, args, config)
             eval_result = await evaluator.evaluate(inst, patch, eval_runtime)
             eval_data = {
                 "accepted": eval_result.accepted,
@@ -589,7 +1085,10 @@ async def run_one_instance_async(
             task_path=Path(args.data_file),
             workspace=workspace,
             base_env=source_env,
+            preserve_stateful_session=args.agent_mode == "stateful",
         )
+        codex_env = env
+        codex_home = Path(env["CODEX_HOME"])
         seeded_auth = prepare_codex_environment(
             env,
             source_env=source_env,
@@ -628,21 +1127,25 @@ async def run_one_instance_async(
             timeout_seconds=args.codex_timeout_seconds,
         )
         duration = time.monotonic() - started_at
-        write_json(
-            instance_dir / "codex-command.json",
-            {
-                "command": command,
-                "returncode": returncode,
-                "duration": duration,
-            },
+        subagent_usage = native_subagent_usage(
+            args.subagent,
+            args.subagent_min_count,
+            codex_home,
         )
+        command_record = {
+            "command": command,
+            "returncode": returncode,
+            "duration": duration,
+            "native_subagent": subagent_usage["native_subagent"],
+            "subagent_usage": subagent_usage,
+        }
+        write_json(instance_dir / "codex-command.json", command_record)
 
         cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
         stateful_repo_cleanup = None
-        patch = git_diff(workspace)
-        (instance_dir / "patch.diff").write_text(patch, encoding="utf-8")
 
         if returncode != 0:
+            (instance_dir / "patch.diff").write_text("", encoding="utf-8")
             return InstanceResult(
                 inst.id,
                 False,
@@ -650,7 +1153,29 @@ async def run_one_instance_async(
                 "codex-error",
                 f"codex exited {returncode}",
                 None,
+                subagent_used=subagent_usage["subagent_used"],
+                subagent_usage=subagent_usage,
             )
+
+        if args.subagent == "on" and not subagent_usage["subagent_requirement_met"]:
+            (instance_dir / "patch.diff").write_text("", encoding="utf-8")
+            spawn_count = subagent_usage["native_subagent"]["subagent_spawn_count"]
+            return InstanceResult(
+                inst.id,
+                False,
+                None,
+                "subagent-requirement-failed",
+                (
+                    f"subagent:on requires at least {args.subagent_min_count} native Codex "
+                    f"subagent spawns; observed {spawn_count}"
+                ),
+                None,
+                subagent_used=subagent_usage["subagent_used"],
+                subagent_usage=subagent_usage,
+            )
+
+        patch = git_diff(workspace)
+        (instance_dir / "patch.diff").write_text(patch, encoding="utf-8")
 
         if args.skip_eval:
             return InstanceResult(
@@ -660,17 +1185,14 @@ async def run_one_instance_async(
                 "skip-eval",
                 None,
                 {"details": {"pass_rate": 1.0}},
+                subagent_used=subagent_usage["subagent_used"],
+                subagent_usage=subagent_usage,
             )
 
         eval_runtime = runtime_cls(
-            config.runtime.model_copy(update={"image": image, "workdir": inst.workdir}),
+            runtime_config_for_local_image(config.runtime, image, inst.workdir),
         )
-        evaluator = DeNovoSWEEvaluator(
-            timeout=config.eval.timeout,
-            validate_run=args.validate_run,
-            del_done_images=args.del_done_images,
-            eval_iters=args.eval_iters,
-        )
+        evaluator = build_denovo_evaluator(DeNovoSWEEvaluator, args, config)
         eval_result = await evaluator.evaluate(inst, patch, eval_runtime)
         eval_data = {
             "accepted": eval_result.accepted,
@@ -686,6 +1208,8 @@ async def run_one_instance_async(
             "stop",
             None,
             eval_data,
+            subagent_used=subagent_usage["subagent_used"],
+            subagent_usage=subagent_usage,
         )
     except CodexTimeoutError:
         return InstanceResult(
@@ -701,10 +1225,17 @@ async def run_one_instance_async(
     except UnsafeNestedCodexHome as error:
         return InstanceResult(inst.id, False, None, "setup-error", str(error), None)
     except Exception as error:
-        return InstanceResult(inst.id, False, None, "adapter-error", repr(error), None)
+        return instance_setup_exception_result(inst.id, error)
     finally:
         cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
         cleanup_seeded_auth(seeded_auth)
+        if codex_env is not None:
+            cleanup_codex_home_caches(codex_env)
+        await delete_runtime_image_after_instance(
+            config.runtime,
+            image,
+            enabled=args.del_done_images,
+        )
 
 
 async def run_real_instances_async(args: argparse.Namespace) -> int:
@@ -716,7 +1247,8 @@ async def run_real_instances_async(args: argparse.Namespace) -> int:
         write_adapter_metadata(
             output,
             {
-                **profile_metadata(args.agent_mode, args.subagent),
+                **profile_metadata(args.agent_mode, args.subagent, args.subagent_min_count),
+                **subagent_usage_metadata(results, args.subagent_min_count),
                 "fake": False,
                 "results": len(results),
                 "max_concurrent": args.max_concurrent,
@@ -752,15 +1284,20 @@ async def run_real_instances_async(args: argparse.Namespace) -> int:
     if args.mode == "single":
         instances = instances[:1]
 
+    results_path = output / "_" / "results.jsonl"
+    write_jsonl(results_path, [])
     results = []
     for inst in instances:
-        results.append(await run_one_instance_async(args, config, task, inst, output))
+        result = await run_one_instance_async(args, config, task, inst, output)
+        results.append(result)
+        append_result_jsonl(results_path, result)
 
-    write_jsonl(output / "_" / "results.jsonl", [instance_result_row(result) for result in results])
+    write_jsonl(results_path, [instance_result_row(result) for result in results])
     write_adapter_metadata(
         output,
         {
-            **profile_metadata(args.agent_mode, args.subagent),
+            **profile_metadata(args.agent_mode, args.subagent, args.subagent_min_count),
+            **subagent_usage_metadata(results, args.subagent_min_count),
             "fake": False,
             "results": len(results),
             "benchmark_model": args.benchmark_model,

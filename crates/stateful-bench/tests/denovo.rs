@@ -75,6 +75,7 @@ fn denovo_official_result_deserializer_accepts_extra_fields() {
           "instance_id": "PyCQA_pep8_pr970",
           "success": true,
           "score": 0.96,
+          "subagent_used": true,
           "eval_result": {
             "details": {"pass_rate": 0.958, "passed": 92, "failed": 4, "duration_ms": 12}
           },
@@ -86,6 +87,7 @@ fn denovo_official_result_deserializer_accepts_extra_fields() {
     assert_eq!(result.instance_id, "PyCQA_pep8_pr970");
     assert_eq!(result.success, Some(true));
     assert_eq!(result.score, Some(0.96));
+    assert_eq!(result.subagent_used, Some(true));
     assert_eq!(
         result
             .extra
@@ -123,11 +125,11 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
     };
     let results = vec![
         serde_json::from_str::<DeNovoOfficialResult>(
-            r#"{"instance_id":"a","success":true,"score":1.0,"eval_result":{"details":{"pass_rate":1.0}}}"#,
+            r#"{"instance_id":"a","success":true,"score":1.0,"subagent_used":true,"eval_result":{"details":{"pass_rate":1.0}}}"#,
         )
         .expect("result a"),
         serde_json::from_str::<DeNovoOfficialResult>(
-            r#"{"instance_id":"b","success":false,"score":0.75,"eval_result":{"details":{"pass_rate":0.5}}}"#,
+            r#"{"instance_id":"b","success":false,"score":0.75,"subagent_used":false,"eval_result":{"details":{"pass_rate":0.5}}}"#,
         )
         .expect("result b"),
         serde_json::from_str::<DeNovoOfficialResult>(
@@ -158,6 +160,9 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
     assert_eq!(report.almost_correct_rate, Some(0.333));
     assert_eq!(report.running_time_ms, 9000);
     assert_eq!(report.average_running_time_ms, Some(3000.0));
+    assert_eq!(report.subagent_observed_instances, 2);
+    assert_eq!(report.subagent_used_count, 1);
+    assert_eq!(report.subagent_used_rate, Some(0.5));
 }
 
 #[test]
@@ -402,6 +407,7 @@ fn denovo_codex_adapter_command_uses_stateful_adapter_and_condition_axes() {
         benchmark_model_context_window: 256000,
         benchmark_temperature: "1".to_string(),
         benchmark_max_turns: 500,
+        subagent_min_count: 4,
         max_resumes: 2,
         codex_timeout_seconds: 7200,
         adapter_script: Some("crates/stateful-bench/scripts/denovo_codex_agent.py".into()),
@@ -443,6 +449,12 @@ fn denovo_codex_adapter_command_uses_stateful_adapter_and_condition_axes() {
             .args
             .windows(2)
             .any(|pair| pair == ["--benchmark-max-turns", "500"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--subagent-min-count", "4"])
     );
     assert!(
         command
@@ -502,6 +514,7 @@ out.mkdir(parents=True, exist_ok=True)
         benchmark_model_context_window: 256000,
         benchmark_temperature: "1".to_string(),
         benchmark_max_turns: 500,
+        subagent_min_count: 3,
         max_resumes: 1,
         codex_timeout_seconds: 7200,
         codex_adapter_script: None,
@@ -588,6 +601,7 @@ out.mkdir(parents=True, exist_ok=True)
         benchmark_model_context_window: 256000,
         benchmark_temperature: "1".to_string(),
         benchmark_max_turns: 500,
+        subagent_min_count: 3,
         max_resumes: 1,
         codex_timeout_seconds: 7200,
         codex_adapter_script: Some(adapter),
@@ -706,6 +720,7 @@ out.mkdir(parents=True, exist_ok=True)
         benchmark_model_context_window: 256000,
         benchmark_temperature: "1".to_string(),
         benchmark_max_turns: 500,
+        subagent_min_count: 3,
         max_resumes: 1,
         codex_timeout_seconds: 7200,
         codex_adapter_script: Some(adapter.clone()),
@@ -771,6 +786,7 @@ sys.exit(2)
         benchmark_model_context_window: 256000,
         benchmark_temperature: "1".to_string(),
         benchmark_max_turns: 500,
+        subagent_min_count: 3,
         max_resumes: 1,
         codex_timeout_seconds: 7200,
         codex_adapter_script: Some(adapter),
@@ -822,12 +838,14 @@ score = 1.0 if "stateful" in args.config else 0.5
     )
     .expect("fake run.py should write");
 
+    let data_file = root.join("denovo.jsonl");
+    fs::write(&data_file, "{\"instance_id\":\"fake-a\"}\n").expect("matrix data file should write");
     let run_dir = root.join("runs/dev-denovo");
     let reports = run_denovo_matrix(DeNovoMatrixRunOptions {
         run_id: "dev-denovo".to_string(),
         aweagent_root: aweagent,
         python: "python3".to_string(),
-        data_file: "denovoswe_with_patches.jsonl".into(),
+        data_file,
         run_dir: run_dir.clone(),
         base_config: "configs/tasks/denovoswe.yaml".into(),
         conditions: vec![
@@ -846,6 +864,7 @@ score = 1.0 if "stateful" in args.config else 0.5
         benchmark_model_context_window: 256000,
         benchmark_temperature: "1".to_string(),
         benchmark_max_turns: 500,
+        subagent_min_count: 3,
         max_resumes: 1,
         codex_timeout_seconds: 7200,
         codex_adapter_script: None,

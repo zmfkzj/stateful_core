@@ -1,6 +1,9 @@
 use clap::Parser;
-use stateful_bench::{Cli, Command, DeNovoCommand, DeNovoRunMode, ReportFormat, RunMode};
-use std::{fs, path::PathBuf, process::Command as ProcessCommand};
+use stateful_bench::{
+    Cli, Command, DeNovoAgentKind, DeNovoCommand, DeNovoMatrixRunOptions, DeNovoRunMode,
+    ReportFormat, RunMode, parse_denovo_condition, run_denovo_matrix,
+};
+use std::{fs, path::PathBuf, process::Command as ProcessCommand, time::Duration};
 
 #[test]
 fn fetch_command_parses_defaults_and_output_override() {
@@ -241,6 +244,7 @@ fn denovo_run_command_parses_codex_cli_agent_options() {
                 benchmark_model_context_window: 256000,
                 ref benchmark_temperature,
                 benchmark_max_turns: 500,
+                subagent_min_count: 3,
                 max_resumes: 2,
                 codex_timeout_seconds: 7200,
                 ref codex_adapter_script,
@@ -259,6 +263,263 @@ fn denovo_run_command_parses_codex_cli_agent_options() {
             && codex_adapter_script.as_deref()
                 == Some(std::path::Path::new("crates/stateful-bench/scripts/denovo_codex_agent.py"))
     ));
+}
+
+#[test]
+fn denovo_run_command_rejects_zero_subagent_min_count() {
+    let error = Cli::try_parse_from([
+        "stateful-bench",
+        "denovo",
+        "run",
+        "--agent",
+        "codex-cli",
+        "--data-file",
+        ".stateful_bench/denovo/extracts/dev/results.jsonl",
+        "--subagent-min-count",
+        "0",
+    ])
+    .expect_err("zero subagent minimum should be rejected");
+
+    assert!(error.to_string().contains("expected a positive integer"));
+}
+
+#[test]
+fn denovo_matrix_runs_all_conditions_for_one_instance_before_next_instance() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-matrix-instance-major");
+    let aweagent_root = temp_dir.join("AweAgent");
+    fs::create_dir_all(&aweagent_root).expect("fake AweAgent root should be created");
+    let data_file = temp_dir.join("denovo.jsonl");
+    fs::write(
+        &data_file,
+        [
+            r#"{"instance_id":"case-a"}"#,
+            r#"{"instance_id":"case-b"}"#,
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("data file should be written");
+    let log_path = temp_dir.join("order.log");
+    let adapter_script = temp_dir.join("fake_denovo_adapter.py");
+    fs::write(
+        &adapter_script,
+        format!(
+            r#"
+import argparse
+import json
+import os
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--output", required=True)
+parser.add_argument("--agent-mode", required=True)
+parser.add_argument("--subagent", required=True)
+parser.add_argument("--instance-id", action="append", default=[])
+parser.add_argument("--del-done-images", dest="del_done_images", action="store_true", default=True)
+parser.add_argument("--keep-done-images", dest="del_done_images", action="store_false")
+args, _ = parser.parse_known_args()
+
+log_path = Path(os.environ["DENOVO_ORDER_LOG"])
+with log_path.open("a", encoding="utf-8") as log:
+    for instance_id in args.instance_id:
+        image_action = "delete" if args.del_done_images else "keep"
+        log.write(f"{{args.agent_mode}}/{{args.subagent}}/{{instance_id}}/{{image_action}}\n")
+
+output = Path(args.output)
+results = output / "_" / "results.jsonl"
+results.parent.mkdir(parents=True, exist_ok=True)
+with results.open("w", encoding="utf-8") as handle:
+    for instance_id in args.instance_id:
+        handle.write(json.dumps({{
+            "instance_id": instance_id,
+            "success": True,
+            "score": 1.0,
+            "eval_result": {{"details": {{"pass_rate": 1.0}}}},
+        }}) + "\n")
+"#
+        ),
+    )
+    .expect("fake adapter should be written");
+
+    let order_env = log_path.to_string_lossy();
+    let reports = run_denovo_matrix(DeNovoMatrixRunOptions {
+        run_id: "dev-denovo-instance-major".to_string(),
+        aweagent_root,
+        python: "python3".to_string(),
+        data_file,
+        run_dir: temp_dir.join("runs"),
+        base_config: PathBuf::from("configs/tasks/denovoswe.yaml"),
+        conditions: vec![
+            parse_denovo_condition(&format!(
+                "stateful:off,subagent:on,env:DENOVO_ORDER_LOG={order_env}"
+            ))
+            .expect("off condition should parse"),
+            parse_denovo_condition(&format!(
+                "stateful:on,subagent:on,env:DENOVO_ORDER_LOG={order_env}"
+            ))
+            .expect("on condition should parse"),
+        ],
+        agent: DeNovoAgentKind::CodexCli,
+        codex_bin: "codex".to_string(),
+        stateful_binary: "stateful".to_string(),
+        benchmark_model: "gpt-5.4-mini".to_string(),
+        benchmark_reasoning_effort: "low".to_string(),
+        benchmark_model_context_window: 256000,
+        benchmark_temperature: "1".to_string(),
+        benchmark_max_turns: 500,
+        subagent_min_count: 3,
+        max_resumes: 1,
+        codex_timeout_seconds: 7200,
+        codex_adapter_script: Some(adapter_script),
+        mode: DeNovoRunMode::Batch,
+        instance_ids: vec!["case-a".to_string(), "case-b".to_string()],
+        llm_config: None,
+        model: None,
+        max_steps: None,
+        max_concurrent: None,
+        search_override: None,
+        skip_eval: false,
+        validate_run: false,
+        eval_iters: 1,
+        del_done_images: true,
+        dump_clean_snapshot: None,
+        prompt_version: "v1".to_string(),
+        verbose: false,
+    })
+    .expect("matrix run should complete");
+
+    let order = fs::read_to_string(&log_path).expect("order log should be readable");
+    assert_eq!(
+        order.lines().collect::<Vec<_>>(),
+        vec![
+            "no-state/on/case-a/keep",
+            "stateful/on/case-a/delete",
+            "no-state/on/case-b/keep",
+            "stateful/on/case-b/delete",
+        ]
+    );
+    assert_eq!(reports.len(), 2);
+    assert!(reports.iter().all(|report| report.total_instances == 2));
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
+fn denovo_matrix_preserves_aggregate_results_when_later_instance_fails() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-matrix-error-preserves-results");
+    let aweagent_root = temp_dir.join("AweAgent");
+    fs::create_dir_all(&aweagent_root).expect("fake AweAgent root should be created");
+    let data_file = temp_dir.join("denovo.jsonl");
+    fs::write(
+        &data_file,
+        [
+            r#"{"instance_id":"case-a"}"#,
+            r#"{"instance_id":"case-b"}"#,
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("data file should be written");
+    let adapter_script = temp_dir.join("fake_denovo_adapter.py");
+    fs::write(
+        &adapter_script,
+        r#"
+import argparse
+import json
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--output", required=True)
+parser.add_argument("--instance-id", action="append", default=[])
+args, _ = parser.parse_known_args()
+
+output = Path(args.output)
+results = output / "_" / "results.jsonl"
+results.parent.mkdir(parents=True, exist_ok=True)
+instance_id = args.instance_id[0]
+if instance_id == "case-b":
+    results.write_text("", encoding="utf-8")
+    raise SystemExit("synthetic adapter failure")
+
+with results.open("w", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "instance_id": instance_id,
+        "success": True,
+        "score": 1.0,
+        "eval_result": {"details": {"pass_rate": 1.0}},
+    }) + "\n")
+"#,
+    )
+    .expect("fake adapter should be written");
+
+    let error = run_denovo_matrix(DeNovoMatrixRunOptions {
+        run_id: "dev-denovo-error-preserves-results".to_string(),
+        aweagent_root,
+        python: "python3".to_string(),
+        data_file,
+        run_dir: temp_dir.join("runs"),
+        base_config: PathBuf::from("configs/tasks/denovoswe.yaml"),
+        conditions: vec![
+            parse_denovo_condition("stateful:off,subagent:on").expect("condition should parse"),
+        ],
+        agent: DeNovoAgentKind::CodexCli,
+        codex_bin: "codex".to_string(),
+        stateful_binary: "stateful".to_string(),
+        benchmark_model: "gpt-5.4-mini".to_string(),
+        benchmark_reasoning_effort: "low".to_string(),
+        benchmark_model_context_window: 256000,
+        benchmark_temperature: "1".to_string(),
+        benchmark_max_turns: 500,
+        subagent_min_count: 3,
+        max_resumes: 1,
+        codex_timeout_seconds: 7200,
+        codex_adapter_script: Some(adapter_script),
+        mode: DeNovoRunMode::Batch,
+        instance_ids: vec!["case-a".to_string(), "case-b".to_string()],
+        llm_config: None,
+        model: None,
+        max_steps: None,
+        max_concurrent: None,
+        search_override: None,
+        skip_eval: false,
+        validate_run: false,
+        eval_iters: 1,
+        del_done_images: true,
+        dump_clean_snapshot: None,
+        prompt_version: "v1".to_string(),
+        verbose: false,
+    })
+    .expect_err("second instance should fail");
+    assert!(
+        error.to_string().contains("DeNovoSWE command failed"),
+        "{error:#}"
+    );
+
+    let aggregate_path = temp_dir
+        .join("runs")
+        .join("conditions")
+        .join("stateful-off_subagent-on")
+        .join("codex-cli")
+        .join("_")
+        .join("results.jsonl");
+    let rows =
+        fs::read_to_string(&aggregate_path).expect("aggregate results should remain readable");
+    let rows = rows
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("row should be json"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["instance_id"], "case-a");
+
+    let comparison_path = temp_dir.join("runs").join("comparison.json");
+    let comparison = fs::read_to_string(&comparison_path)
+        .expect("matrix comparison checkpoint should remain readable");
+    let comparison = serde_json::from_str::<serde_json::Value>(&comparison)
+        .expect("comparison checkpoint should be json");
+    assert_eq!(comparison["conditions"][0]["total_instances"], 1);
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }
 
 #[test]
@@ -310,6 +571,116 @@ fn denovo_report_and_compare_commands_parse_outputs() {
         } if report.len() == 2
             && output.as_ref().is_some_and(|path| path.to_string_lossy() == ".stateful_bench/denovo/runs/dev-denovo/comparison.json")
     ));
+}
+
+#[test]
+fn denovo_report_skips_stale_condition_report_when_results_were_reset() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-report-stale-condition");
+    let run_dir = temp_dir.join("runs").join("dev-denovo");
+    let current_dir = run_dir.join("conditions").join("stateful-off_subagent-on");
+    let stale_dir = run_dir.join("conditions").join("stateful-on_subagent-on");
+    let current_official = current_dir.join("codex-cli");
+    let stale_official = stale_dir.join("codex-cli");
+    fs::create_dir_all(current_official.join("_")).expect("current results dir should exist");
+    fs::create_dir_all(stale_official.join("_")).expect("stale results dir should exist");
+
+    let current_results = current_official.join("_").join("results.jsonl");
+    let stale_results = stale_official.join("_").join("results.jsonl");
+    fs::write(&current_results, "{}\n").expect("current results should be written");
+    fs::write(&stale_results, "{}\n").expect("stale results should be written");
+    std::thread::sleep(Duration::from_millis(20));
+
+    let current_report = current_dir.join("denovo-report.json");
+    let stale_report = stale_dir.join("denovo-report.json");
+    fs::write(
+        &current_report,
+        serde_json::json!({
+            "run_id": "dev-denovo",
+            "condition_id": "stateful-off_subagent-on",
+            "condition": {"stateful": false, "subagent": true},
+            "total_instances": 1,
+            "completed_instances": 1,
+            "scored_instances": 1,
+            "pass_rate_instances": 1,
+            "success_count": 1,
+            "error_count": 0,
+            "success_rate": 1.0,
+            "average_score": 1.0,
+            "average_pass_rate": 1.0,
+            "correct_rate": 1.0,
+            "almost_correct_rate": 1.0,
+            "running_time_ms": 1,
+            "average_running_time_ms": 1.0,
+            "subagent_observed_instances": 1,
+            "subagent_used_count": 1,
+            "subagent_used_rate": 1.0
+        })
+        .to_string(),
+    )
+    .expect("current report should be written");
+    fs::write(
+        &stale_report,
+        serde_json::json!({
+            "run_id": "dev-denovo",
+            "condition_id": "stateful-on_subagent-on",
+            "condition": {"stateful": true, "subagent": true},
+            "total_instances": 2,
+            "completed_instances": 1,
+            "scored_instances": 1,
+            "pass_rate_instances": 1,
+            "success_count": 0,
+            "error_count": 1,
+            "success_rate": 0.0,
+            "average_score": 0.75,
+            "average_pass_rate": 0.75,
+            "correct_rate": 0.0,
+            "almost_correct_rate": 0.5,
+            "running_time_ms": 1,
+            "average_running_time_ms": 1.0,
+            "subagent_observed_instances": 1,
+            "subagent_used_count": 1,
+            "subagent_used_rate": 1.0
+        })
+        .to_string(),
+    )
+    .expect("stale report should be written");
+
+    write_condition_metadata(
+        &current_dir,
+        &current_official,
+        &current_results,
+        &current_report,
+        "stateful-off_subagent-on",
+        false,
+    );
+    write_condition_metadata(
+        &stale_dir,
+        &stale_official,
+        &stale_results,
+        &stale_report,
+        "stateful-on_subagent-on",
+        true,
+    );
+
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(&stale_results, "").expect("stale results should be reset after report");
+
+    let output = run_dir.join("report.json");
+    stateful_bench::denovo::run_denovo_cli(DeNovoCommand::Report {
+        run_dir: run_dir.clone(),
+        format: ReportFormat::Json,
+        output: Some(output.clone()),
+    })
+    .expect("report command should succeed with current reports");
+
+    let rendered = fs::read_to_string(&output).expect("report output should be readable");
+    let reports =
+        serde_json::from_str::<serde_json::Value>(&rendered).expect("report output should be json");
+    let reports = reports.as_array().expect("report output should be array");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["condition_id"], "stateful-off_subagent-on");
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }
 
 #[test]
@@ -514,6 +885,7 @@ fn codex_pair_agent_accepts_explicit_stateful_session_arguments() {
     assert!(stdout.contains("--benchmark-reasoning-effort"));
     assert!(stdout.contains("--benchmark-model-context-window"));
     assert!(stdout.contains("--benchmark-max-turns"));
+    assert!(stdout.contains("--subagent-min-count"));
     assert!(stdout.contains("--enable-native-subagent"));
     assert!(stdout.contains("--disable-bundled-skills"));
     assert!(stdout.contains("--stateful-integration"));
@@ -668,7 +1040,59 @@ print(json.dumps({{"fast": fast, "timeout": timeout_message}}))
 }
 
 #[test]
-fn denovo_codex_agent_safe_extract_rejects_symlink_members() {
+fn denovo_codex_agent_safe_extract_allows_internal_symlink_members() {
+    let dir = target_temp_dir("denovo-codex-safe-extract-internal-link");
+    let script = format!(
+        r#"
+import importlib.util
+import io
+import json
+import sys
+import tarfile
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_tar_test", {agent_path})
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+destination = Path({destination})
+destination.mkdir(parents=True, exist_ok=True)
+buffer = io.BytesIO()
+with tarfile.open(fileobj=buffer, mode="w") as tar:
+    readme = b"changes"
+    info = tarfile.TarInfo("repo/CHANGES.rst")
+    info.size = len(readme)
+    tar.addfile(info, io.BytesIO(readme))
+
+    info = tarfile.TarInfo("repo/docs/source/changelog.rst")
+    info.type = tarfile.SYMTYPE
+    info.linkname = "../../CHANGES.rst"
+    tar.addfile(info)
+
+buffer.seek(0)
+with tarfile.open(fileobj=buffer, mode="r") as tar:
+    mod._safe_extract_tar(tar, destination)
+
+link = destination / "repo" / "docs" / "source" / "changelog.rst"
+print(json.dumps({{
+    "is_symlink": link.is_symlink(),
+    "target": link.readlink().as_posix(),
+    "content": link.read_text(encoding="utf-8"),
+}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        destination = serde_json::to_string(&dir).expect("destination should serialize"),
+    );
+    let output = run_python_json(&script);
+    assert_eq!(output["is_symlink"], true);
+    assert_eq!(output["target"], "../../CHANGES.rst");
+    assert_eq!(output["content"], "changes");
+    fs::remove_dir_all(&dir).expect("temp tar workspace should clean up");
+}
+
+#[test]
+fn denovo_codex_agent_safe_extract_rejects_escaping_symlink_members() {
     let dir = target_temp_dir("denovo-codex-safe-extract");
     let script = format!(
         r#"
@@ -716,6 +1140,44 @@ print(json.dumps({{"message": message}}))
             .contains("link-out")
     );
     fs::remove_dir_all(&dir).expect("temp tar workspace should clean up");
+}
+
+#[test]
+fn denovo_codex_agent_copy_exported_workspace_preserves_dangling_symlinks() {
+    let dir = target_temp_dir("denovo-codex-copy-export-dangling-link");
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_copy_test", {agent_path})
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+root = Path({root})
+source = root / "source"
+workspace = root / "workspace"
+(source / "docs").mkdir(parents=True)
+(source / "docs" / "contributing.md").symlink_to("../missing/contributing.md")
+mod.copy_exported_workspace(source, workspace)
+link = workspace / "docs" / "contributing.md"
+print(json.dumps({{
+    "is_symlink": link.is_symlink(),
+    "target": link.readlink().as_posix(),
+    "exists": link.exists(),
+}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        root = serde_json::to_string(&dir).expect("root should serialize"),
+    );
+    let output = run_python_json(&script);
+    assert_eq!(output["is_symlink"], true);
+    assert_eq!(output["target"], "../missing/contributing.md");
+    assert_eq!(output["exists"], false);
+    fs::remove_dir_all(&dir).expect("temp copy workspace should clean up");
 }
 
 #[test]
@@ -793,6 +1255,7 @@ source_auth.write_text("{{\"token\":\"source\"}}")
 source_env = {{
     "HOME": str(source_home),
     "PATH": "/bin",
+    "STATEFUL_SESSION_ID": "outer-session",
 }}
 output = root / "adapter-output"
 workspace = root / "workspace"
@@ -820,6 +1283,7 @@ stateful_env = module.denovo_codex_environment(
     task_path=task_path,
     workspace=workspace,
     base_env=source_env,
+    preserve_stateful_session=True,
 )
 module.prepare_codex_environment(
     stateful_env,
@@ -833,10 +1297,12 @@ stateful_config = (stateful_home / "config.toml").read_text()
 
 print(json.dumps({{
     "no_state_home": no_state_env["HOME"],
+    "no_state_has_session": "STATEFUL_SESSION_ID" in no_state_env,
     "no_state_config_exists": (no_state_home / "config.toml").exists(),
     "no_state_skill_exists": (no_state_home / "skills" / "stateful-command-policy" / "SKILL.md").exists(),
     "no_state_auth_exists": (no_state_home / "auth.json").exists(),
     "stateful_home": stateful_env["HOME"],
+    "stateful_has_session": "STATEFUL_SESSION_ID" in stateful_env,
     "stateful_config": stateful_config,
     "stateful_skill_exists": (stateful_home / "skills" / "stateful-command-policy" / "SKILL.md").exists(),
     "stateful_auth_exists": (stateful_home / "auth.json").exists(),
@@ -854,6 +1320,7 @@ print(json.dumps({{
             .expect("no-state home should be text")
             .ends_with("adapter-output/codex-homes/issue-no-state/home")
     );
+    assert_eq!(output["no_state_has_session"], false);
     assert_eq!(output["no_state_config_exists"], false);
     assert_eq!(output["no_state_skill_exists"], false);
     assert_eq!(output["no_state_auth_exists"], true);
@@ -869,9 +1336,74 @@ print(json.dumps({{
         .expect("stateful config should be text");
     assert!(config.contains("[mcp_servers.stateful]"));
     assert!(config.contains("command = \"/tmp/stateful\""));
+    assert!(config.contains(
+        "env_vars = [\"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\", \"STATEFUL_SESSION_ID\"]"
+    ));
     assert!(config.contains("[[hooks.SessionStart]]"));
+    assert_eq!(output["stateful_has_session"], true);
     assert_eq!(output["stateful_skill_exists"], true);
     assert_eq!(output["stateful_auth_exists"], true);
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
+fn denovo_codex_agent_scopes_nested_codex_home_by_condition_output() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-codex-nested-condition-profiles");
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_nested_condition_profiles_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+root = Path({temp_dir})
+source_env = {{
+    "PATH": "/bin",
+    "STATEFUL_NESTED_CODEX_HOME_ROOT": str(root / "nested-codex-homes"),
+}}
+task_path = root / "extracts" / "results.jsonl"
+workspace_off = root / "runs" / "run-a" / "conditions" / "stateful-off_subagent-on" / "codex-cli" / "instances" / "owner-repo-pr1" / "workspace"
+workspace_on = root / "runs" / "run-a" / "conditions" / "stateful-on_subagent-on" / "codex-cli" / "instances" / "owner-repo-pr1" / "workspace"
+output_off = root / "runs" / "run-a" / "conditions" / "stateful-off_subagent-on" / "codex-cli"
+output_on = root / "runs" / "run-a" / "conditions" / "stateful-on_subagent-on" / "codex-cli"
+
+env_off = module.denovo_codex_environment(
+    output=output_off,
+    instance_id="owner/repo#1",
+    task_path=task_path,
+    workspace=workspace_off,
+    base_env=source_env,
+)
+env_on = module.denovo_codex_environment(
+    output=output_on,
+    instance_id="owner/repo#1",
+    task_path=task_path,
+    workspace=workspace_on,
+    base_env=source_env,
+)
+
+print(json.dumps({{
+    "off_home": env_off["CODEX_HOME"],
+    "on_home": env_on["CODEX_HOME"],
+}}, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        temp_dir = serde_json::to_string(&temp_dir.to_string_lossy())
+            .expect("temp dir should encode as json"),
+    );
+    let output = run_python_json(&script);
+
+    let off_home = output["off_home"].as_str().expect("off home");
+    let on_home = output["on_home"].as_str().expect("on home");
+    assert_ne!(off_home, on_home);
+    assert!(off_home.contains("stateful-off_subagent-on"));
+    assert!(on_home.contains("stateful-on_subagent-on"));
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }
@@ -1058,6 +1590,328 @@ print(json.dumps({{
 }
 
 #[test]
+fn denovo_codex_agent_classifies_missing_runtime_images() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_missing_image_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+class ReprError(Exception):
+    def __init__(self, repr_text):
+        self.repr_text = repr_text
+    def __repr__(self):
+        return self.repr_text
+
+local_missing = ReprError("ImageNotFound(HTTPError('404 Client Error: Not Found for url: http+docker://localhost/v1.53/images/aweaiteam/denovoswe:case-a/json'))")
+remote_missing = ReprError("NotFound(HTTPError('404 Client Error: Not Found for url: http+docker://localhost/v1.53/images/create?tag=case-b&fromImage=aweaiteam%2Fdenovoswe'))")
+other = RuntimeError("unsafe archive link")
+
+print(json.dumps({{
+    "local": module.instance_result_row(module.instance_setup_exception_result("case-a", local_missing)),
+    "remote": module.instance_result_row(module.instance_setup_exception_result("case-b", remote_missing)),
+    "other": module.instance_result_row(module.instance_setup_exception_result("case-c", other)),
+}}, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["local"]["finish_reason"], "missing-runtime-image");
+    assert!(
+        output["local"]["error"]
+            .as_str()
+            .expect("local error should be text")
+            .contains("aweaiteam/denovoswe:case-a")
+    );
+    assert_eq!(output["remote"]["finish_reason"], "missing-runtime-image");
+    assert!(
+        output["remote"]["error"]
+            .as_str()
+            .expect("remote error should be text")
+            .contains("aweaiteam/denovoswe:case-b")
+    );
+    assert_eq!(output["other"]["finish_reason"], "adapter-error");
+}
+
+#[test]
+fn denovo_codex_agent_manages_runtime_image_once_per_instance() {
+    let script = format!(
+        r#"
+import asyncio
+import importlib.util
+import json
+import sys
+from argparse import Namespace
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_image_lifecycle_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+class FakeDockerConfig:
+    def __init__(self, pull_policy):
+        self.pull_policy = pull_policy
+
+    def model_copy(self, update):
+        copied = FakeDockerConfig(self.pull_policy)
+        for key, value in update.items():
+            setattr(copied, key, value)
+        return copied
+
+class FakeRuntimeConfig:
+    def __init__(self, backend="docker", pull_policy="if_not_present"):
+        self.backend = backend
+        self.docker = FakeDockerConfig(pull_policy)
+        self.image = ""
+        self.workdir = ""
+
+    def model_copy(self, update):
+        copied = FakeRuntimeConfig(self.backend, self.docker.pull_policy)
+        copied.image = self.image
+        copied.workdir = self.workdir
+        copied.docker = self.docker
+        for key, value in update.items():
+            setattr(copied, key, value)
+        return copied
+
+class FakeImages:
+    def __init__(self):
+        self.calls = []
+
+    def get(self, image):
+        self.calls.append(["get", image])
+        raise RuntimeError("missing")
+
+    def pull(self, image):
+        self.calls.append(["pull", image])
+
+    def remove(self, image, force=False):
+        self.calls.append(["remove", image, force])
+
+class FakeClient:
+    def __init__(self):
+        self.images = FakeImages()
+
+class FakeEvaluator:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+async def main():
+    client = FakeClient()
+    base = FakeRuntimeConfig()
+    await module.ensure_runtime_image_available(
+        base,
+        "aweaiteam/denovoswe:case-a",
+        client_factory=lambda: client,
+    )
+    local = module.runtime_config_for_local_image(base, "aweaiteam/denovoswe:case-a", "/workspace/case-a")
+    evaluator = module.build_denovo_evaluator(
+        FakeEvaluator,
+        Namespace(validate_run=False, del_done_images=True, eval_iters=3),
+        Namespace(eval=Namespace(timeout=123)),
+    )
+    await module.delete_runtime_image_after_instance(
+        base,
+        "aweaiteam/denovoswe:case-a",
+        enabled=True,
+        client_factory=lambda: client,
+    )
+    print(json.dumps({{
+        "calls": client.images.calls,
+        "base_pull_policy": base.docker.pull_policy,
+        "local_pull_policy": local.docker.pull_policy,
+        "local_image": local.image,
+        "local_workdir": local.workdir,
+        "evaluator_del_done_images": evaluator.kwargs["del_done_images"],
+        "evaluator_eval_iters": evaluator.kwargs["eval_iters"],
+    }}, sort_keys=True))
+
+asyncio.run(main())
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(
+        output["calls"],
+        serde_json::json!([
+            ["get", "aweaiteam/denovoswe:case-a"],
+            ["pull", "aweaiteam/denovoswe:case-a"],
+            ["remove", "aweaiteam/denovoswe:case-a", true],
+        ])
+    );
+    assert_eq!(output["base_pull_policy"], "if_not_present");
+    assert_eq!(output["local_pull_policy"], "never");
+    assert_eq!(output["local_image"], "aweaiteam/denovoswe:case-a");
+    assert_eq!(output["local_workdir"], "/workspace/case-a");
+    assert_eq!(output["evaluator_del_done_images"], false);
+    assert_eq!(output["evaluator_eval_iters"], 3);
+}
+
+#[test]
+fn denovo_codex_agent_cleans_nested_home_caches_without_removing_codex_logs() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-codex-cache-cleanup");
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_cache_cleanup_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+home = Path({home})
+cache = home / ".cache"
+library_cache = home / "Library" / "Caches"
+codex_home = home / ".codex"
+cache.mkdir(parents=True)
+library_cache.mkdir(parents=True)
+codex_home.mkdir(parents=True)
+(cache / "blob").write_text("cache", encoding="utf-8")
+(library_cache / "blob").write_text("cache", encoding="utf-8")
+(codex_home / "session.jsonl").write_text("log", encoding="utf-8")
+
+removed = module.cleanup_codex_home_caches({{
+    "HOME": str(home),
+    "XDG_CACHE_HOME": str(cache),
+    "CODEX_HOME": str(codex_home),
+}})
+print(json.dumps({{
+    "removed": sorted(Path(path).name for path in removed),
+    "cache_exists": cache.exists(),
+    "library_cache_exists": library_cache.exists(),
+    "codex_log_exists": (codex_home / "session.jsonl").exists(),
+}}, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        home = serde_json::to_string(&temp_dir.join("home").to_string_lossy())
+            .expect("home path should encode as json"),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["removed"], serde_json::json!([".cache", "Caches"]));
+    assert_eq!(output["cache_exists"], false);
+    assert_eq!(output["library_cache_exists"], false);
+    assert_eq!(output["codex_log_exists"], true);
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
+fn denovo_codex_agent_reports_low_disk_space_before_starting_instance() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_low_disk_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+result = module.low_disk_space_result(
+    "case-a",
+    Path("/tmp/output"),
+    min_free_bytes=100,
+    disk_usage=lambda path: SimpleNamespace(free=40),
+)
+print(json.dumps(module.instance_result_row(result), sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["instance_id"], "case-a");
+    assert_eq!(output["success"], false);
+    assert_eq!(output["finish_reason"], "disk-space-low");
+    assert!(
+        output["error"]
+            .as_str()
+            .expect("error should be text")
+            .contains("free disk space 40 bytes is below required 100 bytes")
+    );
+}
+
+#[test]
+fn denovo_codex_agent_appends_intermediate_result_rows() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "stateful-bench-denovo-codex-intermediate-results-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp_dir);
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_result_append_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+results_path = Path({results_path})
+first = module.InstanceResult(
+    instance_id="case-a",
+    success=False,
+    score=None,
+    finish_reason="adapter-error",
+    error="setup failed",
+    eval_result=None,
+)
+second = module.InstanceResult(
+    instance_id="case-b",
+    success=True,
+    score=1.0,
+    finish_reason="stop",
+    error=None,
+    eval_result={{"details": {{"pass_rate": 1.0}}}},
+)
+module.append_result_jsonl(results_path, first)
+module.append_result_jsonl(results_path, second)
+rows = [
+    json.loads(line)
+    for line in results_path.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+print(json.dumps({{"rows": rows}}, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        results_path = serde_json::to_string(
+            &temp_dir
+                .join("codex-cli")
+                .join("_")
+                .join("results.jsonl")
+                .to_string_lossy()
+        )
+        .expect("results path should encode as json"),
+    );
+    let output = run_python_json(&script);
+
+    let rows = output["rows"].as_array().expect("rows should be an array");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["instance_id"], "case-a");
+    assert_eq!(rows[0]["error"], "setup failed");
+    assert_eq!(rows[1]["instance_id"], "case-b");
+    assert_eq!(rows[1]["success"], true);
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
 fn denovo_codex_agent_metadata_marks_official_single_rollout_protocol() {
     let script = format!(
         r#"
@@ -1081,10 +1935,116 @@ print(json.dumps(module.profile_metadata("stateful", "on"), sort_keys=True))
         "denovo_swe_single_rollout"
     );
     assert_eq!(output["agent_rollouts_per_instance"], 1);
+    assert!(output.get("host_worker_count").is_none());
+    assert_eq!(output["subagent_mode"], "native_codex_subagents");
+    assert_eq!(output["native_subagent_required"], true);
     assert_eq!(output["eval_feedback_loop"], false);
     assert_eq!(output["eval_feedback_attempts"], 0);
     assert_eq!(output["resume_policy"], "context_or_token_failure_only");
+    assert_eq!(output["subagent_required"], true);
     assert_eq!(output["stateful_mcp"], true);
+}
+
+#[test]
+fn denovo_codex_agent_prompt_requires_native_subagents_when_subagent_on() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_prompt_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+off = module.build_codex_prompt(
+    instance_id="i1",
+    document="doc",
+    benchmark_max_turns=500,
+    max_steps=None,
+    prompt_version="v1",
+    subagent="off",
+)
+on = module.build_codex_prompt(
+    instance_id="i1",
+    document="doc",
+    benchmark_max_turns=500,
+    max_steps=None,
+    prompt_version="v1",
+    subagent="on",
+    subagent_min_count=3,
+)
+print(json.dumps({{"off": off, "on": on}}, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    let off = output["off"].as_str().expect("off prompt");
+    let on = output["on"].as_str().expect("on prompt");
+    assert!(!off.contains("Native Codex subagent requirements"));
+    assert!(on.contains("Native Codex subagent requirements"));
+    assert!(on.contains("MUST use native Codex subagents"));
+    assert!(on.contains("Spawn at least 3 native subagents"));
+    assert!(on.contains("Use all 3 native subagents for repository editing"));
+    assert!(on.contains("Do not leave any native subagent as analysis-only"));
+    assert!(on.contains("Wait for each spawned subagent"));
+    assert_ne!(off, on);
+}
+
+#[test]
+fn denovo_codex_agent_detects_native_subagent_usage_from_codex_home() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sqlite3
+import sys
+import tempfile
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_subagent_usage_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+with tempfile.TemporaryDirectory() as tmp:
+    codex_home = Path(tmp) / ".codex"
+    session_dir = codex_home / "sessions" / "2026" / "06" / "14"
+    session_dir.mkdir(parents=True)
+    (session_dir / "rollout.jsonl").write_text(
+        json.dumps({{"type": "response_item", "payload": {{"type": "function_call", "name": "multi_agent_v1spawn_agent"}}}}) + "\n"
+        + json.dumps({{"type": "response_item", "payload": {{"type": "function_call", "name": "wait_agent"}}}}) + "\n",
+        encoding="utf-8",
+    )
+    db = sqlite3.connect(codex_home / "state_5.sqlite")
+    db.execute("create table agent_jobs(id integer primary key)")
+    db.execute("insert into agent_jobs(id) values (1)")
+    db.execute("create table agent_job_items(id integer primary key)")
+    db.execute("insert into agent_job_items(id) values (1)")
+    db.execute("create table thread_spawn_edges(id integer primary key)")
+    db.execute("insert into thread_spawn_edges(id) values (1)")
+    db.execute("create table thread_dynamic_tools(id integer primary key)")
+    db.execute("insert into thread_dynamic_tools(id) values (1)")
+    db.commit()
+    db.close()
+
+    used = module.detect_native_subagent_usage(codex_home)
+    empty = module.detect_native_subagent_usage(Path(tmp) / "empty" / ".codex")
+
+print(json.dumps({{"used": used, "empty": empty}}, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["used"]["subagent_used"], true);
+    assert_eq!(output["used"]["counts"]["spawn_agent_calls"], 1);
+    assert_eq!(output["used"]["counts"]["wait_agent_calls"], 1);
+    assert_eq!(output["used"]["counts"]["agent_jobs"], 1);
+    assert_eq!(output["used"]["counts"]["thread_spawn_edges"], 1);
+    assert_eq!(output["empty"]["subagent_used"], false);
 }
 
 #[test]
@@ -1112,6 +2072,55 @@ print(json.dumps({{
 
     assert_eq!(output["validate_run"], false);
     assert_eq!(output["normal_run"], true);
+}
+
+#[test]
+fn denovo_codex_agent_deletes_done_images_by_default() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_parse_defaults_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+base = [
+    "--data-file", "data.jsonl",
+    "--config", "configs/tasks/denovoswe.yaml",
+    "--mode", "batch",
+    "--output", "out",
+    "--agent-mode", "stateful",
+    "--subagent", "on",
+    "--aweagent-root", "AweAgent",
+    "--codex-bin", "codex",
+    "--stateful-binary", "stateful",
+    "--benchmark-model", "gpt-5.4-mini",
+    "--benchmark-reasoning-effort", "low",
+    "--benchmark-model-context-window", "256000",
+    "--benchmark-temperature", "1",
+    "--benchmark-max-turns", "500",
+    "--max-resumes", "1",
+    "--codex-timeout-seconds", "7200",
+    "--eval-iters", "1",
+    "--prompt-version", "v1",
+]
+
+default_args = module.parse_args(base)
+keep_args = module.parse_args(base + ["--keep-done-images"])
+print(json.dumps({{
+    "default": default_args.del_done_images,
+    "keep": keep_args.del_done_images,
+}}, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["default"], true);
+    assert_eq!(output["keep"], false);
 }
 
 #[test]
@@ -1242,6 +2251,37 @@ print(json.dumps({{"command": command}}))
 }
 
 #[test]
+fn codex_pair_agent_prompt_requires_native_subagents_when_enabled() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+
+spec = importlib.util.spec_from_file_location("codex_pair_agent_prompt_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+print(json.dumps({{
+    "off": module.native_subagent_prompt_instruction(False),
+    "on": module.native_subagent_prompt_instruction(True, 3),
+}}, sort_keys=True))
+"#,
+        agent_path = codex_pair_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    let off = output["off"].as_str().expect("off prompt");
+    let on = output["on"].as_str().expect("on prompt");
+    assert_eq!(off, "");
+    assert!(on.contains("Native Codex subagent requirements"));
+    assert!(on.contains("MUST use native Codex subagents"));
+    assert!(on.contains("Spawn at least 3 native subagents"));
+    assert!(on.contains("Use all 3 native subagents for repository editing"));
+    assert!(on.contains("Do not leave any native subagent as analysis-only"));
+    assert!(on.contains("Wait for each spawned subagent"));
+}
+
+#[test]
 fn codex_pair_agent_builds_nested_codex_environment() {
     let script = format!(
         r#"
@@ -1267,22 +2307,12 @@ print(json.dumps(env, sort_keys=True))
     );
     let output = run_python_json(&script);
 
-    assert_eq!(
-        output["HOME"],
-        "/repo/target/nested-codex-homes/pair-one/task-a/home"
-    );
-    assert_eq!(
-        output["CODEX_HOME"],
-        "/repo/target/nested-codex-homes/pair-one/task-a/home/.codex"
-    );
-    assert_eq!(
-        output["XDG_CONFIG_HOME"],
-        "/repo/target/nested-codex-homes/pair-one/task-a/home/.config"
-    );
-    assert_eq!(
-        output["XDG_CACHE_HOME"],
-        "/repo/target/nested-codex-homes/pair-one/task-a/home/.cache"
-    );
+    let home = output["HOME"].as_str().expect("HOME should be string");
+    assert!(home.starts_with("/repo/target/nested-codex-homes/pair-one/task-a/"));
+    assert!(home.ends_with("/home"));
+    assert_eq!(output["CODEX_HOME"], format!("{home}/.codex"));
+    assert_eq!(output["XDG_CONFIG_HOME"], format!("{home}/.config"));
+    assert_eq!(output["XDG_CACHE_HOME"], format!("{home}/.cache"));
     assert_eq!(output["PATH"], "/bin");
 }
 
@@ -1333,6 +2363,9 @@ print(json.dumps({{
     assert!(config.contains("[mcp_servers.stateful]"));
     assert!(config.contains("command = \"/tmp/stateful\""));
     assert!(config.contains("args = [\"mcp\", \"serve\"]"));
+    assert!(config.contains(
+        "env_vars = [\"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\", \"STATEFUL_SESSION_ID\"]"
+    ));
     assert!(config.contains("[[hooks.SessionStart]]"));
     assert!(config.contains("[[hooks.PreToolUse]]"));
     assert!(config.contains("[[hooks.Stop]]"));
@@ -1444,7 +2477,7 @@ print(json.dumps({{
 }
 
 #[test]
-fn codex_pair_agent_source_env_sets_stateful_session_only_for_stateful_mode() {
+fn codex_pair_agent_source_env_sets_stateful_session_id_for_stateful_mode() {
     let script = format!(
         r#"
 import importlib.util
@@ -1473,11 +2506,14 @@ print(json.dumps({{
     );
     let output = run_python_json(&script);
 
-    assert_eq!(
-        output["stateful"]["STATEFUL_SESSION_ID"],
-        "pair-one-agent-a"
-    );
     assert_eq!(output["stateful"]["PATH"], "/bin");
+    assert_eq!(
+        output["stateful"]
+            .as_object()
+            .expect("stateful env should be an object")
+            .get("STATEFUL_SESSION_ID"),
+        Some(&serde_json::Value::String("pair-one-agent-a".to_string()))
+    );
     assert_eq!(
         output["no_state"]
             .as_object()
@@ -2017,6 +3053,36 @@ fn codex_synthetic_agent_path_json() -> String {
         "/../../.stateful_bench/agent_synthetic/codex_synthetic_agent.py"
     ))
     .expect("agent path should encode as json")
+}
+
+fn write_condition_metadata(
+    condition_dir: &std::path::Path,
+    official_dir: &std::path::Path,
+    results_jsonl: &std::path::Path,
+    report_json: &std::path::Path,
+    condition_id: &str,
+    stateful: bool,
+) {
+    let metadata = serde_json::json!({
+        "run_id": "dev-denovo",
+        "condition_id": condition_id,
+        "condition": {"stateful": stateful, "subagent": true},
+        "agent": "codex-cli",
+        "command": {
+            "program": "python3",
+            "args": [],
+            "cwd": official_dir,
+            "env": {}
+        },
+        "official_dir": official_dir,
+        "results_jsonl": results_jsonl,
+        "report_json": report_json,
+        "started_at_ms": 1,
+        "finished_at_ms": 2,
+        "running_time_ms": 1
+    });
+    fs::write(condition_dir.join("condition.json"), metadata.to_string())
+        .expect("condition metadata should be written");
 }
 
 fn run_python_json(script: &str) -> serde_json::Value {

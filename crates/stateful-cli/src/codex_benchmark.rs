@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 #[cfg(any(target_os = "macos", test))]
 use std::process::Command;
 use std::{
@@ -12,12 +14,13 @@ use crate::sandbox::apply_sandbox_temp_env;
 #[cfg(target_os = "macos")]
 use crate::sandbox::run_command_with_timeout;
 use crate::sandbox::{
-    STATEFUL_SANDBOX_RUN_ACTIVE_ENV, SandboxAuthorizationDenied, SandboxAuthorizeContext,
-    SandboxAuthorizeDecision, SandboxCommandResult, SandboxNetworkPolicy, SandboxRunOutput,
-    SandboxWritablePath, SandboxWritablePathKind, authorize_sandbox_write,
-    classify_sandbox_authorize_response, enrich_sandbox_write_dir_denial, ensure_repo_dir_target,
-    normalize_sandbox_target_path, push_seatbelt_device_read_allows, resolve_sandbox_cwd,
-    sandbox_temp_dir, sandbox_write_dir_display_path, seatbelt_escape,
+    STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV, STATEFUL_SANDBOX_RUN_ACTIVE_ENV,
+    SandboxAuthorizationDenied, SandboxAuthorizeContext, SandboxAuthorizeDecision,
+    SandboxCommandResult, SandboxNetworkPolicy, SandboxRunOutput, SandboxWritablePath,
+    SandboxWritablePathKind, authorize_sandbox_write, classify_sandbox_authorize_response,
+    enrich_sandbox_write_dir_denial, ensure_repo_dir_target, normalize_sandbox_target_path,
+    push_seatbelt_device_read_allows, resolve_sandbox_cwd, sandbox_temp_dir,
+    sandbox_write_dir_display_path, seatbelt_escape,
 };
 use crate::{
     CurrentSession, GlobalPaths, RepoGate, discover_runtime_with_global, ensure_server,
@@ -29,6 +32,7 @@ pub struct NestedCodexBenchmarkSandboxRequest {
     pub purpose: String,
     pub write_dir: String,
     pub codex_home_root: String,
+    pub docker_socket: Option<PathBuf>,
     pub command: String,
     pub timeout_seconds: Option<u64>,
 }
@@ -77,6 +81,11 @@ pub fn run_nested_codex_benchmark_sandbox_in_repo(
         &request.write_dir,
         &request.codex_home_root,
     )?;
+    let docker_socket = request
+        .docker_socket
+        .as_deref()
+        .map(validate_nested_codex_benchmark_docker_socket)
+        .transpose()?;
 
     let current_session: CurrentSession = read_current_session_file(&repo_root).map_err(|_| {
         anyhow::anyhow!("sandbox run-nested-codex-benchmark requires a current stateful session")
@@ -123,6 +132,7 @@ pub fn run_nested_codex_benchmark_sandbox_in_repo(
         &cwd,
         &writable_paths,
         &nested_paths.codex_home_root,
+        docker_socket.as_deref(),
         timeout,
     )?;
 
@@ -176,6 +186,39 @@ fn validate_nested_codex_benchmark_paths(
     })
 }
 
+fn validate_nested_codex_benchmark_docker_socket(docker_socket: &Path) -> anyhow::Result<PathBuf> {
+    if !docker_socket.is_absolute() {
+        anyhow::bail!(
+            "stateful sandbox run-nested-codex-benchmark requires --docker-socket to be an absolute path"
+        );
+    }
+
+    let metadata = fs::metadata(docker_socket).map_err(|error| {
+        anyhow::anyhow!(
+            "stateful sandbox run-nested-codex-benchmark Docker socket {} is unavailable: {error}",
+            docker_socket.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        if !metadata.file_type().is_socket() {
+            anyhow::bail!(
+                "stateful sandbox run-nested-codex-benchmark Docker socket {} is not a Unix socket",
+                docker_socket.display()
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        anyhow::bail!(
+            "stateful sandbox run-nested-codex-benchmark --docker-socket is supported only on Unix hosts"
+        );
+    }
+
+    Ok(docker_socket.to_path_buf())
+}
+
 fn prepare_nested_codex_benchmark_writable_paths(
     paths: &NestedCodexBenchmarkSandboxPaths,
 ) -> anyhow::Result<Vec<SandboxWritablePath>> {
@@ -200,6 +243,7 @@ fn run_nested_codex_benchmark_sandboxed_command(
     cwd: &Path,
     writable_paths: &[SandboxWritablePath],
     codex_home_root: &Path,
+    docker_socket: Option<&Path>,
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
     let temp_dir = sandbox_temp_dir(writable_paths)
@@ -213,6 +257,7 @@ fn run_nested_codex_benchmark_sandboxed_command(
                 writable_paths,
                 &temp_dir,
                 codex_home_root,
+                docker_socket,
             ),
             timeout,
         )
@@ -225,6 +270,7 @@ fn run_nested_codex_benchmark_sandboxed_command(
             cwd,
             writable_paths,
             codex_home_root,
+            docker_socket,
             timeout,
             temp_dir,
         );
@@ -240,6 +286,7 @@ fn run_nested_codex_benchmark_sandboxed_command(
             cwd,
             writable_paths,
             codex_home_root,
+            docker_socket,
             timeout,
             temp_dir,
         );
@@ -254,9 +301,14 @@ fn apply_nested_codex_benchmark_env(
     command: &mut Command,
     temp_dir: &Path,
     codex_home_root: &Path,
+    docker_socket: Option<&Path>,
 ) {
     apply_sandbox_temp_env(command, Some(temp_dir));
     command.env("STATEFUL_NESTED_CODEX_HOME_ROOT", codex_home_root);
+    command.env(STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV, "1");
+    if let Some(docker_socket) = docker_socket {
+        command.env("DOCKER_HOST", format!("unix://{}", docker_socket.display()));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -266,8 +318,9 @@ fn nested_codex_benchmark_seatbelt_command(
     writable_paths: &[SandboxWritablePath],
     temp_dir: &Path,
     codex_home_root: &Path,
+    docker_socket: Option<&Path>,
 ) -> Command {
-    let profile = nested_codex_benchmark_seatbelt_profile(writable_paths);
+    let profile = nested_codex_benchmark_seatbelt_profile(writable_paths, docker_socket);
     let mut sandbox = Command::new("/usr/bin/sandbox-exec");
     sandbox
         .arg("-p")
@@ -276,18 +329,26 @@ fn nested_codex_benchmark_seatbelt_command(
         .arg("-c")
         .arg(command)
         .current_dir(cwd);
-    apply_nested_codex_benchmark_env(&mut sandbox, temp_dir, codex_home_root);
+    apply_nested_codex_benchmark_env(&mut sandbox, temp_dir, codex_home_root, docker_socket);
     sandbox
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn nested_codex_benchmark_seatbelt_profile(writable_paths: &[SandboxWritablePath]) -> String {
+fn nested_codex_benchmark_seatbelt_profile(
+    writable_paths: &[SandboxWritablePath],
+    docker_socket: Option<&Path>,
+) -> String {
     let mut profile =
         String::from("(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n");
     push_seatbelt_device_read_allows(&mut profile);
     profile.push_str(
         "(allow sysctl-read)\n(allow network*)\n(allow file-write* (literal \"/dev/null\")",
     );
+    if let Some(docker_socket) = docker_socket {
+        profile.push_str(" (literal \"");
+        profile.push_str(&seatbelt_escape(&docker_socket.to_string_lossy()));
+        profile.push_str("\")");
+    }
     for writable_path in writable_paths {
         profile.push_str(match writable_path.kind {
             SandboxWritablePathKind::File => " (literal \"",
@@ -353,6 +414,7 @@ mod tests {
             &mut command,
             Path::new("/repo/target/.stateful-tmp"),
             Path::new("/repo/target/nested-codex-homes/run-1"),
+            None,
         );
 
         let env = command
@@ -375,14 +437,55 @@ mod tests {
                 .map(|(_, value)| value),
             Some(&Some("/repo/target/nested-codex-homes/run-1".to_string()))
         );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "STATEFUL_ALLOW_NESTED_SANDBOX_RUN")
+                .map(|(_, value)| value),
+            Some(&Some("1".to_string()))
+        );
+    }
+
+    #[test]
+    fn nested_codex_benchmark_env_sets_docker_host_when_socket_is_explicit() {
+        let mut command = Command::new("printenv");
+        apply_nested_codex_benchmark_env(
+            &mut command,
+            Path::new("/repo/target/.stateful-tmp"),
+            Path::new("/repo/target/nested-codex-homes/run-1"),
+            Some(Path::new("/Users/arthur/.colima/default/docker.sock")),
+        );
+
+        let env = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().to_string(),
+                    value.map(|value| value.to_string_lossy().to_string()),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "DOCKER_HOST")
+                .map(|(_, value)| value),
+            Some(&Some(
+                "unix:///Users/arthur/.colima/default/docker.sock".to_string()
+            ))
+        );
     }
 
     #[test]
     fn nested_codex_benchmark_seatbelt_profile_is_target_only_with_network() {
-        let profile = nested_codex_benchmark_seatbelt_profile(&[
-            SandboxWritablePath::directory(PathBuf::from("/repo/target")),
-            SandboxWritablePath::directory(PathBuf::from("/repo/target/nested-codex-homes/run-1")),
-        ]);
+        let profile = nested_codex_benchmark_seatbelt_profile(
+            &[
+                SandboxWritablePath::directory(PathBuf::from("/repo/target")),
+                SandboxWritablePath::directory(PathBuf::from(
+                    "/repo/target/nested-codex-homes/run-1",
+                )),
+            ],
+            None,
+        );
 
         assert!(profile.contains("(allow network*)"));
         assert!(profile.contains(
@@ -402,5 +505,25 @@ mod tests {
         assert!(profile.contains("(subpath \"/repo/target\")"));
         assert!(profile.contains("(subpath \"/repo/target/nested-codex-homes/run-1\")"));
         assert!(!profile.contains("(subpath \"/repo\")"));
+    }
+
+    #[test]
+    fn nested_codex_benchmark_seatbelt_profile_allows_explicit_docker_socket() {
+        let profile = nested_codex_benchmark_seatbelt_profile(
+            &[SandboxWritablePath::directory(PathBuf::from(
+                "/repo/target",
+            ))],
+            Some(Path::new("/Users/arthur/.colima/default/docker.sock")),
+        );
+
+        let write_rules = profile
+            .lines()
+            .filter(|line| line.starts_with("(allow file-write*"))
+            .collect::<Vec<_>>();
+        assert!(
+            write_rules.iter().any(
+                |line| line.contains("(literal \"/Users/arthur/.colima/default/docker.sock\")")
+            )
+        );
     }
 }

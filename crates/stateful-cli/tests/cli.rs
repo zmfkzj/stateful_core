@@ -223,17 +223,43 @@ fn parses_nested_codex_benchmark_sandbox_command() {
             purpose,
             write_dir,
             codex_home_root,
+            docker_socket,
             command,
             timeout_seconds,
         }) => {
             assert_eq!(purpose, "run nested Codex chaos benchmark");
             assert_eq!(write_dir, "target");
             assert_eq!(codex_home_root, "target/nested-codex-homes/run-1");
+            assert_eq!(docker_socket, None);
             assert_eq!(command, "cargo run -p stateful-bench -- run");
             assert_eq!(timeout_seconds, Some(120));
         }
         other => panic!("expected nested Codex benchmark sandbox command, got {other:?}"),
     }
+}
+
+#[test]
+fn parses_nested_codex_benchmark_sandbox_command_with_docker_socket() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "run-nested-codex-benchmark",
+        "--purpose",
+        "run nested Codex chaos benchmark",
+        "--write-dir",
+        "target",
+        "--codex-home-root",
+        "target/nested-codex-homes/run-1",
+        "--docker-socket",
+        "/Users/arthur/.colima/default/docker.sock",
+        "--command",
+        "cargo run -p stateful-bench -- run",
+    ]);
+
+    assert!(
+        cli.is_ok(),
+        "nested Codex benchmark sandbox should accept an explicit Docker socket"
+    );
 }
 
 #[test]
@@ -581,8 +607,10 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
     assert_eq!(
         json["allowed_tools"],
         serde_json::json!([
+            "multi_agent_v1spawn_agent",
             "multi_agent_v1wait_agent",
             "multi_agent_v1close_agent",
+            "multi_agent_v1resume_agent",
             "mcp__openaiDeveloperDocs__fetch_openai_doc",
             "mcp__openaiDeveloperDocs__search_openai_docs",
             "multi_agent_v1send_input",
