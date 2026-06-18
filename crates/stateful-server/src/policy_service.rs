@@ -953,17 +953,33 @@ fn current_target_observation(
     relative_path: &str,
 ) -> Result<CurrentTargetObservation, String> {
     let path = workspace_relative_path(root, relative_path)?;
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CurrentTargetObservation {
+                exists: false,
+                content_hash: None,
+            });
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to read target observation metadata for {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    if metadata.is_dir() && relative_path.ends_with('/') {
+        return Ok(CurrentTargetObservation {
+            exists: true,
+            content_hash: None,
+        });
+    }
+
     match std::fs::read(&path) {
         Ok(bytes) => Ok(CurrentTargetObservation {
             exists: true,
             content_hash: Some(content_hash(&bytes)),
         }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(CurrentTargetObservation {
-                exists: false,
-                content_hash: None,
-            })
-        }
         Err(error) => Err(format!(
             "failed to read target observation for {}: {error}",
             path.display()

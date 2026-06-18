@@ -2854,6 +2854,120 @@ async fn lease_acquire_returns_conflict_for_active_lease_conflict() {
 }
 
 #[tokio::test]
+async fn lease_acquire_allows_existing_directory_observation() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-directory-lease-observation-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let repo_root = temp_root.join("repo");
+    std::fs::create_dir_all(repo_root.join("tmp")).expect("repo tmp should be creatable");
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let mut declare_body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "purpose": "Write build artifacts.",
+            "files_planned": ["tmp/"]
+        }),
+    );
+    declare_body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
+    let declare = app
+        .clone()
+        .oneshot(json_request("/v1/intent/declare", declare_body))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let acquire = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "tmp/",
+                "root": repo_root.to_string_lossy()
+            }),
+        ))
+        .await
+        .expect("directory lease acquire should complete");
+    assert_eq!(acquire.status(), StatusCode::OK);
+
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[tokio::test]
+async fn lease_acquire_rejects_directory_observation_for_file_path() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-file-lease-directory-observation-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let repo_root = temp_root.join("repo");
+    std::fs::create_dir_all(repo_root.join("tmp")).expect("repo tmp should be creatable");
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let mut declare_body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "purpose": "Edit file path.",
+            "files_planned": ["tmp"]
+        }),
+    );
+    declare_body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
+    let declare = app
+        .clone()
+        .oneshot(json_request("/v1/intent/declare", declare_body))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let acquire = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "tmp",
+                "root": repo_root.to_string_lossy()
+            }),
+        ))
+        .await
+        .expect("file lease acquire should complete");
+    assert_eq!(acquire.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let json = response_json(acquire, 2048).await;
+    assert!(
+        json["error"]
+            .as_str()
+            .expect("error message should be present")
+            .contains("Is a directory"),
+        "unexpected response: {json}"
+    );
+
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[tokio::test]
 async fn lease_acquire_rejects_active_reservation_conflict_without_breaking_claim() {
     let store = Store::open_in_memory().expect("store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));

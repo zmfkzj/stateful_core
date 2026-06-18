@@ -6,6 +6,21 @@ use stateful_cli::{
     tool_list_for_repo, workspace_id_for_enabled_repo,
 };
 
+fn default_allowed_tools() -> Vec<String> {
+    [
+        "multi_agent_v1spawn_agent",
+        "multi_agent_v1wait_agent",
+        "multi_agent_v1close_agent",
+        "multi_agent_v1resume_agent",
+        "mcp__openaiDeveloperDocs__fetch_openai_doc",
+        "mcp__openaiDeveloperDocs__search_openai_docs",
+        "multi_agent_v1send_input",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 #[test]
 fn enable_repo_registers_git_root_and_writes_repo_configs() {
     let fixture = TestFixture::new("enable");
@@ -26,6 +41,7 @@ fn enable_repo_registers_git_root_and_writes_repo_configs() {
     );
     assert!(entry.enabled);
     assert!(!entry.enabled_at.is_empty());
+    assert_eq!(entry.allowed_tools, default_allowed_tools());
     assert_eq!(registry.repos, vec![entry.clone()]);
     assert!(registry.is_enabled(&repo));
     assert_eq!(
@@ -149,7 +165,9 @@ fn tool_allowlist_is_repo_scoped_deduplicated_and_preserved() {
 
     let entry = allow_tool_for_repo(&fixture.paths, &nested_a, "FutureWriteTool")
         .expect("tool should be allowed for repo a");
-    assert_eq!(entry.allowed_tools, vec!["FutureWriteTool".to_string()]);
+    let mut expected_repo_a_tools = default_allowed_tools();
+    expected_repo_a_tools.push("FutureWriteTool".to_string());
+    assert_eq!(entry.allowed_tools, expected_repo_a_tools);
 
     allow_tool_for_repo(&fixture.paths, &repo_a, "FutureWriteTool")
         .expect("duplicate allow should be idempotent");
@@ -159,7 +177,7 @@ fn tool_allowlist_is_repo_scoped_deduplicated_and_preserved() {
         .iter()
         .find(|entry| entry.root == repo_a.canonicalize().expect("repo a should canonicalize"))
         .expect("repo a should be registered");
-    assert_eq!(repo_a_entry.allowed_tools, vec!["FutureWriteTool"]);
+    assert_eq!(repo_a_entry.allowed_tools, expected_repo_a_tools);
 
     assert!(
         tool_allowed_for_enabled_repo(&fixture.paths, &nested_a, "FutureWriteTool")
@@ -178,7 +196,7 @@ fn tool_allowlist_is_repo_scoped_deduplicated_and_preserved() {
 
     let entry = deny_tool_for_repo(&fixture.paths, &repo_a, "FutureWriteTool")
         .expect("tool should be removed from repo allowlist");
-    assert!(entry.allowed_tools.is_empty());
+    assert_eq!(entry.allowed_tools, default_allowed_tools());
     assert!(
         !tool_allowed_for_enabled_repo(&fixture.paths, &repo_a, "FutureWriteTool")
             .expect("allow lookup should work after deny")
@@ -200,13 +218,16 @@ fn tool_list_includes_recorded_unclassified_tools() {
         .expect("duplicate unclassified record should be idempotent");
 
     let list = tool_list_for_repo(&fixture.paths, &repo).expect("tool list should load");
-    assert_eq!(list.allowed_tools, vec!["KnownTool"]);
+    let mut expected_allowed_tools = default_allowed_tools();
+    expected_allowed_tools.push("KnownTool".to_string());
+    assert_eq!(list.allowed_tools, expected_allowed_tools);
     assert_eq!(list.unclassified_tools, vec!["FutureWriteTool"]);
 
     allow_tool_for_repo(&fixture.paths, &repo, "FutureWriteTool")
         .expect("allowing a tool should remove it from unclassified tools");
     let list = tool_list_for_repo(&fixture.paths, &repo).expect("tool list should reload");
-    assert_eq!(list.allowed_tools, vec!["KnownTool", "FutureWriteTool"]);
+    expected_allowed_tools.push("FutureWriteTool".to_string());
+    assert_eq!(list.allowed_tools, expected_allowed_tools);
     assert!(list.unclassified_tools.is_empty());
 }
 

@@ -11,6 +11,7 @@ use stateful_core::normalize_relative_path;
 
 use crate::outbox::queue_session_heartbeat_outbox;
 use crate::sandbox::{parse_sandbox_run_bash_invocation, validate_sandbox_run_request_shape};
+use crate::shadow_guard;
 use crate::shell_command::{
     first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
 };
@@ -25,6 +26,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookOutcome {
     Allow,
+    AllowWithContext { message: String },
     Deny { reason: String },
 }
 
@@ -35,6 +37,7 @@ struct NestedCodexBenchmarkSandboxInvocation {
     purpose: String,
     write_dir: String,
     codex_home_root: String,
+    docker_socket: Option<String>,
     command: String,
 }
 
@@ -53,6 +56,13 @@ impl HookOutcome {
     pub fn to_stdout_json(&self) -> serde_json::Result<serde_json::Value> {
         match self {
             Self::Allow => Ok(json!({})),
+            Self::AllowWithContext { message } => Ok(json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": message,
+                }
+            })),
             Self::Deny { reason } => Ok(json!({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
@@ -61,6 +71,10 @@ impl HookOutcome {
                 }
             })),
         }
+    }
+
+    fn emits_stdout(&self) -> bool {
+        !matches!(self, Self::Allow)
     }
 }
 
@@ -100,7 +114,7 @@ pub fn run_hook(command: HookCommand) -> anyhow::Result<()> {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input)?;
             let outcome = handle_pre_tool_use_in_repo(&input, hook_start_dir(&input)?)?;
-            if !matches!(outcome, HookOutcome::Allow) {
+            if outcome.emits_stdout() {
                 println!("{}", serde_json::to_string(&outcome.to_stdout_json()?)?);
             }
         }
@@ -218,7 +232,13 @@ pub fn handle_user_prompt_submit_in_repo(
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     remember_current_session(&repo_root, &runtime, input)?;
     let identity = repo_identity(&paths, &repo_root)?;
-    handle_user_prompt_submit_with_runtime(input, &runtime, Some(&identity))
+    let input: UserPromptSubmitInput = serde_json::from_str(input)?;
+    if user_prompt_context_rendered(&repo_root, input.stateful_session_id()) {
+        return Ok(String::new());
+    }
+    let prompt_text = handle_user_prompt_submit_with_runtime(&input, &runtime, Some(&identity))?;
+    mark_user_prompt_context_rendered(&repo_root, input.stateful_session_id());
+    Ok(prompt_text)
 }
 
 pub fn handle_stop_in_repo(input: &str, repo_root: impl AsRef<Path>) -> anyhow::Result<()> {
@@ -287,14 +307,22 @@ fn handle_post_tool_use_with_runtime(
 }
 
 fn handle_user_prompt_submit_with_runtime(
-    input: &str,
+    input: &UserPromptSubmitInput,
     runtime: &ServerRuntime,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<String> {
-    let input: UserPromptSubmitInput = serde_json::from_str(input)?;
+    let prompt_text = render_context_prompt_text(runtime, input.stateful_session_id(), identity)?;
+    Ok(with_stateful_command_policy_reminder(prompt_text))
+}
+
+fn render_context_prompt_text(
+    runtime: &ServerRuntime,
+    session_id: &str,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<String> {
     let workspace_id = effective_workspace_id(runtime, identity);
     let mut body = json!({
-        "session_id": input.stateful_session_id(),
+        "session_id": session_id,
         "workspace_id": workspace_id,
         "mode": "brief"
     });
@@ -317,7 +345,27 @@ fn handle_user_prompt_submit_with_runtime(
     }
 
     let response: ContextRenderResponse = serde_json::from_str(&response.body)?;
-    Ok(with_stateful_command_policy_reminder(response.prompt_text))
+    Ok(response.prompt_text)
+}
+
+fn user_prompt_context_rendered(repo_root: &Path, session_id: &str) -> bool {
+    user_prompt_context_marker_path(repo_root, session_id).exists()
+}
+
+fn mark_user_prompt_context_rendered(repo_root: &Path, session_id: &str) {
+    let path = user_prompt_context_marker_path(repo_root, session_id);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, b"rendered\n");
+}
+
+fn user_prompt_context_marker_path(repo_root: &Path, session_id: &str) -> PathBuf {
+    repo_root
+        .join(".stateful_core")
+        .join("runtime")
+        .join("prompt_context")
+        .join(format!("{session_id}.sent"))
 }
 
 fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
@@ -344,7 +392,7 @@ fn handle_stop_with_runtime(
     let input: SessionEventInput = serde_json::from_str(input)?;
     post_session_event(
         runtime,
-        "/v1/activity/observe",
+        "/v1/activity/finalize",
         input.stateful_session_id(),
         identity,
     )
@@ -552,10 +600,15 @@ fn is_builtin_safe_tool(tool_name: &str) -> bool {
             | "request_user_input"
             | "view_image"
             | "spawn_agent"
+            | "multi_agent_v1spawn_agent"
             | "wait_agent"
+            | "multi_agent_v1wait_agent"
             | "send_input"
+            | "multi_agent_v1send_input"
             | "close_agent"
+            | "multi_agent_v1close_agent"
             | "resume_agent"
+            | "multi_agent_v1resume_agent"
     )
 }
 
@@ -682,6 +735,13 @@ fn authorize_nested_codex_benchmark_sandbox_bash(command: &str) -> HookOutcome {
             "stateful sandbox run-nested-codex-benchmark requires --codex-home-root under target",
         );
     }
+    if let Some(docker_socket) = &invocation.docker_socket {
+        if !Path::new(docker_socket).is_absolute() {
+            return bash_policy_deny(
+                "stateful sandbox run-nested-codex-benchmark requires --docker-socket to be an absolute path",
+            );
+        }
+    }
     if invocation.command.trim().is_empty() {
         return bash_policy_deny(
             "stateful sandbox run-nested-codex-benchmark requires a non-empty --command",
@@ -770,6 +830,7 @@ fn parse_nested_codex_benchmark_sandbox_invocation(
     let mut purpose = None;
     let mut write_dir = None;
     let mut codex_home_root = None;
+    let mut docker_socket = None;
     let mut inner_command = None;
     let mut index = 3;
     while index < words.len() {
@@ -795,6 +856,14 @@ fn parse_nested_codex_benchmark_sandbox_invocation(
                     &words,
                     index,
                     "--codex-home-root",
+                )?);
+            }
+            "--docker-socket" => {
+                index += 1;
+                docker_socket = Some(parse_sandbox_run_arg_value(
+                    &words,
+                    index,
+                    "--docker-socket",
                 )?);
             }
             "--command" => {
@@ -851,6 +920,7 @@ fn parse_nested_codex_benchmark_sandbox_invocation(
         purpose,
         write_dir,
         codex_home_root,
+        docker_socket,
         command,
     })
 }
@@ -989,7 +1059,39 @@ fn authorize_apply_patch(
             reason: "apply_patch target is outside the enabled repo".to_string(),
         });
     };
-    authorize_targets(input, runtime, repo_root, targets, identity)
+    let outcome = authorize_targets(input, runtime, repo_root, targets, identity)?;
+    Ok(with_file_tool_live_context(
+        outcome, input, runtime, identity,
+    ))
+}
+
+fn with_file_tool_live_context(
+    outcome: HookOutcome,
+    input: &PreToolUseInput,
+    runtime: Option<&ServerRuntime>,
+    identity: Option<&RepoIdentity>,
+) -> HookOutcome {
+    let Some(runtime) = runtime else {
+        return outcome;
+    };
+    let Ok(prompt_text) =
+        render_context_prompt_text(runtime, input.stateful_session_id(), identity)
+    else {
+        return outcome;
+    };
+    if prompt_text.trim().is_empty() {
+        return outcome;
+    }
+
+    match outcome {
+        HookOutcome::Allow => HookOutcome::AllowWithContext {
+            message: prompt_text,
+        },
+        HookOutcome::AllowWithContext { .. } => outcome,
+        HookOutcome::Deny { reason } => HookOutcome::Deny {
+            reason: format!("{reason}\n\n{prompt_text}"),
+        },
+    }
 }
 
 fn authorize_file_change_tool(
@@ -1043,13 +1145,16 @@ fn authorize_file_write_tool(
         });
     };
 
-    authorize_targets(
+    let outcome = authorize_targets(
         input,
         runtime,
         repo_root,
         vec![PatchTarget::write(&target)],
         identity,
-    )
+    )?;
+    Ok(with_file_tool_live_context(
+        outcome, input, runtime, identity,
+    ))
 }
 
 fn normalize_targets(
@@ -1125,6 +1230,17 @@ fn authorize_targets(
     targets: Vec<PatchTarget>,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<HookOutcome> {
+    if let Some(repo_root) = repo_root
+        && let Err(error) = shadow_guard::check_paths_for_dependency_shadowing(
+            repo_root,
+            shadow_write_paths(&targets),
+        )
+    {
+        return Ok(HookOutcome::Deny {
+            reason: error.to_string(),
+        });
+    }
+
     let Some(runtime) = runtime else {
         return Ok(HookOutcome::Deny {
             reason: format!(
@@ -1202,6 +1318,14 @@ fn authorize_targets(
     }
 
     Ok(HookOutcome::Allow)
+}
+
+fn shadow_write_paths(targets: &[PatchTarget]) -> impl Iterator<Item = &str> {
+    targets.iter().filter_map(|target| match target.action {
+        "write_file" => Some(target.path.as_str()),
+        "move_file" => target.new_path.as_deref(),
+        _ => None,
+    })
 }
 
 fn authorization_unavailable_reason(error: &dyn std::fmt::Display) -> String {
@@ -1496,11 +1620,17 @@ struct PreToolUseInput {
 #[derive(Debug, Deserialize)]
 struct RuntimeHookInput {
     session_id: String,
+    #[serde(default)]
+    thread_id: Option<String>,
 }
 
 impl RuntimeHookInput {
     fn stateful_session_id(&self) -> &str {
-        &self.session_id
+        self.thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|thread_id| !thread_id.is_empty())
+            .unwrap_or(&self.session_id)
     }
 }
 
@@ -1607,9 +1737,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_hook_input_exposes_session_id_directly() {
+    fn runtime_hook_input_prefers_thread_id_when_present() {
         let input = RuntimeHookInput {
             session_id: "codex-session-1".to_string(),
+            thread_id: Some("codex-thread-1".to_string()),
+        };
+
+        assert_eq!(input.stateful_session_id(), "codex-thread-1");
+    }
+
+    #[test]
+    fn runtime_hook_input_falls_back_to_session_id_without_thread_id() {
+        let input = RuntimeHookInput {
+            session_id: "codex-session-1".to_string(),
+            thread_id: None,
         };
 
         assert_eq!(input.stateful_session_id(), "codex-session-1");

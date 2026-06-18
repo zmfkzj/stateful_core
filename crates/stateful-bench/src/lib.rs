@@ -1,3 +1,16 @@
+pub mod denovo;
+
+pub use denovo::{
+    DeNovoAgentKind, DeNovoCodexRunOptions, DeNovoCommand, DeNovoComparisonReport, DeNovoCondition,
+    DeNovoConditionMetadata, DeNovoConditionReport, DeNovoConditionRunOptions, DeNovoEvalDetails,
+    DeNovoEvalResult, DeNovoExtractMetadata, DeNovoExtractOptions, DeNovoExtractRecipeOptions,
+    DeNovoMatrixRunOptions, DeNovoOfficialResult, DeNovoRunMode, DeNovoRunRecipeOptions,
+    RecipeCommand, build_denovo_codex_adapter_command, build_denovo_condition_report,
+    build_denovo_extract_recipe_command, build_denovo_run_recipe_command, compare_denovo_reports,
+    default_denovo_conditions, parse_denovo_condition, render_denovo_comparison_markdown,
+    render_denovo_report_markdown, run_denovo_condition, run_denovo_extract, run_denovo_matrix,
+};
+
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
@@ -144,6 +157,10 @@ pub enum Command {
         format: ReportFormat,
         #[arg(long)]
         output: Option<PathBuf>,
+    },
+    Denovo {
+        #[command(subcommand)]
+        command: denovo::DeNovoCommand,
     },
 }
 
@@ -298,6 +315,9 @@ pub fn run_cli() -> Result<()> {
             } else {
                 println!("{rendered}");
             }
+        }
+        Command::Denovo { command } => {
+            denovo::run_denovo_cli(command)?;
         }
     }
 
@@ -1128,6 +1148,16 @@ pub struct AgentRunRecord {
     pub outcome: AgentOutcome,
     pub exit_code: Option<i32>,
     pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_token_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_token_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_token_count: Option<u64>,
 }
 
 impl AgentRunRecord {
@@ -1141,6 +1171,11 @@ impl AgentRunRecord {
             },
             exit_code: Some(exit_code),
             duration_ms,
+            token_count: None,
+            input_token_count: None,
+            cached_input_token_count: None,
+            output_token_count: None,
+            reasoning_output_token_count: None,
         }
     }
 
@@ -1150,6 +1185,11 @@ impl AgentRunRecord {
             outcome: AgentOutcome::TimedOut,
             exit_code: None,
             duration_ms,
+            token_count: None,
+            input_token_count: None,
+            cached_input_token_count: None,
+            output_token_count: None,
+            reasoning_output_token_count: None,
         }
     }
 
@@ -1159,7 +1199,55 @@ impl AgentRunRecord {
             outcome: AgentOutcome::Failed,
             exit_code: None,
             duration_ms,
+            token_count: None,
+            input_token_count: None,
+            cached_input_token_count: None,
+            output_token_count: None,
+            reasoning_output_token_count: None,
         }
+    }
+
+    fn with_usage_metrics(mut self, metrics: AgentUsageMetrics) -> Self {
+        self.token_count = metrics.token_count;
+        self.input_token_count = metrics.input_token_count;
+        self.cached_input_token_count = metrics.cached_input_token_count;
+        self.output_token_count = metrics.output_token_count;
+        self.reasoning_output_token_count = metrics.reasoning_output_token_count;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AgentUsageMetrics {
+    token_count: Option<u64>,
+    input_token_count: Option<u64>,
+    cached_input_token_count: Option<u64>,
+    output_token_count: Option<u64>,
+    reasoning_output_token_count: Option<u64>,
+}
+
+impl AgentUsageMetrics {
+    fn add_agent(&mut self, agent: &AgentRunRecord) {
+        self.token_count = add_optional(self.token_count, agent.token_count);
+        self.input_token_count = add_optional(self.input_token_count, agent.input_token_count);
+        self.cached_input_token_count = add_optional(
+            self.cached_input_token_count,
+            agent.cached_input_token_count,
+        );
+        self.output_token_count = add_optional(self.output_token_count, agent.output_token_count);
+        self.reasoning_output_token_count = add_optional(
+            self.reasoning_output_token_count,
+            agent.reasoning_output_token_count,
+        );
+    }
+}
+
+fn add_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left + right),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
     }
 }
 
@@ -1833,11 +1921,14 @@ fn wait_for_agents(
             if records[index].is_none()
                 && let Ok(Some(status)) = agent.child.try_wait()
             {
-                records[index] = Some(AgentRunRecord::finished(
-                    agent.agent_id.as_str(),
-                    status.code().unwrap_or(1),
-                    elapsed_ms(started.elapsed()),
-                ));
+                records[index] = Some(
+                    AgentRunRecord::finished(
+                        agent.agent_id.as_str(),
+                        status.code().unwrap_or(1),
+                        elapsed_ms(started.elapsed()),
+                    )
+                    .with_usage_metrics(read_agent_usage_metrics(&agent.stdout)),
+                );
             }
         }
 
@@ -1845,10 +1936,13 @@ fn wait_for_agents(
             for (index, agent) in agents.iter_mut().enumerate() {
                 if records[index].is_none() {
                     let _ = terminate_child(&mut agent.child);
-                    records[index] = Some(AgentRunRecord::timed_out(
-                        agent.agent_id.as_str(),
-                        elapsed_ms(started.elapsed()),
-                    ));
+                    records[index] = Some(
+                        AgentRunRecord::timed_out(
+                            agent.agent_id.as_str(),
+                            elapsed_ms(started.elapsed()),
+                        )
+                        .with_usage_metrics(read_agent_usage_metrics(&agent.stdout)),
+                    );
                 }
             }
         }
@@ -1872,9 +1966,83 @@ fn wait_for_agents(
                     agents[index].agent_id.as_str(),
                     elapsed_ms(started.elapsed()),
                 )
+                .with_usage_metrics(read_agent_usage_metrics(&agents[index].stdout))
             })
         })
         .collect())
+}
+
+fn read_agent_usage_metrics(path: &Path) -> AgentUsageMetrics {
+    let Ok(file) = File::open(path) else {
+        return AgentUsageMetrics::default();
+    };
+    let mut metrics = AgentUsageMetrics::default();
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(usage) = extract_codex_usage_metrics(&value) {
+            metrics = usage;
+        }
+    }
+    metrics
+}
+
+fn extract_codex_usage_metrics(value: &Value) -> Option<AgentUsageMetrics> {
+    [
+        value.pointer("/info/total_token_usage"),
+        value.pointer("/payload/info/total_token_usage"),
+        value.pointer("/usage"),
+        value.pointer("/payload/usage"),
+        value.pointer("/response/usage"),
+        value.pointer("/payload/response/usage"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(usage_metrics_from_value)
+}
+
+fn usage_metrics_from_value(value: &Value) -> Option<AgentUsageMetrics> {
+    let input_token_count = value.get("input_tokens").and_then(Value::as_u64);
+    let cached_input_token_count = value
+        .get("cached_input_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            value
+                .pointer("/input_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+        });
+    let output_token_count = value.get("output_tokens").and_then(Value::as_u64);
+    let reasoning_output_token_count = value
+        .get("reasoning_output_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            value
+                .pointer("/output_tokens_details/reasoning_tokens")
+                .and_then(Value::as_u64)
+        });
+    let token_count = value
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| value.get("token_count").and_then(Value::as_u64))
+        .or_else(|| add_optional(input_token_count, output_token_count));
+
+    if token_count.is_none()
+        && input_token_count.is_none()
+        && cached_input_token_count.is_none()
+        && output_token_count.is_none()
+        && reasoning_output_token_count.is_none()
+    {
+        return None;
+    }
+
+    Some(AgentUsageMetrics {
+        token_count,
+        input_token_count,
+        cached_input_token_count,
+        output_token_count,
+        reasoning_output_token_count,
+    })
 }
 
 fn terminate_agent_children(agents: &mut [RunningAgent]) {
@@ -3542,6 +3710,8 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
         let task_outcomes = harness.task_outcomes(expected_task_count(&record));
         let functional = functional_outcome_from_task_outcomes(&task_outcomes);
         let score = composite_score_for_task_outcomes(&task_outcomes, &collisions);
+        let agent_usage = aggregate_agent_usage_metrics(&record);
+        let pair_token_count = harness.metrics.token_count.or(agent_usage.token_count);
 
         summary.wall_time_ms += record.wall_time_ms;
         summary.uncoordinated_same_file_collisions += collisions.uncoordinated_same_file_collisions;
@@ -3564,7 +3734,7 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
         if let Some(score) = &score {
             score_sums.add(score);
         }
-        if let Some(count) = harness.metrics.token_count {
+        if let Some(count) = pair_token_count {
             has_tokens = true;
             token_count += count;
         }
@@ -3584,7 +3754,7 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
             collisions,
             score,
             wall_time_ms: record.wall_time_ms,
-            token_count: harness.metrics.token_count,
+            token_count: pair_token_count,
             tool_call_count: harness.metrics.tool_call_count,
             preserved_edit_count: harness.metrics.preserved_edit_count,
             missing_expected_line_count: harness.metrics.missing_expected_line_count,
@@ -3687,6 +3857,14 @@ fn recorded_agents(record: &PairRunRecord) -> Vec<&AgentRunRecord> {
     } else {
         record.agents.iter().collect()
     }
+}
+
+fn aggregate_agent_usage_metrics(record: &PairRunRecord) -> AgentUsageMetrics {
+    let mut metrics = AgentUsageMetrics::default();
+    for agent in recorded_agents(record) {
+        metrics.add_agent(agent);
+    }
+    metrics
 }
 
 fn functional_outcome_from_task_outcomes(outcomes: &[HarnessTaskOutcome]) -> FunctionalOutcome {

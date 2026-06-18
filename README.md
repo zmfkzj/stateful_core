@@ -655,6 +655,15 @@ bundled.
 - `run`: execute no-state or stateful paired-agent runs.
 - `report` and `compare`: summarize one run or compare stateful/no-state runs.
 - `synthetic`: run the built-in synthetic coordination benchmark.
+- `denovo`: wrap AweAgent DeNovoSWE extract/evaluation workflows and run either
+  the official AweAgent agent recipe or a host Codex CLI adapter while recording
+  `stateful`, `subagent`, and `running_time_ms` comparison axes.
+
+For Codex-backed paired-agent runs, `stateful-bench run --mode stateful`
+starts a per-pair stateful server and prepares each isolated nested Codex home
+with the stateful MCP server config, lifecycle hooks, and
+`stateful-command-policy` skill. `--mode no-state` does not write those Codex
+integration files, keeping the stateful on/off benchmark axis separate.
 
 The synthetic benchmark is a deterministic fixture for exercising report and
 comparison plumbing. Treat its positive delta as a smoke test for the metric
@@ -670,6 +679,87 @@ empirical paired-agent stateful/no-state result. Use `run` plus `compare` on a
 reviewed manifest before citing benchmark evidence for real conflict prevention.
 
 Benchmark artifacts live under `.stateful_bench/` and are intentionally ignored.
+
+### DeNovoSWE Official Wrapper
+
+`stateful-bench denovo` follows the official AweAgent DeNovoSWE workflow instead
+of reimplementing the evaluator. Provide an AweAgent checkout with
+`--aweagent-root` or `AWEAGENT_ROOT`; the wrapper invokes
+`recipes/denovo_swe/extract_patch.py` and `recipes/denovo_swe/run.py` from that
+checkout.
+
+Preprocess raw DeNovoSWE JSONL:
+
+```bash
+stateful-bench denovo extract \
+  --aweagent-root ../AweAgent \
+  --input /path/to/ready_denovoswe.jsonl \
+  --output .stateful_bench/denovo/extracts/dev \
+  --config configs/tasks/denovoswe.yaml \
+  --max-concurrent 10
+```
+
+Run a comparison matrix. If no `--condition` is provided, the wrapper records
+the four canonical axis combinations. To make an axis change agent behavior,
+provide official-compatible AweAgent configs through `--condition` entries.
+
+```bash
+stateful-bench denovo run \
+  --aweagent-root ../AweAgent \
+  --data-file .stateful_bench/denovo/extracts/dev/extract_patch_*/results.jsonl \
+  --run-id dev-denovo \
+  --condition stateful:off,subagent:off,config:configs/tasks/denovoswe.yaml \
+  --condition stateful:on,subagent:off,config:configs/tasks/denovoswe-stateful.yaml \
+  --condition stateful:off,subagent:on,config:configs/tasks/denovoswe-subagent.yaml \
+  --condition stateful:on,subagent:on,config:configs/tasks/denovoswe-stateful-subagent.yaml \
+  --mode batch \
+  --max-concurrent 4 \
+  --eval-iters 1
+```
+
+Run with the Codex CLI adapter when you want the agent step to use host
+`codex exec` authentication. This mode uses Codex OAuth credentials from
+`auth.json` instead of an AweAgent LLM API key:
+
+```bash
+stateful-bench denovo run \
+  --agent codex-cli \
+  --aweagent-root ../AweAgent \
+  --data-file .stateful_bench/denovo/extracts/dev/extract_patch_*/results.jsonl \
+  --output-dir target/stateful-bench/denovo/runs \
+  --run-id dev-denovo-codex \
+  --condition stateful:off,subagent:on \
+  --condition stateful:on,subagent:on \
+  --mode batch \
+  --max-concurrent 1 \
+  --benchmark-model gpt-5.4-mini \
+  --benchmark-reasoning-effort low \
+  --benchmark-model-context-window 256000 \
+  --benchmark-temperature 1 \
+  --benchmark-max-turns 500 \
+  --stateful-binary /Users/arthur/.cargo/bin/stateful
+```
+
+The Codex CLI adapter uses isolated `CODEX_HOME` directories for both profiles:
+
+- `stateful:off`: isolated `CODEX_HOME` seeded with auth only, `codex exec` uses
+  `--ignore-user-config`, `--ignore-rules`, bundled skills disabled, no
+  generated MCP config/hooks/skills.
+- `stateful:on`: isolated `CODEX_HOME` seeded with auth plus generated stateful
+  `config.toml`, stateful MCP server config, lifecycle hooks, and
+  `stateful-command-policy` skill; does not pass `--ignore-user-config`.
+
+Generate reports:
+
+```bash
+stateful-bench denovo report \
+  --run-dir .stateful_bench/denovo/runs/dev-denovo \
+  --format markdown
+```
+
+`running_time_ms` is measured around each official recipe process invocation.
+Official DeNovoSWE clean, test patch, binary fixture, evaluation, and anti-hack
+semantics remain delegated to AweAgent.
 
 ## Development
 

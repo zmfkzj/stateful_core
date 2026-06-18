@@ -20,13 +20,14 @@ use crate::{
     CurrentSession, GlobalPaths, HttpResponse, ProtocolEnvelopeArgs, RepoGate, ServerRuntime,
     discover_runtime_with_global, ensure_server, post_json, protocol_envelope,
     read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
-    runtime_env_override_is_configured,
+    runtime_env_override_is_configured, shadow_guard,
     shell_command::{
         first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
     },
 };
 
 pub(crate) const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
+pub(crate) const STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV: &str = "STATEFUL_ALLOW_NESTED_SANDBOX_RUN";
 const BUILD_PROFILE_WRITE_DIR: &str = "tmp";
 #[cfg(unix)]
 const SIGTERM: i32 = 15;
@@ -119,6 +120,18 @@ pub(crate) struct SandboxWritablePath {
     pub(crate) kind: SandboxWritablePathKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitProfileIdentity {
+    name: String,
+    email: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct GitProfileConfig {
+    identity: Option<GitProfileIdentity>,
+    credential_helpers: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SandboxWritablePathKind {
     File,
@@ -165,6 +178,14 @@ pub fn run_sandbox_in_repo(
     let create_targets = shape.create_targets;
     let write_dirs = shape.write_dirs;
     let git_command_words = shape.git_command_words;
+    if request.fs == SandboxFsProfile::Build {
+        shadow_guard::audit_dependency_shadowing(&repo_root)?;
+    } else if request.fs == SandboxFsProfile::WriteTargets {
+        shadow_guard::check_paths_for_dependency_shadowing(
+            &repo_root,
+            create_targets.iter().map(String::as_str),
+        )?;
+    }
     let runtime = if sandbox_profile_requires_runtime(request.fs) {
         if !runtime_env_override_is_configured() {
             ensure_server(paths)?;
@@ -530,6 +551,11 @@ fn run_sandboxed_command(
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
     let temp_dir = sandbox_temp_dir(writable_paths);
+    if allow_direct_nested_sandbox_run() {
+        let mut command = direct_shell_command(command, cwd);
+        apply_sandbox_temp_env(&mut command, temp_dir.as_deref());
+        return run_command_with_timeout(command, timeout);
+    }
     #[cfg(target_os = "macos")]
     {
         run_command_with_timeout(
@@ -562,10 +588,26 @@ fn run_sandboxed_git_command(
     network: SandboxNetworkPolicy,
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
+    let config = discover_git_profile_config(cwd);
+
+    if allow_direct_nested_sandbox_run() {
+        let mut command = direct_git_command(words, cwd);
+        apply_git_profile_env(&mut command, temp_dir, hooks_dir, &config);
+        return run_command_with_timeout(command, timeout);
+    }
+
     #[cfg(target_os = "macos")]
     {
         run_command_with_timeout(
-            seatbelt_git_command(words, cwd, writable_paths, temp_dir, hooks_dir, network),
+            seatbelt_git_command(
+                words,
+                cwd,
+                writable_paths,
+                temp_dir,
+                hooks_dir,
+                &config,
+                network,
+            ),
             timeout,
         )
     }
@@ -573,7 +615,15 @@ fn run_sandboxed_git_command(
     #[cfg(target_os = "linux")]
     {
         run_command_with_timeout(
-            bubblewrap_git_command(words, cwd, writable_paths, temp_dir, hooks_dir, network),
+            bubblewrap_git_command(
+                words,
+                cwd,
+                writable_paths,
+                temp_dir,
+                hooks_dir,
+                &config,
+                network,
+            ),
             timeout,
         )
     }
@@ -591,6 +641,28 @@ fn run_sandboxed_git_command(
         );
         anyhow::bail!("stateful sandbox run is only supported on macOS and Linux");
     }
+}
+
+fn allow_direct_nested_sandbox_run() -> bool {
+    std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some()
+        && matches!(
+            std::env::var_os(STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV)
+                .as_deref()
+                .and_then(|value| value.to_str()),
+            Some("1")
+        )
+}
+
+fn direct_shell_command(command: &str, cwd: &Path) -> Command {
+    let mut direct = Command::new("/bin/sh");
+    direct.arg("-c").arg(command).current_dir(cwd);
+    direct
+}
+
+fn direct_git_command(words: &[String], cwd: &Path) -> Command {
+    let mut direct = Command::new("git");
+    direct.args(&words[1..]).current_dir(cwd);
+    direct
 }
 
 fn prepare_external_writable_paths(
@@ -1566,6 +1638,7 @@ fn seatbelt_git_command(
     writable_paths: &[SandboxWritablePath],
     temp_dir: &Path,
     hooks_dir: &Path,
+    config: &GitProfileConfig,
     network: SandboxNetworkPolicy,
 ) -> Command {
     let profile = seatbelt_git_profile(writable_paths, cwd, network);
@@ -1576,7 +1649,7 @@ fn seatbelt_git_command(
         .arg("git")
         .args(&words[1..])
         .current_dir(cwd);
-    apply_git_profile_env(&mut sandbox, temp_dir, hooks_dir);
+    apply_git_profile_env(&mut sandbox, temp_dir, hooks_dir, config);
     sandbox
 }
 
@@ -1626,9 +1699,10 @@ fn seatbelt_profile(
     writable_paths: &[SandboxWritablePath],
     network: SandboxNetworkPolicy,
 ) -> String {
-    let mut profile = String::from(
-        "(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n(allow sysctl-read)\n(allow file-write* (literal \"/dev/null\")",
-    );
+    let mut profile =
+        String::from("(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n");
+    push_seatbelt_device_read_allows(&mut profile);
+    profile.push_str("(allow sysctl-read)\n(allow file-write* (literal \"/dev/null\")");
     for writable_path in writable_paths {
         profile.push_str(match writable_path.kind {
             SandboxWritablePathKind::File => " (literal \"",
@@ -1642,6 +1716,13 @@ fn seatbelt_profile(
         profile.push_str("(allow network*)\n");
     }
     profile
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn push_seatbelt_device_read_allows(profile: &mut String) {
+    profile.push_str(
+        "(allow file-read* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/urandom\"))\n",
+    );
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -1670,11 +1751,12 @@ fn bubblewrap_git_command(
     writable_paths: &[SandboxWritablePath],
     temp_dir: &Path,
     hooks_dir: &Path,
+    config: &GitProfileConfig,
     network: SandboxNetworkPolicy,
 ) -> Command {
     let mut bwrap = Command::new("bwrap");
     bwrap.args(bubblewrap_git_args(words, cwd, writable_paths, network));
-    apply_git_profile_env(&mut bwrap, temp_dir, hooks_dir);
+    apply_git_profile_env(&mut bwrap, temp_dir, hooks_dir, config);
     bwrap
 }
 
@@ -1686,6 +1768,7 @@ fn bubblewrap_args(
     network: SandboxNetworkPolicy,
 ) -> Vec<OsString> {
     let mut args = bubblewrap_base_args(cwd, writable_paths, network);
+    args.push(OsString::from("--"));
     args.push(OsString::from("/bin/sh"));
     args.push(OsString::from("-c"));
     args.push(OsString::from(command));
@@ -1705,6 +1788,7 @@ fn bubblewrap_git_args(
         args.push(protected_path.path.as_os_str().to_owned());
         args.push(protected_path.path.as_os_str().to_owned());
     }
+    args.push(OsString::from("--"));
     args.push(OsString::from("git"));
     args.extend(words.iter().skip(1).map(OsString::from));
     args
@@ -1735,6 +1819,12 @@ fn bubblewrap_base_args(
         OsString::from("--dev-bind"),
         OsString::from("/dev/null"),
         OsString::from("/dev/null"),
+        OsString::from("--dev-bind"),
+        OsString::from("/dev/zero"),
+        OsString::from("/dev/zero"),
+        OsString::from("--dev-bind"),
+        OsString::from("/dev/urandom"),
+        OsString::from("/dev/urandom"),
     ]);
 
     for writable_path in writable_paths {
@@ -1745,12 +1835,75 @@ fn bubblewrap_base_args(
 
     args.push(OsString::from("--chdir"));
     args.push(cwd.as_os_str().to_owned());
-    args.push(OsString::from("--"));
     args
 }
 
-fn apply_git_profile_env(command: &mut Command, temp_dir: &Path, hooks_dir: &Path) {
-    apply_sandbox_temp_env(command, Some(temp_dir));
+fn discover_git_profile_config(cwd: &Path) -> GitProfileConfig {
+    GitProfileConfig {
+        identity: discover_git_profile_identity(cwd),
+        credential_helpers: discover_git_profile_credential_helpers(cwd),
+    }
+}
+
+fn discover_git_profile_identity(cwd: &Path) -> Option<GitProfileIdentity> {
+    let name = git_profile_config_value(cwd, "user.name")?;
+    let email = git_profile_config_value(cwd, "user.email")?;
+    Some(GitProfileIdentity { name, email })
+}
+
+fn git_profile_config_value(cwd: &Path, key: &str) -> Option<String> {
+    git_profile_config_values(cwd, key).into_iter().last()
+}
+
+fn discover_git_profile_credential_helpers(cwd: &Path) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    git_profile_config_values(cwd, "credential.helper")
+        .into_iter()
+        .filter_map(|helper| allowed_git_profile_credential_helper(&helper))
+        .filter(|helper| seen.insert(helper.clone()))
+        .collect()
+}
+
+fn git_profile_config_values(cwd: &Path, key: &str) -> Vec<String> {
+    let mut command = Command::new("git");
+    remove_git_profile_env(&mut command);
+    command
+        .arg("-C")
+        .arg(cwd)
+        .arg("config")
+        .arg("--get-all")
+        .arg(key)
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let Some(output) = command.output().ok() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let Some(output) = String::from_utf8(output.stdout).ok() else {
+        return Vec::new();
+    };
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn allowed_git_profile_credential_helper(helper: &str) -> Option<String> {
+    match helper.trim() {
+        "store" => Some("store".to_string()),
+        "cache" => Some("cache".to_string()),
+        "osxkeychain" => Some("osxkeychain".to_string()),
+        "!gh auth git-credential" | "! gh auth git-credential" => {
+            Some("!gh auth git-credential".to_string())
+        }
+        _ => None,
+    }
+}
+
+fn remove_git_profile_env(command: &mut Command) {
     for (key, _) in std::env::vars_os() {
         let key_string = key.to_string_lossy();
         if key_string == "GIT_CONFIG_COUNT"
@@ -1761,30 +1914,50 @@ fn apply_git_profile_env(command: &mut Command, temp_dir: &Path, hooks_dir: &Pat
             command.env_remove(key);
         }
     }
+}
+
+fn apply_git_profile_env(
+    command: &mut Command,
+    temp_dir: &Path,
+    hooks_dir: &Path,
+    config: &GitProfileConfig,
+) {
+    apply_sandbox_temp_env(command, Some(temp_dir));
+    remove_git_profile_env(command);
+    let mut config_entries = vec![
+        ("core.hooksPath", hooks_dir.as_os_str().to_owned()),
+        ("core.fsmonitor", OsString::from("false")),
+        ("diff.external", OsString::from("")),
+        ("interactive.diffFilter", OsString::from("")),
+        ("protocol.ext.allow", OsString::from("never")),
+        ("branch.autoSetupMerge", OsString::from("false")),
+        ("branch.autoSetupRebase", OsString::from("never")),
+    ];
+    if let Some(identity) = &config.identity {
+        config_entries.push(("user.name", OsString::from(&identity.name)));
+        config_entries.push(("user.email", OsString::from(&identity.email)));
+    }
+    config_entries.extend(
+        config
+            .credential_helpers
+            .iter()
+            .map(|helper| ("credential.helper", OsString::from(helper))),
+    );
     command
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_COUNT", "7")
-        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
-        .env("GIT_CONFIG_VALUE_0", hooks_dir)
-        .env("GIT_CONFIG_KEY_1", "core.fsmonitor")
-        .env("GIT_CONFIG_VALUE_1", "false")
-        .env("GIT_CONFIG_KEY_2", "diff.external")
-        .env("GIT_CONFIG_VALUE_2", "")
-        .env("GIT_CONFIG_KEY_3", "interactive.diffFilter")
-        .env("GIT_CONFIG_VALUE_3", "")
-        .env("GIT_CONFIG_KEY_4", "protocol.ext.allow")
-        .env("GIT_CONFIG_VALUE_4", "never")
-        .env("GIT_CONFIG_KEY_5", "branch.autoSetupMerge")
-        .env("GIT_CONFIG_VALUE_5", "false")
-        .env("GIT_CONFIG_KEY_6", "branch.autoSetupRebase")
-        .env("GIT_CONFIG_VALUE_6", "never")
+        .env("GIT_CONFIG_COUNT", config_entries.len().to_string())
         .env("GIT_LFS_SKIP_SMUDGE", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", ":")
         .env("GIT_SEQUENCE_EDITOR", ":")
         .env("GIT_PAGER", "cat")
         .env("PAGER", "cat");
+    for (index, (key, value)) in config_entries.into_iter().enumerate() {
+        command
+            .env(format!("GIT_CONFIG_KEY_{index}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{index}"), value);
+    }
 }
 
 pub(crate) fn run_command_with_timeout(
@@ -2034,7 +2207,7 @@ mod tests {
     }
 
     #[test]
-    fn bubblewrap_read_only_uses_unshare_net_and_dev_null_device() {
+    fn bubblewrap_read_only_uses_unshare_net_and_device_policy() {
         let args = bubblewrap_args(
             "rg auth src",
             Path::new("/repo"),
@@ -2051,6 +2224,44 @@ mod tests {
         assert!(
             args.windows(3)
                 .any(|window| { window == ["--dev-bind", "/dev/null", "/dev/null"] })
+        );
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--dev-bind", "/dev/zero", "/dev/zero"] })
+        );
+        assert!(!args.windows(5).any(|window| {
+            window
+                == [
+                    "--dev-bind",
+                    "/dev/zero",
+                    "/dev/zero",
+                    "--remount-ro",
+                    "/dev/zero",
+                ]
+        }));
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--dev-bind", "/dev/urandom", "/dev/urandom"] })
+        );
+        assert!(!args.windows(5).any(|window| {
+            window
+                == [
+                    "--dev-bind",
+                    "/dev/urandom",
+                    "/dev/urandom",
+                    "--remount-ro",
+                    "/dev/urandom",
+                ]
+        }));
+        assert!(
+            !args
+                .windows(3)
+                .any(|window| { window == ["--ro-bind", "/dev/zero", "/dev/zero"] })
+        );
+        assert!(
+            !args
+                .windows(3)
+                .any(|window| { window == ["--ro-bind", "/dev/urandom", "/dev/urandom"] })
         );
         assert!(args.ends_with(&[
             "--".to_string(),
@@ -2078,7 +2289,7 @@ mod tests {
     }
 
     #[test]
-    fn bubblewrap_write_targets_bind_authorized_files_and_dev_null() {
+    fn bubblewrap_write_targets_bind_authorized_files_and_devices() {
         let writable_paths = vec![
             SandboxWritablePath::file(PathBuf::from("/repo/src/allowed.ts")),
             SandboxWritablePath::file(PathBuf::from("/repo/src/new.ts")),
@@ -2110,8 +2321,78 @@ mod tests {
             args.windows(3)
                 .any(|window| { window == ["--dev-bind", "/dev/null", "/dev/null"] })
         );
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--dev-bind", "/dev/zero", "/dev/zero"] })
+        );
+        assert!(!args.windows(5).any(|window| {
+            window
+                == [
+                    "--dev-bind",
+                    "/dev/zero",
+                    "/dev/zero",
+                    "--remount-ro",
+                    "/dev/zero",
+                ]
+        }));
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--dev-bind", "/dev/urandom", "/dev/urandom"] })
+        );
+        assert!(!args.windows(5).any(|window| {
+            window
+                == [
+                    "--dev-bind",
+                    "/dev/urandom",
+                    "/dev/urandom",
+                    "--remount-ro",
+                    "/dev/urandom",
+                ]
+        }));
+        assert!(
+            !args
+                .windows(3)
+                .any(|window| { window == ["--ro-bind", "/dev/zero", "/dev/zero"] })
+        );
+        assert!(
+            !args
+                .windows(3)
+                .any(|window| { window == ["--ro-bind", "/dev/urandom", "/dev/urandom"] })
+        );
         assert!(args.contains(&"--unshare-net".to_string()));
         assert!(!args.contains(&"--share-net".to_string()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bubblewrap_read_only_profile_can_read_required_devices() {
+        if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
+            return;
+        }
+        if Command::new("bwrap").arg("--version").status().is_err() {
+            return;
+        }
+
+        let output = run_command_with_timeout(
+            bubblewrap_command(
+                "dd if=/dev/zero of=/dev/null bs=1 count=1 >/dev/null 2>&1 && dd if=/dev/urandom of=/dev/null bs=1 count=1 >/dev/null 2>&1",
+                Path::new("/"),
+                &[],
+                None,
+                SandboxNetworkPolicy::Disabled,
+            ),
+            Duration::from_secs(10),
+        )
+        .expect("bubblewrap command should run");
+
+        assert_eq!(output.status, "exited");
+        assert_eq!(
+            output.exit_code,
+            Some(0),
+            "device reads should succeed: stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
     }
 
     #[test]
@@ -2182,17 +2463,28 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
+        let command_separator_index = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("bubblewrap args should include a command separator");
+        let config_rebind_index = args
+            .windows(3)
+            .position(|window| {
+                window[0] == "--ro-bind" && window[1] == config && window[2] == config
+            })
+            .expect("git config should be rebound read-only");
+        let hooks_rebind_index = args
+            .windows(3)
+            .position(|window| window[0] == "--ro-bind" && window[1] == hooks && window[2] == hooks)
+            .expect("git hooks should be rebound read-only");
+
         assert!(args.windows(3).any(|window| {
             window[0] == "--bind"
                 && window[1] == repo_root.to_string_lossy()
                 && window[2] == repo_root.to_string_lossy()
         }));
-        assert!(args.windows(3).any(|window| {
-            window[0] == "--ro-bind" && window[1] == config && window[2] == config
-        }));
-        assert!(args.windows(3).any(|window| {
-            window[0] == "--ro-bind" && window[1] == hooks && window[2] == hooks
-        }));
+        assert!(config_rebind_index < command_separator_index);
+        assert!(hooks_rebind_index < command_separator_index);
 
         fs::remove_dir_all(&repo_root).expect("temp root should be removable");
     }
@@ -2334,7 +2626,7 @@ mod tests {
     }
 
     #[test]
-    fn seatbelt_profile_allows_dev_null_exact_targets_and_directory_subpaths() {
+    fn seatbelt_profile_allows_device_reads_dev_null_writes_and_targets() {
         let profile = seatbelt_profile(
             &[
                 SandboxWritablePath::file(PathBuf::from("/repo/src/allowed.ts")),
@@ -2347,7 +2639,20 @@ mod tests {
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("(allow file-read*)"));
         assert!(profile.contains("(allow sysctl-read)"));
-        assert!(profile.contains("(literal \"/dev/null\")"));
+        assert!(profile.contains(
+            "(allow file-read* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/urandom\"))"
+        ));
+        let write_rules = profile
+            .lines()
+            .filter(|line| line.starts_with("(allow file-write*"))
+            .collect::<Vec<_>>();
+        assert!(
+            write_rules
+                .iter()
+                .any(|line| line.contains("(literal \"/dev/null\")"))
+        );
+        assert!(!write_rules.iter().any(|line| line.contains("/dev/zero")));
+        assert!(!write_rules.iter().any(|line| line.contains("/dev/urandom")));
         assert!(profile.contains("(literal \"/repo/src/allowed.ts\")"));
         assert!(profile.contains("(literal \"/repo/src/quoted\\\"path.ts\")"));
         assert!(profile.contains("(subpath \"/repo/tmp\")"));
@@ -2401,6 +2706,7 @@ mod tests {
             &writable_paths,
             Path::new("/repo/.git/stateful/.stateful-tmp"),
             Path::new("/repo/.git/stateful/hooks-disabled"),
+            &GitProfileConfig::default(),
             SandboxNetworkPolicy::Enabled,
         );
         let args = command
@@ -2504,6 +2810,7 @@ mod tests {
             &mut command,
             Path::new("/repo/.git/stateful/.stateful-tmp"),
             Path::new("/repo/.git/stateful/hooks-disabled"),
+            &GitProfileConfig::default(),
         );
         let envs = command
             .get_envs()
@@ -2529,6 +2836,197 @@ mod tests {
         );
         assert_eq!(envs.get("GIT_CONFIG_VALUE_6"), Some(&"never".to_string()));
         assert!(!envs.contains_key("GIT_EXTERNAL_DIFF"));
+    }
+
+    #[test]
+    fn git_profile_env_injects_discovered_commit_identity() {
+        let mut command = Command::new("git");
+        let config = GitProfileConfig {
+            identity: Some(GitProfileIdentity {
+                name: "Stateful User".into(),
+                email: "stateful@example.invalid".into(),
+            }),
+            credential_helpers: vec![],
+        };
+        apply_git_profile_env(
+            &mut command,
+            Path::new("/repo/.git/stateful/.stateful-tmp"),
+            Path::new("/repo/.git/stateful/hooks-disabled"),
+            &config,
+        );
+        let envs = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(envs.get("GIT_CONFIG_COUNT"), Some(&"9".to_string()));
+        assert_eq!(envs.get("GIT_CONFIG_KEY_7"), Some(&"user.name".to_string()));
+        assert_eq!(
+            envs.get("GIT_CONFIG_VALUE_7"),
+            Some(&"Stateful User".to_string())
+        );
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_8"),
+            Some(&"user.email".to_string())
+        );
+        assert_eq!(
+            envs.get("GIT_CONFIG_VALUE_8"),
+            Some(&"stateful@example.invalid".to_string())
+        );
+    }
+
+    #[test]
+    fn git_profile_env_injects_allowed_credential_helpers() {
+        let mut command = Command::new("git");
+        let config = GitProfileConfig {
+            identity: None,
+            credential_helpers: vec!["store".into(), "!gh auth git-credential".into()],
+        };
+        apply_git_profile_env(
+            &mut command,
+            Path::new("/repo/.git/stateful/.stateful-tmp"),
+            Path::new("/repo/.git/stateful/hooks-disabled"),
+            &config,
+        );
+        let envs = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(envs.get("GIT_CONFIG_COUNT"), Some(&"9".to_string()));
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_7"),
+            Some(&"credential.helper".to_string())
+        );
+        assert_eq!(envs.get("GIT_CONFIG_VALUE_7"), Some(&"store".to_string()));
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_8"),
+            Some(&"credential.helper".to_string())
+        );
+        assert_eq!(
+            envs.get("GIT_CONFIG_VALUE_8"),
+            Some(&"!gh auth git-credential".to_string())
+        );
+    }
+
+    #[test]
+    fn git_profile_credential_helper_filter_allows_only_safe_helpers() {
+        assert_eq!(
+            allowed_git_profile_credential_helper("store"),
+            Some("store".to_string())
+        );
+        assert_eq!(
+            allowed_git_profile_credential_helper("osxkeychain"),
+            Some("osxkeychain".to_string())
+        );
+        assert_eq!(
+            allowed_git_profile_credential_helper("!gh auth git-credential"),
+            Some("!gh auth git-credential".to_string())
+        );
+        assert_eq!(
+            allowed_git_profile_credential_helper("! gh auth git-credential"),
+            Some("!gh auth git-credential".to_string())
+        );
+        assert_eq!(
+            allowed_git_profile_credential_helper("!curl example.test"),
+            None
+        );
+        assert_eq!(allowed_git_profile_credential_helper("/tmp/helper"), None);
+        assert_eq!(
+            allowed_git_profile_credential_helper("store --file=/tmp/x"),
+            None
+        );
+    }
+
+    #[test]
+    fn git_profile_identity_discovers_normal_git_config() {
+        let root = std::env::temp_dir().join(format!(
+            "stateful-git-profile-identity-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp repo should be created");
+        let run_git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .expect("git should run");
+            assert!(status.success(), "git {args:?} should succeed");
+        };
+        run_git(&["init"]);
+        run_git(&["config", "user.name", "Config User"]);
+        run_git(&["config", "user.email", "config@example.invalid"]);
+
+        let identity =
+            discover_git_profile_identity(&root).expect("identity should be read from git config");
+
+        assert_eq!(
+            identity,
+            GitProfileIdentity {
+                name: "Config User".to_string(),
+                email: "config@example.invalid".to_string(),
+            }
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_profile_config_discovers_allowed_credential_helpers() {
+        let root = std::env::temp_dir().join(format!(
+            "stateful-git-profile-credentials-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp repo should be created");
+        let run_git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .expect("git should run");
+            assert!(status.success(), "git {args:?} should succeed");
+        };
+        run_git(&["init"]);
+        run_git(&["config", "user.name", "Config User"]);
+        run_git(&["config", "user.email", "config@example.invalid"]);
+        run_git(&["config", "--add", "credential.helper", "store"]);
+        run_git(&[
+            "config",
+            "--add",
+            "credential.helper",
+            "!gh auth git-credential",
+        ]);
+        run_git(&["config", "--add", "credential.helper", "!curl example.test"]);
+
+        let config = discover_git_profile_config(&root);
+
+        assert!(config.credential_helpers.contains(&"store".to_string()));
+        assert!(
+            config
+                .credential_helpers
+                .contains(&"!gh auth git-credential".to_string())
+        );
+        assert!(
+            !config
+                .credential_helpers
+                .contains(&"!curl example.test".to_string())
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

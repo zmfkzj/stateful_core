@@ -9,6 +9,16 @@ use anyhow::Context;
 
 use crate::{GlobalPaths, default_config_yml};
 
+const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
+    "multi_agent_v1spawn_agent",
+    "multi_agent_v1wait_agent",
+    "multi_agent_v1close_agent",
+    "multi_agent_v1resume_agent",
+    "mcp__openaiDeveloperDocs__fetch_openai_doc",
+    "mcp__openaiDeveloperDocs__search_openai_docs",
+    "multi_agent_v1send_input",
+];
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RepoRegistry {
     #[serde(default)]
@@ -180,12 +190,14 @@ pub fn enable_repo(paths: &GlobalPaths, repo: impl AsRef<Path>) -> anyhow::Resul
     ensure_repo_configs(&root)?;
     let repo_id = repo_id_for_root(&root);
     let mut registry = RepoRegistry::load(paths)?;
-    let allowed_tools = registry
-        .repos
-        .iter()
-        .find(|existing| existing.repo_id == repo_id || existing.root == root)
-        .map(|existing| existing.allowed_tools.clone())
-        .unwrap_or_default();
+    let allowed_tools = default_allowed_tools_with_existing(
+        registry
+            .repos
+            .iter()
+            .find(|existing| existing.repo_id == repo_id || existing.root == root)
+            .map(|existing| existing.allowed_tools.clone())
+            .unwrap_or_default(),
+    );
     let unclassified_tools = registry
         .repos
         .iter()
@@ -405,6 +417,19 @@ fn update_tool_allowlist(
     write_repo_metadata(paths, &updated)?;
 
     Ok(updated)
+}
+
+fn default_allowed_tools_with_existing(existing_tools: Vec<String>) -> Vec<String> {
+    let mut allowed_tools: Vec<String> = DEFAULT_ALLOWED_TOOLS
+        .iter()
+        .map(|tool| (*tool).to_string())
+        .collect();
+    for tool in existing_tools {
+        if !allowed_tools.iter().any(|allowed| allowed == &tool) {
+            allowed_tools.push(tool);
+        }
+    }
+    allowed_tools
 }
 
 fn normalized_tool_name(tool_name: &str) -> anyhow::Result<String> {
