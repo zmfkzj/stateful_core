@@ -2718,6 +2718,62 @@ async fn intent_request_reserves_available_target_but_still_requires_claim() {
 }
 
 #[tokio::test]
+async fn lease_acquire_with_same_session_reservation_returns_claim_guidance() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    ensure_test_intent_via_http(&app, "s1", "w1", "src/auth.ts").await;
+
+    let requested = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/request",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-lease-claim",
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "purpose": "Reserve auth file before acquiring the lease."
+            }),
+        ))
+        .await
+        .expect("intent request should complete");
+    assert_eq!(requested.status(), StatusCode::OK);
+    let json = response_json(requested, 2048).await;
+    assert_eq!(json["request_state"], "reserved");
+    let wait_id = json["reservation"]["wait_id"]
+        .as_str()
+        .expect("wait id should be present")
+        .to_string();
+
+    let acquire = app
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(acquire.status(), StatusCode::CONFLICT);
+    let json = response_json(acquire, 2048).await;
+    assert_eq!(json["reason_code"], "reservation_claim_required");
+    assert_eq!(json["reservation"]["wait_id"], wait_id);
+    assert_eq!(json["reservation"]["status"], "reserved");
+    assert_eq!(json["reservation"]["session_id"], "s1");
+    assert!(
+        json["required_next_action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("state.intent.claim"),
+        "unexpected response: {json}"
+    );
+}
+
+#[tokio::test]
 async fn intent_claim_preserves_existing_session_intent_scope() {
     let store = Store::open_in_memory().expect("store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -2867,7 +2923,7 @@ async fn lease_acquire_allows_existing_directory_observation() {
         std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
     }
     let repo_root = temp_root.join("repo");
-    std::fs::create_dir_all(repo_root.join("tmp")).expect("repo tmp should be creatable");
+    std::fs::create_dir_all(repo_root.join("tmp/build")).expect("repo tmp should be creatable");
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -2877,7 +2933,7 @@ async fn lease_acquire_allows_existing_directory_observation() {
         "w1",
         serde_json::json!({
             "purpose": "Write build artifacts.",
-            "files_planned": ["tmp/"]
+            "files_planned": ["tmp/build/"]
         }),
     );
     declare_body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
@@ -2895,7 +2951,7 @@ async fn lease_acquire_allows_existing_directory_observation() {
             serde_json::json!({
                 "session_id": "s1",
                 "workspace_id": "w1",
-                "path": "tmp/",
+                "path": "tmp/build/",
                 "root": repo_root.to_string_lossy()
             }),
         ))
@@ -2904,6 +2960,36 @@ async fn lease_acquire_allows_existing_directory_observation() {
     assert_eq!(acquire.status(), StatusCode::OK);
 
     std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[tokio::test]
+async fn lease_acquire_rejects_direct_tmp_directory_resource() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    ensure_test_intent_via_http(&app, "s1", "w1", "tmp/").await;
+    let acquire = app
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "tmp/"
+            }),
+        ))
+        .await
+        .expect("direct tmp lease acquire should complete");
+
+    assert_eq!(acquire.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(acquire, 2048).await;
+    assert_eq!(json["reason_code"], "invalid_lease_path");
+    assert!(
+        json["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("direct tmp leases are not allowed"),
+        "unexpected response: {json}"
+    );
 }
 
 #[tokio::test]

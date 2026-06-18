@@ -10,7 +10,10 @@ use serde_json::json;
 use stateful_core::normalize_relative_path;
 
 use crate::outbox::queue_session_heartbeat_outbox;
-use crate::sandbox::{parse_sandbox_run_bash_invocation, validate_sandbox_run_request_shape};
+use crate::sandbox::{
+    parse_sandbox_process_find_bash_invocation, parse_sandbox_run_bash_invocation,
+    validate_process_find_request, validate_sandbox_run_request_shape,
+};
 use crate::shadow_guard;
 use crate::shell_command::{
     first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
@@ -380,7 +383,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 fn stateful_command_policy_reminder() -> String {
     let binary = trusted_stateful_binary_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- Before using Bash, use the `stateful-command-policy` skill.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For build or test commands, declare intent and acquire a same-session directory lease for `tmp/`, then use `{binary} sandbox run --fs build --network enabled --command '<cmd>'`.\n- For git operations, use `{binary} sandbox run --fs git --network enabled --command 'git <args>'`.\n- For file edits, declare exact intent, acquire the same-session file lease successfully, then use native Codex edit tools such as `apply_patch` or Edit.\n- For command-shaped writes, declare exact intent, acquire the matching file or directory lease successfully, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`, `{binary} sandbox run --fs write-targets --create-target <file> --command '<cmd>'`, or `{binary} sandbox run --fs write-targets --write-dir tmp --command '<cmd>'` for tmp artifacts."
+        "Stateful command policy reminder:\n- Before using Bash, use the `stateful-command-policy` skill.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For process checks, use `{binary} sandbox process find --contains <literal>` or `--name <comm>` with selectors.\n- For build or test commands, declare intent and acquire a same-session directory lease for a scoped tmp child such as `tmp/<purpose>/`, then use `{binary} sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command '<cmd>'`.\n- For local git operations, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; use `--network enabled` only for networked git operations.\n- For file edits, declare exact intent, acquire the same-session file lease successfully, then use native Codex edit tools such as `apply_patch` or Edit.\n- For command-shaped writes, declare exact intent, acquire the matching file or directory lease successfully, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`, `{binary} sandbox run --fs write-targets --create-target <file> --command '<cmd>'`, or `{binary} sandbox run --fs write-targets --write-dir tmp/<purpose> --command '<cmd>'` for tmp artifacts."
     )
 }
 
@@ -693,6 +696,15 @@ fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
         return authorize_nested_codex_benchmark_sandbox_bash(command);
     }
 
+    if split_simple_command_words(command)
+        .ok()
+        .is_some_and(|words| {
+            words.len() >= 4 && words[1] == "sandbox" && words[2] == "process" && words[3] == "find"
+        })
+    {
+        return authorize_sandbox_process_find_bash(command);
+    }
+
     let invocation = match parse_sandbox_run_bash_invocation(command) {
         Ok(invocation) => invocation,
         Err(reason) => return bash_policy_deny(reason),
@@ -704,6 +716,24 @@ fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
         );
     }
     if let Err(error) = validate_sandbox_run_request_shape(&invocation.request) {
+        return bash_policy_deny(error.to_string());
+    }
+
+    HookOutcome::Allow
+}
+
+fn authorize_sandbox_process_find_bash(command: &str) -> HookOutcome {
+    let invocation = match parse_sandbox_process_find_bash_invocation(command) {
+        Ok(invocation) => invocation,
+        Err(reason) => return bash_policy_deny(reason),
+    };
+
+    if !is_trusted_stateful_executable(&invocation.executable) {
+        return bash_policy_deny(
+            "stateful sandbox process find requires the trusted absolute stateful binary",
+        );
+    }
+    if let Err(error) = validate_process_find_request(&invocation.request) {
         return bash_policy_deny(error.to_string());
     }
 
@@ -792,7 +822,8 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 
 fn bash_policy_guidance() -> String {
     format!(
-        "Use the `stateful-command-policy` skill before Bash. Raw Bash is denied; for read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`; for build or test commands use `{} sandbox run --fs build --network enabled --command '<cmd>'` after declaring and leasing `tmp/`; for git operations use `{} sandbox run --fs git --network enabled --command 'git <args>'`; for command-shaped repo writes use `{} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`; for approved repo-external writes use `{} external-run request --purpose '<purpose>' --write-dir <dir> --command '<cmd>'`.",
+        "Use the `stateful-command-policy` skill before Bash. Raw Bash is denied; for read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`; for process checks use `{} sandbox process find --contains <literal>`; for build or test commands use `{} sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command '<cmd>'` after declaring and leasing that scoped tmp child; for local git operations use `{} sandbox run --fs git --network disabled --command 'git <args>'` and use network enabled only for networked git operations; for command-shaped repo writes use `{} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`; for approved repo-external writes use `{} external-run request --purpose '<purpose>' --write-dir <dir> --command '<cmd>'`.",
+        trusted_stateful_binary_for_guidance(),
         trusted_stateful_binary_for_guidance(),
         trusted_stateful_binary_for_guidance(),
         trusted_stateful_binary_for_guidance(),
@@ -1762,6 +1793,30 @@ mod tests {
 
         assert!(!source.contains(&concat!("Claude", "CodeRuntimeAdapter")));
         assert!(!source.contains(&concat!("trait ", "RuntimeAdapter")));
+    }
+
+    #[test]
+    fn stateful_command_policy_reminder_mentions_process_find_and_local_git_profile() {
+        let reminder = stateful_command_policy_reminder();
+
+        assert!(
+            reminder.contains("sandbox process find"),
+            "reminder should mention structured process lookup: {reminder}"
+        );
+        assert!(
+            reminder.contains("sandbox run --fs git --network disabled"),
+            "reminder should default local git to network disabled: {reminder}"
+        );
+
+        let guidance = bash_policy_guidance();
+        assert!(
+            guidance.contains("sandbox run --fs git --network disabled"),
+            "denial guidance should default local git to network disabled: {guidance}"
+        );
+        assert!(
+            guidance.contains("network enabled"),
+            "denial guidance should mention networked git exception: {guidance}"
+        );
     }
 
     #[test]

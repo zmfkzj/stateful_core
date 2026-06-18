@@ -125,11 +125,11 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
     };
     let results = vec![
         serde_json::from_str::<DeNovoOfficialResult>(
-            r#"{"instance_id":"a","success":true,"score":1.0,"subagent_used":true,"eval_result":{"details":{"pass_rate":1.0}}}"#,
+            r#"{"instance_id":"a","success":true,"score":1.0,"subagent_used":true,"token_usage":{"turns":2,"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"reasoning_output_tokens":3},"eval_result":{"details":{"pass_rate":1.0}}}"#,
         )
         .expect("result a"),
         serde_json::from_str::<DeNovoOfficialResult>(
-            r#"{"instance_id":"b","success":false,"score":0.75,"subagent_used":false,"eval_result":{"details":{"pass_rate":0.5}}}"#,
+            r#"{"instance_id":"b","success":false,"score":0.75,"subagent_used":false,"token_usage":{"turns":1,"input_tokens":50,"cached_input_tokens":20,"output_tokens":5,"reasoning_output_tokens":2},"eval_result":{"details":{"pass_rate":0.5}}}"#,
         )
         .expect("result b"),
         serde_json::from_str::<DeNovoOfficialResult>(
@@ -163,6 +163,17 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
     assert_eq!(report.subagent_observed_instances, 2);
     assert_eq!(report.subagent_used_count, 1);
     assert_eq!(report.subagent_used_rate, Some(0.5));
+    assert_eq!(report.token_observed_instances, 2);
+    assert_eq!(report.token_usage_turns, 3);
+    assert_eq!(report.token_input_tokens, 150);
+    assert_eq!(report.token_cached_input_tokens, 60);
+    assert_eq!(report.token_output_tokens, 15);
+    assert_eq!(report.token_reasoning_output_tokens, 5);
+    assert_eq!(report.token_input_plus_output_tokens, 165);
+    assert_eq!(report.token_uncached_input_tokens, 90);
+    assert_eq!(report.token_uncached_input_plus_output_tokens, 105);
+    assert_eq!(report.average_input_plus_output_tokens, Some(82.5));
+    assert_eq!(report.average_uncached_input_plus_output_tokens, Some(52.5));
 }
 
 #[test]
@@ -765,17 +776,20 @@ fn denovo_condition_run_reports_neutral_command_failure_for_codex_adapter() {
         &adapter,
         r#"#!/usr/bin/env python3
 import sys
+print("adapter stdout before failure")
+print("adapter stderr before failure", file=sys.stderr)
 sys.exit(2)
 "#,
     )
     .expect("fake adapter should write");
 
+    let run_dir = root.join("runs/dev-denovo-codex-failure");
     let error = run_denovo_condition(DeNovoConditionRunOptions {
         run_id: "dev-denovo-codex-failure".to_string(),
         aweagent_root: aweagent,
         python: "python3".to_string(),
         data_file: "denovoswe_with_patches.jsonl".into(),
-        run_dir: root.join("runs/dev-denovo-codex-failure"),
+        run_dir: run_dir.clone(),
         base_config: "configs/tasks/denovoswe.yaml".into(),
         condition: DeNovoCondition::new(false, true),
         agent: DeNovoAgentKind::CodexCli,
@@ -810,6 +824,42 @@ sys.exit(2)
     let message = error.to_string();
     assert!(message.contains("DeNovoSWE command failed with status"));
     assert!(!message.contains("official DeNovoSWE recipe failed"));
+    assert!(message.contains("command.stderr.log"));
+
+    let condition_dir = run_dir.join("conditions/stateful-off_subagent-on");
+    assert_eq!(
+        fs::read_to_string(condition_dir.join("command.stdout.log"))
+            .expect("stdout log should be written"),
+        "adapter stdout before failure\n"
+    );
+    assert_eq!(
+        fs::read_to_string(condition_dir.join("command.stderr.log"))
+            .expect("stderr log should be written"),
+        "adapter stderr before failure\n"
+    );
+    let metadata: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(condition_dir.join("condition.json"))
+            .expect("failure metadata should be written"),
+    )
+    .expect("failure metadata should parse");
+    assert!(
+        metadata["error"]
+            .as_str()
+            .expect("error should be recorded")
+            .contains("command.stderr.log")
+    );
+    assert!(
+        metadata["stdout_log"]
+            .as_str()
+            .expect("stdout log path should be recorded")
+            .ends_with("command.stdout.log")
+    );
+    assert!(
+        metadata["stderr_log"]
+            .as_str()
+            .expect("stderr log path should be recorded")
+            .ends_with("command.stderr.log")
+    );
 
     fs::remove_dir_all(root).expect("temp root should clean up");
 }

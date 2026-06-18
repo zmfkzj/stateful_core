@@ -32,6 +32,7 @@ from codex_pair_agent import (  # noqa: E402
     path_fragment,
     path_scope_digest,
     prepare_codex_environment,
+    iter_json_events,
     run_codex_with_resume,
     toml_string,
 )
@@ -54,6 +55,13 @@ class InstanceResult:
     eval_result: dict[str, Any] | None
     subagent_used: bool | None = None
     subagent_usage: dict[str, Any] | None = None
+    token_usage: dict[str, int] | None = None
+
+
+@dataclass
+class CodexExecutionSummary:
+    returncode: int
+    token_usage: dict[str, int]
 
 
 class CodexTimeoutError(TimeoutError):
@@ -158,7 +166,7 @@ def run_codex_with_timeout(
     max_resumes: int,
     timeout_seconds: float,
     runner: Any = subprocess.run,
-) -> int:
+) -> CodexExecutionSummary:
     if timeout_seconds <= 0:
         raise CodexTimeoutError(f"codex timed out after {timeout_seconds:g}s")
 
@@ -174,14 +182,63 @@ def run_codex_with_timeout(
         except subprocess.TimeoutExpired as error:
             raise CodexTimeoutError(f"codex timed out after {timeout_seconds:g}s") from error
 
-    return run_codex_with_resume(
+    token_usage = empty_codex_token_usage()
+
+    def observe_result(result: Any) -> None:
+        add_codex_token_usage(token_usage, codex_token_usage_from_output(result.stdout))
+
+    returncode = run_codex_with_resume(
         command,
         prompt,
         workspace,
         env,
         max_resumes=max_resumes,
         runner=bounded_runner,
+        result_observer=observe_result,
     )
+    return CodexExecutionSummary(returncode=returncode, token_usage=token_usage)
+
+
+def empty_codex_token_usage() -> dict[str, int]:
+    return {
+        "turns": 0,
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "input_plus_output_tokens": 0,
+        "uncached_input_tokens": 0,
+        "uncached_input_plus_output_tokens": 0,
+    }
+
+
+def add_codex_token_usage(total: dict[str, int], update: dict[str, int]) -> None:
+    for key in total:
+        total[key] += int(update.get(key, 0) or 0)
+
+
+def codex_token_usage_from_output(output: str) -> dict[str, int]:
+    total = empty_codex_token_usage()
+    for event in iter_json_events(output):
+        if not isinstance(event, dict) or event.get("type") != "turn.completed":
+            continue
+        usage = event.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+        cached_input_tokens = int(usage.get("cached_input_tokens", 0) or 0)
+        output_tokens = int(usage.get("output_tokens", 0) or 0)
+        reasoning_output_tokens = int(usage.get("reasoning_output_tokens", 0) or 0)
+        uncached_input_tokens = max(0, input_tokens - cached_input_tokens)
+        total["turns"] += 1
+        total["input_tokens"] += input_tokens
+        total["cached_input_tokens"] += cached_input_tokens
+        total["output_tokens"] += output_tokens
+        total["reasoning_output_tokens"] += reasoning_output_tokens
+        total["input_plus_output_tokens"] += input_tokens + output_tokens
+        total["uncached_input_tokens"] += uncached_input_tokens
+        total["uncached_input_plus_output_tokens"] += uncached_input_tokens + output_tokens
+    return total
 
 
 def add_aweagent_to_path(aweagent_root: Path) -> None:
@@ -475,7 +532,8 @@ def codex_command_for_profile(
     if subagent == "on":
         command.extend(["-c", "features.multi_agent=true"])
     if agent_mode == "no-state":
-        command.append("--ignore-user-config")
+        if not nested_benchmark:
+            command.append("--ignore-user-config")
     elif agent_mode != "stateful":
         raise ValueError(f"unsupported agent_mode: {agent_mode}")
     if not nested_benchmark:
@@ -494,8 +552,8 @@ def denovo_codex_environment(
 ) -> dict[str, str]:
     source_env = os.environ if base_env is None else base_env
     env = dict(source_env)
-    if not preserve_stateful_session:
-        env.pop("STATEFUL_SESSION_ID", None)
+    _ = preserve_stateful_session
+    env.pop("STATEFUL_SESSION_ID", None)
     nested_root = source_env.get(NESTED_CODEX_HOME_ROOT_ENV)
     if nested_root:
         output_scope_parts = output.parts[-4:] if len(output.parts) >= 4 else output.parts
@@ -871,6 +929,8 @@ def instance_result_row(result: InstanceResult) -> dict[str, Any]:
         row["subagent_used"] = result.subagent_used
     if result.subagent_usage is not None:
         row["subagent_usage"] = result.subagent_usage
+    if result.token_usage is not None:
+        row["token_usage"] = result.token_usage
     return row
 
 
@@ -1085,7 +1145,6 @@ async def run_one_instance_async(
             task_path=Path(args.data_file),
             workspace=workspace,
             base_env=source_env,
-            preserve_stateful_session=args.agent_mode == "stateful",
         )
         codex_env = env
         codex_home = Path(env["CODEX_HOME"])
@@ -1118,13 +1177,19 @@ async def run_one_instance_async(
             )
 
         started_at = time.monotonic()
-        returncode = run_codex_with_timeout(
+        codex_summary = run_codex_with_timeout(
             command,
             prompt,
             workspace,
             env,
             max_resumes=args.max_resumes,
             timeout_seconds=args.codex_timeout_seconds,
+        )
+        returncode = codex_summary.returncode
+        token_usage = (
+            codex_summary.token_usage
+            if codex_summary.token_usage.get("turns", 0) > 0
+            else None
         )
         duration = time.monotonic() - started_at
         subagent_usage = native_subagent_usage(
@@ -1139,6 +1204,8 @@ async def run_one_instance_async(
             "native_subagent": subagent_usage["native_subagent"],
             "subagent_usage": subagent_usage,
         }
+        if token_usage is not None:
+            command_record["token_usage"] = token_usage
         write_json(instance_dir / "codex-command.json", command_record)
 
         cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
@@ -1155,6 +1222,7 @@ async def run_one_instance_async(
                 None,
                 subagent_used=subagent_usage["subagent_used"],
                 subagent_usage=subagent_usage,
+                token_usage=token_usage,
             )
 
         if args.subagent == "on" and not subagent_usage["subagent_requirement_met"]:
@@ -1172,6 +1240,7 @@ async def run_one_instance_async(
                 None,
                 subagent_used=subagent_usage["subagent_used"],
                 subagent_usage=subagent_usage,
+                token_usage=token_usage,
             )
 
         patch = git_diff(workspace)
@@ -1187,6 +1256,7 @@ async def run_one_instance_async(
                 {"details": {"pass_rate": 1.0}},
                 subagent_used=subagent_usage["subagent_used"],
                 subagent_usage=subagent_usage,
+                token_usage=token_usage,
             )
 
         eval_runtime = runtime_cls(
@@ -1210,6 +1280,7 @@ async def run_one_instance_async(
             eval_data,
             subagent_used=subagent_usage["subagent_used"],
             subagent_usage=subagent_usage,
+            token_usage=token_usage,
         )
     except CodexTimeoutError:
         return InstanceResult(

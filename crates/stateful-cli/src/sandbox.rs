@@ -60,9 +60,24 @@ pub struct SandboxRunRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxProcessFindRequest {
+    pub names: Vec<String>,
+    pub contains: Vec<String>,
+    pub pids: Vec<u32>,
+    pub parent_pids: Vec<u32>,
+    pub process_groups: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SandboxRunBashInvocation {
     pub(crate) executable: String,
     pub(crate) request: SandboxRunRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SandboxProcessFindBashInvocation {
+    pub(crate) executable: String,
+    pub(crate) request: SandboxProcessFindRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +96,28 @@ pub struct SandboxRunOutput {
     pub stderr: String,
     pub allowed_write_targets: Vec<String>,
     pub denied_write_targets: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SandboxProcessFindOutput {
+    pub status: &'static str,
+    pub processes: Vec<SandboxProcessInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SandboxProcessInfo {
+    pub pid: u32,
+    pub ppid: u32,
+    pub pgid: u32,
+    pub stat: String,
+    pub etime: String,
+    pub comm: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SandboxProcessRow {
+    info: SandboxProcessInfo,
+    command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,21 +322,24 @@ pub fn run_sandbox_in_repo(
                 network: request.network,
                 fs_profile: sandbox_fs_profile_name(request.fs),
             };
-            let build_write_dirs = vec![BUILD_PROFILE_WRITE_DIR.to_string()];
-            let authorization_path = sandbox_write_dir_display_path(BUILD_PROFILE_WRITE_DIR);
+            let build_write_dirs = write_dirs.clone();
+            let build_write_dir = build_write_dirs
+                .first()
+                .expect("build profile validation requires one write dir");
+            let authorization_path = sandbox_write_dir_display_path(build_write_dir);
             let response = authorize_sandbox_write(
                 &authorize_context,
                 "write_directory",
                 &authorization_path,
             )?;
-            match classify_sandbox_authorize_response(BUILD_PROFILE_WRITE_DIR, response)? {
+            match classify_sandbox_authorize_response(build_write_dir, response)? {
                 SandboxAuthorizeDecision::Allow => {
                     allowed_write_targets.push(authorization_path);
                 }
                 SandboxAuthorizeDecision::Deny(body) => {
                     let body = enrich_sandbox_write_dir_denial(body);
                     denied_write_targets.push(serde_json::json!({
-                        "path": sandbox_write_dir_display_path(BUILD_PROFILE_WRITE_DIR),
+                        "path": sandbox_write_dir_display_path(build_write_dir),
                         "authorization": body,
                     }));
                 }
@@ -460,6 +500,83 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
     })
 }
 
+pub(crate) fn parse_sandbox_process_find_bash_invocation(
+    command: &str,
+) -> Result<SandboxProcessFindBashInvocation, String> {
+    reject_outer_shell_syntax(
+        command,
+        "Bash wrapper must be a single stateful sandbox process find command",
+    )?;
+    let words = split_simple_command_words(command)?;
+    if words.is_empty() {
+        return Err("Bash commands must use stateful sandbox process find".to_string());
+    }
+    if first_word_is_env_assignment(&words[0]) {
+        return Err("Bash wrapper must not use outer environment assignments".to_string());
+    }
+    if words.len() < 4 || words[1] != "sandbox" || words[2] != "process" || words[3] != "find" {
+        return Err("Bash commands must use stateful sandbox process find".to_string());
+    }
+
+    let mut request = SandboxProcessFindRequest {
+        names: Vec::new(),
+        contains: Vec::new(),
+        pids: Vec::new(),
+        parent_pids: Vec::new(),
+        process_groups: Vec::new(),
+    };
+    let mut index = 4;
+    while index < words.len() {
+        let arg = &words[index];
+        match arg.as_str() {
+            "--" => {
+                return Err("stateful sandbox process find does not support argv mode".to_string());
+            }
+            "--name" => {
+                index += 1;
+                request
+                    .names
+                    .push(parse_sandbox_run_arg_value(&words, index, "--name")?);
+            }
+            "--contains" => {
+                index += 1;
+                request
+                    .contains
+                    .push(parse_sandbox_run_arg_value(&words, index, "--contains")?);
+            }
+            "--pid" => {
+                index += 1;
+                request
+                    .pids
+                    .push(parse_process_selector_arg(&words, index, "--pid")?);
+            }
+            "--parent-pid" | "--ppid" => {
+                index += 1;
+                request
+                    .parent_pids
+                    .push(parse_process_selector_arg(&words, index, arg)?);
+            }
+            "--process-group" | "--pgid" => {
+                index += 1;
+                request
+                    .process_groups
+                    .push(parse_process_selector_arg(&words, index, arg)?);
+            }
+            _ => {
+                return Err(format!(
+                    "unsupported stateful sandbox process find argument `{arg}`"
+                ));
+            }
+        }
+        index += 1;
+    }
+
+    Ok(SandboxProcessFindBashInvocation {
+        executable: words[0].clone(),
+        request,
+    })
+}
+
 pub(crate) fn validate_sandbox_run_request_shape(
     request: &SandboxRunRequest,
 ) -> anyhow::Result<ValidatedSandboxRunShape> {
@@ -472,6 +589,7 @@ pub(crate) fn validate_sandbox_run_request_shape(
     let write_dirs = normalize_sandbox_target_paths("write_dirs", &request.write_dirs)?;
     validate_profile_network_policy(request.fs, request.network)?;
     validate_profile_targets(request.fs, &write_targets, &create_targets, &write_dirs)?;
+    validate_sandbox_run_process_inspection(&request.command)?;
     let git_command_words = if request.fs == SandboxFsProfile::Git {
         Some(validate_git_profile_command(&request.command)?)
     } else {
@@ -484,6 +602,55 @@ pub(crate) fn validate_sandbox_run_request_shape(
         write_dirs,
         git_command_words,
     })
+}
+
+pub(crate) fn validate_process_find_request(
+    request: &SandboxProcessFindRequest,
+) -> anyhow::Result<()> {
+    if request.names.is_empty()
+        && request.contains.is_empty()
+        && request.pids.is_empty()
+        && request.parent_pids.is_empty()
+        && request.process_groups.is_empty()
+    {
+        anyhow::bail!("stateful sandbox process find requires at least one selector");
+    }
+    for name in &request.names {
+        validate_process_name_selector(name)?;
+    }
+    for contains in &request.contains {
+        validate_process_contains_selector(contains)?;
+    }
+    for (label, ids) in [
+        ("--pid", request.pids.as_slice()),
+        ("--parent-pid", request.parent_pids.as_slice()),
+        ("--process-group", request.process_groups.as_slice()),
+    ] {
+        if ids.contains(&0) {
+            anyhow::bail!("stateful sandbox process find {label} selectors must be positive");
+        }
+    }
+
+    Ok(())
+}
+
+pub fn run_sandbox_process_find(
+    request: SandboxProcessFindRequest,
+) -> anyhow::Result<SandboxProcessFindOutput> {
+    validate_process_find_request(&request)?;
+    let rows = read_process_find_rows()?;
+    let processes = filter_process_find_rows(&request, rows);
+    Ok(SandboxProcessFindOutput {
+        status: "ok",
+        processes,
+    })
+}
+
+fn parse_process_selector_arg(words: &[String], index: usize, arg: &str) -> Result<u32, String> {
+    let value = parse_sandbox_run_arg_value(words, index, arg)?;
+    value
+        .parse::<u32>()
+        .map_err(|_| format!("stateful sandbox process find argument `{arg}` requires an integer"))
 }
 
 fn parse_sandbox_run_arg_value(
@@ -1047,11 +1214,15 @@ fn validate_profile_targets(
             }
         }
         SandboxFsProfile::Build => {
-            if !write_targets.is_empty() || !create_targets.is_empty() || !write_dirs.is_empty() {
+            if !write_targets.is_empty() || !create_targets.is_empty() {
+                anyhow::bail!("build profile rejects explicit write targets and create targets");
+            }
+            if write_dirs.len() != 1 {
                 anyhow::bail!(
-                    "build profile manages tmp/ writes automatically and rejects explicit write targets, create targets, and write dirs"
+                    "build profile requires exactly one scoped artifact directory with --write-dir tmp/<purpose>"
                 );
             }
+            ensure_artifact_write_dir_target(&write_dirs[0])?;
         }
         SandboxFsProfile::Git => {
             if !write_targets.is_empty() || !create_targets.is_empty() || !write_dirs.is_empty() {
@@ -1073,6 +1244,589 @@ fn validate_profile_network_policy(
     }
 
     Ok(())
+}
+
+fn validate_process_name_selector(name: &str) -> anyhow::Result<()> {
+    if name.trim().is_empty() {
+        anyhow::bail!("stateful sandbox process find --name must not be empty");
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        anyhow::bail!("stateful sandbox process find --name contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn validate_process_contains_selector(contains: &str) -> anyhow::Result<()> {
+    let trimmed = contains.trim();
+    if trimmed.len() < 3 {
+        anyhow::bail!("stateful sandbox process find --contains must be at least 3 characters");
+    }
+    if trimmed.chars().any(char::is_control) {
+        anyhow::bail!("stateful sandbox process find --contains contains control characters");
+    }
+    Ok(())
+}
+
+fn validate_sandbox_run_process_inspection(command: &str) -> anyhow::Result<()> {
+    if sandbox_run_command_invokes_raw_process_inspection(command, 0) {
+        anyhow::bail!("process inspection must use stateful sandbox process find");
+    }
+    Ok(())
+}
+
+fn sandbox_run_command_invokes_raw_process_inspection(command: &str, depth: usize) -> bool {
+    if depth > 4 {
+        return true;
+    }
+
+    if shell_substitutions_invoke_raw_process_inspection(command, depth) {
+        return true;
+    }
+
+    simple_shell_command_segments(command)
+        .iter()
+        .any(|segment| {
+            split_process_inspection_command_words(segment)
+                .ok()
+                .is_some_and(|words| {
+                    simple_command_words_invoke_raw_process_inspection(&words, depth)
+                })
+        })
+}
+
+fn simple_command_words_invoke_raw_process_inspection(words: &[String], depth: usize) -> bool {
+    let mut index = 0;
+    while index < words.len() {
+        let word = &words[index];
+        if first_word_is_env_assignment(word)
+            || matches!(
+                word.as_str(),
+                "!" | "if" | "then" | "do" | "else" | "elif" | "while" | "until"
+            )
+        {
+            index += 1;
+            continue;
+        }
+
+        let command = process_comm_basename(word);
+        if matches!(command, "ps" | "pgrep") {
+            return true;
+        }
+        if command == "time" {
+            index = skip_process_wrapper_options(words, index + 1);
+            continue;
+        }
+        if command == "command" {
+            index = skip_process_wrapper_options(words, index + 1);
+            continue;
+        }
+        if command == "exec" {
+            index = skip_exec_process_wrapper_options(words, index + 1);
+            continue;
+        }
+        if command == "env" {
+            if env_process_wrapper_invokes_raw_process_inspection(words, index + 1, depth) {
+                return true;
+            }
+            index = skip_env_process_wrapper(words, index + 1);
+            continue;
+        }
+        if matches!(command, "sh" | "bash" | "zsh" | "dash") {
+            return shell_c_argument_invokes_raw_process_inspection(words, index, depth);
+        }
+        return false;
+    }
+
+    false
+}
+
+fn skip_process_wrapper_options(words: &[String], mut index: usize) -> usize {
+    while index < words.len() {
+        let word = &words[index];
+        if word == "--" {
+            return index + 1;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    index
+}
+
+fn skip_exec_process_wrapper_options(words: &[String], mut index: usize) -> usize {
+    while index < words.len() {
+        let word = &words[index];
+        if word == "--" {
+            return index + 1;
+        }
+        if word == "-a" {
+            index = (index + 2).min(words.len());
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    index
+}
+
+fn env_process_wrapper_invokes_raw_process_inspection(
+    words: &[String],
+    mut index: usize,
+    depth: usize,
+) -> bool {
+    while index < words.len() {
+        let word = &words[index];
+        if word == "--" {
+            return false;
+        }
+        if first_word_is_env_assignment(word) {
+            index += 1;
+            continue;
+        }
+        if let Some(command) = word.strip_prefix("--split-string=") {
+            return sandbox_run_command_invokes_raw_process_inspection(command, depth + 1);
+        }
+        if word == "-S" || word == "--split-string" {
+            return words.get(index + 1).is_some_and(|command| {
+                sandbox_run_command_invokes_raw_process_inspection(command, depth + 1)
+            });
+        }
+        if let Some(command) = word.strip_prefix("-S") {
+            if !command.is_empty() {
+                return sandbox_run_command_invokes_raw_process_inspection(command, depth + 1);
+            }
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            let consumes_arg = matches!(
+                word.as_str(),
+                "-u" | "--unset" | "-C" | "--chdir" | "-P" | "--path"
+            );
+            index += 1;
+            if consumes_arg {
+                index = (index + 1).min(words.len());
+            }
+            continue;
+        }
+        break;
+    }
+
+    false
+}
+
+fn skip_env_process_wrapper(words: &[String], mut index: usize) -> usize {
+    while index < words.len() {
+        let word = &words[index];
+        if word == "--" {
+            return index + 1;
+        }
+        if first_word_is_env_assignment(word) {
+            index += 1;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            let consumes_arg = matches!(
+                word.as_str(),
+                "-u" | "--unset" | "-C" | "--chdir" | "-P" | "--path" | "-S" | "--split-string"
+            );
+            index += 1;
+            if consumes_arg {
+                index = (index + 1).min(words.len());
+            }
+            continue;
+        }
+        break;
+    }
+    index
+}
+
+fn shell_c_argument_invokes_raw_process_inspection(
+    words: &[String],
+    shell_index: usize,
+    depth: usize,
+) -> bool {
+    let mut index = shell_index + 1;
+    while index < words.len() {
+        let word = &words[index];
+        if word == "-c" || (word.starts_with('-') && word.contains('c')) {
+            return words.get(index + 1).is_some_and(|command| {
+                sandbox_run_command_invokes_raw_process_inspection(command, depth + 1)
+            });
+        }
+        index += 1;
+    }
+
+    false
+}
+
+fn shell_substitutions_invoke_raw_process_inspection(command: &str, depth: usize) -> bool {
+    let chars = command.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    let mut state = ShellSegmentQuoteState::None;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        match state {
+            ShellSegmentQuoteState::None => match ch {
+                '\'' => state = ShellSegmentQuoteState::Single,
+                '"' => state = ShellSegmentQuoteState::Double,
+                '\\' => index += 1,
+                '$' if chars.get(index + 1) == Some(&'(') => {
+                    if let Some((nested, end_index)) =
+                        collect_parenthesized_shell_command(&chars, index + 2)
+                    {
+                        if sandbox_run_command_invokes_raw_process_inspection(&nested, depth + 1) {
+                            return true;
+                        }
+                        index = end_index;
+                    }
+                }
+                '`' => {
+                    if let Some((nested, end_index)) = collect_backtick_shell_command(&chars, index)
+                    {
+                        if sandbox_run_command_invokes_raw_process_inspection(&nested, depth + 1) {
+                            return true;
+                        }
+                        index = end_index;
+                    }
+                }
+                _ => {}
+            },
+            ShellSegmentQuoteState::Single => {
+                if ch == '\'' {
+                    state = ShellSegmentQuoteState::None;
+                }
+            }
+            ShellSegmentQuoteState::Double => match ch {
+                '"' => state = ShellSegmentQuoteState::None,
+                '\\' => index += 1,
+                '$' if chars.get(index + 1) == Some(&'(') => {
+                    if let Some((nested, end_index)) =
+                        collect_parenthesized_shell_command(&chars, index + 2)
+                    {
+                        if sandbox_run_command_invokes_raw_process_inspection(&nested, depth + 1) {
+                            return true;
+                        }
+                        index = end_index;
+                    }
+                }
+                '`' => {
+                    if let Some((nested, end_index)) = collect_backtick_shell_command(&chars, index)
+                    {
+                        if sandbox_run_command_invokes_raw_process_inspection(&nested, depth + 1) {
+                            return true;
+                        }
+                        index = end_index;
+                    }
+                }
+                _ => {}
+            },
+        }
+        index += 1;
+    }
+
+    false
+}
+
+fn collect_parenthesized_shell_command(
+    chars: &[char],
+    mut index: usize,
+) -> Option<(String, usize)> {
+    let mut nested = String::new();
+    let mut depth = 1;
+    let mut state = ShellSegmentQuoteState::None;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        match state {
+            ShellSegmentQuoteState::None => match ch {
+                '\'' => {
+                    state = ShellSegmentQuoteState::Single;
+                    nested.push(ch);
+                }
+                '"' => {
+                    state = ShellSegmentQuoteState::Double;
+                    nested.push(ch);
+                }
+                '\\' => {
+                    nested.push(ch);
+                    if let Some(next) = chars.get(index + 1) {
+                        nested.push(*next);
+                        index += 1;
+                    }
+                }
+                '(' => {
+                    depth += 1;
+                    nested.push(ch);
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((nested, index));
+                    }
+                    nested.push(ch);
+                }
+                _ => nested.push(ch),
+            },
+            ShellSegmentQuoteState::Single => {
+                nested.push(ch);
+                if ch == '\'' {
+                    state = ShellSegmentQuoteState::None;
+                }
+            }
+            ShellSegmentQuoteState::Double => {
+                nested.push(ch);
+                if ch == '"' {
+                    state = ShellSegmentQuoteState::None;
+                }
+            }
+        }
+        index += 1;
+    }
+
+    None
+}
+
+fn collect_backtick_shell_command(chars: &[char], mut index: usize) -> Option<(String, usize)> {
+    let mut nested = String::new();
+    index += 1;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '`' {
+            return Some((nested, index));
+        }
+        if ch == '\\' {
+            if let Some(next) = chars.get(index + 1) {
+                nested.push(*next);
+                index += 2;
+                continue;
+            }
+        }
+        nested.push(ch);
+        index += 1;
+    }
+
+    None
+}
+
+fn split_process_inspection_command_words(command: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut state = ShellSegmentQuoteState::None;
+    let mut in_word = false;
+    let mut chars = command.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match state {
+            ShellSegmentQuoteState::None => match ch {
+                '\'' => {
+                    state = ShellSegmentQuoteState::Single;
+                    in_word = true;
+                }
+                '"' => {
+                    state = ShellSegmentQuoteState::Double;
+                    in_word = true;
+                }
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                    } else {
+                        current.push(ch);
+                    }
+                    in_word = true;
+                }
+                ch if ch.is_whitespace() => {
+                    if in_word {
+                        words.push(std::mem::take(&mut current));
+                        in_word = false;
+                    }
+                }
+                _ => {
+                    current.push(ch);
+                    in_word = true;
+                }
+            },
+            ShellSegmentQuoteState::Single => {
+                if ch == '\'' {
+                    state = ShellSegmentQuoteState::None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            ShellSegmentQuoteState::Double => match ch {
+                '"' => state = ShellSegmentQuoteState::None,
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                    } else {
+                        current.push(ch);
+                    }
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+
+    if state != ShellSegmentQuoteState::None {
+        return Err("sandbox run command has unterminated quotes".to_string());
+    }
+    if in_word {
+        words.push(current);
+    }
+
+    Ok(words)
+}
+
+fn simple_shell_command_segments(command: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut state = ShellSegmentQuoteState::None;
+
+    for ch in command.chars() {
+        match state {
+            ShellSegmentQuoteState::None => match ch {
+                '\'' => {
+                    state = ShellSegmentQuoteState::Single;
+                    current.push(ch);
+                }
+                '"' => {
+                    state = ShellSegmentQuoteState::Double;
+                    current.push(ch);
+                }
+                ';' | '|' | '&' | '(' | ')' | '\n' | '\r' => {
+                    if !current.trim().is_empty() {
+                        segments.push(current.trim().to_string());
+                    }
+                    current.clear();
+                }
+                _ => current.push(ch),
+            },
+            ShellSegmentQuoteState::Single => {
+                current.push(ch);
+                if ch == '\'' {
+                    state = ShellSegmentQuoteState::None;
+                }
+            }
+            ShellSegmentQuoteState::Double => {
+                current.push(ch);
+                if ch == '"' {
+                    state = ShellSegmentQuoteState::None;
+                }
+            }
+        }
+    }
+
+    if !current.trim().is_empty() {
+        segments.push(current.trim().to_string());
+    }
+
+    segments
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellSegmentQuoteState {
+    None,
+    Single,
+    Double,
+}
+
+fn read_process_find_rows() -> anyhow::Result<Vec<SandboxProcessRow>> {
+    let output = Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,pgid=,stat=,etime=,comm=,command="])
+        .output()
+        .or_else(|_| {
+            Command::new("ps")
+                .args(["-axo", "pid=,ppid=,pgid=,stat=,etime=,comm=,command="])
+                .output()
+        })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "stateful sandbox process find failed to inspect processes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    parse_process_find_ps_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_process_find_ps_output(output: &str) -> anyhow::Result<Vec<SandboxProcessRow>> {
+    let mut rows = Vec::new();
+    for line in output.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 6 {
+            continue;
+        }
+        let pid = parse_process_find_field(fields[0], "pid")?;
+        let ppid = parse_process_find_field(fields[1], "ppid")?;
+        let pgid = parse_process_find_field(fields[2], "pgid")?;
+        let stat = fields[3].to_string();
+        let etime = fields[4].to_string();
+        let comm = fields[5].to_string();
+        let command = if fields.len() > 6 {
+            fields[6..].join(" ")
+        } else {
+            comm.clone()
+        };
+        rows.push(SandboxProcessRow {
+            info: SandboxProcessInfo {
+                pid,
+                ppid,
+                pgid,
+                stat,
+                etime,
+                comm,
+            },
+            command,
+        });
+    }
+    Ok(rows)
+}
+
+fn parse_process_find_field(value: &str, field: &str) -> anyhow::Result<u32> {
+    value.parse::<u32>().map_err(|_| {
+        anyhow::anyhow!("stateful sandbox process find invalid {field} field `{value}`")
+    })
+}
+
+fn filter_process_find_rows(
+    request: &SandboxProcessFindRequest,
+    rows: Vec<SandboxProcessRow>,
+) -> Vec<SandboxProcessInfo> {
+    rows.into_iter()
+        .filter(|row| row.info.pid != std::process::id())
+        .filter(|row| process_find_row_matches(request, row))
+        .map(|row| row.info)
+        .collect()
+}
+
+fn process_find_row_matches(request: &SandboxProcessFindRequest, row: &SandboxProcessRow) -> bool {
+    (request.names.is_empty()
+        || request
+            .names
+            .iter()
+            .any(|name| row.info.comm == *name || process_comm_basename(&row.info.comm) == name))
+        && (request.contains.is_empty()
+            || request
+                .contains
+                .iter()
+                .any(|contains| row.command.contains(contains)))
+        && (request.pids.is_empty() || request.pids.contains(&row.info.pid))
+        && (request.parent_pids.is_empty() || request.parent_pids.contains(&row.info.ppid))
+        && (request.process_groups.is_empty() || request.process_groups.contains(&row.info.pgid))
+}
+
+fn process_comm_basename(comm: &str) -> &str {
+    Path::new(comm)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(comm)
 }
 
 fn sandbox_fs_profile_name(fs: SandboxFsProfile) -> &'static str {
@@ -1469,10 +2223,17 @@ enum ShellQuoteState {
 }
 
 fn ensure_artifact_write_dir_target(relative_path: &str) -> anyhow::Result<()> {
-    let top_level = relative_path.split('/').next().unwrap_or_default();
+    let trimmed = relative_path.trim_end_matches('/');
+    let mut components = trimmed.split('/');
+    let top_level = components.next().unwrap_or_default();
     if top_level != BUILD_PROFILE_WRITE_DIR {
         anyhow::bail!(
             "stateful sandbox run --write-dir is limited to the tmp/ artifact tree; use native Codex edit tools or exact file write targets for source-tree edits"
+        );
+    }
+    if components.next().is_none() {
+        anyhow::bail!(
+            "stateful sandbox run --write-dir cannot target tmp directly; use --write-dir tmp/<purpose>"
         );
     }
     Ok(())
@@ -2148,6 +2909,172 @@ mod tests {
         );
     }
 
+    #[test]
+    fn process_find_request_requires_a_selector() {
+        let request = SandboxProcessFindRequest {
+            names: Vec::new(),
+            contains: Vec::new(),
+            pids: Vec::new(),
+            parent_pids: Vec::new(),
+            process_groups: Vec::new(),
+        };
+
+        let error = validate_process_find_request(&request)
+            .expect_err("process find should require a selector");
+
+        assert!(
+            error
+                .to_string()
+                .contains("stateful sandbox process find requires at least one selector"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn process_find_filters_rows_without_exposing_args() {
+        let request = SandboxProcessFindRequest {
+            names: Vec::new(),
+            contains: vec!["denovo_codex_agent".to_string()],
+            pids: Vec::new(),
+            parent_pids: Vec::new(),
+            process_groups: Vec::new(),
+        };
+        let rows = parse_process_find_ps_output(
+            "101 1 101 S 00:01 codex /opt/bin/codex exec\n\
+             202 1 202 S 00:02 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
+        )
+        .expect("ps output should parse");
+
+        let matches = filter_process_find_rows(&request, rows);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].pid, 202);
+        assert_eq!(matches[0].comm, "python3");
+    }
+
+    #[test]
+    fn process_find_excludes_current_finder_process() {
+        let request = SandboxProcessFindRequest {
+            names: Vec::new(),
+            contains: vec!["denovo_codex_agent".to_string()],
+            pids: Vec::new(),
+            parent_pids: Vec::new(),
+            process_groups: Vec::new(),
+        };
+        let current_pid = std::process::id();
+        let rows = parse_process_find_ps_output(&format!(
+            "{current_pid} 1 {current_pid} S 00:01 stateful stateful sandbox process find --contains denovo_codex_agent\n\
+             202 1 202 S 00:02 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
+        ))
+        .expect("ps output should parse");
+
+        let matches = filter_process_find_rows(&request, rows);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].pid, 202);
+    }
+
+    #[test]
+    fn sandbox_run_rejects_raw_ps_process_inspection() {
+        let request = SandboxRunRequest {
+            fs: SandboxFsProfile::ReadOnly,
+            network: SandboxNetworkPolicy::Disabled,
+            write_targets: Vec::new(),
+            create_targets: Vec::new(),
+            write_dirs: Vec::new(),
+            command: "ps -o pid,comm -p 1".to_string(),
+            timeout_seconds: None,
+        };
+
+        let error = validate_sandbox_run_request_shape(&request)
+            .expect_err("sandbox run should reject raw ps inspection");
+
+        assert!(
+            error
+                .to_string()
+                .contains("process inspection must use stateful sandbox process find"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn sandbox_run_rejects_raw_pgrep_process_inspection() {
+        let request = SandboxRunRequest {
+            fs: SandboxFsProfile::ReadOnly,
+            network: SandboxNetworkPolicy::Disabled,
+            write_targets: Vec::new(),
+            create_targets: Vec::new(),
+            write_dirs: Vec::new(),
+            command: "pgrep -f denovo_codex_agent".to_string(),
+            timeout_seconds: None,
+        };
+
+        let error = validate_sandbox_run_request_shape(&request)
+            .expect_err("sandbox run should reject raw pgrep inspection");
+
+        assert!(
+            error
+                .to_string()
+                .contains("process inspection must use stateful sandbox process find"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn sandbox_run_rejects_raw_process_inspection_shell_forms() {
+        for command in [
+            "env -i pgrep -f denovo_codex_agent",
+            "command -p ps -o pid",
+            "exec ps -o pid",
+            "if true; then ps -ef; fi",
+            "(pgrep -f denovo_codex_agent)",
+            "sh -c 'pgrep -f denovo_codex_agent'",
+            "echo $(ps -axo command)",
+            "echo `pgrep -af denovo_codex_agent`",
+            "env -S 'pgrep -f denovo_codex_agent'",
+            "env --split-string='pgrep -f denovo_codex_agent'",
+            "echo $(echo $(echo $(echo $(echo $(pgrep -f denovo_codex_agent)))))",
+            r"p\s -ef",
+        ] {
+            let request = SandboxRunRequest {
+                fs: SandboxFsProfile::ReadOnly,
+                network: SandboxNetworkPolicy::Disabled,
+                write_targets: Vec::new(),
+                create_targets: Vec::new(),
+                write_dirs: Vec::new(),
+                command: command.to_string(),
+                timeout_seconds: None,
+            };
+
+            let Err(error) = validate_sandbox_run_request_shape(&request) else {
+                panic!("sandbox run should reject raw process inspection in `{command}`");
+            };
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("process inspection must use stateful sandbox process find"),
+                "unexpected result for `{command}`: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sandbox_run_allows_non_process_command_with_process_text_argument() {
+        let request = SandboxRunRequest {
+            fs: SandboxFsProfile::ReadOnly,
+            network: SandboxNetworkPolicy::Disabled,
+            write_targets: Vec::new(),
+            create_targets: Vec::new(),
+            write_dirs: Vec::new(),
+            command: "rg ps crates".to_string(),
+            timeout_seconds: None,
+        };
+
+        validate_sandbox_run_request_shape(&request)
+            .expect("literal ps argument should not be treated as process inspection");
+    }
+
     fn sandbox_output(status: &'static str, exit_code: Option<i32>) -> SandboxRunOutput {
         SandboxRunOutput {
             status,
@@ -2769,8 +3696,21 @@ mod tests {
 
     #[test]
     fn build_profile_rejects_explicit_write_targets() {
-        validate_profile_targets(SandboxFsProfile::Build, &[], &[], &[])
-            .expect("build profile should manage tmp writes automatically");
+        validate_profile_targets(
+            SandboxFsProfile::Build,
+            &[],
+            &[],
+            &["tmp/build".to_string()],
+        )
+        .expect("build profile should accept one scoped tmp write dir");
+
+        let missing_write_dir = validate_profile_targets(SandboxFsProfile::Build, &[], &[], &[])
+            .expect_err("build profile should require a scoped tmp write dir");
+        assert!(
+            missing_write_dir
+                .to_string()
+                .contains("--write-dir tmp/<purpose>")
+        );
 
         let error = validate_profile_targets(
             SandboxFsProfile::Build,
@@ -2783,7 +3723,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("build profile manages tmp/ writes automatically")
+                .contains("build profile rejects explicit write targets")
         );
     }
 

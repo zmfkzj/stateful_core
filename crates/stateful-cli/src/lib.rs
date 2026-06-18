@@ -235,6 +235,10 @@ pub enum SandboxCommand {
         #[arg(long)]
         timeout_seconds: Option<u64>,
     },
+    Process {
+        #[command(subcommand)]
+        command: SandboxProcessCommand,
+    },
     RunNestedCodexBenchmark {
         #[arg(long)]
         purpose: String,
@@ -248,6 +252,22 @@ pub enum SandboxCommand {
         command: String,
         #[arg(long)]
         timeout_seconds: Option<u64>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SandboxProcessCommand {
+    Find {
+        #[arg(long = "name")]
+        names: Vec<String>,
+        #[arg(long = "contains")]
+        contains: Vec<String>,
+        #[arg(long = "pid")]
+        pids: Vec<u32>,
+        #[arg(long = "parent-pid", alias = "ppid")]
+        parent_pids: Vec<u32>,
+        #[arg(long = "process-group", alias = "pgid")]
+        process_groups: Vec<u32>,
     },
 }
 
@@ -665,6 +685,25 @@ pub fn run() -> anyhow::Result<()> {
             if let Some(exit_code) = sandbox::sandbox_run_cli_exit_code(&output) {
                 std::process::exit(exit_code);
             }
+        }
+        Command::Sandbox(SandboxCommand::Process {
+            command:
+                SandboxProcessCommand::Find {
+                    names,
+                    contains,
+                    pids,
+                    parent_pids,
+                    process_groups,
+                },
+        }) => {
+            let output = sandbox::run_sandbox_process_find(sandbox::SandboxProcessFindRequest {
+                names,
+                contains,
+                pids,
+                parent_pids,
+                process_groups,
+            })?;
+            println!("{}", serde_json::to_string(&output)?);
         }
         Command::Enable { repo } => {
             let paths = GlobalPaths::from_env()?;

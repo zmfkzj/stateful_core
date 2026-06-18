@@ -44,6 +44,30 @@ pub enum CurrentFreshness {
     Finalized,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CurrentEvidenceKind {
+    DeclaredIntent,
+    LeaseOnly,
+    WaitQueue,
+    Reservation,
+    ObservedWrite,
+    VerifiedDiff,
+}
+
+impl CurrentEvidenceKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DeclaredIntent => "declared_intent",
+            Self::LeaseOnly => "lease_only",
+            Self::WaitQueue => "wait_queue",
+            Self::Reservation => "reservation",
+            Self::ObservedWrite => "observed_write",
+            Self::VerifiedDiff => "verified_diff",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrentItem {
     pub kind: CurrentItemKind,
@@ -56,6 +80,8 @@ pub struct CurrentItem {
     pub next_action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_kind: Option<CurrentEvidenceKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,6 +114,7 @@ impl CurrentItem {
             summary: summary.into(),
             next_action: None,
             evidence: None,
+            evidence_kind: None,
             session_id: None,
             workspace_id: None,
             source_refs: Vec::new(),
@@ -104,6 +131,11 @@ impl CurrentItem {
 
     pub fn with_evidence(mut self, evidence: impl Into<String>) -> Self {
         self.evidence = Some(evidence.into());
+        self
+    }
+
+    pub fn with_evidence_kind(mut self, evidence_kind: CurrentEvidenceKind) -> Self {
+        self.evidence_kind = Some(evidence_kind);
         self
     }
 
@@ -181,7 +213,8 @@ impl ContextPackage {
             .with_next_action(format!(
                 "Reread {path}, summarize the human change, choose adopt/reapply/ask_user/abandon, then call state.reconcile.ack."
             ))
-            .with_evidence("HumanWriteObserved affects active agent work."),
+            .with_evidence("HumanWriteObserved affects active agent work.")
+            .with_evidence_kind(CurrentEvidenceKind::ObservedWrite),
         ])
     }
 
@@ -385,10 +418,13 @@ fn render_section(
         if let Some(next_action) = &item.next_action {
             output.push_str(&format!("  next: {}\n", trim_trailing_period(next_action)));
         }
-        if matches!(mode, RenderMode::Detailed)
-            && let Some(evidence) = &item.evidence
-        {
-            output.push_str(&format!("  evidence: {}\n", trim_trailing_period(evidence)));
+        if matches!(mode, RenderMode::Detailed) {
+            if let Some(evidence_kind) = item.evidence_kind {
+                output.push_str(&format!("  evidence kind: {}\n", evidence_kind.as_str()));
+            }
+            if let Some(evidence) = &item.evidence {
+                output.push_str(&format!("  evidence: {}\n", trim_trailing_period(evidence)));
+            }
         }
     }
 }

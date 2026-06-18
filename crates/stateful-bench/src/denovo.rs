@@ -3,7 +3,7 @@ use std::{
     env,
     fs::{self, File},
     path::{Path, PathBuf},
-    process::Command as ProcessCommand,
+    process::{Command as ProcessCommand, Stdio},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -674,6 +674,10 @@ pub struct DeNovoConditionMetadata {
     pub results_jsonl: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_json: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_log: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_log: Option<PathBuf>,
     pub started_at_ms: u64,
     pub finished_at_ms: u64,
     pub running_time_ms: u64,
@@ -766,9 +770,11 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
         }),
     }?;
 
+    let stdout_log = condition_dir.join("command.stdout.log");
+    let stderr_log = condition_dir.join("command.stderr.log");
     let started_at_ms = unix_ms();
     let started = Instant::now();
-    let execution = execute_recipe_command(&command);
+    let execution = execute_recipe_command(&command, &stdout_log, &stderr_log);
     let running_time_ms = elapsed_ms(started);
     let finished_at_ms = unix_ms();
     let aweagent_commit = read_aweagent_commit(&options.aweagent_root);
@@ -784,6 +790,8 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
             official_dir: agent_output_dir,
             results_jsonl: None,
             report_json: None,
+            stdout_log: Some(stdout_log),
+            stderr_log: Some(stderr_log),
             started_at_ms,
             finished_at_ms,
             running_time_ms,
@@ -820,6 +828,8 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
         official_dir: agent_output_dir,
         results_jsonl: Some(results_jsonl),
         report_json: Some(report_json),
+        stdout_log: Some(stdout_log),
+        stderr_log: Some(stderr_log),
         started_at_ms,
         finished_at_ms,
         running_time_ms,
@@ -930,6 +940,8 @@ fn flush_denovo_condition_aggregate(
                 official_dir: agent_output_dir,
                 results_jsonl: Some(results_jsonl),
                 report_json: Some(report_json),
+                stdout_log: Some(condition_dir.join("command.stdout.log")),
+                stderr_log: Some(condition_dir.join("command.stderr.log")),
                 started_at_ms: aggregate.started_at_ms.unwrap_or(started_at_ms),
                 finished_at_ms: aggregate.finished_at_ms.unwrap_or_else(unix_ms),
                 running_time_ms: aggregate.running_time_ms,
@@ -1174,7 +1186,9 @@ pub fn run_denovo_extract(options: DeNovoExtractOptions) -> Result<DeNovoExtract
     })?;
     let started_at_ms = unix_ms();
     let started = Instant::now();
-    execute_recipe_command(&command)?;
+    let stdout_log = options.output.join("command.stdout.log");
+    let stderr_log = options.output.join("command.stderr.log");
+    execute_recipe_command(&command, &stdout_log, &stderr_log)?;
     let running_time_ms = elapsed_ms(started);
     let finished_at_ms = unix_ms();
     let results_jsonl = find_results_jsonl(&options.output).with_context(|| {
@@ -1199,18 +1213,20 @@ pub fn run_denovo_extract(options: DeNovoExtractOptions) -> Result<DeNovoExtract
 
 pub fn render_denovo_report_markdown(reports: &[DeNovoConditionReport]) -> String {
     let mut output = String::from(
-        "# DeNovoSWE Report\n\n| Condition | Stateful | Subagent | Instances | Success rate | Average score | Running time ms |\n| --- | --- | --- | ---: | ---: | ---: | ---: |\n",
+        "# DeNovoSWE Report\n\n| Condition | Stateful | Subagent | Instances | Success rate | Average score | Running time ms | Input+output tokens | Uncached input+output tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n",
     );
     for report in reports {
         output.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             report.condition_id,
             axis_label(report.condition.stateful),
             axis_label(report.condition.subagent),
             report.total_instances,
             optional_float(report.success_rate),
             optional_float(report.average_score),
-            report.running_time_ms
+            report.running_time_ms,
+            report.token_input_plus_output_tokens,
+            report.token_uncached_input_plus_output_tokens
         ));
     }
     output
@@ -1235,6 +1251,14 @@ pub fn render_denovo_comparison_markdown(report: &DeNovoComparisonReport) -> Str
         "- Total running time ms: {}\n",
         report.total_running_time_ms
     ));
+    output.push_str(&format!(
+        "- Total input+output tokens: {}\n",
+        report.total_input_plus_output_tokens
+    ));
+    output.push_str(&format!(
+        "- Total uncached input+output tokens: {}\n",
+        report.total_uncached_input_plus_output_tokens
+    ));
     if !report.missing_axis_ids.is_empty() {
         output.push_str(&format!(
             "- Missing axes: {}\n",
@@ -1256,17 +1280,36 @@ pub fn render_denovo_comparison_markdown(report: &DeNovoComparisonReport) -> Str
     output
 }
 
-fn execute_recipe_command(command: &RecipeCommand) -> Result<()> {
+fn execute_recipe_command(
+    command: &RecipeCommand,
+    stdout_log: &Path,
+    stderr_log: &Path,
+) -> Result<()> {
+    let stdout = File::create(stdout_log)
+        .with_context(|| format!("failed to create stdout log {}", stdout_log.display()))?;
+    let stderr = File::create(stderr_log)
+        .with_context(|| format!("failed to create stderr log {}", stderr_log.display()))?;
     let status = ProcessCommand::new(&command.program)
         .args(&command.args)
         .current_dir(&command.cwd)
         .envs(&command.env)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
         .status()
-        .with_context(|| format!("failed to execute {}", command_line(command)))?;
+        .with_context(|| {
+            format!(
+                "failed to execute {}; stdout log: {}; stderr log: {}",
+                command_line(command),
+                stdout_log.display(),
+                stderr_log.display()
+            )
+        })?;
     if !status.success() {
         bail!(
-            "DeNovoSWE command failed with status {status}: {}",
-            command_line(command)
+            "DeNovoSWE command failed with status {status}: {}; stdout log: {}; stderr log: {}",
+            command_line(command),
+            stdout_log.display(),
+            stderr_log.display()
         );
     }
     Ok(())
@@ -1574,11 +1617,67 @@ pub struct DeNovoOfficialResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_used: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<DeNovoTokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval_result: Option<DeNovoEvalResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeNovoTokenUsage {
+    #[serde(default)]
+    pub turns: usize,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub cached_input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub reasoning_output_tokens: u64,
+    #[serde(default)]
+    pub input_plus_output_tokens: u64,
+    #[serde(default)]
+    pub uncached_input_tokens: u64,
+    #[serde(default)]
+    pub uncached_input_plus_output_tokens: u64,
+}
+
+impl DeNovoTokenUsage {
+    fn has_observed_tokens(&self) -> bool {
+        self.turns > 0
+            || self.input_tokens > 0
+            || self.cached_input_tokens > 0
+            || self.output_tokens > 0
+            || self.reasoning_output_tokens > 0
+    }
+
+    fn input_plus_output_tokens(&self) -> u64 {
+        if self.input_plus_output_tokens == 0 {
+            self.input_tokens + self.output_tokens
+        } else {
+            self.input_plus_output_tokens
+        }
+    }
+
+    fn uncached_input_tokens(&self) -> u64 {
+        if self.uncached_input_tokens == 0 {
+            self.input_tokens.saturating_sub(self.cached_input_tokens)
+        } else {
+            self.uncached_input_tokens
+        }
+    }
+
+    fn uncached_input_plus_output_tokens(&self) -> u64 {
+        if self.uncached_input_plus_output_tokens == 0 {
+            self.uncached_input_tokens() + self.output_tokens
+        } else {
+            self.uncached_input_plus_output_tokens
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1625,6 +1724,28 @@ pub struct DeNovoConditionReport {
     pub subagent_used_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_used_rate: Option<f64>,
+    #[serde(default)]
+    pub token_observed_instances: usize,
+    #[serde(default)]
+    pub token_usage_turns: usize,
+    #[serde(default)]
+    pub token_input_tokens: u64,
+    #[serde(default)]
+    pub token_cached_input_tokens: u64,
+    #[serde(default)]
+    pub token_output_tokens: u64,
+    #[serde(default)]
+    pub token_reasoning_output_tokens: u64,
+    #[serde(default)]
+    pub token_input_plus_output_tokens: u64,
+    #[serde(default)]
+    pub token_uncached_input_tokens: u64,
+    #[serde(default)]
+    pub token_uncached_input_plus_output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_input_plus_output_tokens: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_uncached_input_plus_output_tokens: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aweagent_commit: Option<String>,
 }
@@ -1642,6 +1763,10 @@ pub struct DeNovoComparisonReport {
     pub subagent_score_delta_without_stateful: Option<f64>,
     pub combined_interaction_score_delta: Option<f64>,
     pub total_running_time_ms: u64,
+    #[serde(default)]
+    pub total_input_plus_output_tokens: u64,
+    #[serde(default)]
+    pub total_uncached_input_plus_output_tokens: u64,
 }
 
 pub fn build_denovo_condition_report(
@@ -1693,6 +1818,41 @@ pub fn build_denovo_condition_report(
         .iter()
         .filter(|result| result.subagent_used == Some(true))
         .count();
+    let token_usages = results
+        .iter()
+        .filter_map(|result| result.token_usage.as_ref())
+        .filter(|usage| usage.has_observed_tokens())
+        .collect::<Vec<_>>();
+    let token_observed_instances = token_usages.len();
+    let token_usage_turns = token_usages.iter().map(|usage| usage.turns).sum::<usize>();
+    let token_input_tokens = token_usages
+        .iter()
+        .map(|usage| usage.input_tokens)
+        .sum::<u64>();
+    let token_cached_input_tokens = token_usages
+        .iter()
+        .map(|usage| usage.cached_input_tokens)
+        .sum::<u64>();
+    let token_output_tokens = token_usages
+        .iter()
+        .map(|usage| usage.output_tokens)
+        .sum::<u64>();
+    let token_reasoning_output_tokens = token_usages
+        .iter()
+        .map(|usage| usage.reasoning_output_tokens)
+        .sum::<u64>();
+    let token_input_plus_output_tokens = token_usages
+        .iter()
+        .map(|usage| usage.input_plus_output_tokens())
+        .sum::<u64>();
+    let token_uncached_input_tokens = token_usages
+        .iter()
+        .map(|usage| usage.uncached_input_tokens())
+        .sum::<u64>();
+    let token_uncached_input_plus_output_tokens = token_usages
+        .iter()
+        .map(|usage| usage.uncached_input_plus_output_tokens())
+        .sum::<u64>();
 
     let condition_id = condition.id();
 
@@ -1720,6 +1880,23 @@ pub fn build_denovo_condition_report(
         subagent_observed_instances,
         subagent_used_count,
         subagent_used_rate: ratio(subagent_used_count, subagent_observed_instances),
+        token_observed_instances,
+        token_usage_turns,
+        token_input_tokens,
+        token_cached_input_tokens,
+        token_output_tokens,
+        token_reasoning_output_tokens,
+        token_input_plus_output_tokens,
+        token_uncached_input_tokens,
+        token_uncached_input_plus_output_tokens,
+        average_input_plus_output_tokens: average_u64(
+            token_input_plus_output_tokens,
+            token_observed_instances,
+        ),
+        average_uncached_input_plus_output_tokens: average_u64(
+            token_uncached_input_plus_output_tokens,
+            token_observed_instances,
+        ),
         aweagent_commit,
     }
 }
@@ -1728,6 +1905,14 @@ pub fn compare_denovo_reports(reports: Vec<DeNovoConditionReport>) -> DeNovoComp
     let total_running_time_ms = reports
         .iter()
         .map(|report| report.running_time_ms)
+        .sum::<u64>();
+    let total_input_plus_output_tokens = reports
+        .iter()
+        .map(|report| report.token_input_plus_output_tokens)
+        .sum::<u64>();
+    let total_uncached_input_plus_output_tokens = reports
+        .iter()
+        .map(|report| report.token_uncached_input_plus_output_tokens)
         .sum::<u64>();
     let mut by_axes: BTreeMap<(bool, bool), Vec<&DeNovoConditionReport>> = BTreeMap::new();
     let mut condition_id_mismatches = Vec::new();
@@ -1774,6 +1959,8 @@ pub fn compare_denovo_reports(reports: Vec<DeNovoConditionReport>) -> DeNovoComp
             _ => None,
         },
         total_running_time_ms,
+        total_input_plus_output_tokens,
+        total_uncached_input_plus_output_tokens,
     }
 }
 
@@ -1812,6 +1999,14 @@ fn average(values: &[f64]) -> Option<f64> {
         Some(round_three(
             values.iter().sum::<f64>() / values.len() as f64,
         ))
+    }
+}
+
+fn average_u64(total: u64, count: usize) -> Option<f64> {
+    if count == 0 {
+        None
+    } else {
+        Some(round_three(total as f64 / count as f64))
     }
 }
 

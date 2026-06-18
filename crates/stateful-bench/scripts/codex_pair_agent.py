@@ -23,6 +23,8 @@ STATEFUL_INTEGRATION_HOOKS_ONLY = "hooks-only"
 STATEFUL_INTEGRATION_NONE = "none"
 NESTED_CODEX_HOME_ROOT_ENV = "STATEFUL_NESTED_CODEX_HOME_ROOT"
 AUTH_FILE_NAME = "auth.json"
+CODEX_CONFIG_FILE_NAME = "config.json"
+CODEX_CONFIG_TOML_FILE_NAME = "config.toml"
 COMMAND_POLICY_SKILL = "stateful-command-policy"
 COMMAND_POLICY_SKILL_PATH = Path("skills") / COMMAND_POLICY_SKILL / "SKILL.md"
 STATEFUL_BENCH_CONFIG_MARKER = "# stateful-bench nested Codex integration"
@@ -63,9 +65,17 @@ Native Codex subagent requirements:
 
 
 class SeededAuth:
-    def __init__(self, path: Path, digest: str) -> None:
+    def __init__(
+        self,
+        path: Path,
+        digest: str,
+        extra_files: list[tuple[Path, str]] | None = None,
+    ) -> None:
         self.path = path
         self.digest = digest
+        self.files = [(path, digest)]
+        if extra_files:
+            self.files.extend(extra_files)
 
 
 class UnsafeNestedCodexHome(RuntimeError):
@@ -90,6 +100,54 @@ class CodexRunResult:
 
 def toml_string(value: str) -> str:
     return json.dumps(value)
+
+
+def toml_table_name(line: str) -> str | None:
+    stripped = line.strip()
+    if stripped.startswith("[[") and stripped.endswith("]]"):
+        return stripped[2:-2].strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        return stripped[1:-1].strip()
+    return None
+
+
+def codex_provider_config_fragment(config: str | None) -> str:
+    if not config:
+        return ""
+
+    lines = config.splitlines()
+    output: list[str] = []
+    include_table = False
+    in_table = False
+
+    for line in lines:
+        table = toml_table_name(line)
+        if table is not None:
+            in_table = True
+            include_table = table == "model_providers" or table.startswith("model_providers.")
+            if include_table:
+                if output and output[-1] != "":
+                    output.append("")
+                output.append(line)
+            continue
+
+        if include_table:
+            output.append(line)
+            continue
+
+        if in_table:
+            continue
+
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key == "model_provider":
+            output.append(line)
+
+    while output and output[-1] == "":
+        output.pop()
+    return "\n".join(output)
 
 
 def hook_override(event_name: str, command: str, status_message: str, matcher: str | None = None) -> str:
@@ -125,7 +183,11 @@ def stateful_hook_overrides(stateful_binary: str) -> list[str]:
     ]
 
 
-def stateful_codex_config(stateful_binary: str, include_mcp: bool = True) -> str:
+def stateful_codex_config(
+    stateful_binary: str,
+    include_mcp: bool = True,
+    base_config: str | None = None,
+) -> str:
     hook_prefix = f"{shlex.quote(stateful_binary)} hook"
     mcp_config = ""
     if include_mcp:
@@ -137,7 +199,14 @@ env_vars = ["STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN", "STATEFUL_SESSION_ID
 startup_timeout_sec = 20
 default_tools_approval_mode = "approve"
 """
+    base_config_text = ""
+    provider_config = codex_provider_config_fragment(base_config)
+    if provider_config:
+        stripped = provider_config.rstrip()
+        if stripped:
+            base_config_text = f"{stripped}\n\n"
     return f"""{STATEFUL_BENCH_CONFIG_MARKER}
+{base_config_text}
 [features]
 hooks = true
 
@@ -219,11 +288,16 @@ def write_stateful_codex_integration(
     stateful_binary: str,
     include_mcp: bool = True,
     include_skill: bool = True,
+    base_config: str | None = None,
 ) -> None:
     codex_home = Path(env["CODEX_HOME"])
     write_text_file(
         codex_home / "config.toml",
-        stateful_codex_config(stateful_binary, include_mcp=include_mcp),
+        stateful_codex_config(
+            stateful_binary,
+            include_mcp=include_mcp,
+            base_config=base_config,
+        ),
     )
     if include_skill:
         write_text_file(codex_home / COMMAND_POLICY_SKILL_PATH, command_policy_skill_text())
@@ -380,6 +454,7 @@ def run_codex_with_resume(
     env: dict[str, str] | None,
     max_resumes: int,
     runner=subprocess.run,
+    result_observer=None,
 ) -> int:
     pending_resume_failures: list[CodexRunResult] = []
     session_id: str | None = None
@@ -397,6 +472,8 @@ def run_codex_with_resume(
         )
         if result.session_id:
             session_id = result.session_id
+        if result_observer is not None:
+            result_observer(result)
 
         if result.resumeable_token_failure:
             if session_id and attempts < max_resumes:
@@ -590,30 +667,43 @@ def benchmark_source_env(
     mode: str,
     session_id: str | None,
     base_env: dict[str, str] | None = None,
+    preserve_stateful_session: bool = True,
 ) -> dict[str, str]:
     env = dict(os.environ if base_env is None else base_env)
     env.pop("STATEFUL_SESSION_ID", None)
-    if mode == "stateful":
+    if mode == "stateful" and preserve_stateful_session:
         if not session_id:
             raise ValueError("session_id is required in stateful mode")
         env["STATEFUL_SESSION_ID"] = session_id
     return env
 
 
-def source_codex_auth_path(source_env: dict[str, str]) -> Path | None:
+def source_codex_file_path(source_env: dict[str, str], file_name: str) -> Path | None:
     codex_home = source_env.get("CODEX_HOME")
     if codex_home:
-        auth_path = Path(codex_home) / AUTH_FILE_NAME
-        if auth_path.is_file():
-            return auth_path
+        path = Path(codex_home) / file_name
+        if path.is_file():
+            return path
 
     home = source_env.get("HOME")
     if home:
-        auth_path = Path(home) / ".codex" / AUTH_FILE_NAME
-        if auth_path.is_file():
-            return auth_path
+        path = Path(home) / ".codex" / file_name
+        if path.is_file():
+            return path
 
     return None
+
+
+def source_codex_auth_path(source_env: dict[str, str]) -> Path | None:
+    return source_codex_file_path(source_env, AUTH_FILE_NAME)
+
+
+def source_codex_config_path(source_env: dict[str, str]) -> Path | None:
+    return source_codex_file_path(source_env, CODEX_CONFIG_FILE_NAME)
+
+
+def source_codex_config_toml_path(source_env: dict[str, str]) -> Path | None:
+    return source_codex_file_path(source_env, CODEX_CONFIG_TOML_FILE_NAME)
 
 
 def file_digest(path: Path) -> str:
@@ -663,6 +753,21 @@ def prepare_codex_environment(
         if not ensure_safe_directory(Path(env[key])):
             raise UnsafeNestedCodexHome(f"unsafe nested Codex directory for {key}: {env[key]}")
 
+    target_auth = Path(env["CODEX_HOME"]) / AUTH_FILE_NAME
+    target_config = Path(env["CODEX_HOME"]) / CODEX_CONFIG_FILE_NAME
+    target_config_toml = Path(env["CODEX_HOME"]) / CODEX_CONFIG_TOML_FILE_NAME
+    source = os.environ if source_env is None else source_env
+    source_config_toml = source_codex_config_toml_path(source)
+    base_config_toml = None
+    if (
+        source_config_toml is not None
+        and source_config_toml.resolve() != target_config_toml.resolve()
+    ):
+        try:
+            base_config_toml = source_config_toml.read_text(encoding="utf-8")
+        except OSError:
+            base_config_toml = None
+
     if stateful_integration != STATEFUL_INTEGRATION_NONE:
         if not stateful_binary:
             raise UnsafeNestedCodexHome("stateful_binary is required for stateful Codex setup")
@@ -671,15 +776,18 @@ def prepare_codex_environment(
             stateful_binary,
             include_mcp=stateful_integration == STATEFUL_INTEGRATION_FULL,
             include_skill=stateful_integration == STATEFUL_INTEGRATION_FULL,
+            base_config=base_config_toml,
         )
     else:
         remove_stateful_codex_integration(env)
 
-    target_auth = Path(env["CODEX_HOME"]) / AUTH_FILE_NAME
-    source = os.environ if source_env is None else source_env
     source_auth = source_codex_auth_path(source)
+    source_config = source_codex_config_path(source)
     if source_auth is None:
         remove_stale_nested_auth(target_auth)
+        remove_stale_nested_auth(target_config)
+        if stateful_integration == STATEFUL_INTEGRATION_NONE:
+            remove_stale_nested_auth(target_config_toml)
         return None
 
     if source_auth.resolve() == target_auth.resolve():
@@ -689,8 +797,32 @@ def prepare_codex_environment(
         source_digest = file_digest(source_auth)
         remove_stale_nested_auth(target_auth)
         shutil.copy2(source_auth, target_auth)
-        copied_auth = SeededAuth(path=target_auth, digest=source_digest)
+        extra_files = []
+        if source_config is None:
+            remove_stale_nested_auth(target_config)
+        elif source_config.resolve() != target_config.resolve():
+            config_digest = file_digest(source_config)
+            remove_stale_nested_auth(target_config)
+            shutil.copy2(source_config, target_config)
+            extra_files.append((target_config, config_digest))
+        if stateful_integration == STATEFUL_INTEGRATION_NONE:
+            if source_config_toml is None:
+                remove_stale_nested_auth(target_config_toml)
+            elif source_config_toml.resolve() != target_config_toml.resolve():
+                config_toml_digest = file_digest(source_config_toml)
+                remove_stale_nested_auth(target_config_toml)
+                shutil.copy2(source_config_toml, target_config_toml)
+                extra_files.append((target_config_toml, config_toml_digest))
+        copied_auth = SeededAuth(
+            path=target_auth,
+            digest=source_digest,
+            extra_files=extra_files,
+        )
     except OSError:
+        remove_stale_nested_auth(target_auth)
+        remove_stale_nested_auth(target_config)
+        if stateful_integration == STATEFUL_INTEGRATION_NONE:
+            remove_stale_nested_auth(target_config_toml)
         return None
     return copied_auth
 
@@ -706,14 +838,14 @@ def remove_stale_nested_auth(path: Path) -> None:
 def cleanup_seeded_auth(seeded_auth: SeededAuth | None) -> None:
     if seeded_auth is None:
         return
-    path = seeded_auth.path
-    if path.is_symlink():
-        return
-    try:
-        if file_digest(path) == seeded_auth.digest:
-            path.unlink()
-    except (FileNotFoundError, OSError):
-        pass
+    for path, digest in seeded_auth.files:
+        if path.is_symlink():
+            continue
+        try:
+            if file_digest(path) == digest:
+                path.unlink()
+        except (FileNotFoundError, OSError):
+            pass
 
 
 def main() -> int:
@@ -801,7 +933,11 @@ When finished, leave the working tree with only the production code fix for this
 task.
 """.strip()
 
-    source_env = benchmark_source_env(args.mode, args.session_id)
+    source_env = benchmark_source_env(
+        args.mode,
+        args.session_id,
+        preserve_stateful_session=not args.enable_native_subagent,
+    )
     command = codex_command(
         workspace=workspace,
         mode=args.mode,

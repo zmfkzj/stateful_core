@@ -718,12 +718,15 @@ severity: block | warn | info
 resource
 summary
 next_action
+evidence_kind: declared_intent | lease_only | wait_queue | reservation | observed_write | verified_diff
 evidence
 source_refs
 ```
 
-`brief` mode is capped at 8 total bullets. `detailed` mode is capped at 20 total
-bullets. `next_action` is required for `block` and `warn`.
+`evidence_kind` classifies the coordination signal behind the item, while
+`evidence` is optional supporting detail. Prompt text includes both fields only
+in `detailed` mode. `brief` mode is capped at 8 total bullets. `detailed` mode
+is capped at 20 total bullets. `next_action` is required for `block` and `warn`.
 
 The renderer can place supplied expired and finalized records only under
 `Stale/Expired`, but the shipped store-backed route currently emits live

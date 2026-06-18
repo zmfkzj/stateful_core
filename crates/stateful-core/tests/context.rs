@@ -1,6 +1,6 @@
 use stateful_core::{
-    ContextPackage, CurrentFreshness, CurrentItem, CurrentItemKind, CurrentSeverity,
-    ReconciliationDecision, RenderMode, render_prompt_text,
+    ContextPackage, CurrentEvidenceKind, CurrentFreshness, CurrentItem, CurrentItemKind,
+    CurrentSeverity, ReconciliationDecision, RenderMode, render_prompt_text,
 };
 
 #[test]
@@ -71,6 +71,25 @@ fn structured_items_render_purpose_and_required_actions() {
     assert!(text.contains("purpose: Fix auth validation behavior requested by the user"));
     assert!(text.contains("Nearby Activity"));
     assert!(text.contains("purpose: Resume queued session cleanup after rereading"));
+}
+
+#[test]
+fn detailed_context_renders_evidence_kind() {
+    let package = ContextPackage::from_items(vec![
+        CurrentItem::new(
+            CurrentItemKind::Intent,
+            CurrentSeverity::Info,
+            CurrentFreshness::Live,
+            "src/auth.ts",
+            "Fix auth validation behavior.",
+            "Session s1 declared intent for src/auth.ts.",
+        )
+        .with_evidence_kind(CurrentEvidenceKind::DeclaredIntent),
+    ]);
+
+    let text = render_prompt_text(&package, RenderMode::Detailed);
+
+    assert!(text.contains("evidence kind: declared_intent"));
 }
 
 #[test]

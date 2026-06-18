@@ -550,6 +550,17 @@ fn missing_intent_response() -> (StatusCode, Json<Value>) {
     )
 }
 
+fn invalid_lease_path_response(path: String) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "status": "error",
+            "reason_code": "invalid_lease_path",
+            "message": format!("Invalid lease path `{path}`: direct tmp leases are not allowed; lease a file or subdirectory under tmp instead.")
+        })),
+    )
+}
+
 fn lease_conflict_response() -> (StatusCode, Json<Value>) {
     (
         StatusCode::CONFLICT,
@@ -558,6 +569,19 @@ fn lease_conflict_response() -> (StatusCode, Json<Value>) {
             "reason_code": "lease_conflict",
             "message": "Requested lease conflicts with an active lease or reserved request.",
             "required_next_action": "To wait for this path, call state.intent.request with action, path, purpose, and request_id. Then poll state.notifications.poll or state.resume.next; when reserved, reread the target and call state.intent.claim with the wait_id before retrying the write."
+        })),
+    )
+}
+
+fn reservation_claim_required_response(reservation: WaitRecord) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "status": "error",
+            "reason_code": "reservation_claim_required",
+            "message": "A reservation for this session must be claimed before acquiring the lease.",
+            "reservation": reservation,
+            "required_next_action": "Reread the target, then call state.intent.claim with the wait_id before retrying the write."
         })),
     )
 }
@@ -650,7 +674,27 @@ async fn lease_acquire(
                 &path,
                 observation,
             ) {
-                Ok(()) => Ok(()),
+                Ok(()) => Ok(None),
+                Err(StoreError::LeaseConflict) => {
+                    let reservation = if path.ends_with('/') {
+                        store.active_reservation_for_directory_by_session(
+                            &workspace_id,
+                            &path,
+                            &session_id,
+                        )
+                    } else {
+                        store.active_reservation_for_path_by_session(
+                            &workspace_id,
+                            &path,
+                            &session_id,
+                        )
+                    };
+                    match reservation {
+                        Ok(Some(reservation)) => Ok(Some(reservation)),
+                        Ok(None) => Err(StoreError::LeaseConflict),
+                        Err(error) => Err(error),
+                    }
+                }
                 Err(error) => Err(error),
             }
         }
@@ -658,9 +702,11 @@ async fn lease_acquire(
     };
 
     match result {
-        Ok(()) => status_response(Ok(())),
+        Ok(Some(reservation)) => reservation_claim_required_response(reservation),
+        Ok(None) => status_response(Ok(())),
         Err(StoreError::MissingPurpose) => missing_purpose_response(),
         Err(StoreError::MissingIntent) => missing_intent_response(),
+        Err(StoreError::InvalidLeasePath(path)) => invalid_lease_path_response(path),
         Err(StoreError::LeaseConflict) => lease_conflict_response(),
         Err(error) => status_response(Err(error.to_string())),
     }

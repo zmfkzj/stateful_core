@@ -936,6 +936,7 @@ fn denovo_codex_agent_git_diff_includes_new_and_modified_files() {
     let script = format!(
         r#"
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -983,6 +984,7 @@ fn denovo_codex_agent_timeout_wrapper_bounds_run() {
     let script = format!(
         r#"
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -994,20 +996,32 @@ sys.modules[spec.name] = mod
 spec.loader.exec_module(mod)
 
 def fast_runner(command, **kwargs):
-    return subprocess.CompletedProcess(command, 0, "", "")
+    return subprocess.CompletedProcess(
+        command,
+        0,
+        '{{"type":"turn.completed","usage":{{"input_tokens":100,"cached_input_tokens":40,"output_tokens":12,"reasoning_output_tokens":5}}}}\n'
+        '{{"type":"turn.completed","usage":{{"input_tokens":10,"cached_input_tokens":4,"output_tokens":3,"reasoning_output_tokens":2}}}}\n',
+        "",
+    )
 
 def timeout_runner(command, **kwargs):
     raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
 
-fast = mod.run_codex_with_timeout(
-    ["codex", "exec", "-"],
-    "prompt",
-    Path("/tmp"),
-    None,
-    max_resumes=0,
-    timeout_seconds=1,
-    runner=fast_runner,
-)
+captured_stdout = io.StringIO()
+original_stdout = sys.stdout
+sys.stdout = captured_stdout
+try:
+    fast = mod.run_codex_with_timeout(
+        ["codex", "exec", "-"],
+        "prompt",
+        Path("/tmp"),
+        None,
+        max_resumes=0,
+        timeout_seconds=1,
+        runner=fast_runner,
+    )
+finally:
+    sys.stdout = original_stdout
 try:
     mod.run_codex_with_timeout(
         ["codex", "exec", "-"],
@@ -1023,14 +1037,31 @@ except mod.CodexTimeoutError as error:
 else:
     raise AssertionError("expected CodexTimeoutError")
 
-assert fast == 0
+assert fast.returncode == 0
+assert fast.token_usage == {{
+    "turns": 2,
+    "input_tokens": 110,
+    "cached_input_tokens": 44,
+    "output_tokens": 15,
+    "reasoning_output_tokens": 7,
+    "input_plus_output_tokens": 125,
+    "uncached_input_tokens": 66,
+    "uncached_input_plus_output_tokens": 81,
+}}
+assert captured_stdout.getvalue().count('"type":"turn.completed"') == 2
 assert "codex timed out after 0.25s" in timeout_message
-print(json.dumps({{"fast": fast, "timeout": timeout_message}}))
+print(json.dumps({{"fast": fast.returncode, "token_usage": fast.token_usage, "emitted_stdout": captured_stdout.getvalue(), "timeout": timeout_message}}))
 "#,
         agent_path = denovo_codex_agent_path_json(),
     );
     let output = run_python_json(&script);
     assert_eq!(output["fast"], 0);
+    assert_eq!(output["token_usage"]["input_tokens"], 110);
+    assert_eq!(output["token_usage"]["input_plus_output_tokens"], 125);
+    assert_eq!(
+        output["token_usage"]["uncached_input_plus_output_tokens"],
+        81
+    );
     assert!(
         output["timeout"]
             .as_str()
@@ -1206,7 +1237,10 @@ kwargs = {{
 }}
 no_state = module.codex_command_for_profile(agent_mode="no-state", **kwargs)
 stateful = module.codex_command_for_profile(agent_mode="stateful", **kwargs)
-print(json.dumps({{"no_state": no_state, "stateful": stateful}}))
+nested_kwargs = dict(kwargs)
+nested_kwargs["base_env"] = {{"STATEFUL_NESTED_CODEX_HOME_ROOT": "/repo/target/nested-codex-homes"}}
+nested_no_state = module.codex_command_for_profile(agent_mode="no-state", **nested_kwargs)
+print(json.dumps({{"no_state": no_state, "stateful": stateful, "nested_no_state": nested_no_state}}))
 "#,
         agent_path = denovo_codex_agent_path_json(),
     );
@@ -1217,6 +1251,9 @@ print(json.dumps({{"no_state": no_state, "stateful": stateful}}))
     let stateful = output["stateful"]
         .as_array()
         .expect("stateful command should be an array");
+    let nested_no_state = output["nested_no_state"]
+        .as_array()
+        .expect("nested no-state command should be an array");
 
     assert_eq!(no_state[0], "/opt/homebrew/bin/codex");
     assert!(command_contains(no_state, "--ignore-user-config"));
@@ -1230,6 +1267,18 @@ print(json.dumps({{"no_state": no_state, "stateful": stateful}}))
     assert!(command_contains(stateful, "--ignore-rules"));
     assert!(command_contains(stateful, "skills.bundled.enabled=false"));
     assert!(command_contains(stateful, "features.multi_agent=true"));
+
+    assert_eq!(nested_no_state[0], "/opt/homebrew/bin/codex");
+    assert!(!command_contains(nested_no_state, "--ignore-user-config"));
+    assert!(command_contains(nested_no_state, "--ignore-rules"));
+    assert!(command_contains(
+        nested_no_state,
+        "skills.bundled.enabled=false"
+    ));
+    assert!(command_contains(
+        nested_no_state,
+        "features.multi_agent=true"
+    ));
 }
 
 #[test]
@@ -1255,6 +1304,8 @@ source_auth.write_text("{{\"token\":\"source\"}}")
 source_env = {{
     "HOME": str(source_home),
     "PATH": "/bin",
+    "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
+    "STATEFUL_SERVER_TOKEN": "token-123",
     "STATEFUL_SESSION_ID": "outer-session",
 }}
 output = root / "adapter-output"
@@ -1303,6 +1354,8 @@ print(json.dumps({{
     "no_state_auth_exists": (no_state_home / "auth.json").exists(),
     "stateful_home": stateful_env["HOME"],
     "stateful_has_session": "STATEFUL_SESSION_ID" in stateful_env,
+    "stateful_server_url": stateful_env.get("STATEFUL_SERVER_URL"),
+    "stateful_server_token": stateful_env.get("STATEFUL_SERVER_TOKEN"),
     "stateful_config": stateful_config,
     "stateful_skill_exists": (stateful_home / "skills" / "stateful-command-policy" / "SKILL.md").exists(),
     "stateful_auth_exists": (stateful_home / "auth.json").exists(),
@@ -1340,7 +1393,9 @@ print(json.dumps({{
         "env_vars = [\"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\", \"STATEFUL_SESSION_ID\"]"
     ));
     assert!(config.contains("[[hooks.SessionStart]]"));
-    assert_eq!(output["stateful_has_session"], true);
+    assert_eq!(output["stateful_has_session"], false);
+    assert_eq!(output["stateful_server_url"], "http://127.0.0.1:43873");
+    assert_eq!(output["stateful_server_token"], "token-123");
     assert_eq!(output["stateful_skill_exists"], true);
     assert_eq!(output["stateful_auth_exists"], true);
 
@@ -2330,10 +2385,26 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 root = Path({temp_dir})
+source_home = root / "source-home"
+source_config_toml = source_home / ".codex" / "config.toml"
+source_config_toml.parent.mkdir(parents=True, exist_ok=True)
+source_config_toml.write_text('''model_provider = "codex-lb"
+
+[model_providers.codex-lb]
+base_url = "http://127.0.0.1:2455/backend-api/codex"
+wire_api = "responses"
+
+[features]
+goals = true
+
+[mcp_servers.stateful]
+command = "stale-stateful"
+''')
 workspace = root / "runs" / "pair-one" / "workspace"
 task_path = workspace / ".stateful_bench" / "task-a.json"
 source_env = {{
     "PATH": "/bin",
+    "HOME": str(source_home),
     "STATEFUL_NESTED_CODEX_HOME_ROOT": str(root / "nested-codex-homes"),
 }}
 env = module.codex_environment(task_path=task_path, workspace=workspace, base_env=source_env)
@@ -2349,6 +2420,7 @@ config = (codex_home / "config.toml").read_text()
 skill = (codex_home / "skills" / "stateful-command-policy" / "SKILL.md").read_text()
 print(json.dumps({{
     "config": config,
+    "feature_table_count": config.count("[features]"),
     "skill": skill,
     "auth_exists": (codex_home / "auth.json").exists(),
 }}, sort_keys=True))
@@ -2360,6 +2432,13 @@ print(json.dumps({{
     let output = run_python_json(&script);
 
     let config = output["config"].as_str().expect("config should be text");
+    assert!(config.contains("model_provider = \"codex-lb\""));
+    assert!(config.contains("[model_providers.codex-lb]"));
+    assert!(config.contains("base_url = \"http://127.0.0.1:2455/backend-api/codex\""));
+    assert!(config.contains("wire_api = \"responses\""));
+    assert_eq!(output["feature_table_count"], 1);
+    assert!(!config.contains("goals = true"));
+    assert!(!config.contains("stale-stateful"));
     assert!(config.contains("[mcp_servers.stateful]"));
     assert!(config.contains("command = \"/tmp/stateful\""));
     assert!(config.contains("args = [\"mcp\", \"serve\"]"));
@@ -2492,6 +2571,12 @@ stateful = module.benchmark_source_env(
     session_id="pair-one-agent-a",
     base_env={{"PATH": "/bin"}},
 )
+stateful_with_native_subagent = module.benchmark_source_env(
+    mode="stateful",
+    session_id="pair-one-agent-a",
+    base_env={{"PATH": "/bin", "STATEFUL_SESSION_ID": "outer-session"}},
+    preserve_stateful_session=False,
+)
 no_state = module.benchmark_source_env(
     mode="no-state",
     session_id=None,
@@ -2499,6 +2584,7 @@ no_state = module.benchmark_source_env(
 )
 print(json.dumps({{
     "stateful": stateful,
+    "stateful_with_native_subagent": stateful_with_native_subagent,
     "no_state": no_state,
 }}, sort_keys=True))
 "#,
@@ -2513,6 +2599,13 @@ print(json.dumps({{
             .expect("stateful env should be an object")
             .get("STATEFUL_SESSION_ID"),
         Some(&serde_json::Value::String("pair-one-agent-a".to_string()))
+    );
+    assert_eq!(
+        output["stateful_with_native_subagent"]
+            .as_object()
+            .expect("native subagent env should be an object")
+            .contains_key("STATEFUL_SESSION_ID"),
+        false
     );
     assert_eq!(
         output["no_state"]
@@ -2545,6 +2638,7 @@ class Completed:
         self.stderr = stderr
 
 calls = []
+observed = []
 
 def fake_run(command, input, text, cwd, check, env, stdout, stderr):
     calls.append({{
@@ -2580,6 +2674,7 @@ try:
         {{"PATH": "/bin"}},
         max_resumes=1,
         runner=fake_run,
+        result_observer=observed.append,
     )
 finally:
     sys.stdout = original_stdout
@@ -2588,6 +2683,14 @@ finally:
 print(json.dumps({{
     "code": code,
     "calls": calls,
+    "observed": [
+        {{
+            "returncode": result.returncode,
+            "session_id": result.session_id,
+            "resumeable_token_failure": result.resumeable_token_failure,
+        }}
+        for result in observed
+    ],
     "stdout": captured_stdout.getvalue(),
     "stderr": captured_stderr.getvalue(),
 }}, sort_keys=True))
@@ -2601,6 +2704,13 @@ print(json.dumps({{
         .as_array()
         .expect("calls should be an array");
     assert_eq!(calls.len(), 2);
+    let observed = output["observed"]
+        .as_array()
+        .expect("observed results should be an array");
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0]["session_id"], "session-123");
+    assert_eq!(observed[0]["resumeable_token_failure"], true);
+    assert_eq!(observed[1]["returncode"], 0);
     assert_eq!(calls[0]["input"], "initial prompt");
     assert!(
         calls[1]["input"]
@@ -2653,6 +2763,10 @@ source_home = root / "source-home"
 source_auth = source_home / ".codex" / "auth.json"
 source_auth.parent.mkdir(parents=True, exist_ok=True)
 source_auth.write_text("{{\"token\":\"source\"}}")
+source_config = source_home / ".codex" / "config.json"
+source_config.write_text("{{\"provider\":\"codex_lb\"}}")
+source_config_toml = source_home / ".codex" / "config.toml"
+source_config_toml.write_text('model_provider = "codex-lb"\n\n[model_providers.codex-lb]\nbase_url = "http://127.0.0.1:2455/backend-api/codex"\n')
 
 workspace = root / "runs" / "pair-one" / "workspace"
 task_path = workspace / ".stateful_bench" / "task-a.json"
@@ -2664,13 +2778,23 @@ source_env = {{
 env = module.codex_environment(task_path=task_path, workspace=workspace, base_env=source_env)
 seeded = module.prepare_codex_environment(env, source_env=source_env)
 target_auth = Path(env["CODEX_HOME"]) / "auth.json"
+target_config = Path(env["CODEX_HOME"]) / "config.json"
+target_config_toml = Path(env["CODEX_HOME"]) / "config.toml"
 copied = target_auth.read_text()
+copied_config = target_config.read_text()
+copied_config_toml = target_config_toml.read_text()
 module.cleanup_seeded_auth(seeded)
 print(json.dumps({{
     "copied": copied,
+    "copied_config": copied_config,
+    "copied_config_toml": copied_config_toml,
     "seeded": str(seeded.path if seeded else None),
     "target_exists_after_cleanup": target_auth.exists(),
+    "target_config_exists_after_cleanup": target_config.exists(),
+    "target_config_toml_exists_after_cleanup": target_config_toml.exists(),
     "source_exists_after_cleanup": source_auth.exists(),
+    "source_config_exists_after_cleanup": source_config.exists(),
+    "source_config_toml_exists_after_cleanup": source_config_toml.exists(),
 }}))
 "#,
         agent_path = codex_pair_agent_path_json(),
@@ -2680,8 +2804,17 @@ print(json.dumps({{
     let output = run_python_json(&script);
 
     assert_eq!(output["copied"], "{\"token\":\"source\"}");
+    assert_eq!(output["copied_config"], "{\"provider\":\"codex_lb\"}");
+    assert_eq!(
+        output["copied_config_toml"],
+        "model_provider = \"codex-lb\"\n\n[model_providers.codex-lb]\nbase_url = \"http://127.0.0.1:2455/backend-api/codex\"\n"
+    );
     assert_eq!(output["target_exists_after_cleanup"], false);
+    assert_eq!(output["target_config_exists_after_cleanup"], false);
+    assert_eq!(output["target_config_toml_exists_after_cleanup"], false);
     assert_eq!(output["source_exists_after_cleanup"], true);
+    assert_eq!(output["source_config_exists_after_cleanup"], true);
+    assert_eq!(output["source_config_toml_exists_after_cleanup"], true);
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }

@@ -533,12 +533,17 @@ Prompt items must use this shape:
 ```text
 - [severity] resource: summary.
   next: concrete action.
+  evidence kind: detailed mode only.
   evidence: detailed mode only.
 ```
 
 Severity values are `block`, `warn`, and `info`. `brief` output is limited to 8
 bullets total. `detailed` output is limited to 20 bullets total. Empty sections
 are omitted except `Blocking: None` when a resource filter is present.
+
+Evidence kind distinguishes declared intent, lease-only blockers, queue or
+reservation state, observed writes, and verified diffs; `evidence` remains
+optional supporting detail.
 
 Block and warning items must include `next:`. `Required Next Action` appears
 immediately after `Blocking` so the agent sees the recovery path before nearby

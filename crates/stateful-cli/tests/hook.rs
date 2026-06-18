@@ -298,6 +298,112 @@ fn pre_tool_use_allows_canonical_sandbox_run_read_only() {
 }
 
 #[test]
+fn pre_tool_use_allows_structured_process_find() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox process find --contains denovo_codex_agent")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_denies_process_find_without_selector() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox process find")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(
+        outcome,
+        "stateful sandbox process find requires at least one selector",
+    );
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_run_with_raw_process_inspection() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs read-only --network disabled --command 'pgrep -f denovo_codex_agent'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(
+        outcome,
+        "process inspection must use stateful sandbox process find",
+    );
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_run_with_wrapped_raw_process_inspection() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs read-only --network disabled --command 'env -i pgrep -f denovo_codex_agent'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(
+        outcome,
+        "process inspection must use stateful sandbox process find",
+    );
+}
+
+#[test]
+fn pre_tool_use_denies_untrusted_process_find() {
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "/bin/echo sandbox process find --contains denovo_codex_agent"
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(
+        outcome,
+        "stateful sandbox process find requires the trusted absolute stateful binary",
+    );
+}
+
+#[test]
 fn pre_tool_use_denies_read_only_sandbox_run_with_network_enabled() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
@@ -429,7 +535,7 @@ fn pre_tool_use_allows_sandbox_run_write_dir() {
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
         "tool_input": {
-            "command": format!("{stateful} sandbox run --fs write-targets --network enabled --write-dir tmp --command 'cargo test'")
+            "command": format!("{stateful} sandbox run --fs write-targets --network enabled --write-dir tmp/run-1 --command 'cargo test'")
         }
     })
     .to_string();
@@ -437,6 +543,25 @@ fn pre_tool_use_allows_sandbox_run_write_dir() {
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
     assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_run_direct_tmp_write_dir() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs write-targets --network enabled --write-dir tmp --command 'cargo test'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(outcome, "tmp/<purpose>");
 }
 
 #[test]
@@ -459,7 +584,26 @@ fn pre_tool_use_denies_sandbox_run_write_dir_outside_artifact_tree() {
 }
 
 #[test]
-fn pre_tool_use_allows_sandbox_run_build_profile_without_explicit_targets() {
+fn pre_tool_use_allows_sandbox_run_build_profile_with_scoped_tmp_write_dir() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs build --network enabled --write-dir tmp/build-tests --command 'npm test'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_run_build_profile_without_scoped_tmp_write_dir() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "s1",
@@ -474,7 +618,7 @@ fn pre_tool_use_allows_sandbox_run_build_profile_without_explicit_targets() {
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_denial_mentions(outcome, "--write-dir tmp/<purpose>");
 }
 
 #[test]
@@ -773,7 +917,7 @@ fn pre_tool_use_denies_invalid_nested_codex_benchmark_sandbox_wrappers() {
             format!(
                 "{stateful} sandbox run --fs build --network enabled --write-target README.md --command 'npm test'"
             ),
-            "build profile manages tmp/ writes automatically",
+            "build profile rejects explicit write targets and create targets",
         ),
         (
             "git profile with non-git command",

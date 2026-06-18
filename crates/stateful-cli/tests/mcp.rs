@@ -252,9 +252,9 @@ fn sandbox_run_write_dir_authorizes_directory_and_allows_artifact_write() {
             "--fs",
             "write-targets",
             "--write-dir",
-            "tmp",
+            "tmp/run-1",
             "--command",
-            "printf artifact > tmp/out.txt && printf tmp > \"$TMPDIR/out.tmp\"",
+            "printf artifact > tmp/run-1/out.txt && printf tmp > \"$TMPDIR/out.tmp\"",
         ],
     );
 
@@ -271,29 +271,74 @@ fn sandbox_run_write_dir_authorizes_directory_and_allows_artifact_write() {
         request_json_body(&request)["payload"]["action"],
         "write_directory"
     );
-    assert_eq!(request_json_body(&request)["payload"]["path"], "tmp/");
+    assert_eq!(request_json_body(&request)["payload"]["path"], "tmp/run-1/");
     assert_eq!(
         request_json_body(&request)["payload"]["purpose"],
-        "Run sandbox command for write directory `tmp/`."
+        "Run sandbox command for write directory `tmp/run-1/`."
     );
     assert_eq!(
-        fs::read_to_string(repo_root.join("tmp/out.txt")).expect("artifact should read"),
+        fs::read_to_string(repo_root.join("tmp/run-1/out.txt")).expect("artifact should read"),
         "artifact"
     );
     assert_eq!(
-        fs::read_to_string(repo_root.join("tmp/.stateful-tmp/out.tmp"))
+        fs::read_to_string(repo_root.join("tmp/run-1/.stateful-tmp/out.tmp"))
             .expect("temp artifact should read"),
         "tmp"
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("\"allowed_write_targets\":[\"tmp/\"]")
+        String::from_utf8_lossy(&output.stdout)
+            .contains("\"allowed_write_targets\":[\"tmp/run-1/\"]")
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn sandbox_run_build_profile_authorizes_tmp_and_allows_artifact_write() {
+fn sandbox_run_write_dir_rejects_direct_tmp_before_authorize() {
+    let temp_root = temp_root("stateful-sandbox-run-write-dir-root-tmp");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"should not authorize","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "write-targets",
+            "--write-dir",
+            "tmp",
+            "--command",
+            "printf bypass > tmp/out.txt",
+        ],
+    );
+
+    assert!(!output.status.success(), "direct tmp write-dir should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("tmp/<purpose>"), "stderr was {stderr}");
+    assert!(
+        rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "direct tmp write-dir should fail before authorization"
+    );
+    assert!(
+        !repo_root.join("tmp/out.txt").exists(),
+        "direct tmp write-dir command must not run"
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn sandbox_run_build_profile_authorizes_scoped_tmp_and_allows_artifact_write() {
     if macos_stateful_sandbox_is_active() {
         return;
     }
@@ -320,8 +365,10 @@ fn sandbox_run_build_profile_authorizes_tmp_and_allows_artifact_write() {
             "build",
             "--network",
             "enabled",
+            "--write-dir",
+            "tmp/build-profile",
             "--command",
-            "printf artifact > tmp/build.out && printf tmp > \"$TMPDIR/build.tmp\"",
+            "printf artifact > tmp/build-profile/build.out && printf tmp > \"$TMPDIR/build.tmp\"",
         ],
     );
 
@@ -338,29 +385,84 @@ fn sandbox_run_build_profile_authorizes_tmp_and_allows_artifact_write() {
         request_json_body(&request)["payload"]["action"],
         "write_directory"
     );
-    assert_eq!(request_json_body(&request)["payload"]["path"], "tmp/");
+    assert_eq!(
+        request_json_body(&request)["payload"]["path"],
+        "tmp/build-profile/"
+    );
     assert_eq!(
         request_json_body(&request)["payload"]["fs_profile"],
         "build"
     );
     assert_eq!(
-        fs::read_to_string(repo_root.join("tmp/build.out")).expect("artifact should read"),
+        fs::read_to_string(repo_root.join("tmp/build-profile/build.out"))
+            .expect("artifact should read"),
         "artifact"
     );
     assert_eq!(
-        fs::read_to_string(repo_root.join("tmp/.stateful-tmp/build.tmp"))
+        fs::read_to_string(repo_root.join("tmp/build-profile/.stateful-tmp/build.tmp"))
             .expect("temp artifact should read"),
         "tmp"
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("\"allowed_write_targets\":[\"tmp/\"]")
+        String::from_utf8_lossy(&output.stdout)
+            .contains("\"allowed_write_targets\":[\"tmp/build-profile/\"]")
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn sandbox_run_build_profile_sets_cargo_target_dir_under_tmp() {
+fn sandbox_run_build_profile_requires_scoped_tmp_write_dir() {
+    let temp_root = temp_root("stateful-sandbox-run-build-requires-write-dir");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"allow","reason_code":"authorized","message":"should not authorize","required_next_action":null}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "build",
+            "--network",
+            "enabled",
+            "--command",
+            "printf bypass > tmp/build.out",
+        ],
+    );
+
+    assert!(
+        !output.status.success(),
+        "build profile should require write-dir"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--write-dir tmp/<purpose>"),
+        "stderr was {stderr}"
+    );
+    assert!(
+        rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "missing build write-dir should fail before authorization"
+    );
+    assert!(
+        !repo_root.join("tmp/build.out").exists(),
+        "build command must not run without a scoped tmp write-dir"
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn sandbox_run_build_profile_sets_cargo_target_dir_under_scoped_tmp() {
     if macos_stateful_sandbox_is_active() {
         return;
     }
@@ -387,8 +489,10 @@ fn sandbox_run_build_profile_sets_cargo_target_dir_under_tmp() {
             "build",
             "--network",
             "enabled",
+            "--write-dir",
+            "tmp/build-cargo",
             "--command",
-            "printf '%s' \"$CARGO_TARGET_DIR\" > tmp/cargo-target-dir.txt",
+            "printf '%s' \"$CARGO_TARGET_DIR\" > tmp/build-cargo/cargo-target-dir.txt",
         ],
     );
 
@@ -398,14 +502,15 @@ fn sandbox_run_build_profile_sets_cargo_target_dir_under_tmp() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let cargo_target_dir = fs::read_to_string(repo_root.join("tmp/cargo-target-dir.txt"))
-        .expect("target dir should read");
+    let cargo_target_dir =
+        fs::read_to_string(repo_root.join("tmp/build-cargo/cargo-target-dir.txt"))
+            .expect("target dir should read");
     assert_eq!(
         cargo_target_dir,
         repo_root
             .canonicalize()
             .expect("repo root should canonicalize")
-            .join("tmp/target")
+            .join("tmp/build-cargo/target")
             .to_string_lossy()
     );
 
@@ -442,8 +547,10 @@ dependencies = ["langchain-core>=0.3"]
             "run",
             "--fs",
             "build",
+            "--write-dir",
+            "tmp/build-shadowing",
             "--command",
-            "printf should-not-run > tmp/shadow-audit-ran.txt",
+            "printf should-not-run > tmp/build-shadowing/shadow-audit-ran.txt",
         ],
     );
 
@@ -457,7 +564,9 @@ dependencies = ["langchain-core>=0.3"]
     assert!(combined.contains("langchain_core"));
     assert!(combined.contains("langchain-core"));
     assert!(
-        !repo_root.join("tmp/shadow-audit-ran.txt").exists(),
+        !repo_root
+            .join("tmp/build-shadowing/shadow-audit-ran.txt")
+            .exists(),
         "build command must not run when import resolution audit fails"
     );
 

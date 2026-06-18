@@ -828,6 +828,7 @@ Each rendered item uses:
 ```text
 - [severity] resource: summary.
   next: concrete action.
+  evidence kind: detailed mode only.
   evidence: detailed mode only.
 ```
 
@@ -835,6 +836,10 @@ Severity values are `block`, `warn`, and `info`. `brief` mode has at most 8
 bullets. `detailed` mode has at most 20 bullets. Empty sections are omitted
 except `Blocking: None` when a resource filter is present. Raw event dumps are
 forbidden.
+
+Evidence kind distinguishes declared intent, lease-only blockers, queue or
+reservation state, observed writes, and verified diffs; `evidence` remains
+optional supporting detail.
 
 When the block is an unreconciled human write, `Required Next Action` should tell
 the agent to reread the file, summarize the human change, decide whether to

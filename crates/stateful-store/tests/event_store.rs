@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 use serde_json::json;
-use stateful_core::{AuthorizationInput, CurrentItemKind, DecisionKind};
+use stateful_core::{AuthorizationInput, CurrentEvidenceKind, CurrentItemKind, DecisionKind};
 use stateful_store::{Event, IntentRequestInput, OutboxEntry, Store, StoreError};
 use std::fs;
 use std::sync::mpsc;
@@ -288,7 +288,7 @@ fn intent_declarations_allow_edit_and_artifact_scopes_to_coexist() {
             "s1",
             "w1",
             "Run the workspace test suite.",
-            ["tmp/"],
+            ["tmp/test-suite/"],
         ))
         .expect("artifact intent should append");
 
@@ -296,7 +296,7 @@ fn intent_declarations_allow_edit_and_artifact_scopes_to_coexist() {
         .acquire_lease("s1", "w1", "src/auth.ts")
         .expect("edit lease should still be authorized");
     store
-        .acquire_lease("s1", "w1", "tmp/")
+        .acquire_lease("s1", "w1", "tmp/test-suite/")
         .expect("artifact lease should be authorized");
 
     let live = store
@@ -309,7 +309,8 @@ fn intent_declarations_allow_edit_and_artifact_scopes_to_coexist() {
     assert!(
         live.items
             .iter()
-            .any(|item| item.resource == "tmp/" && item.purpose == "Run the workspace test suite.")
+            .any(|item| item.resource == "tmp/test-suite/"
+                && item.purpose == "Run the workspace test suite.")
     );
 }
 
@@ -840,6 +841,10 @@ fn live_current_state_reports_active_items_with_purpose() {
         .expect("intent item should exist");
     assert_eq!(intent.resource, "src/auth.ts");
     assert_eq!(intent.purpose, "Fix auth validation behavior.");
+    assert_eq!(
+        intent.evidence_kind,
+        Some(CurrentEvidenceKind::DeclaredIntent)
+    );
 
     let lease = live
         .items
@@ -847,6 +852,7 @@ fn live_current_state_reports_active_items_with_purpose() {
         .find(|item| item.kind == CurrentItemKind::Lease)
         .expect("lease item should exist");
     assert_eq!(lease.purpose, "Fix auth validation behavior.");
+    assert_eq!(lease.evidence_kind, Some(CurrentEvidenceKind::LeaseOnly));
 
     let waiter = live
         .items
@@ -857,6 +863,7 @@ fn live_current_state_reports_active_items_with_purpose() {
         waiter.purpose,
         "Update the same auth file after the active lease clears."
     );
+    assert_eq!(waiter.evidence_kind, Some(CurrentEvidenceKind::WaitQueue));
 }
 
 #[test]
@@ -1292,6 +1299,32 @@ fn acquire_lease_requires_matching_active_intent() {
 
     assert!(matches!(error, StoreError::MissingIntent));
     assert_eq!(store.lease_count().expect("lease count should load"), 0);
+}
+
+#[test]
+fn acquire_lease_rejects_direct_tmp_resource_even_with_matching_intent() {
+    for path in ["tmp", "tmp/"] {
+        let store = Store::open_in_memory().expect("in-memory store should open");
+        store
+            .append(Event::intent_declared(
+                "s1",
+                "w1",
+                "Run test artifacts in a scoped tmp path.",
+                [path],
+            ))
+            .expect("tmp intent should append");
+
+        let error = store
+            .acquire_lease("s1", "w1", path)
+            .expect_err("direct tmp lease should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("direct tmp leases are not allowed"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(store.lease_count().expect("lease count should load"), 0);
+    }
 }
 
 #[test]

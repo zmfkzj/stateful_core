@@ -1,8 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use stateful_core::{
-    CurrentFreshness, CurrentItem, CurrentItemKind, CurrentSeverity, IntentScope, PolicyState,
-    normalize_relative_path,
+    CurrentEvidenceKind, CurrentFreshness, CurrentItem, CurrentItemKind, CurrentSeverity,
+    IntentScope, PolicyState, normalize_relative_path,
 };
 use std::path::Path;
 use std::time::Duration as StdDuration;
@@ -42,6 +42,10 @@ pub enum StoreError {
     LeaseOwnerMismatch,
     #[error("matching active intent is required")]
     MissingIntent,
+    #[error(
+        "invalid lease path `{0}`: direct tmp leases are not allowed; lease a file or subdirectory under tmp instead"
+    )]
+    InvalidLeasePath(String),
     #[error("purpose is required")]
     MissingPurpose,
     #[error("intent scope is required")]
@@ -515,6 +519,7 @@ impl Store {
                     .with_session(session_id.clone())
                     .with_workspace(workspace_id.clone())
                     .with_source_ref("IntentDeclared")
+                    .with_evidence_kind(CurrentEvidenceKind::DeclaredIntent)
                     .with_observed_at(declared_at.clone())
                     .with_expires_at(expires_at.clone()),
                 );
@@ -652,6 +657,7 @@ impl Store {
             ))
             .with_workspace(workspace_id.clone())
             .with_source_ref("LeaseAcquired")
+            .with_evidence_kind(CurrentEvidenceKind::LeaseOnly)
             .with_expires_at(expires_at);
             if let Some(session_id) = session_id {
                 item = item.with_session(session_id);
@@ -767,6 +773,11 @@ impl Store {
                     ),
                 )
             };
+            let evidence_kind = if status == "reserved" {
+                CurrentEvidenceKind::Reservation
+            } else {
+                CurrentEvidenceKind::WaitQueue
+            };
             let evidence = blocking_session_id.map(|blocking_session_id| {
                 format!("Blocked by session {blocking_session_id}; wait_id {wait_id}.")
             });
@@ -782,6 +793,7 @@ impl Store {
             .with_session(session_id)
             .with_workspace(workspace_id)
             .with_source_ref("IntentRequested")
+            .with_evidence_kind(evidence_kind)
             .with_observed_at(requested_at)
             .with_expires_at(reservation_expires_at);
             if let Some(evidence) = evidence {
@@ -1096,6 +1108,9 @@ impl Store {
             "write_file"
         };
         let relative_path = normalize_relative_path(requested_relative_path);
+        if direct_tmp_lease_path(&relative_path) {
+            return Err(StoreError::InvalidLeasePath(relative_path));
+        }
         let Some(purpose) = self.active_intent_purpose_for_lease(
             session_id,
             workspace_id,
@@ -3658,6 +3673,10 @@ fn intent_scope_is_empty(scope: &IntentScope) -> bool {
     match scope {
         IntentScope::File(path) | IntentScope::Directory(path) => path.trim().is_empty(),
     }
+}
+
+fn direct_tmp_lease_path(relative_path: &str) -> bool {
+    relative_path == "tmp"
 }
 
 fn required_purpose(purpose: &str) -> StoreResult<String> {
