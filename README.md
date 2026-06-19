@@ -260,14 +260,18 @@ stateful server status
 ```
 
 For manual CLI use outside the default Codex workflow, declare what you plan to
-edit and inspect the active current state. In `stateful codex`, lifecycle hooks
-bind the current Codex thread id as the Stateful session id by default. Outside
-hooks, pass session and workspace IDs explicitly.
+edit and inspect the active current state:
 
 ```bash
 stateful intent declare --purpose "Update README content requested by the user." README.md
 stateful current
 ```
+
+Inside an active Codex session, do not run `stateful intent declare` or
+`stateful mcp call` through the Bash tool. Use the Stateful MCP tools directly,
+such as `state_intent_declare` and `state_lease_acquire`; lifecycle hooks bind
+the current Codex thread id as the Stateful session id by default. Outside
+hooks, pass session and workspace IDs explicitly when using CLI commands.
 
 ```bash
 stateful intent declare --session-id demo --workspace-id <workspace> --purpose "Update README content requested by the user." README.md
@@ -279,17 +283,21 @@ Run tests normally from a plain checkout:
 cargo test --workspace
 ```
 
-Run tests in a stateful sandbox from inside an active `stateful codex` session
-and check local installation health. The sandbox runner reads the current
-session file created by lifecycle hooks, so declaring an arbitrary
-`--session-id` in a plain terminal is not enough for `--fs write-targets`.
+Run tests in a stateful sandbox from inside an active `stateful codex` session.
+The sandbox runner reads the current session file created by lifecycle hooks, so
+declaring an arbitrary `--session-id` in a plain terminal is not enough for
+`--fs write-targets`.
+
+First call `state_intent_declare` with `files_planned: ["tmp/test-run/"]`, then
+call `state_lease_acquire` with `path: "tmp/test-run/"`. After the directory
+lease succeeds, run:
 
 ```bash
-stateful intent declare --purpose "Run the workspace test suite." tmp/
-stateful mcp call state_lease_acquire '{"session_id":"<current-session>","workspace_id":"<workspace>","path":"tmp/"}'
-stateful sandbox run --fs build --network enabled --command 'cargo test --workspace'
-stateful doctor
+<absolute-stateful-binary> sandbox run --fs build --network enabled --write-dir tmp/test-run --command 'cargo test --workspace'
 ```
+
+Run `stateful doctor` from a plain terminal when you want to check local
+installation health.
 
 ## CLI Overview
 
@@ -336,15 +344,16 @@ stateful doctor
 - `stateful notifications poll` reads pending coordination notifications.
 - `stateful resume next` reads the next reservation available to the active
   session.
-- `stateful sandbox run --fs build --network enabled --command <cmd>` runs
-  build or test commands with artifact writes limited to `tmp/` after exact
-  directory intent and a successful same-session directory lease. The profile is
-  language-independent for filesystem access and sets `CARGO_TARGET_DIR` to
-  `tmp/target` for Cargo commands; configure other tool-specific build caches
-  to live under `tmp/` when they do not use standard temp variables.
-- `stateful sandbox run --fs write-targets --write-dir tmp --command <cmd>`
-  runs command-shaped artifact writes with writes limited to `tmp/` after exact
-  directory intent and a successful same-session directory lease.
+- `stateful sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command <cmd>`
+  runs build or test commands with artifact writes limited to a scoped tmp child
+  after exact directory intent and a successful same-session directory lease.
+  The profile is language-independent for filesystem access and sets
+  `CARGO_TARGET_DIR` to `tmp/<purpose>/target` for Cargo commands; configure
+  other tool-specific build caches to live under the same scoped tmp child when
+  they do not use standard temp variables.
+- `stateful sandbox run --fs write-targets --write-dir tmp/<purpose> --command <cmd>`
+  runs command-shaped artifact writes with writes limited to a scoped tmp child
+  after exact directory intent and a successful same-session directory lease.
 - `stateful sandbox run --fs git --network enabled --command 'git <args>'`
   runs a single git command with the repo worktree and Git internals writable
   inside the OS sandbox. The wrapper rejects shell-dispatching git options and
@@ -352,17 +361,25 @@ stateful doctor
   setters, `push -u`, and config-mutating `git remote` subcommands such as
   `add`, `set-url`, `rename`, and `remove`. Use `--network disabled` for
   local-only git operations.
+- `stateful sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`
+  runs a single non-interactive GitHub pull request command. Use this for PR
+  listing, viewing, PR status (`gh pr status`), and creation after git work has
+  been pushed. The profile manages transient PR state automatically and rejects
+  explicit write targets and write dirs. Use the GitHub connector instead when
+  that connector is explicitly allowlisted for the repo.
 - `stateful codex [--codex-bin <path>] [--sandbox passthrough|read-only-tmp] [--no-stateful] -- <args...>`
   runs Codex with pass-through session configuration by default.
   `--sandbox read-only-tmp` remains available as a Codex filesystem profile,
   not as a Bash authorization signal, and `--no-stateful` disables Codex
   lifecycle hooks for that run.
 - `stateful mcp serve` exposes the MCP adapter over stdio.
-- `stateful mcp call <tool> [arguments_json]` calls an MCP tool. Most tools map
-  to the local HTTP server. Stale `state_file_write` / `state.file.write` and
-  `state_bash_write` / `state.bash.write` calls are removed; use native Codex
-  edit tools such as `apply_patch` or Edit for file edits after exact intent
-  declaration and a successful same-session file lease, and use
+- `stateful mcp call <tool> [arguments_json]` calls an MCP tool from a plain
+  terminal. In Codex sessions, call the MCP tools directly instead of routing
+  through Bash. Most tools map to the local HTTP server. Stale
+  `state_file_write` / `state.file.write` and `state_bash_write` /
+  `state.bash.write` calls are removed; use native Codex edit tools such as
+  `apply_patch` or Edit for file edits after exact intent declaration and a
+  successful same-session file lease, and use
   `stateful sandbox run --fs write-targets ... --command ...` for
   command-shaped writes.
 - `stateful sync-outbox` replays pending local outbox records to the server.
@@ -455,21 +472,29 @@ command-shaped writes. Git operations use `--fs git`, which accepts a single
 and Git internals as the writable sandbox scope while filtering
 shell-dispatching options, branch upstream/tracking persistence, `git init`,
 `push -u`, and config-mutating `git remote` subcommands.
+GitHub pull request list/view/status/create commands use
+`<absolute-stateful-binary> sandbox run --fs github-pr --network enabled
+--command 'gh pr <list|view|status|create> ...'`; use the GitHub connector
+instead when that connector is explicitly allowlisted for the repo. The profile
+rejects explicit write targets and write dirs.
 
 Build and test commands should use
-`stateful sandbox run --fs build --network enabled --command <cmd>` after exact
-`tmp/` directory intent and a successful same-session directory lease. The build
-profile grants writable `tmp/`, standard temp variables, and `CARGO_TARGET_DIR`
-pointing at `tmp/target`; tools with other language-specific build directories
-should be configured to place those directories under `tmp/`.
+`stateful sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command <cmd>`
+after exact scoped directory intent and a successful same-session directory
+lease. The build profile grants writable access to that scoped tmp child, sets
+standard temp variables under `tmp/<purpose>/.stateful-tmp`, and points
+`CARGO_TARGET_DIR` at `tmp/<purpose>/target`; tools with other language-specific
+build directories should be configured to place those directories under the same
+scoped tmp child.
 
 Other command-shaped writes should use
 `stateful sandbox run --fs write-targets --write-target <path> ... --command <cmd>`,
 optionally with `--create-target` for files that should be pre-created before
 sandboxing. Artifact-producing commands that are not build/test commands should
-declare a directory intent such as `tmp/`, acquire the same-session directory
-lease, and use `--write-dir tmp`. Inside a Bash hook tool call, the
-outer executable must be the trusted absolute binary path from the hook
+declare a scoped directory intent such as `tmp/reports/`, acquire the
+same-session directory lease, and use `--write-dir tmp/reports`. Inside a Bash
+hook tool call, the outer executable must be the trusted absolute binary path
+from the hook
 configuration, for example `<absolute-stateful-binary> sandbox run --fs
 write-targets ... --command <cmd>`. The wrapper authorizes `--write-target` and
 `--create-target` entries with `/v1/authorize` as `write_file`, and authorizes
@@ -540,7 +565,11 @@ successful same-session file lease, and use
 writes. Use `stateful sandbox run --fs git ... --command 'git <args>'` for git
 operations; config-mutating `git remote` commands such as `remote add` and
 `remote set-url`, `git init`, branch upstream/tracking setters, and `push -u`
-are rejected by the git profile.
+are rejected by the git profile. Use
+`stateful sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`
+for GitHub pull request listing, viewing, PR status (`gh pr status`), and
+creation, or the GitHub connector when it is explicitly allowlisted for the
+repo. The profile rejects explicit write targets and write dirs.
 
 The `/v1/authorize` endpoint and the intent declare/request/claim/cancel
 endpoints require the `stateful.v1` request envelope with `payload`. Flat
@@ -555,13 +584,13 @@ payloads also reject empty or normalized-empty `path` with `missing_scope`.
 ## Sandboxed Tests
 
 Raw Bash test commands are denied by hooks. Use the trusted `stateful sandbox
-run` wrapper after exact `tmp/` directory intent and a successful same-session
-directory lease before commands that write build output:
+run` wrapper after exact scoped tmp directory intent and a successful
+same-session directory lease before commands that write build output. In Codex
+sessions, call `state_intent_declare` and `state_lease_acquire` as MCP tools
+directly before invoking Bash:
 
 ```bash
-stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." tmp/
-stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"tmp/"}'
-stateful sandbox run --fs build --network enabled --command 'cargo test --workspace'
+<absolute-stateful-binary> sandbox run --fs build --network enabled --write-dir tmp/test-run --command 'cargo test --workspace'
 ```
 
 Use `--network enabled` when tests bind or connect loopback sockets. The build
@@ -780,6 +809,46 @@ Run formatting and lint checks:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+## Versioning And Releases
+
+PR titles are the release input. Keep squash merge enabled and set GitHub's
+squash commit message default to the PR title, so the commit that lands on
+`main` is the same Conventional Commit title reviewed on the PR.
+
+Use these PR title forms:
+
+```text
+fix(hook): reject stateful coordination through Bash
+feat(cli): add sandboxed git status support
+feat(mcp)!: rename the lease acquisition method
+docs: clarify sandbox write targets
+chore: update release automation
+```
+
+Release Please reads the merged commits on `main`, opens or updates a release
+PR, and updates crate versions and `CHANGELOG.md` when that release PR is
+merged. The configured release rules are:
+
+- `fix:` creates a patch release.
+- `feat:` normally creates a minor release, but while the project is `0.x`, it
+  creates a patch release.
+- `!` or a `BREAKING CHANGE:` footer normally creates a major release, but
+  while the project is `0.x`, it creates the next minor release.
+- `docs:`, `test:`, `ci:`, `build:`, `chore:`, and `refactor:` are allowed PR
+  titles but do not create a version bump unless they are marked breaking.
+
+The release configuration uses manifest-driven `release-please` with the Rust
+`cargo-workspace` plugin and a linked version group for the public crates:
+`stateful-core`, `stateful-store`, `stateful-server`, `stateful-cli`, and
+`stateful-mcp`. The benchmark crate is `publish = false` and is not a release
+component.
+
+The release workflow uses `GITHUB_TOKEN` by default. Configure a repository
+secret named `RELEASE_PLEASE_TOKEN` with a suitable personal access token when
+release-please-created PRs or tags need to trigger other GitHub Actions
+workflows. Repository settings must also allow GitHub Actions to create pull
+requests.
 
 ## Documentation
 

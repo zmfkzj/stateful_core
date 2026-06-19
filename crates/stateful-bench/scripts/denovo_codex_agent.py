@@ -50,6 +50,30 @@ DIFF_EXCLUDED_PATHS = (
     ".stateful/**",
     ".stateful_core",
     ".stateful_core/**",
+    ".stateful-tmp",
+    ".stateful-tmp/**",
+    "**/.stateful-tmp",
+    "**/.stateful-tmp/**",
+    "tmp",
+    "tmp/**",
+    ".cache",
+    ".cache/**",
+    ".pytest_cache",
+    ".pytest_cache/**",
+    ".ruff_cache",
+    ".ruff_cache/**",
+    ".mypy_cache",
+    ".mypy_cache/**",
+    "__pycache__",
+    "__pycache__/**",
+    "**/__pycache__",
+    "**/__pycache__/**",
+    ".coverage",
+    "coverage.xml",
+    "htmlcov",
+    "htmlcov/**",
+    "target",
+    "target/**",
     "clean.sh",
 )
 
@@ -1000,6 +1024,12 @@ def should_run_codex(args: argparse.Namespace) -> bool:
     return not args.validate_run
 
 
+def stateful_runtime_env_error(env: dict[str, str]) -> str | None:
+    if env.get("STATEFUL_SERVER_URL") and env.get("STATEFUL_SERVER_TOKEN"):
+        return None
+    return "stateful Codex benchmark requires STATEFUL_SERVER_URL and STATEFUL_SERVER_TOKEN"
+
+
 def max_concurrent_error_result(args: argparse.Namespace) -> InstanceResult | None:
     if args.max_concurrent is None or args.max_concurrent <= 1:
         return None
@@ -1164,6 +1194,17 @@ async def run_one_instance_async(
         )
         codex_env = env
         codex_home = Path(env["CODEX_HOME"])
+        if args.agent_mode == "stateful":
+            runtime_env_error = stateful_runtime_env_error(env)
+            if runtime_env_error is not None:
+                return InstanceResult(
+                    inst.id,
+                    False,
+                    None,
+                    "setup-error",
+                    runtime_env_error,
+                    None,
+                )
         seeded_auth = prepare_codex_environment(
             env,
             source_env=source_env,

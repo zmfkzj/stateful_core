@@ -197,7 +197,11 @@ Read-only command-shaped inspection uses `<absolute-stateful-binary> sandbox run
 --fs read-only --network disabled --command <cmd>`; the read-only profile rejects
 `--network enabled`. Command-shaped writes use
 `--fs write-targets` with explicit `--write-target` / `--create-target` values
-and target authorization.
+and target authorization. Git operations use `--fs git` for one `git ...`
+command. GitHub pull request list/view/status/create commands use
+`<absolute-stateful-binary> sandbox run --fs github-pr --network enabled
+--command 'gh pr <list|view|status|create> ...'`; use the GitHub connector
+instead when that connector is explicitly allowlisted for the repo.
 
 ## Decision Output
 
@@ -486,7 +490,7 @@ stateful status
 stateful current
 stateful events
 stateful doctor
-stateful sandbox run --fs read-only|write-targets ...
+stateful sandbox run --fs read-only|write-targets|build|git|github-pr ...
 stateful intent declare [--session-id <id>] [--workspace-id <id>] --purpose <purpose> <paths...>
 stateful notifications poll [--session-id <id>] [--workspace-id <id>]
 stateful resume next [--session-id <id>] [--workspace-id <id>]

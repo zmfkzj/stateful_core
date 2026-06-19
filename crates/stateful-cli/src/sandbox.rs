@@ -42,6 +42,7 @@ pub enum SandboxFsProfile {
     WriteTargets,
     Build,
     Git,
+    GithubPr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, ValueEnum)]
@@ -83,11 +84,17 @@ pub(crate) struct SandboxProcessFindBashInvocation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ValidatedSandboxDirectCommand {
+    Git(Vec<String>),
+    GithubPr(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidatedSandboxRunShape {
     pub(crate) write_targets: Vec<String>,
     pub(crate) create_targets: Vec<String>,
     pub(crate) write_dirs: Vec<String>,
-    pub(crate) git_command_words: Option<Vec<String>>,
+    pub(crate) direct_command: Option<ValidatedSandboxDirectCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -216,7 +223,7 @@ pub fn run_sandbox_in_repo(
     let write_targets = shape.write_targets;
     let create_targets = shape.create_targets;
     let write_dirs = shape.write_dirs;
-    let git_command_words = shape.git_command_words;
+    let direct_command = shape.direct_command;
     if request.fs == SandboxFsProfile::Build {
         shadow_guard::audit_dependency_shadowing(&repo_root)?;
     } else if request.fs == SandboxFsProfile::WriteTargets {
@@ -365,24 +372,43 @@ pub fn run_sandbox_in_repo(
                 .push(sandbox_write_dir_display_path(&repo_root.to_string_lossy()));
             prepare_git_profile_writable_paths(&repo_root)?
         }
+        SandboxFsProfile::GithubPr => {
+            allowed_write_targets.push(sandbox_write_dir_display_path(
+                &github_pr_profile_private_dir(&repo_root).to_string_lossy(),
+            ));
+            prepare_github_pr_profile_writable_paths(&repo_root)?
+        }
     };
 
     let cwd = resolve_sandbox_cwd(&repo_root)?;
     let timeout = Duration::from_secs(request.timeout_seconds.unwrap_or(300).max(1));
-    let result = if let Some(words) = git_command_words.as_deref() {
-        let temp_dir = sandbox_temp_dir(&writable_paths)
-            .ok_or_else(|| anyhow::anyhow!("git profile requires a temp directory"))?;
-        run_sandboxed_git_command(
-            words,
-            &cwd,
-            &writable_paths,
-            &temp_dir,
-            &git_profile_hooks_dir(&repo_root),
-            request.network,
-            timeout,
-        )?
-    } else {
-        run_sandboxed_command(
+    let result = match direct_command.as_ref() {
+        Some(ValidatedSandboxDirectCommand::Git(words)) => {
+            let temp_dir = sandbox_temp_dir(&writable_paths)
+                .ok_or_else(|| anyhow::anyhow!("git profile requires a temp directory"))?;
+            run_sandboxed_git_command(
+                words,
+                &cwd,
+                &writable_paths,
+                &temp_dir,
+                &git_profile_hooks_dir(&repo_root),
+                request.network,
+                timeout,
+            )?
+        }
+        Some(ValidatedSandboxDirectCommand::GithubPr(words)) => {
+            let temp_dir = sandbox_temp_dir(&writable_paths)
+                .ok_or_else(|| anyhow::anyhow!("github-pr profile requires a temp directory"))?;
+            run_sandboxed_github_pr_command(
+                words,
+                &cwd,
+                &writable_paths,
+                &temp_dir,
+                request.network,
+                timeout,
+            )?
+        }
+        None => run_sandboxed_command(
             &request.command,
             &cwd,
             &writable_paths,
@@ -390,7 +416,7 @@ pub fn run_sandbox_in_repo(
             false,
             request.network,
             timeout,
-        )?
+        )?,
     };
 
     Ok(SandboxRunOutput {
@@ -594,17 +620,23 @@ pub(crate) fn validate_sandbox_run_request_shape(
     validate_profile_network_policy(request.fs, request.network)?;
     validate_profile_targets(request.fs, &write_targets, &create_targets, &write_dirs)?;
     validate_sandbox_run_process_inspection(&request.command)?;
-    let git_command_words = if request.fs == SandboxFsProfile::Git {
-        Some(validate_git_profile_command(&request.command)?)
-    } else {
-        None
+    let direct_command = match request.fs {
+        SandboxFsProfile::Git => Some(ValidatedSandboxDirectCommand::Git(
+            validate_git_profile_command(&request.command)?,
+        )),
+        SandboxFsProfile::GithubPr => Some(ValidatedSandboxDirectCommand::GithubPr(
+            validate_github_pr_profile_command(&request.command)?,
+        )),
+        SandboxFsProfile::ReadOnly | SandboxFsProfile::WriteTargets | SandboxFsProfile::Build => {
+            None
+        }
     };
 
     Ok(ValidatedSandboxRunShape {
         write_targets,
         create_targets,
         write_dirs,
-        git_command_words,
+        direct_command,
     })
 }
 
@@ -674,8 +706,9 @@ fn parse_sandbox_fs_profile(value: &str) -> Result<SandboxFsProfile, String> {
         "write-targets" => Ok(SandboxFsProfile::WriteTargets),
         "build" => Ok(SandboxFsProfile::Build),
         "git" => Ok(SandboxFsProfile::Git),
+        "github-pr" => Ok(SandboxFsProfile::GithubPr),
         _ => Err(
-            "stateful sandbox run supports only read-only, write-targets, build, and git profiles"
+            "stateful sandbox run supports only read-only, write-targets, build, git, and github-pr profiles"
                 .to_string(),
         ),
     }
@@ -852,6 +885,43 @@ fn run_sandboxed_git_command(
     }
 }
 
+fn run_sandboxed_github_pr_command(
+    words: &[String],
+    cwd: &Path,
+    writable_paths: &[SandboxWritablePath],
+    temp_dir: &Path,
+    network: SandboxNetworkPolicy,
+    timeout: Duration,
+) -> anyhow::Result<SandboxCommandResult> {
+    if allow_direct_nested_sandbox_run() {
+        let mut command = direct_github_pr_command(words, cwd);
+        apply_github_pr_profile_env(&mut command, temp_dir);
+        return run_command_with_timeout(command, timeout);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        run_command_with_timeout(
+            seatbelt_github_pr_command(words, cwd, writable_paths, temp_dir, network),
+            timeout,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        run_command_with_timeout(
+            bubblewrap_github_pr_command(words, cwd, writable_paths, temp_dir, network),
+            timeout,
+        )
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (words, cwd, writable_paths, temp_dir, network, timeout);
+        anyhow::bail!("stateful sandbox run is only supported on macOS and Linux");
+    }
+}
+
 fn allow_direct_nested_sandbox_run() -> bool {
     std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some()
         && matches!(
@@ -870,6 +940,12 @@ fn direct_shell_command(command: &str, cwd: &Path) -> Command {
 
 fn direct_git_command(words: &[String], cwd: &Path) -> Command {
     let mut direct = Command::new("git");
+    direct.args(&words[1..]).current_dir(cwd);
+    direct
+}
+
+fn direct_github_pr_command(words: &[String], cwd: &Path) -> Command {
+    let mut direct = Command::new("gh");
     direct.args(&words[1..]).current_dir(cwd);
     direct
 }
@@ -1316,6 +1392,13 @@ fn validate_profile_targets(
                 );
             }
         }
+        SandboxFsProfile::GithubPr => {
+            if !write_targets.is_empty() || !create_targets.is_empty() || !write_dirs.is_empty() {
+                anyhow::bail!(
+                    "github-pr profile manages transient PR state automatically and rejects explicit write targets, create targets, and write dirs"
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1326,6 +1409,9 @@ fn validate_profile_network_policy(
 ) -> anyhow::Result<()> {
     if fs == SandboxFsProfile::ReadOnly && network == SandboxNetworkPolicy::Enabled {
         anyhow::bail!("read-only sandbox run requires --network disabled");
+    }
+    if fs == SandboxFsProfile::GithubPr && network != SandboxNetworkPolicy::Enabled {
+        anyhow::bail!("github-pr sandbox run requires --network enabled");
     }
 
     Ok(())
@@ -1920,6 +2006,7 @@ fn sandbox_fs_profile_name(fs: SandboxFsProfile) -> &'static str {
         SandboxFsProfile::WriteTargets => "write-targets",
         SandboxFsProfile::Build => "build",
         SandboxFsProfile::Git => "git",
+        SandboxFsProfile::GithubPr => "github-pr",
     }
 }
 
@@ -1942,6 +2029,31 @@ fn prepare_git_profile_writable_paths(
         .ok_or_else(|| anyhow::anyhow!("git profile requires a temp directory"))?;
     fs::create_dir_all(&temp_dir)?;
     fs::create_dir_all(git_profile_hooks_dir(repo_root))?;
+    Ok(writable_paths)
+}
+
+fn github_pr_profile_private_dir(repo_root: &Path) -> PathBuf {
+    let dot_git = repo_root.join(".git");
+    if dot_git.is_dir() || !dot_git.exists() {
+        dot_git.join("stateful").join("github-pr")
+    } else {
+        repo_root.join(".stateful-git").join("github-pr")
+    }
+}
+
+fn github_pr_profile_writable_paths(repo_root: &Path) -> Vec<SandboxWritablePath> {
+    vec![SandboxWritablePath::directory(
+        github_pr_profile_private_dir(repo_root),
+    )]
+}
+
+fn prepare_github_pr_profile_writable_paths(
+    repo_root: &Path,
+) -> anyhow::Result<Vec<SandboxWritablePath>> {
+    let writable_paths = github_pr_profile_writable_paths(repo_root);
+    let temp_dir = sandbox_temp_dir(&writable_paths)
+        .ok_or_else(|| anyhow::anyhow!("github-pr profile requires a temp directory"))?;
+    fs::create_dir_all(&temp_dir)?;
     Ok(writable_paths)
 }
 
@@ -1983,8 +2095,23 @@ fn validate_git_profile_command(command: &str) -> anyhow::Result<Vec<String>> {
         .map_err(|reason| anyhow::anyhow!("git profile requires a single git command: {reason}"))
 }
 
+fn validate_github_pr_profile_command(command: &str) -> anyhow::Result<Vec<String>> {
+    parse_github_pr_profile_command(command).map_err(|reason| {
+        anyhow::anyhow!("github-pr profile requires a single gh pr command: {reason}")
+    })
+}
+
+pub(crate) fn parse_github_pr_profile_command(command: &str) -> Result<Vec<String>, String> {
+    reject_direct_profile_shell_syntax(command)
+        .map_err(|reason| format!("github-pr profile requires a single gh pr command: {reason}"))?;
+    let words = split_git_profile_command_words(command)
+        .map_err(|reason| format!("github-pr profile requires a single gh pr command: {reason}"))?;
+    validate_github_pr_profile_words(&words)?;
+    Ok(words)
+}
+
 pub(crate) fn parse_git_profile_command(command: &str) -> Result<Vec<String>, String> {
-    reject_git_profile_shell_syntax(command)
+    reject_direct_profile_shell_syntax(command)
         .map_err(|reason| format!("git profile requires a single git command: {reason}"))?;
     let words = split_git_profile_command_words(command)
         .map_err(|reason| format!("git profile requires a single git command: {reason}"))?;
@@ -1993,6 +2120,45 @@ pub(crate) fn parse_git_profile_command(command: &str) -> Result<Vec<String>, St
     }
     validate_git_profile_words(&words)?;
     Ok(words)
+}
+
+fn validate_github_pr_profile_words(words: &[String]) -> Result<(), String> {
+    if words.len() < 3 || words[0] != "gh" || words[1] != "pr" {
+        return Err("github-pr profile requires a single gh pr command".to_string());
+    }
+
+    let subcommand = words[2].as_str();
+    if !GITHUB_PR_PROFILE_ALLOWED_SUBCOMMANDS.contains(&subcommand) {
+        return Err(format!(
+            "github-pr profile does not allow gh pr subcommand `{subcommand}`"
+        ));
+    }
+
+    for word in &words[3..] {
+        if let Some(flag) = github_pr_profile_denied_flag(word) {
+            return Err(format!(
+                "github-pr profile does not allow interactive/browser flag `{flag}`"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn github_pr_profile_denied_flag(word: &str) -> Option<String> {
+    let flag = word.split_once('=').map_or(word, |(flag, _)| flag);
+    if GITHUB_PR_PROFILE_DENIED_FLAGS.contains(&flag) {
+        return Some(flag.to_string());
+    }
+    if flag.starts_with("--") {
+        return None;
+    }
+
+    flag.strip_prefix('-')?.chars().find_map(|short| {
+        GITHUB_PR_PROFILE_DENIED_SHORT_FLAGS
+            .contains(&short)
+            .then(|| format!("-{short}"))
+    })
 }
 
 fn validate_git_profile_words(words: &[String]) -> Result<(), String> {
@@ -2204,7 +2370,11 @@ const GIT_PROFILE_ALLOWED_SUBCOMMANDS: &[&str] = &[
     "tag",
 ];
 
-fn reject_git_profile_shell_syntax(command: &str) -> Result<(), String> {
+const GITHUB_PR_PROFILE_ALLOWED_SUBCOMMANDS: &[&str] = &["create", "list", "status", "view"];
+const GITHUB_PR_PROFILE_DENIED_FLAGS: &[&str] = &["--editor", "--recover", "--web"];
+const GITHUB_PR_PROFILE_DENIED_SHORT_FLAGS: &[char] = &['w', 'e'];
+
+fn reject_direct_profile_shell_syntax(command: &str) -> Result<(), String> {
     let mut state = ShellQuoteState::None;
     let mut chars = command.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -2506,6 +2676,26 @@ fn seatbelt_git_command(
     sandbox
 }
 
+#[cfg(target_os = "macos")]
+fn seatbelt_github_pr_command(
+    words: &[String],
+    cwd: &Path,
+    writable_paths: &[SandboxWritablePath],
+    temp_dir: &Path,
+    network: SandboxNetworkPolicy,
+) -> Command {
+    let profile = seatbelt_profile(writable_paths, network);
+    let mut sandbox = Command::new("/usr/bin/sandbox-exec");
+    sandbox
+        .arg("-p")
+        .arg(profile)
+        .arg("gh")
+        .args(&words[1..])
+        .current_dir(cwd);
+    apply_github_pr_profile_env(&mut sandbox, temp_dir);
+    sandbox
+}
+
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn seatbelt_git_profile(
     writable_paths: &[SandboxWritablePath],
@@ -2638,6 +2828,24 @@ fn bubblewrap_git_command(
     let mut bwrap = Command::new("bwrap");
     bwrap.args(bubblewrap_git_args(words, cwd, writable_paths, network));
     apply_git_profile_env(&mut bwrap, temp_dir, hooks_dir, config);
+    bwrap
+}
+
+#[cfg(target_os = "linux")]
+fn bubblewrap_github_pr_command(
+    words: &[String],
+    cwd: &Path,
+    writable_paths: &[SandboxWritablePath],
+    temp_dir: &Path,
+    network: SandboxNetworkPolicy,
+) -> Command {
+    let mut bwrap = Command::new("bwrap");
+    let mut args = bubblewrap_base_args(cwd, writable_paths, network);
+    args.push(OsString::from("--"));
+    args.push(OsString::from("gh"));
+    args.extend(words.iter().skip(1).map(OsString::from));
+    bwrap.args(args);
+    apply_github_pr_profile_env(&mut bwrap, temp_dir);
     bwrap
 }
 
@@ -2858,6 +3066,31 @@ fn apply_git_profile_env(
             .env(format!("GIT_CONFIG_KEY_{index}"), key)
             .env(format!("GIT_CONFIG_VALUE_{index}"), value);
     }
+}
+
+fn apply_github_pr_profile_env(command: &mut Command, temp_dir: &Path) {
+    apply_sandbox_temp_env(command, Some(temp_dir));
+    remove_git_profile_env(command);
+    for key in [
+        "GH_PAGER",
+        "GH_EDITOR",
+        "VISUAL",
+        "EDITOR",
+        "GH_BROWSER",
+        "BROWSER",
+        "GH_FORCE_TTY",
+    ] {
+        command.env_remove(key);
+    }
+    command
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_NO_UPDATE_NOTIFIER", "1")
+        .env("GH_NO_EXTENSION_UPDATE_NOTIFIER", "1")
+        .env("GH_SPINNER_DISABLED", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", ":")
+        .env("GIT_PAGER", "cat")
+        .env("PAGER", "cat");
 }
 
 pub(crate) fn run_command_with_timeout(
@@ -3505,6 +3738,43 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bubblewrap_github_pr_profile_invokes_gh_by_argv() {
+        let writable_paths = github_pr_profile_writable_paths(Path::new("/repo"));
+        let words = vec![
+            "gh".to_string(),
+            "pr".to_string(),
+            "view".to_string(),
+            "123".to_string(),
+        ];
+        let command = bubblewrap_github_pr_command(
+            &words,
+            Path::new("/repo"),
+            &writable_paths,
+            Path::new("/repo/.git/stateful/github-pr/.stateful-tmp"),
+            SandboxNetworkPolicy::Enabled,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(command.get_program(), "bwrap");
+        assert!(args.ends_with(&[
+            "--".to_string(),
+            "gh".to_string(),
+            "pr".to_string(),
+            "view".to_string(),
+            "123".to_string(),
+        ]));
+        assert!(
+            !args
+                .windows(2)
+                .any(|window| { window == ["/bin/sh", "-c"] })
+        );
+    }
+
     #[test]
     fn bubblewrap_git_profile_rebinds_persistent_git_metadata_read_only() {
         let repo_root = std::env::temp_dir().join(format!(
@@ -3918,6 +4188,159 @@ mod tests {
     }
 
     #[test]
+    fn github_pr_profile_requires_network_enabled() {
+        let error = validate_profile_network_policy(
+            SandboxFsProfile::GithubPr,
+            SandboxNetworkPolicy::Disabled,
+        )
+        .expect_err("github-pr profile should require network enabled");
+
+        assert!(
+            error
+                .to_string()
+                .contains("github-pr sandbox run requires --network enabled"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn github_pr_profile_rejects_explicit_write_targets() {
+        let error = validate_profile_targets(
+            SandboxFsProfile::GithubPr,
+            &["README.md".to_string()],
+            &[],
+            &[],
+        )
+        .expect_err("github-pr profile should reject explicit targets");
+
+        assert!(
+            error
+                .to_string()
+                .contains("github-pr profile manages transient PR state automatically"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn github_pr_profile_writable_paths_are_private() {
+        assert_eq!(
+            github_pr_profile_writable_paths(Path::new("/repo")),
+            vec![SandboxWritablePath::directory(PathBuf::from(
+                "/repo/.git/stateful/github-pr"
+            ))]
+        );
+    }
+
+    #[test]
+    fn github_pr_profile_writable_paths_use_stateful_git_for_linked_worktrees() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "stateful-github-pr-linked-worktree-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&repo_root);
+        fs::create_dir_all(&repo_root).expect("temp repo root should be created");
+        fs::write(
+            repo_root.join(".git"),
+            "gitdir: ../main/.git/worktrees/linked\n",
+        )
+        .expect(".git file should be writable");
+
+        assert_eq!(
+            github_pr_profile_writable_paths(&repo_root),
+            vec![SandboxWritablePath::directory(
+                repo_root.join(".stateful-git/github-pr")
+            )]
+        );
+
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn github_pr_profile_env_is_non_interactive_and_clears_launcher_overrides() {
+        let mut command = Command::new("gh");
+        command
+            .env("GH_PAGER", "sh -c nope")
+            .env("GH_EDITOR", "sh -c nope")
+            .env("VISUAL", "sh -c nope")
+            .env("EDITOR", "sh -c nope")
+            .env("GH_BROWSER", "sh -c nope")
+            .env("BROWSER", "sh -c nope")
+            .env("GH_FORCE_TTY", "1");
+        apply_github_pr_profile_env(
+            &mut command,
+            Path::new("/repo/.git/stateful/github-pr/.stateful-tmp"),
+        );
+        let envs = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(envs.get("GH_PROMPT_DISABLED"), Some(&"1".to_string()));
+        assert_eq!(envs.get("GH_NO_UPDATE_NOTIFIER"), Some(&"1".to_string()));
+        assert_eq!(
+            envs.get("GH_NO_EXTENSION_UPDATE_NOTIFIER"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(envs.get("GH_SPINNER_DISABLED"), Some(&"1".to_string()));
+        assert_eq!(envs.get("GIT_TERMINAL_PROMPT"), Some(&"0".to_string()));
+        assert_eq!(envs.get("GIT_EDITOR"), Some(&":".to_string()));
+        assert_eq!(envs.get("GIT_PAGER"), Some(&"cat".to_string()));
+        assert_eq!(envs.get("PAGER"), Some(&"cat".to_string()));
+        for key in [
+            "GH_PAGER",
+            "GH_EDITOR",
+            "VISUAL",
+            "EDITOR",
+            "GH_BROWSER",
+            "BROWSER",
+            "GH_FORCE_TTY",
+        ] {
+            assert!(!envs.contains_key(key), "{key} should not be inherited");
+        }
+    }
+
+    #[test]
+    fn direct_github_pr_command_invokes_gh_by_argv() {
+        let words = vec![
+            "gh".to_string(),
+            "pr".to_string(),
+            "view".to_string(),
+            "123".to_string(),
+            "--json".to_string(),
+            "title,url".to_string(),
+        ];
+        let command = direct_github_pr_command(&words, Path::new("/repo"));
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(command.get_program(), "gh");
+        assert_eq!(
+            args,
+            vec![
+                "pr".to_string(),
+                "view".to_string(),
+                "123".to_string(),
+                "--json".to_string(),
+                "title,url".to_string(),
+            ]
+        );
+        assert!(
+            !args
+                .windows(2)
+                .any(|window| { window == ["/bin/sh", "-c"] })
+        );
+    }
+
+    #[test]
     fn git_profile_env_disables_implicit_branch_tracking_config() {
         let mut command = Command::new("git");
         apply_git_profile_env(
@@ -4270,12 +4693,133 @@ mod tests {
     }
 
     #[test]
+    fn github_pr_profile_command_validation_accepts_allowed_pr_surface() {
+        for command in [
+            "gh pr list",
+            "gh pr view 123 --json title,url",
+            "gh pr status",
+            "gh pr create --title 'Update policy' --body 'Adds github-pr profile' --base dev --head feature --draft",
+        ] {
+            parse_github_pr_profile_command(command)
+                .unwrap_or_else(|error| panic!("expected `{command}` to be accepted: {error}"));
+        }
+    }
+
+    #[test]
+    fn github_pr_profile_command_validation_rejects_non_pr_and_interactive_surfaces() {
+        for (command, expected) in [
+            ("gh api repos/owner/repo", "requires a single gh pr command"),
+            ("gh auth status", "requires a single gh pr command"),
+            ("gh pr merge 123", "does not allow gh pr subcommand `merge`"),
+            ("gh pr close 123", "does not allow gh pr subcommand `close`"),
+            ("gh pr edit 123", "does not allow gh pr subcommand `edit`"),
+            (
+                "gh pr review 123",
+                "does not allow gh pr subcommand `review`",
+            ),
+            (
+                "gh pr checks 123",
+                "does not allow gh pr subcommand `checks`",
+            ),
+            ("gh pr ready 123", "does not allow gh pr subcommand `ready`"),
+            (
+                "gh pr create --web",
+                "does not allow interactive/browser flag `--web`",
+            ),
+            (
+                "gh pr view --web=true",
+                "does not allow interactive/browser flag `--web`",
+            ),
+            (
+                "gh pr create --editor",
+                "does not allow interactive/browser flag `--editor`",
+            ),
+            (
+                "gh pr create --editor=true",
+                "does not allow interactive/browser flag `--editor`",
+            ),
+            (
+                "gh pr create --recover abc",
+                "does not allow interactive/browser flag `--recover`",
+            ),
+            (
+                "gh pr create --recover=abc",
+                "does not allow interactive/browser flag `--recover`",
+            ),
+            (
+                "gh pr view -w",
+                "does not allow interactive/browser flag `-w`",
+            ),
+            (
+                "gh pr create -e",
+                "does not allow interactive/browser flag `-e`",
+            ),
+            (
+                "gh pr create -we",
+                "does not allow interactive/browser flag `-w`",
+            ),
+            (
+                "gh pr create -ew",
+                "does not allow interactive/browser flag `-e`",
+            ),
+            ("gh pr list | cat", "shell control syntax is not supported"),
+            (
+                "gh pr view $(echo 1)",
+                "command substitution is not supported",
+            ),
+        ] {
+            let error = parse_github_pr_profile_command(command)
+                .expect_err("github-pr profile should reject unsafe command");
+            assert!(
+                error.contains(expected),
+                "for `{command}`, expected `{expected}`, got `{error}`"
+            );
+        }
+    }
+
+    #[test]
     fn git_profile_temp_dir_uses_private_git_dir() {
         let writable_paths = git_profile_writable_paths(Path::new("/repo"));
 
         assert_eq!(
             sandbox_temp_dir(&writable_paths),
             Some(PathBuf::from("/repo/.git/stateful/.stateful-tmp"))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_github_pr_profile_invokes_gh_by_argv() {
+        let writable_paths = github_pr_profile_writable_paths(Path::new("/repo"));
+        let words = vec![
+            "gh".to_string(),
+            "pr".to_string(),
+            "view".to_string(),
+            "123".to_string(),
+        ];
+        let command = seatbelt_github_pr_command(
+            &words,
+            Path::new("/repo"),
+            &writable_paths,
+            Path::new("/repo/.git/stateful/github-pr/.stateful-tmp"),
+            SandboxNetworkPolicy::Enabled,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(command.get_program(), "/usr/bin/sandbox-exec");
+        assert!(args.ends_with(&[
+            "gh".to_string(),
+            "pr".to_string(),
+            "view".to_string(),
+            "123".to_string(),
+        ]));
+        assert!(
+            !args
+                .windows(2)
+                .any(|window| { window == ["/bin/sh", "-c"] })
         );
     }
 

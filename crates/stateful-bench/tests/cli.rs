@@ -1016,6 +1016,21 @@ subprocess.run(["git", "commit", "-m", "initial"], cwd=workspace, check=True, st
 (workspace / ".stateful" / "config.yml").write_text("policy\n", encoding="utf-8")
 (workspace / ".codex").mkdir(parents=True, exist_ok=True)
 (workspace / ".codex" / "trace.json").write_text("{{}}\n", encoding="utf-8")
+(workspace / "tmp" / "verify-supervisor" / ".stateful-tmp").mkdir(parents=True, exist_ok=True)
+(workspace / "tmp" / "verify-supervisor" / ".stateful-tmp" / "xcrun_db").write_text("cache\n", encoding="utf-8")
+(workspace / ".stateful-tmp").mkdir(parents=True, exist_ok=True)
+(workspace / ".stateful-tmp" / "xcrun_db").write_text("cache\n", encoding="utf-8")
+(workspace / ".pytest_cache" / "v" / "cache").mkdir(parents=True, exist_ok=True)
+(workspace / ".pytest_cache" / "v" / "cache" / "nodeids").write_text("[]\n", encoding="utf-8")
+(workspace / ".ruff_cache" / "content").mkdir(parents=True, exist_ok=True)
+(workspace / ".ruff_cache" / "content" / "cache").write_text("cache\n", encoding="utf-8")
+(workspace / ".mypy_cache" / "3.11").mkdir(parents=True, exist_ok=True)
+(workspace / ".mypy_cache" / "3.11" / "module.json").write_text("{{}}\n", encoding="utf-8")
+(workspace / "package" / "__pycache__").mkdir(parents=True, exist_ok=True)
+(workspace / "package" / "__pycache__" / "module.cpython-311.pyc").write_text("bytecode\n", encoding="utf-8")
+(workspace / ".coverage").write_text("coverage\n", encoding="utf-8")
+(workspace / "target" / "debug").mkdir(parents=True, exist_ok=True)
+(workspace / "target" / "debug" / "artifact").write_text("build artifact\n", encoding="utf-8")
 (workspace / "clean.sh").unlink()
 
 patch = mod.git_diff(workspace)
@@ -1024,6 +1039,14 @@ assert "diff --git a/tracked.txt b/tracked.txt" in patch
 assert ".stateful_core" not in patch
 assert ".stateful/" not in patch
 assert ".codex/" not in patch
+assert "tmp/verify-supervisor" not in patch
+assert ".stateful-tmp" not in patch
+assert ".pytest_cache" not in patch
+assert ".ruff_cache" not in patch
+assert ".mypy_cache" not in patch
+assert "__pycache__" not in patch
+assert ".coverage" not in patch
+assert "target/debug/artifact" not in patch
 assert "diff --git a/clean.sh b/clean.sh" not in patch
 print(json.dumps({{"patch": patch}}))
 "#,
@@ -1455,6 +1478,245 @@ print(json.dumps({{
     assert_eq!(output["stateful_server_token"], "token-123");
     assert_eq!(output["stateful_skill_exists"], true);
     assert_eq!(output["stateful_auth_exists"], true);
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
+fn denovo_codex_agent_requires_stateful_runtime_env_for_stateful_profile() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_stateful_runtime_env_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+missing_env = {{
+    "PATH": "/bin",
+}}
+complete_env = {{
+    "PATH": "/bin",
+    "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
+    "STATEFUL_SERVER_TOKEN": "token-123",
+}}
+
+if hasattr(module, "stateful_runtime_env_error"):
+    missing_error = module.stateful_runtime_env_error(missing_env)
+    complete_error = module.stateful_runtime_env_error(complete_env)
+else:
+    missing_error = None
+    complete_error = "missing helper"
+
+print(json.dumps({{
+    "missing_error": missing_error,
+    "complete_error": complete_error,
+}}, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(
+        output["missing_error"],
+        "stateful Codex benchmark requires STATEFUL_SERVER_URL and STATEFUL_SERVER_TOKEN"
+    );
+    assert_eq!(output["complete_error"], serde_json::Value::Null);
+}
+
+#[test]
+fn denovo_progress_report_aggregates_in_progress_shards_from_results_jsonl() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-progress-report");
+    let runs_root = temp_dir.join("runs");
+    let shard_a = runs_root.join("r38-denovo-shard-a");
+    let shard_b = runs_root.join("r38-denovo-shard-b");
+
+    let shard_a_off = shard_a
+        .join("conditions")
+        .join("stateful-off_subagent-on")
+        .join("codex-cli")
+        .join("_");
+    let shard_a_on = shard_a
+        .join("conditions")
+        .join("stateful-on_subagent-on")
+        .join("codex-cli")
+        .join("_");
+    let shard_b_off = shard_b
+        .join("conditions")
+        .join("stateful-off_subagent-on")
+        .join("codex-cli")
+        .join("_");
+    let shard_b_on = shard_b
+        .join("conditions")
+        .join("stateful-on_subagent-on")
+        .join("codex-cli")
+        .join("_");
+    for dir in [&shard_a_off, &shard_a_on, &shard_b_off, &shard_b_on] {
+        fs::create_dir_all(dir).expect("fixture result dir should be created");
+    }
+    fs::write(
+        shard_a_off.join("results.jsonl"),
+        [
+            r#"{"instance_id":"a-1","success":true,"score":1.0,"finish_reason":"stop","subagent_used":true}"#,
+            r#"{"instance_id":"a-2","success":false,"score":0.5,"finish_reason":"setup-error","subagent_used":false}"#,
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .expect("fixture results should be written");
+    fs::write(
+        shard_a_on.join("results.jsonl"),
+        r#"{"instance_id":"a-1","success":false,"score":0.0,"finish_reason":"setup-error","error":"stateful Codex benchmark requires STATEFUL_SERVER_URL and STATEFUL_SERVER_TOKEN","subagent_usage":{"subagent_used":true}}"#,
+    )
+    .expect("fixture results should be written");
+    fs::write(
+        shard_b_off.join("results.jsonl"),
+        r#"{"instance_id":"b-1","success":false,"score":0.25,"finish_reason":"context-limit","subagent_usage":{"subagent_used":true}}"#,
+    )
+    .expect("fixture results should be written");
+    fs::write(shard_b_on.join("results.jsonl"), "").expect("empty fixture should be written");
+
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_progress_report_test", {script_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+summary = module.collect_progress(
+    [Path({shard_a}), Path({shard_b})],
+    expected_instances_per_condition=4,
+)
+print(json.dumps(summary, sort_keys=True))
+"#,
+        script_path = denovo_progress_report_path_json(),
+        shard_a = serde_json::to_string(&shard_a.to_string_lossy())
+            .expect("shard path should encode as json"),
+        shard_b = serde_json::to_string(&shard_b.to_string_lossy())
+            .expect("shard path should encode as json"),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["run_count"], 2);
+    assert_eq!(output["total_result_rows"], 4);
+    assert_eq!(output["expected_instances_per_condition"], 4);
+
+    let conditions = output["conditions"]
+        .as_array()
+        .expect("conditions should be an array");
+    let off = conditions
+        .iter()
+        .find(|condition| condition["condition_id"] == "stateful-off_subagent-on")
+        .expect("off condition should be summarized");
+    assert_eq!(off["rows"], 3);
+    assert_eq!(off["success_count"], 1);
+    assert_eq!(off["setup_errors"], 1);
+    assert_eq!(off["finish_reasons"]["setup-error"], 1);
+    assert_eq!(off["finish_reasons"]["context-limit"], 1);
+    assert_eq!(off["subagent_used_count"], 2);
+    assert_eq!(off["subagent_observed"], 3);
+    assert_eq!(off["progress_rate"], 0.75);
+    assert!(
+        (off["average_score"]
+            .as_f64()
+            .expect("average score should be numeric")
+            - 0.5833333333333334)
+            .abs()
+            < 0.000001
+    );
+
+    let on = conditions
+        .iter()
+        .find(|condition| condition["condition_id"] == "stateful-on_subagent-on")
+        .expect("on condition should be summarized");
+    assert_eq!(on["rows"], 1);
+    assert_eq!(on["setup_errors"], 1);
+    assert_eq!(on["subagent_used_count"], 1);
+    assert_eq!(on["progress_rate"], 0.25);
+
+    let runs = output["runs"].as_array().expect("runs should be an array");
+    assert!(
+        runs.iter().any(|run| run["run_id"] == "r38-denovo-shard-b"
+            && run["condition_id"] == "stateful-on_subagent-on"
+            && run["rows"] == 0),
+        "empty in-progress result files should be represented"
+    );
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
+fn denovo_progress_report_prefers_cumulative_condition_report() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-progress-report-cumulative");
+    let run_dir = temp_dir.join("runs").join("r38-denovo-shard-a");
+    let condition_dir = run_dir.join("conditions").join("stateful-off_subagent-on");
+    let result_dir = condition_dir.join("codex-cli").join("_");
+    fs::create_dir_all(&result_dir).expect("fixture result dir should be created");
+    fs::write(
+        result_dir.join("results.jsonl"),
+        r#"{"instance_id":"transient-current","success":false,"score":0.0,"finish_reason":"setup-error"}"#,
+    )
+    .expect("fixture results should be written");
+    fs::write(
+        condition_dir.join("denovo-report.json"),
+        r#"{"condition_id":"stateful-off_subagent-on","total_instances":3,"success_count":2,"average_score":0.75,"completed_instances":3,"scored_instances":3,"error_count":0,"subagent_observed_instances":3,"subagent_used_count":2,"subagent_used_rate":0.6666666667,"running_time_ms":1234}"#,
+    )
+    .expect("fixture cumulative report should be written");
+
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_progress_report_cumulative_test", {script_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+summary = module.collect_progress(
+    [Path({run_dir})],
+    expected_instances_per_condition=6,
+)
+print(json.dumps(summary, sort_keys=True))
+"#,
+        script_path = denovo_progress_report_path_json(),
+        run_dir = serde_json::to_string(&run_dir.to_string_lossy())
+            .expect("run path should encode as json"),
+    );
+    let output = run_python_json(&script);
+    assert_eq!(output["total_result_rows"], 3);
+
+    let condition = output["conditions"]
+        .as_array()
+        .expect("conditions should be an array")
+        .iter()
+        .find(|condition| condition["condition_id"] == "stateful-off_subagent-on")
+        .expect("condition should be summarized");
+    assert_eq!(condition["rows"], 3);
+    assert_eq!(condition["success_count"], 2);
+    assert_eq!(condition["setup_errors"], 0);
+    assert_eq!(condition["average_score"], 0.75);
+    assert_eq!(condition["progress_rate"], 0.5);
+    assert_eq!(condition["subagent_used_count"], 2);
+    assert_eq!(condition["subagent_observed"], 3);
+
+    let run = output["runs"]
+        .as_array()
+        .expect("runs should be an array")
+        .first()
+        .expect("run summary should exist");
+    assert_eq!(run["source"], "denovo-report.json");
+    assert_eq!(run["rows"], 3);
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }
@@ -3245,6 +3507,14 @@ fn codex_pair_agent_path_json() -> String {
 fn denovo_codex_agent_path_json() -> String {
     serde_json::to_string(&format!(
         "{}/scripts/denovo_codex_agent.py",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("path should serialize")
+}
+
+fn denovo_progress_report_path_json() -> String {
+    serde_json::to_string(&format!(
+        "{}/scripts/denovo_progress_report.py",
         env!("CARGO_MANIFEST_DIR")
     ))
     .expect("path should serialize")

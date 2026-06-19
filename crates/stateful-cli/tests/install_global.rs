@@ -185,6 +185,11 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     .expect("source stateful command policy skill should exist");
     assert_eq!(command_policy_skill, source_command_policy_skill);
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
+    assert!(command_policy_skill.contains("In Codex sessions, call Stateful MCP tools directly"));
+    assert!(
+        command_policy_skill
+            .contains("Do not run `stateful intent declare` or `stateful mcp call` through Bash")
+    );
     assert!(command_policy_skill.contains("Intent declarations add"));
     assert!(command_policy_skill.contains("--fs build --network enabled"));
     assert!(command_policy_skill.contains("--write-dir tmp"));

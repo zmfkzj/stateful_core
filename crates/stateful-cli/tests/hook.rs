@@ -39,6 +39,18 @@ fn assert_bash_denial_mentions(outcome: HookOutcome, expected: &str) {
     );
 }
 
+fn assert_bash_denial_mentions_all(outcome: HookOutcome, expected: &[&str]) {
+    let HookOutcome::Deny { reason } = outcome else {
+        panic!("expected Bash denial");
+    };
+    for expected in expected {
+        assert!(
+            reason.contains(expected),
+            "reason `{reason}` should contain `{expected}`"
+        );
+    }
+}
+
 fn trusted_stateful_path() -> String {
     std::env::current_exe()
         .expect("test executable path should resolve")
@@ -463,6 +475,99 @@ fn pre_tool_use_allows_sandbox_run_git_profile_for_git_commands() {
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
     assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_allows_sandbox_run_github_pr_profile_for_pr_commands() {
+    let stateful = trusted_stateful_path();
+    for command in [
+        "gh pr list",
+        "gh pr view 123 --json title,url",
+        "gh pr status",
+        "gh pr create --title 'Update policy' --body 'Adds github-pr profile' --base dev --head feature --draft",
+    ] {
+        let input = serde_json::json!({
+            "session_id": "s1",
+            "cwd": "/repo",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": format!("{stateful} sandbox run --fs github-pr --network enabled --timeout-seconds 30 --command {command:?}")
+            }
+        })
+        .to_string();
+
+        let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+        assert_eq!(
+            outcome,
+            HookOutcome::Allow,
+            "expected `{command}` to be allowed"
+        );
+    }
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_run_github_pr_profile_unsafe_requests() {
+    let stateful = trusted_stateful_path();
+    let cases = [
+        (
+            "network disabled",
+            format!(
+                "{stateful} sandbox run --fs github-pr --network disabled --command 'gh pr status'"
+            ),
+            "github-pr sandbox run requires --network enabled",
+        ),
+        (
+            "explicit write target",
+            format!(
+                "{stateful} sandbox run --fs github-pr --network enabled --write-target README.md --command 'gh pr status'"
+            ),
+            "github-pr profile manages transient PR state automatically",
+        ),
+        (
+            "non pr gh command",
+            format!(
+                "{stateful} sandbox run --fs github-pr --network enabled --command 'gh auth status'"
+            ),
+            "github-pr profile requires a single gh pr command",
+        ),
+        (
+            "merge",
+            format!(
+                "{stateful} sandbox run --fs github-pr --network enabled --command 'gh pr merge 123'"
+            ),
+            "github-pr profile does not allow gh pr subcommand `merge`",
+        ),
+        (
+            "web",
+            format!(
+                "{stateful} sandbox run --fs github-pr --network enabled --command 'gh pr create --web'"
+            ),
+            "github-pr profile does not allow interactive/browser flag `--web`",
+        ),
+    ];
+
+    for (name, command, expected) in cases {
+        let input = serde_json::json!({
+            "session_id": "s1",
+            "cwd": "/repo",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": command
+            }
+        })
+        .to_string();
+
+        let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+        let HookOutcome::Deny { reason } = outcome else {
+            panic!("{name}: expected Bash denial");
+        };
+        assert!(
+            reason.contains(expected),
+            "{name}: reason `{reason}` should contain `{expected}`"
+        );
+    }
 }
 
 #[test]
@@ -957,7 +1062,7 @@ fn pre_tool_use_denies_invalid_nested_codex_benchmark_sandbox_wrappers() {
             format!(
                 "{stateful} sandbox run --fs relaxed --network enabled --write-dir target --command 'cargo test'"
             ),
-            "supports only read-only, write-targets, build, and git profiles",
+            "supports only read-only, write-targets, build, git, and github-pr profiles",
         ),
         (
             "build profile with explicit write target",
@@ -1061,7 +1166,7 @@ fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
         (
             "invalid fs",
             format!("{stateful} sandbox run --fs read-write --command 'rg auth src'"),
-            "supports only read-only, write-targets, build, and git profiles",
+            "supports only read-only, write-targets, build, git, and github-pr profiles",
         ),
         (
             "invalid network",
@@ -1498,7 +1603,7 @@ fn pre_tool_use_denies_native_write_when_runtime_unreachable() {
 }
 
 #[test]
-fn pre_tool_use_denies_raw_stateful_intent_declare() {
+fn pre_tool_use_denies_raw_stateful_intent_declare_with_mcp_guidance() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
@@ -1511,7 +1616,38 @@ fn pre_tool_use_denies_raw_stateful_intent_declare() {
 
     let outcome = handle_pre_tool_use(input).expect("hook input should parse");
 
-    assert_raw_bash_denied_with_sandbox_run_guidance(outcome);
+    assert_bash_denial_mentions_all(
+        outcome,
+        &[
+            "state_intent_declare",
+            "MCP",
+            "Do not run `stateful intent declare`",
+        ],
+    );
+}
+
+#[test]
+fn pre_tool_use_denies_stateful_mcp_call_intent_declare_with_mcp_guidance() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "stateful mcp call state_intent_declare"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert_bash_denial_mentions_all(
+        outcome,
+        &[
+            "state_intent_declare",
+            "MCP",
+            "`stateful mcp call` through Bash",
+        ],
+    );
 }
 
 #[test]
@@ -3361,8 +3497,12 @@ fn user_prompt_submit_posts_context_render() {
     assert!(rendered.contains("Nearby Activity"));
     assert!(rendered.contains("Before using Bash"));
     assert!(rendered.contains("stateful-command-policy"));
+    assert!(rendered.contains("Use MCP tools `state_intent_declare` and `state_lease_acquire`"));
+    assert!(rendered.contains("Do not run `stateful intent declare`"));
     assert!(rendered.contains("--fs read-only --network disabled"));
     assert!(rendered.contains("--fs build --network enabled"));
+    assert!(rendered.contains("--fs git --network disabled"));
+    assert!(rendered.contains("--fs github-pr --network enabled"));
     assert!(rendered.contains("--fs write-targets --write-target <file>"));
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/context/render HTTP/1.1"));

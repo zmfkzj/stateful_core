@@ -153,6 +153,45 @@ fn parses_sandbox_run_git_profile() {
 }
 
 #[test]
+fn parses_sandbox_run_github_pr_profile() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "run",
+        "--fs",
+        "github-pr",
+        "--network",
+        "enabled",
+        "--timeout-seconds",
+        "30",
+        "--command",
+        "gh pr status",
+    ])
+    .expect("sandbox github-pr profile should parse");
+
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Run {
+            fs,
+            network,
+            write_targets,
+            create_targets,
+            write_dirs,
+            command,
+            timeout_seconds,
+        }) => {
+            assert_eq!(fs, SandboxFsProfile::GithubPr);
+            assert_eq!(network, SandboxNetworkPolicy::Enabled);
+            assert!(write_targets.is_empty());
+            assert!(create_targets.is_empty());
+            assert!(write_dirs.is_empty());
+            assert_eq!(command, "gh pr status");
+            assert_eq!(timeout_seconds, Some(30));
+        }
+        other => panic!("expected sandbox run command, got {other:?}"),
+    }
+}
+
+#[test]
 fn parses_sandbox_run_build_profile() {
     let cli = Cli::try_parse_from([
         "stateful",

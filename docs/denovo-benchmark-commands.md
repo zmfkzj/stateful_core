@@ -1,6 +1,6 @@
 # DeNovoSWE Benchmark Commands
 
-Last updated: 2026-06-18.
+Last updated: 2026-06-19.
 
 Use this file to relaunch the 3-way sharded Codex DeNovoSWE benchmark without
 reconstructing the command line.
@@ -43,8 +43,9 @@ file, not the public full JSONL. The aborted r36 attempt duplicated the full
 - The no-state nested Codex config must not inherit host `mcp_servers.stateful`
   or hooks. This is covered by
   `codex_pair_agent_seeds_and_cleans_nested_auth`.
-- The DeNovo Codex patch harvester excludes `.codex/`, `.stateful/`,
-  `.stateful_core/`, and root `clean.sh`. This is covered by
+- The DeNovo Codex patch harvester excludes Codex/stateful runtime dirs,
+  sandbox scratch dirs such as `tmp/**` and `.stateful-tmp/**`, common Python
+  cache/coverage dirs, `target/**`, and root `clean.sh`. This is covered by
   `denovo_codex_agent_git_diff_excludes_stateful_runtime_artifacts`.
 - Use absolute paths for `--aweagent-root`, `--python`, `--data-file`,
   `--config`, `REPO_ROOT`, `STATEFUL_BIN`, `TMUX`, and `TMUX_SOCKET`.
@@ -74,20 +75,28 @@ $REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-c.sh
 
 These commands do not call `stateful external-run`. They use an existing tmux
 server socket by exposing that Unix socket to the `run-nested-codex-benchmark`
-wrapper.
+wrapper. Pass the `STATEFUL_*` runtime variables into the new tmux session with
+`tmux new-session -e`; otherwise the stateful condition will fail its runtime
+preflight instead of silently producing empty patches.
 
 ```bash
-"$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "start $RUN_ID shard a in existing tmux without external-run" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-a" --docker-socket "$TMUX_SOCKET" --timeout-seconds 20 --command "$TMUX -S $TMUX_SOCKET new-session -d -s $RUN_ID-shard-a /bin/zsh $REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-a.sh"
+"$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "start $RUN_ID shard a in existing tmux without external-run" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-a" --docker-socket "$TMUX_SOCKET" --timeout-seconds 20 --command "$TMUX -S $TMUX_SOCKET new-session -d -s $RUN_ID-shard-a -e STATEFUL_SERVER_URL=\$STATEFUL_SERVER_URL -e STATEFUL_SERVER_TOKEN=\$STATEFUL_SERVER_TOKEN -e STATEFUL_NESTED_CODEX_HOME_ROOT=\$STATEFUL_NESTED_CODEX_HOME_ROOT /bin/zsh $REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-a.sh"
 
-"$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "start $RUN_ID shard b in existing tmux without external-run" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-b" --docker-socket "$TMUX_SOCKET" --timeout-seconds 20 --command "$TMUX -S $TMUX_SOCKET new-session -d -s $RUN_ID-shard-b /bin/zsh $REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-b.sh"
+"$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "start $RUN_ID shard b in existing tmux without external-run" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-b" --docker-socket "$TMUX_SOCKET" --timeout-seconds 20 --command "$TMUX -S $TMUX_SOCKET new-session -d -s $RUN_ID-shard-b -e STATEFUL_SERVER_URL=\$STATEFUL_SERVER_URL -e STATEFUL_SERVER_TOKEN=\$STATEFUL_SERVER_TOKEN -e STATEFUL_NESTED_CODEX_HOME_ROOT=\$STATEFUL_NESTED_CODEX_HOME_ROOT /bin/zsh $REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-b.sh"
 
-"$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "start $RUN_ID shard c in existing tmux without external-run" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-c" --docker-socket "$TMUX_SOCKET" --timeout-seconds 20 --command "$TMUX -S $TMUX_SOCKET new-session -d -s $RUN_ID-shard-c /bin/zsh $REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-c.sh"
+"$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "start $RUN_ID shard c in existing tmux without external-run" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-c" --docker-socket "$TMUX_SOCKET" --timeout-seconds 20 --command "$TMUX -S $TMUX_SOCKET new-session -d -s $RUN_ID-shard-c -e STATEFUL_SERVER_URL=\$STATEFUL_SERVER_URL -e STATEFUL_SERVER_TOKEN=\$STATEFUL_SERVER_TOKEN -e STATEFUL_NESTED_CODEX_HOME_ROOT=\$STATEFUL_NESTED_CODEX_HOME_ROOT /bin/zsh $REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-c.sh"
 ```
 
 List sessions:
 
 ```bash
 "$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "list $RUN_ID tmux sessions without external-run" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-list" --docker-socket "$TMUX_SOCKET" --timeout-seconds 10 --command "$TMUX -S $TMUX_SOCKET ls"
+```
+
+Progress report:
+
+```bash
+python3 crates/stateful-bench/scripts/denovo_progress_report.py --run-prefix "$RUN_ID-shard-" --expected-instances-per-condition 3675
 ```
 
 Stop sessions:

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "rust",
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": true,
+  "separate-pull-requests": false,
+  "group-pull-request-title-pattern": "chore: release stateful workspace",
+  "packages": {
+    "crates/stateful-core": {
+      "component": "stateful-core"
+    },
+    "crates/stateful-store": {
+      "component": "stateful-store"
+    },
+    "crates/stateful-server": {
+      "component": "stateful-server"
+    },
+    "crates/stateful-cli": {
+      "component": "stateful-cli"
+    },
+    "crates/stateful-mcp": {
+      "component": "stateful-mcp"
+    }
+  },
+  "plugins": [
+    {
+      "type": "cargo-workspace",
+      "merge": false
+    },
+    {
+      "type": "linked-versions",
+      "groupName": "stateful workspace",
+      "components": [
+        "stateful-core",
+        "stateful-store",
+        "stateful-server",
+        "stateful-cli",
+        "stateful-mcp"
+      ]
+    }
+  ]
+}

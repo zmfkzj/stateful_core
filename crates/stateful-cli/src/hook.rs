@@ -383,7 +383,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 fn stateful_command_policy_reminder() -> String {
     let binary = stateful_binary_placeholder_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- Before using Bash, use the `stateful-command-policy` skill.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For process checks, use `{binary} sandbox process find --contains <literal>` or `--name <comm>` with selectors.\n- For build or test commands, declare intent and acquire a same-session directory lease for a scoped tmp child such as `tmp/<purpose>/`, then use `{binary} sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command '<cmd>'`.\n- For local git operations, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; use `--network enabled` only for networked git operations.\n- For file edits, declare exact intent, acquire the same-session file lease successfully, then use native Codex edit tools such as `apply_patch` or Edit.\n- For command-shaped writes, declare exact intent, acquire the matching file or directory lease successfully, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`, `{binary} sandbox run --fs write-targets --create-target <file> --command '<cmd>'`, or `{binary} sandbox run --fs write-targets --write-dir tmp/<purpose> --command '<cmd>'` for tmp artifacts."
+        "Stateful command policy reminder:\n- Before using Bash, use the `stateful-command-policy` skill.\n- Use MCP tools `state_intent_declare` and `state_lease_acquire` for coordination. Do not run `stateful intent declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For process checks, use `{binary} sandbox process find --contains <literal>` or `--name <comm>` with selectors.\n- For build or test commands, declare intent and acquire a same-session directory lease for a scoped tmp child such as `tmp/<purpose>/`, then use `{binary} sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command '<cmd>'`.\n- For local git operations, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; use `--network enabled` only for networked git operations.\n- For GitHub pull request list/view/status/create, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`.\n- For file edits, declare exact intent, acquire the same-session file lease successfully, then use native Codex edit tools such as `apply_patch` or Edit.\n- For command-shaped writes, declare exact intent, acquire the matching file or directory lease successfully, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`, `{binary} sandbox run --fs write-targets --create-target <file> --command '<cmd>'`, or `{binary} sandbox run --fs write-targets --write-dir tmp/<purpose> --command '<cmd>'` for tmp artifacts."
     )
 }
 
@@ -661,6 +661,10 @@ fn is_remote_repository_mutation_tool(tool_name: &str) -> bool {
 
 fn authorize_bash(input: &PreToolUseInput) -> anyhow::Result<HookOutcome> {
     let command = input.command().unwrap_or_default();
+    if let Some(coordination) = deny_stateful_coordination_bash(command) {
+        return Ok(coordination);
+    }
+
     let sandbox = authorize_sandbox_run_bash(command);
     if sandbox == HookOutcome::Allow {
         return Ok(sandbox);
@@ -682,6 +686,57 @@ fn authorize_bash(input: &PreToolUseInput) -> anyhow::Result<HookOutcome> {
     }
 
     Ok(sandbox)
+}
+
+fn deny_stateful_coordination_bash(command: &str) -> Option<HookOutcome> {
+    if !command_mentions_stateful_coordination(command) {
+        return None;
+    }
+    Some(bash_policy_deny(stateful_coordination_mcp_guidance()))
+}
+
+fn command_mentions_stateful_coordination(command: &str) -> bool {
+    let Ok(words) = split_simple_command_words(command) else {
+        return false;
+    };
+    match words.get(1).map(String::as_str) {
+        Some("intent") => true,
+        Some("mcp")
+            if words.get(2).is_some_and(|word| word == "call")
+                && words
+                    .get(3)
+                    .is_some_and(|tool| is_stateful_coordination_mcp_tool(tool)) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn is_stateful_coordination_mcp_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "state_intent_declare"
+            | "state.intent.declare"
+            | "state_intent_request"
+            | "state.intent.request"
+            | "state_intent_claim"
+            | "state.intent.claim"
+            | "state_intent_cancel"
+            | "state.intent.cancel"
+            | "state_lease_acquire"
+            | "state.lease.acquire"
+            | "state_lease_release"
+            | "state.lease.release"
+            | "state_notifications_poll"
+            | "state.notifications.poll"
+            | "state_resume_next"
+            | "state.resume.next"
+    )
+}
+
+fn stateful_coordination_mcp_guidance() -> &'static str {
+    "Stateful coordination commands such as `state_intent_declare` must use the Stateful MCP tools in Codex. Do not run `stateful intent declare` or `stateful mcp call` through Bash."
 }
 
 fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
@@ -844,8 +899,8 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 fn bash_policy_guidance() -> String {
     let binary = stateful_binary_placeholder_for_guidance();
     format!(
-        "Use the `stateful-command-policy` skill before Bash. Raw Bash is denied; for read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`; for process checks use `{} sandbox process find --contains <literal>`; for build or test commands use `{} sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command '<cmd>'` after declaring and leasing that scoped tmp child; for local git operations use `{} sandbox run --fs git --network disabled --command 'git <args>'` and use network enabled only for networked git operations; for command-shaped repo writes use `{} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`; for approved repo-external writes use `{} external-run request --purpose '<purpose>' --write-dir <dir> --command '<cmd>'`.",
-        binary, binary, binary, binary, binary, binary
+        "Use the `stateful-command-policy` skill before Bash. Raw Bash is denied. Use MCP tools `state_intent_declare` and `state_lease_acquire` for coordination. Do not run `stateful intent declare` or `stateful mcp call` through Bash. For read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`; for process checks use `{} sandbox process find --contains <literal>`; for build or test commands use `{} sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command '<cmd>'` after declaring and leasing that scoped tmp child; for local git operations use `{} sandbox run --fs git --network disabled --command 'git <args>'` and use network enabled only for networked git operations; for GitHub pull request list/view/status/create use `{} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`; for command-shaped repo writes use `{} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`; for approved repo-external writes use `{} external-run request --purpose '<purpose>' --write-dir <dir> --command '<cmd>'`.",
+        binary, binary, binary, binary, binary, binary, binary
     )
 }
 
@@ -1912,7 +1967,7 @@ mod tests {
     }
 
     #[test]
-    fn stateful_command_policy_reminder_mentions_process_find_and_local_git_profile() {
+    fn stateful_command_policy_reminder_mentions_process_find_local_git_and_github_pr_profiles() {
         let reminder = stateful_command_policy_reminder();
         let current_exe = std::env::current_exe()
             .expect("current executable should resolve")
@@ -1928,6 +1983,10 @@ mod tests {
             "reminder should default local git to network disabled: {reminder}"
         );
         assert!(
+            reminder.contains("sandbox run --fs github-pr --network enabled"),
+            "reminder should mention GitHub PR profile: {reminder}"
+        );
+        assert!(
             reminder.contains("<absolute-stateful-binary>"),
             "reminder should use a placeholder instead of rendering a local path: {reminder}"
         );
@@ -1940,6 +1999,10 @@ mod tests {
         assert!(
             guidance.contains("sandbox run --fs git --network disabled"),
             "denial guidance should default local git to network disabled: {guidance}"
+        );
+        assert!(
+            guidance.contains("sandbox run --fs github-pr --network enabled"),
+            "denial guidance should mention GitHub PR profile: {guidance}"
         );
         assert!(
             guidance.contains("network enabled"),
