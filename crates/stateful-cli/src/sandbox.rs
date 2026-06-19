@@ -2684,7 +2684,7 @@ fn seatbelt_github_pr_command(
     temp_dir: &Path,
     network: SandboxNetworkPolicy,
 ) -> Command {
-    let profile = seatbelt_profile(writable_paths, network);
+    let profile = seatbelt_github_pr_profile(writable_paths, network);
     let mut sandbox = Command::new("/usr/bin/sandbox-exec");
     sandbox
         .arg("-p")
@@ -2707,6 +2707,22 @@ fn seatbelt_git_profile(
         &mut profile,
         &git_profile_persistent_metadata_paths(repo_root),
     );
+    push_seatbelt_macos_identity_and_trust_services(&mut profile);
+    profile
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn seatbelt_github_pr_profile(
+    writable_paths: &[SandboxWritablePath],
+    network: SandboxNetworkPolicy,
+) -> String {
+    let mut profile = seatbelt_profile(writable_paths, network);
+    push_seatbelt_macos_identity_and_trust_services(&mut profile);
+    profile
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn push_seatbelt_macos_identity_and_trust_services(profile: &mut String) {
     profile.push_str(
         "(allow mach-lookup\n\
              (global-name \"com.apple.system.opendirectoryd.libinfo\")\n\
@@ -2714,7 +2730,6 @@ fn seatbelt_git_profile(
              (global-name \"com.apple.trustd\")\n\
              (global-name \"com.apple.trustd.agent\"))\n",
     );
-    profile
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -4095,6 +4110,11 @@ mod tests {
             })
             .expect("seatbelt git command should pass a profile after -p");
 
+        assert_profile_allows_macos_identity_and_trust_services(&profile, "git");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_profile_allows_macos_identity_and_trust_services(profile: &str, profile_name: &str) {
         assert!(profile.contains("(allow mach-lookup"));
         for global_name in [
             "com.apple.system.opendirectoryd.libinfo",
@@ -4104,7 +4124,7 @@ mod tests {
         ] {
             assert!(
                 profile.contains(&format!("(global-name \"{global_name}\")")),
-                "git profile should allow {global_name}: {profile}"
+                "{profile_name} profile should allow {global_name}: {profile}"
             );
         }
     }
@@ -4821,6 +4841,17 @@ mod tests {
                 .windows(2)
                 .any(|window| { window == ["/bin/sh", "-c"] })
         );
+        let profile = args
+            .windows(2)
+            .find_map(|window| {
+                if window[0] == "-p" {
+                    Some(window[1].clone())
+                } else {
+                    None
+                }
+            })
+            .expect("seatbelt github-pr command should pass a profile after -p");
+        assert_profile_allows_macos_identity_and_trust_services(&profile, "github-pr");
     }
 
     #[test]
