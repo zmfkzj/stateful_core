@@ -809,10 +809,11 @@ def prepare_codex_environment(
             if source_config_toml is None:
                 remove_stale_nested_auth(target_config_toml)
             elif source_config_toml.resolve() != target_config_toml.resolve():
-                config_toml_digest = file_digest(source_config_toml)
+                provider_config_toml = codex_provider_config_fragment(base_config_toml)
                 remove_stale_nested_auth(target_config_toml)
-                shutil.copy2(source_config_toml, target_config_toml)
-                extra_files.append((target_config_toml, config_toml_digest))
+                if provider_config_toml:
+                    write_text_file(target_config_toml, f"{provider_config_toml.rstrip()}\n")
+                    extra_files.append((target_config_toml, file_digest(target_config_toml)))
         copied_auth = SeededAuth(
             path=target_auth,
             digest=source_digest,

@@ -17,6 +17,7 @@ use crate::{GlobalPaths, RepoRegistry};
 
 const GLOBAL_CODEX_BLOCK_START: &str = "# stateful-core-global-install";
 const GLOBAL_CODEX_BLOCK_END: &str = "# /stateful-core-global-install";
+const STATEFUL_APPROVAL_POLICY: &str = "approval_policy = { granular = { sandbox_approval = false, rules = true, mcp_elicitations = false, request_permissions = false, skill_approval = false } }";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallOptions {
@@ -126,6 +127,8 @@ pub fn plan_codex_install(options: &CodexInstallOptions) -> anyhow::Result<Insta
     plan.files.push(options.codex_config_path.clone());
     plan.files
         .push(global_command_policy_skill_path(&options.codex_config_path));
+    plan.files
+        .push(global_external_run_rules_path(&options.codex_config_path));
     Ok(plan)
 }
 
@@ -142,6 +145,7 @@ pub fn apply_codex_install(options: CodexInstallOptions) -> anyhow::Result<Insta
     })?;
     write_codex_config_update(&options.codex_config_path, codex_update)?;
     write_global_command_policy_skill(&options.codex_config_path)?;
+    write_global_external_run_rules(&options.codex_config_path, &options.binary_path)?;
     plan.summary = format!(
         "apply: installed stateful global files under {} and merged Codex config {}",
         options.paths.home.display(),
@@ -266,10 +270,33 @@ fn global_command_policy_skill_path(codex_config_path: &Path) -> PathBuf {
         .join("SKILL.md")
 }
 
+fn write_global_external_run_rules(
+    codex_config_path: &Path,
+    binary_path: &str,
+) -> anyhow::Result<()> {
+    let path = global_external_run_rules_path(codex_config_path);
+    let parent = containing_dir(&path);
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create Codex rules directory {}",
+            parent.display()
+        )
+    })?;
+    fs::write(&path, external_run_prompt_rules(binary_path)?)
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn global_external_run_rules_path(codex_config_path: &Path) -> PathBuf {
+    containing_dir(codex_config_path)
+        .join("rules")
+        .join("stateful.rules")
+}
+
 fn merge_codex_config_contents(existing: &str, binary_path: &str) -> anyhow::Result<String> {
     let stripped = strip_stateful_block(existing)?;
     ensure_no_unmarked_stateful_mcp(&stripped)?;
-    let feature_update = ensure_hooks_feature_enabled(&stripped)?;
+    let without_approval_policy = strip_top_level_approval_policy(&stripped)?;
+    let feature_update = ensure_hooks_feature_enabled(&without_approval_policy)?;
     let block = global_codex_config_block(binary_path, feature_update.include_features_section)?;
 
     Ok(append_stateful_block(&feature_update.contents, &block))
@@ -523,13 +550,21 @@ fn unsupported_header_may_affect_stateful(header: &str) -> bool {
         })
         .collect();
 
-    normalized == "features" || normalized == "mcp_servers.stateful"
+    normalized == "features" || is_stateful_mcp_table_name(&normalized)
 }
 
 fn quoted_header_may_affect_stateful(header: &str) -> bool {
     toml_table_key_segments(header)
-        .map(|segments| segments == ["features"] || segments == ["mcp_servers", "stateful"])
+        .map(|segments| segments == ["features"] || is_stateful_mcp_table_segments(&segments))
         .unwrap_or_else(|| unsupported_header_may_affect_stateful(header))
+}
+
+fn is_stateful_mcp_table_name(name: &str) -> bool {
+    name == "mcp_servers.stateful" || name.starts_with("mcp_servers.stateful.")
+}
+
+fn is_stateful_mcp_table_segments(segments: &[String]) -> bool {
+    segments.len() >= 2 && segments[0] == "mcp_servers" && segments[1] == "stateful"
 }
 
 fn toml_table_key_segments(header: &str) -> Option<Vec<String>> {
@@ -665,13 +700,42 @@ fn strip_stateful_block(contents: &str) -> anyhow::Result<String> {
     Ok(stripped)
 }
 
+fn strip_top_level_approval_policy(contents: &str) -> anyhow::Result<String> {
+    let mut lines = Vec::new();
+    let mut section = TomlSection::TopLevel;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if let Some(header) = toml_table_header(trimmed)? {
+            section = if header.simple_name() == Some("features") {
+                TomlSection::Features
+            } else {
+                TomlSection::Other
+            };
+            lines.push(line);
+            continue;
+        }
+        if matches!(section, TomlSection::TopLevel) && toml_key_equals(trimmed, "approval_policy") {
+            continue;
+        }
+        lines.push(line);
+    }
+
+    let mut stripped = lines.join("\n");
+    if contents.ends_with('\n') && !stripped.is_empty() {
+        stripped.push('\n');
+    }
+    Ok(stripped)
+}
+
 fn ensure_no_unmarked_stateful_mcp(contents: &str) -> anyhow::Result<()> {
     for line in contents.lines() {
-        if toml_table_header(line.trim())?.and_then(TomlTableHeader::simple_name)
-            == Some("mcp_servers.stateful")
+        if toml_table_header(line.trim())?
+            .and_then(TomlTableHeader::simple_name)
+            .is_some_and(is_stateful_mcp_table_name)
         {
             anyhow::bail!(
-                "Codex config already contains unmarked [mcp_servers.stateful]; remove it or install into a config without that conflict"
+                "Codex config already contains unmarked [mcp_servers.stateful] configuration; remove it or install into a config without that conflict"
             );
         }
     }
@@ -790,11 +854,14 @@ fn global_codex_config_block(
 
     Ok(format!(
         r#"{GLOBAL_CODEX_BLOCK_START}
+{STATEFUL_APPROVAL_POLICY}
+
 {features_section}[mcp_servers.stateful]
 command = {}
 args = ["mcp", "serve"]
 env_vars = ["STATEFUL_SESSION_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
 startup_timeout_sec = 20
+default_tools_approval_mode = "approve"
 
 [[hooks.SessionStart]]
 matcher = "startup|resume|clear|compact"
@@ -841,6 +908,27 @@ statusMessage = "Recording stateful activity"
         toml_string(&format!("{hook_prefix} pre-tool-use")),
         toml_string(&format!("{hook_prefix} post-tool-use")),
         toml_string(&format!("{hook_prefix} stop"))
+    ))
+}
+
+fn external_run_prompt_rules(binary_path: &str) -> anyhow::Result<String> {
+    validate_no_control_chars(binary_path)?;
+    let binary = toml_string(binary_path);
+    let request_match = toml_string(&format!(
+        "{binary_path} external-run request --purpose 'install rebuilt binaries' --write-dir /Users/me/.cargo/bin --command 'install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful'"
+    ));
+    Ok(format!(
+        r#"{GLOBAL_CODEX_BLOCK_START}
+prefix_rule(
+    pattern = [{binary}, "external-run", "request"],
+    decision = "prompt",
+    justification = "Require explicit approval before running a stateful external-run request.",
+    match = [
+        {request_match},
+    ],
+)
+{GLOBAL_CODEX_BLOCK_END}
+"#
     ))
 }
 

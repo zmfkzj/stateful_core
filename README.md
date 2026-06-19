@@ -374,9 +374,13 @@ Run `stateful <command> --help` for command-specific options.
 
 ## Codex Hooks and Sessions
 
-Global installation merges stateful MCP and hook configuration into the Codex
-config. `stateful enable` opts a repo into enforcement, while disabled repos are
-no-ops for hooks and MCP.
+Global installation merges stateful MCP, MCP tool approval policy, external-run
+approval rules, and hook configuration into the Codex config. Stateful MCP tools
+default to automatic approval. Repo-external writes remain gated by a Codex
+execpolicy prompt for `stateful external-run request`; after that approval, the
+request validates the normalized external write scope and runs immediately.
+`stateful enable` opts a repo into enforcement, while disabled repos are no-ops
+for hooks and MCP.
 
 The generated hook configuration covers:
 
@@ -486,8 +490,8 @@ Repo-external command-shaped writes use `stateful external-run`, not
 `sandbox run`. `external-run` classifies targets by normalized path: targets
 that resolve inside the repo are rejected, while targets outside the repo can
 be listed with `--write-target`, `--create-target`, or `--write-dir`. These
-requests do not require intent or lease. Instead, the first command records an
-approval request and prints a copy-paste command for a user to approve and run:
+requests do not require intent or lease; Codex prompts on the external-run
+request before execution:
 
 ```bash
 stateful external-run request \
@@ -496,12 +500,8 @@ stateful external-run request \
   --command 'install -m 755 target/release/stateful "$HOME/.cargo/bin/stateful"'
 ```
 
-The output includes the purpose, normalized write scope, command, and an
-approval command like:
-
-```bash
-<absolute-stateful-binary> external-run approve <request-id> --run
-```
+After approval, the command runs immediately and prints the external sandbox
+command result as JSON.
 
 ## HTTP And MCP Surface
 

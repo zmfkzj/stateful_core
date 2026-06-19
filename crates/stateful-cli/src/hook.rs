@@ -381,7 +381,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 }
 
 fn stateful_command_policy_reminder() -> String {
-    let binary = trusted_stateful_binary_for_guidance();
+    let binary = stateful_binary_placeholder_for_guidance();
     format!(
         "Stateful command policy reminder:\n- Before using Bash, use the `stateful-command-policy` skill.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For process checks, use `{binary} sandbox process find --contains <literal>` or `--name <comm>` with selectors.\n- For build or test commands, declare intent and acquire a same-session directory lease for a scoped tmp child such as `tmp/<purpose>/`, then use `{binary} sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command '<cmd>'`.\n- For local git operations, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; use `--network enabled` only for networked git operations.\n- For file edits, declare exact intent, acquire the same-session file lease successfully, then use native Codex edit tools such as `apply_patch` or Edit.\n- For command-shaped writes, declare exact intent, acquire the matching file or directory lease successfully, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`, `{binary} sandbox run --fs write-targets --create-target <file> --command '<cmd>'`, or `{binary} sandbox run --fs write-targets --write-dir tmp/<purpose> --command '<cmd>'` for tmp artifacts."
     )
@@ -666,8 +666,13 @@ fn authorize_bash(input: &PreToolUseInput) -> anyhow::Result<HookOutcome> {
         return Ok(sandbox);
     }
 
+    #[cfg(feature = "codex-benchmark")]
+    if let Some(tmux) = authorize_tmux_nested_codex_benchmark_bash(command) {
+        return Ok(tmux);
+    }
+
     let external = authorize_external_run_bash(command);
-    if external == HookOutcome::Allow || command.contains("external-run") {
+    if external == HookOutcome::Allow || command_mentions_external_run(command) {
         return Ok(external);
     }
 
@@ -781,6 +786,20 @@ fn authorize_nested_codex_benchmark_sandbox_bash(command: &str) -> HookOutcome {
     HookOutcome::Allow
 }
 
+#[cfg(feature = "codex-benchmark")]
+fn authorize_tmux_nested_codex_benchmark_bash(command: &str) -> Option<HookOutcome> {
+    if !command_starts_with_trusted_tmux(command) {
+        return None;
+    }
+    match parse_tmux_nested_codex_benchmark_command(command) {
+        Ok(Some(nested_command)) => Some(authorize_nested_codex_benchmark_sandbox_bash(
+            &nested_command,
+        )),
+        Ok(None) => None,
+        Err(reason) => Some(bash_policy_deny(reason)),
+    }
+}
+
 fn authorize_external_run_bash(command: &str) -> HookOutcome {
     let invocation = match parse_external_run_invocation(command) {
         Ok(invocation) => invocation,
@@ -792,11 +811,13 @@ fn authorize_external_run_bash(command: &str) -> HookOutcome {
             "stateful external-run requires the trusted absolute stateful binary",
         );
     }
-    if matches!(invocation.subcommand.as_str(), "approve" | "run") {
-        return bash_policy_deny("external-run approvals must be performed outside hooks");
-    }
-
     HookOutcome::Allow
+}
+
+fn command_mentions_external_run(command: &str) -> bool {
+    split_simple_command_words(command)
+        .ok()
+        .is_some_and(|words| words.len() >= 2 && words[1] == "external-run")
 }
 
 fn authorize_stateful_control_bash(command: &str) -> HookOutcome {
@@ -821,22 +842,15 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 }
 
 fn bash_policy_guidance() -> String {
+    let binary = stateful_binary_placeholder_for_guidance();
     format!(
         "Use the `stateful-command-policy` skill before Bash. Raw Bash is denied; for read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`; for process checks use `{} sandbox process find --contains <literal>`; for build or test commands use `{} sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command '<cmd>'` after declaring and leasing that scoped tmp child; for local git operations use `{} sandbox run --fs git --network disabled --command 'git <args>'` and use network enabled only for networked git operations; for command-shaped repo writes use `{} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`; for approved repo-external writes use `{} external-run request --purpose '<purpose>' --write-dir <dir> --command '<cmd>'`.",
-        trusted_stateful_binary_for_guidance(),
-        trusted_stateful_binary_for_guidance(),
-        trusted_stateful_binary_for_guidance(),
-        trusted_stateful_binary_for_guidance(),
-        trusted_stateful_binary_for_guidance(),
-        trusted_stateful_binary_for_guidance()
+        binary, binary, binary, binary, binary, binary
     )
 }
 
-fn trusted_stateful_binary_for_guidance() -> String {
-    std::env::current_exe()
-        .ok()
-        .map(|path| format!("\"{}\"", path.to_string_lossy()))
-        .unwrap_or_else(|| "<absolute-stateful-binary>".to_string())
+fn stateful_binary_placeholder_for_guidance() -> &'static str {
+    "<absolute-stateful-binary>"
 }
 
 #[cfg(feature = "codex-benchmark")]
@@ -956,6 +970,108 @@ fn parse_nested_codex_benchmark_sandbox_invocation(
     })
 }
 
+#[cfg(feature = "codex-benchmark")]
+fn parse_tmux_nested_codex_benchmark_command(command: &str) -> Result<Option<String>, String> {
+    reject_outer_shell_syntax(
+        command,
+        "Bash wrapper must be a single tmux new-session launcher",
+    )?;
+    let words = split_simple_command_words(command)?;
+    if words.is_empty() {
+        return Ok(None);
+    }
+    if !is_trusted_tmux_executable(&words[0]) {
+        return Ok(None);
+    }
+    if words.len() < 2 || words[1] != "new-session" {
+        return Err("tmux benchmark launcher supports only new-session".to_string());
+    }
+
+    let mut detached = false;
+    let mut session_name = None;
+    let mut nested_command = None;
+    let mut index = 2;
+    while index < words.len() {
+        let arg = &words[index];
+        match arg.as_str() {
+            "-d" => detached = true,
+            "-s" => {
+                index += 1;
+                session_name = Some(parse_tmux_arg_value(&words, index, "-s")?);
+            }
+            "-n" | "-c" => {
+                index += 1;
+                parse_tmux_arg_value(&words, index, arg)?;
+            }
+            _ if arg.starts_with('-') => {
+                return Err(format!(
+                    "unsupported tmux benchmark launcher argument `{arg}`"
+                ));
+            }
+            _ => {
+                if nested_command.is_some() || index + 1 != words.len() {
+                    return Err(
+                        "tmux benchmark launcher requires exactly one shell command".to_string()
+                    );
+                }
+                nested_command = Some(arg.clone());
+            }
+        }
+        index += 1;
+    }
+
+    if !detached {
+        return Err("tmux benchmark launcher requires detached -d mode".to_string());
+    }
+    let Some(session_name) = session_name else {
+        return Err("tmux benchmark launcher requires -s session name".to_string());
+    };
+    if !is_denovo_tmux_session_name(&session_name) {
+        return Err("tmux benchmark launcher session name must be a DeNovo run id".to_string());
+    }
+    let Some(nested_command) = nested_command else {
+        return Err("tmux benchmark launcher requires a nested benchmark command".to_string());
+    };
+
+    Ok(Some(nested_command))
+}
+
+#[cfg(feature = "codex-benchmark")]
+fn parse_tmux_arg_value(words: &[String], index: usize, arg: &str) -> Result<String, String> {
+    words
+        .get(index)
+        .cloned()
+        .ok_or_else(|| format!("tmux benchmark launcher argument `{arg}` requires a value"))
+}
+
+#[cfg(feature = "codex-benchmark")]
+fn is_trusted_tmux_executable(executable: &str) -> bool {
+    matches!(executable, "/opt/homebrew/bin/tmux" | "/usr/bin/tmux")
+}
+
+#[cfg(feature = "codex-benchmark")]
+fn command_starts_with_trusted_tmux(command: &str) -> bool {
+    let trimmed = command.trim_start();
+    ["/opt/homebrew/bin/tmux", "/usr/bin/tmux"]
+        .iter()
+        .any(|prefix| {
+            trimmed == *prefix
+                || trimmed
+                    .strip_prefix(prefix)
+                    .and_then(|rest| rest.chars().next())
+                    .is_some_and(char::is_whitespace)
+        })
+}
+
+#[cfg(feature = "codex-benchmark")]
+fn is_denovo_tmux_session_name(session_name: &str) -> bool {
+    !session_name.is_empty()
+        && session_name.contains("-denovo-full-3-codex-")
+        && session_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
 fn parse_external_run_invocation(command: &str) -> Result<StatefulExternalRunInvocation, String> {
     reject_outer_shell_syntax(command, "Bash wrapper must be a single stateful command")?;
     let words = split_simple_command_words(command)?;
@@ -972,8 +1088,8 @@ fn parse_external_run_invocation(command: &str) -> Result<StatefulExternalRunInv
             "Bash commands must use stateful sandbox run or stateful external-run".to_string(),
         );
     }
-    if !matches!(words[2].as_str(), "request" | "approve" | "run" | "help") {
-        return Err("stateful external-run requires request, approve, or run".to_string());
+    if !matches!(words[2].as_str(), "request" | "help") {
+        return Err("stateful external-run supports only request".to_string());
     }
 
     Ok(StatefulExternalRunInvocation {
@@ -1798,6 +1914,10 @@ mod tests {
     #[test]
     fn stateful_command_policy_reminder_mentions_process_find_and_local_git_profile() {
         let reminder = stateful_command_policy_reminder();
+        let current_exe = std::env::current_exe()
+            .expect("current executable should resolve")
+            .to_string_lossy()
+            .to_string();
 
         assert!(
             reminder.contains("sandbox process find"),
@@ -1806,6 +1926,14 @@ mod tests {
         assert!(
             reminder.contains("sandbox run --fs git --network disabled"),
             "reminder should default local git to network disabled: {reminder}"
+        );
+        assert!(
+            reminder.contains("<absolute-stateful-binary>"),
+            "reminder should use a placeholder instead of rendering a local path: {reminder}"
+        );
+        assert!(
+            !reminder.contains(&current_exe),
+            "reminder should not expose the local executable path: {reminder}"
         );
 
         let guidance = bash_policy_guidance();
@@ -1816,6 +1944,14 @@ mod tests {
         assert!(
             guidance.contains("network enabled"),
             "denial guidance should mention networked git exception: {guidance}"
+        );
+        assert!(
+            guidance.contains("<absolute-stateful-binary>"),
+            "denial guidance should use a placeholder instead of rendering a local path: {guidance}"
+        );
+        assert!(
+            !guidance.contains(&current_exe),
+            "denial guidance should not expose the local executable path: {guidance}"
         );
     }
 

@@ -43,6 +43,15 @@ RESUME_POLICY_CONTEXT_OR_TOKEN_ONLY = "context_or_token_failure_only"
 DEFAULT_SUBAGENT_MIN_COUNT = 3
 DEFAULT_MIN_FREE_DISK_GB = 20.0
 BYTES_PER_GIB = 1024**3
+DIFF_EXCLUDED_PATHS = (
+    ".codex",
+    ".codex/**",
+    ".stateful",
+    ".stateful/**",
+    ".stateful_core",
+    ".stateful_core/**",
+    "clean.sh",
+)
 
 
 @dataclass
@@ -125,7 +134,14 @@ Constraints:
 
 def git_diff(workspace: Path) -> str:
     add_completed = subprocess.run(
-        ["git", "add", "-A"],
+        [
+            "git",
+            "add",
+            "-A",
+            "--",
+            ".",
+            *(f":(exclude){path}" for path in DIFF_EXCLUDED_PATHS),
+        ],
         cwd=workspace,
         text=True,
         check=False,

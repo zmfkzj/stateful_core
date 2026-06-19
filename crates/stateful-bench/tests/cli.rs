@@ -980,6 +980,63 @@ print(json.dumps({{"patch": patch}}))
 }
 
 #[test]
+fn denovo_codex_agent_git_diff_excludes_stateful_runtime_artifacts() {
+    let dir = target_temp_dir("denovo-codex-git-diff-excludes-stateful-runtime");
+    let workspace = dir.join("workspace");
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_git_diff_exclude_test", {agent_path})
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+workspace = Path({workspace})
+workspace.mkdir(parents=True, exist_ok=True)
+subprocess.run(["git", "init"], cwd=workspace, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+subprocess.run(["git", "config", "user.email", "bench@example.test"], cwd=workspace, check=True)
+subprocess.run(["git", "config", "user.name", "Bench Test"], cwd=workspace, check=True)
+(workspace / "tracked.txt").write_text("old line\n", encoding="utf-8")
+(workspace / "clean.sh").write_text("benchmark cleaner\n", encoding="utf-8")
+subprocess.run(["git", "add", "tracked.txt", "clean.sh"], cwd=workspace, check=True)
+subprocess.run(["git", "commit", "-m", "initial"], cwd=workspace, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+(workspace / "tracked.txt").write_text("new line\n", encoding="utf-8")
+(workspace / "new_file.txt").write_text("legitimate change\n", encoding="utf-8")
+(workspace / ".stateful_core" / "runtime" / "sessions").mkdir(parents=True, exist_ok=True)
+(workspace / ".stateful_core" / "runtime" / "session.json").write_text("{{}}\n", encoding="utf-8")
+(workspace / ".stateful_core" / "runtime" / "sessions" / "session.json").write_text("{{}}\n", encoding="utf-8")
+(workspace / ".stateful").mkdir(parents=True, exist_ok=True)
+(workspace / ".stateful" / "config.yml").write_text("policy\n", encoding="utf-8")
+(workspace / ".codex").mkdir(parents=True, exist_ok=True)
+(workspace / ".codex" / "trace.json").write_text("{{}}\n", encoding="utf-8")
+(workspace / "clean.sh").unlink()
+
+patch = mod.git_diff(workspace)
+assert "diff --git a/new_file.txt b/new_file.txt" in patch
+assert "diff --git a/tracked.txt b/tracked.txt" in patch
+assert ".stateful_core" not in patch
+assert ".stateful/" not in patch
+assert ".codex/" not in patch
+assert "diff --git a/clean.sh b/clean.sh" not in patch
+print(json.dumps({{"patch": patch}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        workspace = serde_json::to_string(&workspace).expect("workspace path should serialize"),
+    );
+    let output = run_python_json(&script);
+    let patch = output["patch"].as_str().expect("patch should be a string");
+    assert!(patch.contains("new_file.txt"));
+    fs::remove_dir_all(&dir).expect("temp git diff workspace should clean up");
+}
+
+#[test]
 fn denovo_codex_agent_timeout_wrapper_bounds_run() {
     let script = format!(
         r#"
@@ -2766,7 +2823,20 @@ source_auth.write_text("{{\"token\":\"source\"}}")
 source_config = source_home / ".codex" / "config.json"
 source_config.write_text("{{\"provider\":\"codex_lb\"}}")
 source_config_toml = source_home / ".codex" / "config.toml"
-source_config_toml.write_text('model_provider = "codex-lb"\n\n[model_providers.codex-lb]\nbase_url = "http://127.0.0.1:2455/backend-api/codex"\n')
+source_config_toml.write_text('''model_provider = "codex-lb"
+
+[model_providers.codex-lb]
+base_url = "http://127.0.0.1:2455/backend-api/codex"
+
+[mcp_servers.stateful]
+command = "stale-stateful"
+
+[features]
+hooks = true
+
+[[hooks.PreToolUse]]
+matcher = ".*"
+''')
 
 workspace = root / "runs" / "pair-one" / "workspace"
 task_path = workspace / ".stateful_bench" / "task-a.json"

@@ -14,6 +14,8 @@ use std::{
 };
 
 #[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 use crate::{
@@ -384,6 +386,8 @@ pub fn run_sandbox_in_repo(
             &request.command,
             &cwd,
             &writable_paths,
+            &[],
+            false,
             request.network,
             timeout,
         )?
@@ -691,6 +695,8 @@ pub fn run_external_sandboxed_command(
     write_targets: &[PathBuf],
     create_targets: &[PathBuf],
     write_dirs: &[PathBuf],
+    connect_sockets: &[PathBuf],
+    allow_signal: bool,
     network: SandboxNetworkPolicy,
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
@@ -700,6 +706,7 @@ pub fn run_external_sandboxed_command(
 
     let writable_paths =
         prepare_external_writable_paths(write_targets, create_targets, write_dirs)?;
+    let connect_sockets = prepare_external_connect_sockets(connect_sockets)?;
     let cwd = cwd
         .canonicalize()
         .map_err(|error| anyhow::anyhow!("external-run cwd must exist: {error}"))?;
@@ -707,13 +714,23 @@ pub fn run_external_sandboxed_command(
         anyhow::bail!("external-run cwd must be a directory");
     }
 
-    run_sandboxed_command(command, &cwd, &writable_paths, network, timeout)
+    run_sandboxed_command(
+        command,
+        &cwd,
+        &writable_paths,
+        &connect_sockets,
+        allow_signal,
+        network,
+        timeout,
+    )
 }
 
 fn run_sandboxed_command(
     command: &str,
     cwd: &Path,
     writable_paths: &[SandboxWritablePath],
+    connect_sockets: &[PathBuf],
+    allow_signal: bool,
     network: SandboxNetworkPolicy,
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
@@ -726,7 +743,15 @@ fn run_sandboxed_command(
     #[cfg(target_os = "macos")]
     {
         run_command_with_timeout(
-            seatbelt_command(command, cwd, writable_paths, temp_dir.as_deref(), network),
+            seatbelt_command(
+                command,
+                cwd,
+                writable_paths,
+                connect_sockets,
+                allow_signal,
+                temp_dir.as_deref(),
+                network,
+            ),
             timeout,
         )
     }
@@ -734,14 +759,31 @@ fn run_sandboxed_command(
     #[cfg(target_os = "linux")]
     {
         run_command_with_timeout(
-            bubblewrap_command(command, cwd, writable_paths, temp_dir.as_deref(), network),
+            bubblewrap_command(
+                command,
+                cwd,
+                writable_paths,
+                connect_sockets,
+                allow_signal,
+                temp_dir.as_deref(),
+                network,
+            ),
             timeout,
         )
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (command, cwd, writable_paths, temp_dir, network, timeout);
+        let _ = (
+            command,
+            cwd,
+            writable_paths,
+            connect_sockets,
+            allow_signal,
+            temp_dir,
+            network,
+            timeout,
+        );
         anyhow::bail!("stateful sandbox run is only supported on macOS and Linux");
     }
 }
@@ -909,6 +951,49 @@ fn prepare_external_writable_paths(
     }
 
     Ok(writable_paths)
+}
+
+fn prepare_external_connect_sockets(connect_sockets: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for socket_path in connect_sockets {
+        ensure_external_socket_target(socket_path).map_err(|error| {
+            anyhow::anyhow!(
+                "stateful external-run connect socket `{}` is unsafe: {error}",
+                socket_path.display()
+            )
+        })?;
+        let canonical = socket_path.canonicalize()?;
+        if seen.insert(canonical.clone()) {
+            normalized.push(canonical);
+        }
+    }
+
+    Ok(normalized)
+}
+
+fn ensure_external_socket_target(path: &Path) -> anyhow::Result<()> {
+    if !path.is_absolute() {
+        anyhow::bail!("external-run connect socket targets must be normalized absolute paths");
+    }
+    ensure_no_symlinked_existing_components(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("external-run refuses symlink socket targets");
+    }
+    #[cfg(unix)]
+    {
+        if !metadata.file_type().is_socket() {
+            anyhow::bail!("external-run connect socket target must be a Unix socket");
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        anyhow::bail!("external-run connect socket is only supported on Unix");
+    }
+
+    Ok(())
 }
 
 fn normalize_sandbox_target_paths(field: &str, paths: &[String]) -> anyhow::Result<Vec<String>> {
@@ -2376,10 +2461,17 @@ fn seatbelt_command(
     command: &str,
     cwd: &Path,
     writable_paths: &[SandboxWritablePath],
+    connect_sockets: &[PathBuf],
+    allow_signal: bool,
     temp_dir: Option<&Path>,
     network: SandboxNetworkPolicy,
 ) -> Command {
-    let profile = seatbelt_profile(writable_paths, network);
+    let profile = seatbelt_profile_with_connect_sockets(
+        writable_paths,
+        connect_sockets,
+        allow_signal,
+        network,
+    );
     let mut sandbox = Command::new("/usr/bin/sandbox-exec");
     sandbox
         .arg("-p")
@@ -2460,6 +2552,16 @@ fn seatbelt_profile(
     writable_paths: &[SandboxWritablePath],
     network: SandboxNetworkPolicy,
 ) -> String {
+    seatbelt_profile_with_connect_sockets(writable_paths, &[], false, network)
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn seatbelt_profile_with_connect_sockets(
+    writable_paths: &[SandboxWritablePath],
+    connect_sockets: &[PathBuf],
+    allow_signal: bool,
+    network: SandboxNetworkPolicy,
+) -> String {
     let mut profile =
         String::from("(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n");
     push_seatbelt_device_read_allows(&mut profile);
@@ -2475,6 +2577,15 @@ fn seatbelt_profile(
     profile.push_str(")\n");
     if network == SandboxNetworkPolicy::Enabled {
         profile.push_str("(allow network*)\n");
+    } else {
+        for socket_path in connect_sockets {
+            profile.push_str("(allow network-outbound (literal \"");
+            profile.push_str(&seatbelt_escape(&socket_path.to_string_lossy()));
+            profile.push_str("\"))\n");
+        }
+    }
+    if allow_signal {
+        profile.push_str("(allow signal)\n");
     }
     profile
 }
@@ -2496,11 +2607,20 @@ fn bubblewrap_command(
     command: &str,
     cwd: &Path,
     writable_paths: &[SandboxWritablePath],
+    connect_sockets: &[PathBuf],
+    allow_signal: bool,
     temp_dir: Option<&Path>,
     network: SandboxNetworkPolicy,
 ) -> Command {
     let mut bwrap = Command::new("bwrap");
-    bwrap.args(bubblewrap_args(command, cwd, writable_paths, network));
+    bwrap.args(bubblewrap_args(
+        command,
+        cwd,
+        writable_paths,
+        connect_sockets,
+        allow_signal,
+        network,
+    ));
     apply_sandbox_temp_env(&mut bwrap, temp_dir);
     bwrap
 }
@@ -2526,9 +2646,13 @@ fn bubblewrap_args(
     command: &str,
     cwd: &Path,
     writable_paths: &[SandboxWritablePath],
+    connect_sockets: &[PathBuf],
+    allow_signal: bool,
     network: SandboxNetworkPolicy,
 ) -> Vec<OsString> {
-    let mut args = bubblewrap_base_args(cwd, writable_paths, network);
+    let _ = allow_signal;
+    let mut args =
+        bubblewrap_base_args_with_connect_sockets(cwd, writable_paths, connect_sockets, network);
     args.push(OsString::from("--"));
     args.push(OsString::from("/bin/sh"));
     args.push(OsString::from("-c"));
@@ -2559,6 +2683,16 @@ fn bubblewrap_git_args(
 fn bubblewrap_base_args(
     cwd: &Path,
     writable_paths: &[SandboxWritablePath],
+    network: SandboxNetworkPolicy,
+) -> Vec<OsString> {
+    bubblewrap_base_args_with_connect_sockets(cwd, writable_paths, &[], network)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn bubblewrap_base_args_with_connect_sockets(
+    cwd: &Path,
+    writable_paths: &[SandboxWritablePath],
+    connect_sockets: &[PathBuf],
     network: SandboxNetworkPolicy,
 ) -> Vec<OsString> {
     let mut args = vec![
@@ -2592,6 +2726,11 @@ fn bubblewrap_base_args(
         args.push(OsString::from("--bind"));
         args.push(writable_path.path.as_os_str().to_owned());
         args.push(writable_path.path.as_os_str().to_owned());
+    }
+    for socket_path in connect_sockets {
+        args.push(OsString::from("--ro-bind"));
+        args.push(socket_path.as_os_str().to_owned());
+        args.push(socket_path.as_os_str().to_owned());
     }
 
     args.push(OsString::from("--chdir"));
@@ -3139,6 +3278,8 @@ mod tests {
             "rg auth src",
             Path::new("/repo"),
             &[],
+            &[],
+            false,
             SandboxNetworkPolicy::Disabled,
         );
         let args = args
@@ -3204,6 +3345,8 @@ mod tests {
             "git ls-remote origin",
             Path::new("/repo"),
             &[],
+            &[],
+            false,
             SandboxNetworkPolicy::Enabled,
         );
         let args = args
@@ -3226,6 +3369,8 @@ mod tests {
             "printf ok > src/allowed.ts",
             Path::new("/repo"),
             &writable_paths,
+            &[],
+            false,
             SandboxNetworkPolicy::Disabled,
         );
         let args = args
@@ -3305,6 +3450,8 @@ mod tests {
                 "dd if=/dev/zero of=/dev/null bs=1 count=1 >/dev/null 2>&1 && dd if=/dev/urandom of=/dev/null bs=1 count=1 >/dev/null 2>&1",
                 Path::new("/"),
                 &[],
+                &[],
+                false,
                 None,
                 SandboxNetworkPolicy::Disabled,
             ),
@@ -3586,6 +3733,33 @@ mod tests {
         assert!(!profile.contains("subpath \"/repo/src\""));
         assert!(!profile.contains("subpath \"/dev\""));
         assert!(!profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn seatbelt_profile_allows_exact_connect_socket_without_full_network() {
+        let profile = seatbelt_profile_with_connect_sockets(
+            &[],
+            &[PathBuf::from("/private/tmp/tmux-501/default")],
+            false,
+            SandboxNetworkPolicy::Disabled,
+        );
+
+        assert!(
+            profile
+                .contains("(allow network-outbound (literal \"/private/tmp/tmux-501/default\"))")
+        );
+        assert!(!profile.contains("(allow network*)"));
+        assert!(!profile.contains("(subpath \"/private/tmp/tmux-501\")"));
+    }
+
+    #[test]
+    fn seatbelt_profile_allows_signal_only_when_requested() {
+        let default_profile = seatbelt_profile(&[], SandboxNetworkPolicy::Disabled);
+        let signal_profile =
+            seatbelt_profile_with_connect_sockets(&[], &[], true, SandboxNetworkPolicy::Disabled);
+
+        assert!(!default_profile.contains("(allow signal)"));
+        assert!(signal_profile.contains("(allow signal)"));
     }
 
     #[test]

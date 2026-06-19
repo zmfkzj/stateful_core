@@ -323,6 +323,9 @@ fn parses_external_run_request_command() {
         "/Users/me/.cargo/bin/stateful-bench",
         "--write-dir",
         "/Users/me/.cargo/bin",
+        "--connect-socket",
+        "/private/tmp/tmux-501/default",
+        "--allow-signal",
         "--network",
         "disabled",
         "--timeout-seconds",
@@ -338,6 +341,8 @@ fn parses_external_run_request_command() {
             write_targets,
             create_targets,
             write_dirs,
+            connect_sockets,
+            allow_signal,
             network,
             timeout_seconds,
             command,
@@ -346,6 +351,8 @@ fn parses_external_run_request_command() {
             assert_eq!(write_targets, vec!["/Users/me/.cargo/bin/stateful"]);
             assert_eq!(create_targets, vec!["/Users/me/.cargo/bin/stateful-bench"]);
             assert_eq!(write_dirs, vec!["/Users/me/.cargo/bin"]);
+            assert_eq!(connect_sockets, vec!["/private/tmp/tmux-501/default"]);
+            assert!(allow_signal);
             assert_eq!(network, SandboxNetworkPolicy::Disabled);
             assert_eq!(timeout_seconds, Some(10));
             assert_eq!(
@@ -358,23 +365,24 @@ fn parses_external_run_request_command() {
 }
 
 #[test]
-fn parses_external_run_approve_and_run_command() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "external-run",
-        "approve",
-        "request-123",
-        "--run",
-    ])
-    .expect("external-run approve should parse");
+fn rejects_external_run_approve_and_run_commands() {
+    for args in [
+        vec![
+            "stateful",
+            "external-run",
+            "approve",
+            "request-123",
+            "--run",
+        ],
+        vec!["stateful", "external-run", "run", "request-123"],
+    ] {
+        let error = Cli::try_parse_from(args).expect_err("external-run command should be removed");
 
-    assert!(matches!(
-        cli.command,
-        Command::ExternalRun(ExternalRunCommand::Approve {
-            ref request_id,
-            run: true
-        }) if request_id == "request-123"
-    ));
+        assert!(
+            error.to_string().contains("unrecognized subcommand"),
+            "unexpected parse error: {error}"
+        );
+    }
 }
 
 #[test]

@@ -98,6 +98,7 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     assert!(fixture.paths.state_db.is_file());
     assert!(fixture.codex_config.is_file());
     assert!(!fixture.codex_config_parent().join("hooks.json").exists());
+    assert!(fixture.codex_rules_path().is_file());
 
     let registry = RepoRegistry::load(&fixture.paths).expect("registry should load");
     assert_eq!(registry, RepoRegistry::default());
@@ -112,6 +113,19 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     assert!(first_config.contains(
         "env_vars = [\"STATEFUL_SESSION_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
     ));
+    assert!(first_config.contains(
+        "approval_policy = { granular = { sandbox_approval = false, rules = true, mcp_elicitations = false, request_permissions = false, skill_approval = false } }"
+    ));
+    assert!(first_config.contains("default_tools_approval_mode = \"approve\""));
+    assert!(
+        !first_config.contains("[mcp_servers.stateful.tools.state_current_read]"),
+        "stateful MCP tools should inherit the default approve mode"
+    );
+    assert!(
+        !first_config.contains(
+            "[mcp_servers.stateful.tools.state_lease_acquire]\napproval_mode = \"approve\""
+        )
+    );
     assert!(first_config.contains("hook pre-tool-use"));
     assert!(first_config.contains("[[hooks.PreToolUse]]\nmatcher = \".*\""));
     assert!(first_config.contains(
@@ -125,8 +139,33 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
         fs::read_to_string(&fixture.codex_config).expect("codex config should reread");
     assert_eq!(count(&second_config, "# stateful-core-global-install"), 1);
     assert_eq!(count(&second_config, "[mcp_servers.stateful]"), 1);
+    assert_eq!(count(&second_config, "default_tools_approval_mode"), 1);
+    assert_eq!(count(&second_config, "approval_policy = { granular"), 1);
+    assert!(!second_config.contains("[mcp_servers.stateful.tools."));
     assert_eq!(count(&second_config, "[features]"), 1);
     assert_eq!(count(&second_config, "[[hooks.PreToolUse]]"), 1);
+}
+
+#[test]
+fn install_codex_yes_creates_external_run_prompt_rule() {
+    let fixture = TestFixture::new("codex-rules");
+
+    apply_codex_install(fixture.codex_options(true)).expect("install should apply");
+
+    let rules = fs::read_to_string(fixture.codex_rules_path()).expect("rules should read");
+    assert!(rules.contains("prefix_rule("));
+    assert!(
+        rules.contains("pattern = [\"/opt/stateful/bin/stateful\", \"external-run\", \"request\"]")
+    );
+    assert!(rules.contains("decision = \"prompt\""));
+    assert!(rules.contains("stateful external-run request"));
+    assert!(!rules.contains("stateful external-run approve"));
+    assert!(!rules.contains("stateful external-run run"));
+
+    apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");
+
+    let second_rules = fs::read_to_string(fixture.codex_rules_path()).expect("rules should reread");
+    assert_eq!(count(&second_rules, "prefix_rule("), 1);
 }
 
 #[test]
@@ -204,6 +243,22 @@ fn install_yes_preserves_existing_features_and_enables_hooks() {
 }
 
 #[test]
+fn install_yes_replaces_existing_approval_policy_for_external_run_rules() {
+    let fixture = TestFixture::new("approval-policy");
+    let existing = "approval_policy = \"on-request\"\nmodel = \"gpt-5.5\"\n";
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
+    fs::write(&fixture.codex_config, existing).expect("existing config should write");
+
+    apply_codex_install(fixture.codex_options(true)).expect("install should apply");
+
+    let merged = fs::read_to_string(&fixture.codex_config).expect("merged config should read");
+    assert!(!merged.contains("approval_policy = \"on-request\""));
+    assert!(merged.contains("approval_policy = { granular = {"));
+    assert_eq!(count(&merged, "approval_policy = "), 1);
+    assert!(merged.contains("model = \"gpt-5.5\""));
+}
+
+#[test]
 fn install_yes_preserves_quoted_project_tables() {
     let fixture = TestFixture::new("quoted-project");
     let existing =
@@ -229,6 +284,24 @@ fn install_yes_rejects_existing_unmarked_stateful_mcp_server() {
 
     let error = apply_codex_install(fixture.codex_options(true))
         .expect_err("unmarked stateful mcp config should conflict");
+
+    assert!(error.to_string().contains("mcp_servers.stateful"));
+    assert_eq!(
+        fs::read_to_string(&fixture.codex_config).expect("config should remain readable"),
+        existing
+    );
+    assert!(backup_paths_for(&fixture.codex_config).is_empty());
+}
+
+#[test]
+fn install_yes_rejects_existing_unmarked_stateful_mcp_tool_config() {
+    let fixture = TestFixture::new("mcp-tool-conflict");
+    let existing = "[mcp_servers.stateful.tools.state_current_read]\napproval_mode = \"approve\"\n";
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
+    fs::write(&fixture.codex_config, existing).expect("existing config should write");
+
+    let error = apply_codex_install(fixture.codex_options(true))
+        .expect_err("unmarked stateful mcp tool config should conflict");
 
     assert!(error.to_string().contains("mcp_servers.stateful"));
     assert_eq!(
@@ -469,6 +542,12 @@ impl TestFixture {
         self.codex_config
             .parent()
             .expect("codex config should have a parent directory")
+    }
+
+    fn codex_rules_path(&self) -> PathBuf {
+        self.codex_config_parent()
+            .join("rules")
+            .join("stateful.rules")
     }
 }
 

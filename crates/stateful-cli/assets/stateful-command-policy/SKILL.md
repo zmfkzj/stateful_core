@@ -10,6 +10,7 @@ Stateful hooks are authoritative. Pick commands that match the installed hooks b
 ## Default Write Flow
 
 - Declare exact file intent first with `state_intent_declare` / `state.intent.declare`.
+- Installed Codex config auto-approves Stateful MCP tools, but prompts for `stateful external-run request` through Codex execpolicy rules. Treat that prompt as the approval boundary for validating the external write scope and running the external command.
 - Intent declarations add to the session's active scope in that workspace; declaring a build/test directory does not remove earlier file scopes. When adding targets, declare each active file or directory you still need before acquiring leases.
 - Keep declared paths narrow; prefer exact files for edits, deletes, renames, and moves.
 - Edit repo files with native Codex edit tools such as `apply_patch` or Edit after exact intent and a successful same-session file lease.
@@ -19,10 +20,26 @@ Stateful hooks are authoritative. Pick commands that match the installed hooks b
 - Use `<absolute-stateful-binary> sandbox run --fs git --network disabled --command 'git <args>'` for local git operations and `--network enabled` only for networked git operations such as `fetch`, `pull`, or `push`. The git profile accepts a single `git ...` command, rejects explicit write targets, grants sandboxed write access to the repo worktree plus private transient git state, and protects persistent config/hooks while rejecting shell-dispatching options, path or exec overrides, inline/config-env config, disallowed subcommands such as `init` and `submodule`, branch upstream/tracking persistence, `push -u`, `rebase --exec`, grep pager dispatch, archive/fetch/push exec overrides, and config-mutating `git remote` subcommands such as `add`, `set-url`, `rename`, and `remove`.
 - Put nested benchmark run artifacts under `target/` when using `sandbox run-nested-codex-benchmark`. Hook authorization requires the installed trusted binary to be built with the `codex-benchmark` feature.
 - For Docker-backed nested benchmarks, pass --docker-socket /absolute/path/to/docker.sock so only that Unix socket is exposed to the nested benchmark sandbox; the path must be absolute, exist, and be a Unix socket.
-- Use `<absolute-stateful-binary> external-run request --purpose <purpose> --write-target <external-path> --create-target <external-path> --write-dir <external-dir> --command <cmd>` for command-shaped writes whose normalized targets are outside the repo. External-run does not require intent or lease; it records the request and prints a copy-paste `external-run approve <id> --run` command for the user to approve and execute outside hooks.
+- Use `<absolute-stateful-binary> external-run request --purpose <purpose> --write-target <external-path> --create-target <external-path> --write-dir <external-dir> --command <cmd>` for command-shaped writes whose normalized targets are outside the repo. External-run does not require intent or lease; after Codex approval, it validates the external scope and runs the command directly.
 - Re-read a file immediately before native edits, so preserve unrelated user changes.
 - `apply_patch`, `Edit`, `Write`, and `file_change` are hook-authorized only when targets are visible to stateful policy. If denied, declare the missing exact scope and acquire the exact same-session file lease before retrying; use sandbox-run write targets only for command-shaped writes.
 - If a hook denies an action, read the denial and choose the documented alternative instead of retrying variants.
+
+## Pick The Sandbox Profile First
+
+Choose the narrowest existing entry point before writing the command:
+
+| Need | Use | Do not use |
+|------|-----|------------|
+| Inspect files with shell tools | `sandbox run --fs read-only --network disabled` | raw Bash, networked read-only |
+| Inspect processes | `sandbox process find ...` | `ps`, `pgrep`, or process checks inside `sandbox run --command` |
+| Run any `git ...` command, including PR preparation | `sandbox run --fs git --network disabled --command 'git <args>'` for local git, `--network enabled` only for remote git such as `fetch`, `pull`, or `push` | raw git, `write-targets`, `build`, or explicit write targets |
+| Run builds, tests, package managers, or generators whose outputs are disposable | `sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command <cmd>` after declaring and leasing that scoped tmp child | raw test/build commands, root `tmp`, retained artifacts under `tmp/` |
+| Run a non-git command-shaped repo write | `sandbox run --fs write-targets` with exact `--write-target`, `--create-target`, or scoped disposable `--write-dir tmp/<purpose>` after matching intent and lease | native edits without a file lease, broad write dirs, git commands |
+| Run nested Codex benchmark agents | `sandbox run-nested-codex-benchmark ...` | generic relaxed profiles or wrapping it inside another sandbox |
+| Request command-shaped writes outside the repo | `external-run request ...` | `sandbox run` |
+
+PR workflows still use the git profile for git work: `status`, `diff`, `log`, `branch`, `switch`/`checkout`, `add`, `commit`, `merge`, `rebase`, `tag`, and `push`. Do not use `--fs write-targets` just because git mutates the worktree or `.git`; the git profile owns that scope. Non-git network CLIs such as PR-hosting tools are not covered by the git profile. If no listed profile matches the needed command, stop and report the exact unsupported command instead of trying raw Bash or a near-miss profile.
 
 ## Tmp Retention Rule
 
@@ -51,8 +68,10 @@ Read-only inspection:
 Run a git operation:
 
 ```bash
-<absolute-stateful-binary> sandbox run --fs git --network disabled --command 'git status'
+<absolute-stateful-binary> sandbox run --fs git --network disabled --command 'git status --short'
+<absolute-stateful-binary> sandbox run --fs git --network disabled --command 'git commit -m "Update command policy"'
 <absolute-stateful-binary> sandbox run --fs git --network enabled --command 'git fetch --all'
+<absolute-stateful-binary> sandbox run --fs git --network enabled --command 'git push origin HEAD'
 ```
 
 Run a command-shaped write after declaring exact intent and acquiring the matching same-session lease:
@@ -81,13 +100,13 @@ Run nested Codex benchmark agents only through the dedicated benchmark profile. 
 <absolute-stateful-binary> sandbox run-nested-codex-benchmark --purpose "run nested Codex chaos benchmark" --write-dir target --codex-home-root target/nested-codex-homes/run-1 --timeout-seconds 120 --command '<benchmark-command>'
 ```
 
-Request a repo-external write. The first command only records the request and prints the approval command; the user copies and runs that approval command outside hooks:
+Request a repo-external write. Codex prompts on `external-run request`; after approval, the command runs directly:
 
 ```bash
 <absolute-stateful-binary> external-run request --purpose "install rebuilt stateful binaries" --write-dir <external-install-dir> --command 'install -m 755 target/release/stateful <external-install-dir>/stateful'
 ```
 
-`stateful sandbox run --fs write-targets` targets must be repo-relative. Do not target `.git`, symlinks, paths outside the repo, or paths with control characters. Use `--write-target` for existing files, `--create-target` for new files, and `--write-dir tmp/<purpose>` only for explicitly scoped disposable artifact directories. Declare directory intent with a trailing slash for the exact directory, such as `tmp/reports/`, and acquire the same-session directory lease before using that `--write-dir`; `--write-dir` is limited to children of the `tmp/` artifact tree and rejects root `tmp`. Use `--fs build --write-dir tmp/<purpose>` for standard build/test commands. The read-only profile always requires `--network disabled`. Process inspection must use `stateful sandbox process find`; raw `ps` and `pgrep` inside `sandbox run --command` are disallowed. The git profile manages repo write scope itself; do not pass write targets with `--fs git`, and do not use it for config-mutating remote setup such as `git remote add` or `git remote set-url`. `stateful external-run` is for normalized targets outside the repo and supports exact files, created files, and whole external directories after user approval outside hooks. `/dev/null` is writable inside the sandbox; do not declare it as a target. `stateful sandbox run` is macOS-first and release-verified with Seatbelt. Linux bubblewrap support and `stateful external-run` support are implemented but experimental until verified in a Linux release environment.
+`stateful sandbox run --fs write-targets` targets must be repo-relative. Do not target `.git`, symlinks, paths outside the repo, or paths with control characters. Use `--write-target` for existing files, `--create-target` for new files, and `--write-dir tmp/<purpose>` only for explicitly scoped disposable artifact directories. Declare directory intent with a trailing slash for the exact directory, such as `tmp/reports/`, and acquire the same-session directory lease before using that `--write-dir`; `--write-dir` is limited to children of the `tmp/` artifact tree and rejects root `tmp`. Use `--fs build --write-dir tmp/<purpose>` for standard build/test commands. The read-only profile always requires `--network disabled`. Process inspection must use `stateful sandbox process find`; raw `ps` and `pgrep` inside `sandbox run --command` are disallowed. The git profile manages repo write scope itself; do not pass write targets with `--fs git`, and do not use it for config-mutating remote setup such as `git remote add` or `git remote set-url`. `stateful external-run` is for normalized targets outside the repo and supports exact files, created files, and whole external directories after Codex approval on the request. `/dev/null` is writable inside the sandbox; do not declare it as a target. `stateful sandbox run` is macOS-first and release-verified with Seatbelt. Linux bubblewrap support and `stateful external-run` support are implemented but experimental until verified in a Linux release environment.
 
 ## Prefer
 
@@ -98,7 +117,7 @@ Request a repo-external write. The first command only records the request and pr
 - `<absolute-stateful-binary> sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command 'cargo test --workspace'` for build or test commands that write disposable build artifacts, after exact scoped tmp child directory intent and a successful same-session directory lease.
 - `<absolute-stateful-binary> sandbox run --fs git --network disabled --command 'git <args>'` for local git operations such as status, add, commit, checkout, restore, reset, merge, rebase, and clean; use `--network enabled` for fetch, pull, push, and other remote git operations. Remote metadata mutation such as `git remote add` and `git remote set-url` is rejected.
 - `<absolute-stateful-binary> sandbox run-nested-codex-benchmark --purpose ... --write-dir target --codex-home-root target/... --command ...` for nested Codex benchmark runs that need network and isolated per-agent Codex homes under `target/`.
-- `<absolute-stateful-binary> external-run request --purpose ... --write-dir <external-dir> --command ...` for approved writes outside the repo; give the printed approval command to the user, because approval/run is performed outside hooks.
+- `<absolute-stateful-binary> external-run request --purpose ... --write-dir <external-dir> --command ...` for approved writes outside the repo; Codex prompts before running the request.
 - Stateful diagnostics through MCP tools, native tools, or sandbox-run wrappers through the trusted absolute `stateful` binary.
 
 ## Avoid In Bash
@@ -116,7 +135,7 @@ Request a repo-external write. The first command only records the request and pr
 - Raw test commands; use `sandbox run --fs build --write-dir tmp/<purpose>` after exact scoped tmp child directory intent and a successful same-session directory lease for commands that write build or test artifacts.
 - Generic relaxed sandbox profiles for nested Codex. Use only `sandbox run-nested-codex-benchmark`; it is intentionally narrower than a reusable relaxed profile.
 - Most `stateful` control commands through Bash; use MCP tools when available.
-- Repo-external writes through `sandbox run`, or `external-run approve` / `external-run run` inside hooks; use `external-run request` so the user sees the write scope, purpose, command, and copy-paste approval command.
+- Repo-external writes through `sandbox run`; use `external-run request` so Codex prompts with the write scope, purpose, and command before execution.
 
 ## If Blocked
 

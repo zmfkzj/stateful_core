@@ -498,7 +498,10 @@ stateful commit -m <message> -- <paths...>
 stateful push [remote branch]
 ```
 
-`stateful install --yes` configures global Codex hooks and MCP. `stateful enable`
+`stateful install --yes` configures global Codex hooks, MCP, MCP tool approval
+policy, and external-run approval rules. Stateful MCP tools default to automatic
+approval; `stateful external-run request` is gated by a Codex execpolicy prompt
+before it validates the external write scope and runs the command. `stateful enable`
 opts a repo into enforcement and can install repo-local Codex hooks with
 `--repo-local-codex` as a compatibility fallback. `stateful server start`
 without `--foreground` uses the detached lazy lifecycle. Bare legacy

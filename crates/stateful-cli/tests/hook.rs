@@ -46,6 +46,11 @@ fn trusted_stateful_path() -> String {
         .into_owned()
 }
 
+#[cfg(feature = "codex-benchmark")]
+fn trusted_tmux_path() -> &'static str {
+    "/opt/homebrew/bin/tmux"
+}
+
 fn read_legacy_current_session_file(repo_root: &Path) -> CurrentSession {
     let path = repo_root.join(".stateful_core/runtime/session.json");
     let contents = fs::read_to_string(path).expect("legacy current session should read");
@@ -679,7 +684,7 @@ fn pre_tool_use_allows_nested_codex_benchmark_sandbox_with_docker_socket() {
         "tool_name": "Bash",
         "tool_input": {
             "command": format!(
-                "{stateful} sandbox run-nested-codex-benchmark --purpose bench --write-dir target --codex-home-root target/nested-codex-homes/run-1 --docker-socket /Users/arthur/.colima/default/docker.sock --command true"
+                "{stateful} sandbox run-nested-codex-benchmark --purpose bench --write-dir target --codex-home-root target/nested-codex-homes/run-1 --docker-socket /private/tmp/docker.sock --command true"
             )
         }
     })
@@ -688,6 +693,54 @@ fn pre_tool_use_allows_nested_codex_benchmark_sandbox_with_docker_socket() {
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
     assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+#[cfg(feature = "codex-benchmark")]
+fn pre_tool_use_allows_tmux_new_session_for_nested_codex_benchmark() {
+    let stateful = trusted_stateful_path();
+    let tmux = trusted_tmux_path();
+    let nested = format!(
+        "{stateful} sandbox run-nested-codex-benchmark --purpose 'run DeNovoSWE full dataset Codex benchmark fixture a' --write-dir target --codex-home-root target/nested-codex-homes/fixture-denovo-full-3-codex-a --docker-socket /private/tmp/docker.sock --timeout-seconds 43200 --command 'target/debug/stateful-bench denovo run --run-id fixture-denovo-full-3-codex-a'"
+    );
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!(
+                "{tmux} new-session -d -s fixture-denovo-full-3-codex-a -c /repo \"{nested}\""
+            )
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+#[cfg(feature = "codex-benchmark")]
+fn pre_tool_use_denies_tmux_send_keys_even_for_benchmark_sessions() {
+    let tmux = trusted_tmux_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!(
+                "{tmux} send-keys -t fixture-denovo-full-3-codex-a 'rm -rf target' C-m"
+            )
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(outcome, "tmux benchmark launcher supports only new-session");
 }
 
 #[test]
@@ -725,10 +778,7 @@ fn pre_tool_use_denies_external_run_approve_and_run() {
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(
-        outcome,
-        "external-run approvals must be performed outside hooks",
-    );
+    assert_bash_denial_mentions(outcome, "stateful external-run supports only request");
 }
 
 #[test]
@@ -747,10 +797,7 @@ fn pre_tool_use_denies_external_run_run() {
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(
-        outcome,
-        "external-run approvals must be performed outside hooks",
-    );
+    assert_bash_denial_mentions(outcome, "stateful external-run supports only request");
 }
 
 #[test]

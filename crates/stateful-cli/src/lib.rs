@@ -26,10 +26,7 @@ pub use codex_wrapper::{
     CodexInvocation, CodexSandboxMode, CodexWrapperOptions, build_codex_invocation, run_codex,
 };
 pub use commit::{CommitRequest, CommitResult, run_structured_commit};
-pub use external_run::{
-    ExternalRunApproval, ExternalRunRequest, approve_external_run, request_external_run,
-    run_approved_external_run,
-};
+pub use external_run::{ExternalRunRequest, request_external_run};
 pub use global_paths::GlobalPaths;
 pub use hook::{
     HookOutcome, handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
@@ -166,20 +163,16 @@ pub enum ExternalRunCommand {
         create_targets: Vec<String>,
         #[arg(long = "write-dir")]
         write_dirs: Vec<String>,
+        #[arg(long = "connect-socket")]
+        connect_sockets: Vec<String>,
+        #[arg(long)]
+        allow_signal: bool,
         #[arg(long, value_enum, default_value = "disabled")]
         network: SandboxNetworkPolicy,
         #[arg(long)]
         timeout_seconds: Option<u64>,
         #[arg(long)]
         command: String,
-    },
-    Approve {
-        request_id: String,
-        #[arg(long)]
-        run: bool,
-    },
-    Run {
-        request_id: String,
     },
 }
 
@@ -563,46 +556,24 @@ pub fn run() -> anyhow::Result<()> {
             write_targets,
             create_targets,
             write_dirs,
+            connect_sockets,
+            allow_signal,
             network,
             timeout_seconds,
             command,
         }) => {
-            let approval = request_external_run(ExternalRunRequest {
+            let output = request_external_run(ExternalRunRequest {
                 repo_root: current_repo_root_or_current_dir()?,
-                paths: GlobalPaths::from_env()?,
                 purpose,
                 command,
                 write_targets,
                 create_targets,
                 write_dirs,
+                connect_sockets,
+                allow_signal,
                 network,
                 timeout_seconds,
             })?;
-            print!("{}", approval.guidance);
-        }
-        Command::ExternalRun(ExternalRunCommand::Approve { request_id, run }) => {
-            let paths = GlobalPaths::from_env()?;
-            let approval = approve_external_run(&paths, &request_id, run)?;
-            println!("{}", approval.guidance);
-            if run {
-                let output = run_approved_external_run(&paths, &request_id)?;
-                println!("{}", serde_json::to_string(&output)?);
-                if let Some(exit_code) =
-                    sandbox::sandbox_run_cli_exit_code(&sandbox::SandboxRunOutput {
-                        status: output.status,
-                        exit_code: output.exit_code,
-                        stdout: output.stdout.clone(),
-                        stderr: output.stderr.clone(),
-                        allowed_write_targets: Vec::new(),
-                        denied_write_targets: Vec::new(),
-                    })
-                {
-                    std::process::exit(exit_code);
-                }
-            }
-        }
-        Command::ExternalRun(ExternalRunCommand::Run { request_id }) => {
-            let output = run_approved_external_run(&GlobalPaths::from_env()?, &request_id)?;
             println!("{}", serde_json::to_string(&output)?);
             if output.status != "exited" || output.exit_code != Some(0) {
                 std::process::exit(output.exit_code.unwrap_or(1));
