@@ -22,6 +22,9 @@ and other coordination-sensitive actions.
 Git resolves conflicts after they happen. `stateful_core` is designed to let
 trusted tools detect and avoid likely write conflicts before the write occurs.
 
+The long-term goal is to improve work efficiency in multi-human, multi-agent
+environments. The first milestone is the narrower 1-human, multi-agent workflow.
+
 ## Status
 
 This repository is an early Rust implementation and local-first, macOS-first

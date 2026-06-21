@@ -16,8 +16,8 @@ Benchmark prompts must not be injected through this skill except for instruction
 ## Default Write Flow
 
 - First inspect current state with `state_context_render` / `state.context.render` or `state_current_read` / `state.current.read`. Confirm who is active, what this session already holds, pending reservations, and likely conflicts before choosing files, commands, or subagent work.
-- In Codex sessions, call Stateful MCP tools directly for coordination: `state_intent_declare`, `state_lease_acquire`, `state_intent_request`, `state_notifications_poll`, `state_resume_next`, and `state_intent_claim` as needed. Do not run `stateful intent declare` or `stateful mcp call` through Bash.
-- Declare exact file intent first with `state_intent_declare` / `state.intent.declare`.
+- In Codex sessions with Stateful MCP exposed under the `mcp__stateful__` namespace, use the exact qualified tools shown in the active tool list: `mcp__stateful__state_context_render`, `mcp__stateful__state_current_read`, `mcp__stateful__state_session_register`, `mcp__stateful__state_intent_declare`, `mcp__stateful__state_lease_acquire`, `mcp__stateful__state_intent_request`, `mcp__stateful__state_notifications_poll`, `mcp__stateful__state_resume_next`, and `mcp__stateful__state_intent_claim`. Do not emit namespace-less short-name function calls such as `state_lease_acquire`; transcript logs may display `name: state_lease_acquire` with `namespace: mcp__stateful`, but the callable tool is the qualified MCP tool. Do not run `stateful intent declare` or `stateful mcp call` through Bash.
+- Declare exact file intent first using `mcp__stateful__state_intent_declare` when qualified Stateful MCP tools are present.
 - Installed Codex config auto-approves Stateful MCP tools, but prompts for `stateful external-run request` through Codex execpolicy rules. Treat that prompt as the approval boundary for validating the external write scope and running the external command.
 - Intent declarations add to the session's active scope in that workspace; declaring a build/test directory does not remove earlier file scopes. When adding targets, declare each active file or directory you still need before acquiring leases.
 - Keep declared paths narrow; prefer exact files for edits, deletes, renames, and moves.
@@ -34,7 +34,7 @@ Benchmark prompts must not be injected through this skill except for instruction
 - Re-read a file immediately before native edits, so preserve unrelated user changes.
 - `apply_patch`, `Edit`, `Write`, and `file_change` are hook-authorized only when targets are visible to stateful policy. If denied, declare the missing exact scope and acquire the exact same-session file lease before retrying; use sandbox-run write targets only for command-shaped writes.
 - Native edit hooks and `sandbox run --fs write-targets` release their authorized same-session leases after the write transaction completes. If you need another edit after that boundary, reread the target and reacquire or let a claimable reservation lazy-claim at the next write boundary.
-- In native Codex subagents, the active tool session is the session authority. Do not repair session identity with hook commands, shell environment overrides, or hook-state archaeology. If a native edit or write-target command is denied for missing intent or same-session lease, use the Stateful MCP tools in that same subagent session: `state_session_register` if needed, then `state_intent_declare` and `state_lease_acquire` for the exact path.
+- In native Codex subagents, the active tool session is the session authority. Do not repair session identity with hook commands, shell environment overrides, or hook-state archaeology. If a native edit or write-target command is denied for missing intent or same-session lease, use the same subagent session's qualified Stateful MCP tools: `mcp__stateful__state_session_register` if needed, then `mcp__stateful__state_intent_declare` and `mcp__stateful__state_lease_acquire` for the exact path. If those qualified names are absent, use only the actual tool names shown in that subagent's active tool list.
 - If a hook denies an action, read the denial and choose the documented alternative instead of retrying variants.
 
 ## Subagent Write Recovery
@@ -43,7 +43,7 @@ When a native Codex subagent hits `apply_patch writes require ... same-session f
 
 1. Stop retrying command variants; denials are the API.
 2. Re-read the exact target if it exists.
-3. Use MCP in this subagent session: `state_session_register` if needed, `state_intent_declare(purpose=<task purpose>, files_planned=[...])`, then `state_lease_acquire(path=...)` for the exact file path. For new files, declare and lease the exact new file path, not only the parent directory.
+3. Use MCP in this subagent session with qualified names when present: `mcp__stateful__state_session_register` if needed, `mcp__stateful__state_intent_declare(purpose=<task purpose>, files_planned=[...])`, then `mcp__stateful__state_lease_acquire(path=...)` for the exact file path. For new files, declare and lease the exact new file path, not only the parent directory. If the first recovery call returns `unsupported call`, stop and report the exact call name, active tool list if visible, and denial instead of retrying short-name variants.
 4. Edit with native tools such as `apply_patch`, or use `sandbox run --fs write-targets` with the matching `--write-target` or `--create-target` for command-shaped writes.
 5. If another session owns the lease, do not retry or steal it. Follow the wait queue when available; otherwise report the path, blocking session, and wait or reservation id to the parent agent.
 

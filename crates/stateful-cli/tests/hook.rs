@@ -1622,6 +1622,7 @@ fn pre_tool_use_denies_raw_stateful_intent_declare_with_mcp_guidance() {
         &[
             "state_intent_declare",
             "MCP",
+            "mcp__stateful__state_intent_declare",
             "Do not run `stateful intent declare`",
         ],
     );
@@ -1646,6 +1647,7 @@ fn pre_tool_use_denies_stateful_mcp_call_intent_declare_with_mcp_guidance() {
         &[
             "state_intent_declare",
             "MCP",
+            "mcp__stateful__state_intent_declare",
             "`stateful mcp call` through Bash",
         ],
     );
@@ -3760,7 +3762,9 @@ fn user_prompt_submit_posts_context_render() {
     assert!(rendered.contains("Nearby Activity"));
     assert!(rendered.contains("Before using Bash"));
     assert!(rendered.contains("stateful-command-policy"));
-    assert!(rendered.contains("Use MCP tools `state_intent_declare` and `state_lease_acquire`"));
+    assert!(rendered.contains("mcp__stateful__state_intent_declare"));
+    assert!(rendered.contains("mcp__stateful__state_lease_acquire"));
+    assert!(!rendered.contains("Use MCP tools `state_intent_declare` and `state_lease_acquire`"));
     assert!(rendered.contains("Do not run `stateful intent declare`"));
     assert!(rendered.contains("--fs read-only --network disabled"));
     assert!(rendered.contains("--fs build --network enabled"));

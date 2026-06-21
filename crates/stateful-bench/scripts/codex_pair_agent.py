@@ -35,9 +35,12 @@ description: Use before Bash, file writes, sandboxed tests, commits, pushes, or 
 
 # Stateful Command Policy
 
-Stateful hooks are authoritative. Use MCP tools such as `state_intent_declare`
-and `state_lease_acquire` before protected writes or build/test commands, and
-use the sandbox-run wrappers printed by hook denials for shell commands.
+Stateful hooks are authoritative. In Codex sessions with Stateful MCP exposed
+under the `mcp__stateful__` namespace, use the exact qualified tools shown in
+the active tool list, including `mcp__stateful__state_intent_declare` and
+`mcp__stateful__state_lease_acquire`. Do not call namespace-less short names
+such as `state_lease_acquire`, and do not run `stateful mcp call` through Bash.
+Use the sandbox-run wrappers printed by hook denials for shell commands.
 """
 RESUME_PROMPT = """\
 The previous Codex exec turn stopped because of a token/context limit.

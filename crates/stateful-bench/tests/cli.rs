@@ -3372,7 +3372,14 @@ print(json.dumps({{
 
     let skill = output["skill"].as_str().expect("skill should be text");
     assert!(skill.contains("name: stateful-command-policy"));
-    assert!(skill.contains("state_intent_declare"));
+    assert!(skill.contains("mcp__stateful__state_intent_declare"));
+    assert!(skill.contains("mcp__stateful__state_lease_acquire"));
+    assert!(
+        !skill
+            .contains("call Stateful MCP tools directly for coordination: `state_intent_declare`")
+    );
+    assert!(!skill.contains("Use MCP in this subagent session: `state_session_register`"));
+    assert!(!skill.contains("Declare exact file intent first with `state_intent_declare`"));
     assert_eq!(output["auth_exists"], false);
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
