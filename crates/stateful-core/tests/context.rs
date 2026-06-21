@@ -77,6 +77,54 @@ fn structured_items_render_purpose_and_required_actions() {
 }
 
 #[test]
+fn required_next_action_deduplicates_repeated_blocking_actions() {
+    let repeated = "Wait for the lease to release, or coordinate with session-a.";
+    let package = ContextPackage::from_items(vec![
+        CurrentItem::new(
+            CurrentItemKind::Lease,
+            CurrentSeverity::Block,
+            CurrentFreshness::Live,
+            "src/auth.ts",
+            "Fix auth validation behavior.",
+            "session-a has an active write lease on src/auth.ts.",
+        )
+        .with_next_action(repeated),
+        CurrentItem::new(
+            CurrentItemKind::Lease,
+            CurrentSeverity::Block,
+            CurrentFreshness::Live,
+            "src/session.ts",
+            "Fix auth validation behavior.",
+            "session-a has an active write lease on src/session.ts.",
+        )
+        .with_next_action(repeated),
+        CurrentItem::new(
+            CurrentItemKind::Reservation,
+            CurrentSeverity::Block,
+            CurrentFreshness::Live,
+            "src/cache.ts",
+            "Resume queued cache update.",
+            "A reservation is ready for src/cache.ts.",
+        )
+        .with_next_action("Reread src/cache.ts before continuing."),
+    ]);
+
+    let text = render_prompt_text(&package, RenderMode::Brief);
+    let required_section = text
+        .split("Required Next Action\n")
+        .nth(1)
+        .expect("required next action section should render");
+
+    assert_eq!(
+        required_section
+            .matches("- Wait for the lease to release, or coordinate with session-a")
+            .count(),
+        1
+    );
+    assert!(required_section.contains("- Reread src/cache.ts before continuing"));
+}
+
+#[test]
 fn brief_context_renders_evidence_kind_without_evidence_text() {
     let package = ContextPackage::from_items(vec![
         CurrentItem::new(

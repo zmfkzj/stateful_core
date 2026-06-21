@@ -398,10 +398,16 @@ fn package_status(items: &[CurrentItem]) -> ContextStatus {
 }
 
 fn render_required_next_action(output: &mut String, items: &[&CurrentItem]) {
-    let next_actions = items
-        .iter()
-        .filter_map(|item| item.next_action.as_deref())
-        .collect::<Vec<_>>();
+    let mut next_actions = Vec::new();
+    for item in items {
+        let Some(next_action) = item.next_action.as_deref() else {
+            continue;
+        };
+        let next_action = trim_trailing_period(next_action);
+        if !next_actions.contains(&next_action) {
+            next_actions.push(next_action);
+        }
+    }
     if next_actions.is_empty() {
         return;
     }
@@ -411,7 +417,7 @@ fn render_required_next_action(output: &mut String, items: &[&CurrentItem]) {
     }
     output.push_str("Required Next Action\n");
     for next_action in next_actions {
-        output.push_str(&format!("- {}\n", trim_trailing_period(next_action)));
+        output.push_str(&format!("- {next_action}\n"));
     }
 }
 
