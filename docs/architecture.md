@@ -17,9 +17,10 @@ Codex hooks observe and gate important agent actions. MCP tools give agents a
 structured way to read and update coordination state. The state server owns
 policy, persistence, TTLs, and conflict checks.
 
-The v1 MVP includes sandboxed test execution through `sandbox run --fs build`
-after exact `tmp/` directory intent and a successful same-session directory
-lease, plus explicit reconciliation acknowledgements through
+The v1 MVP includes sandboxed test execution through
+`sandbox run --fs build --write-dir <scratch-purpose>`, which writes disposable
+artifacts under `/tmp/stateful/<session>/<purpose>/`, plus explicit
+reconciliation acknowledgements through
 `state.reconcile.ack`. Automatic human-write observation and reconciliation
 blocks remain target behavior.
 
@@ -272,8 +273,8 @@ V1 enforcement is strict about write target extraction:
   `--fs write-targets` with explicit
   `--write-target` / `--create-target` values and target authorization.
 - Test execution: run only through sandboxed test actions such as
-  `stateful sandbox run --fs build --network enabled --command <cmd>` after
-  exact `tmp/` directory intent and a successful same-session directory lease.
+  `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`.
+  Build artifacts live under `/tmp/stateful/<session>/<purpose>/`.
 - Bash command text alone never authorizes tool use, even when it appears
   read-only.
 
@@ -293,19 +294,16 @@ other Bash command.
 ## Sandboxed Tests
 
 Agents cannot run raw Bash test commands through hooks. They call the trusted
-wrapper after exact `tmp/` directory intent and a successful same-session
-directory lease:
+wrapper with a scratch purpose:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." tmp/
-stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"tmp/"}'
-stateful sandbox run --fs build --network enabled --command <cmd>
+stateful sandbox run --fs build --network enabled --write-dir test-run --command <cmd>
 ```
 
-The wrapper authorizes the `tmp/` artifact directory before execution and the OS
-sandbox limits build/test writes to the tmp artifact tree. Source-tree writes
-remain outside the allowed surface unless exact targets are declared and
-authorized.
+The wrapper creates disposable scratch under
+`/tmp/stateful/<session>/test-run/` and the OS sandbox limits build/test writes
+to that external artifact tree. Source-tree writes remain outside the allowed
+surface unless exact targets are declared and authorized.
 
 The macOS Seatbelt backend is the release-verified first-class backend. Linux
 bubblewrap support is implemented but experimental until it is verified in a
@@ -411,7 +409,8 @@ During this blocked state, the agent may still:
 - read the affected file
 - search the repository
 - inspect diffs
-- run sandboxed tests with the authorized `tmp/` artifact tree
+- run sandboxed tests with an external `/tmp/stateful/<session>/<purpose>/`
+  artifact tree
 
 To resume writing, the agent must call:
 

@@ -10,6 +10,7 @@ use serde_json::json;
 use stateful_core::normalize_relative_path;
 
 use crate::outbox::queue_session_heartbeat_outbox;
+use crate::runtime::write_current_session_file_for_explicit_session;
 use crate::sandbox::{
     parse_sandbox_process_find_bash_invocation, parse_sandbox_run_bash_invocation,
     validate_process_find_request, validate_sandbox_run_request_shape,
@@ -23,7 +24,7 @@ use crate::{
     ServerRuntime, discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server,
     get_json, post_json, protocol_envelope, record_unclassified_tool_for_repo, repo_gate,
     repo_identity_for_enabled_repo, runtime_env_override_is_configured,
-    tool_allowed_for_enabled_repo, write_current_session_file_for_current_stateful_session,
+    tool_allowed_for_enabled_repo,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,8 +63,7 @@ impl HookOutcome {
             Self::AllowWithContext { message } => Ok(json!({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": message,
+                    "additionalContext": message,
                 }
             })),
             Self::Deny { reason } => Ok(json!({
@@ -272,7 +272,7 @@ fn remember_current_session(
         .ok()
         .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok());
     let workspace_id = effective_workspace_id(runtime, identity.as_ref());
-    write_current_session_file_for_current_stateful_session(
+    write_current_session_file_for_explicit_session(
         repo_root,
         &CurrentSession::new(input.stateful_session_id(), workspace_id),
     )
@@ -306,6 +306,7 @@ fn handle_post_tool_use_with_runtime(
         identity,
     )?;
     refresh_post_tool_lease_observations(&input, runtime, repo_root, identity);
+    release_post_tool_leases(&input, runtime, repo_root, identity);
     Ok(())
 }
 
@@ -323,6 +324,14 @@ fn render_context_prompt_text(
     session_id: &str,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<String> {
+    Ok(render_context_response(runtime, session_id, identity)?.prompt_text)
+}
+
+fn render_context_response(
+    runtime: &ServerRuntime,
+    session_id: &str,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<ContextRenderResponse> {
     let workspace_id = effective_workspace_id(runtime, identity);
     let mut body = json!({
         "session_id": session_id,
@@ -348,7 +357,7 @@ fn render_context_prompt_text(
     }
 
     let response: ContextRenderResponse = serde_json::from_str(&response.body)?;
-    Ok(response.prompt_text)
+    Ok(response)
 }
 
 fn user_prompt_context_rendered(repo_root: &Path, session_id: &str) -> bool {
@@ -381,9 +390,9 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 }
 
 fn stateful_command_policy_reminder() -> String {
-    let binary = stateful_binary_placeholder_for_guidance();
+    let binary = stateful_binary_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- Before using Bash, use the `stateful-command-policy` skill.\n- Use MCP tools `state_intent_declare` and `state_lease_acquire` for coordination. Do not run `stateful intent declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For process checks, use `{binary} sandbox process find --contains <literal>` or `--name <comm>` with selectors.\n- For build or test commands, declare intent and acquire a same-session directory lease for a scoped tmp child such as `tmp/<purpose>/`, then use `{binary} sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command '<cmd>'`.\n- For local git operations, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; use `--network enabled` only for networked git operations.\n- For GitHub pull request list/view/status/create, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`.\n- For file edits, declare exact intent, acquire the same-session file lease successfully, then use native Codex edit tools such as `apply_patch` or Edit.\n- For command-shaped writes, declare exact intent, acquire the matching file or directory lease successfully, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`, `{binary} sandbox run --fs write-targets --create-target <file> --command '<cmd>'`, or `{binary} sandbox run --fs write-targets --write-dir tmp/<purpose> --command '<cmd>'` for tmp artifacts."
+        "Stateful command policy reminder:\n- First inspect current state with `state_context_render` or `state.current.read` so you know who is active, what you already hold, and what may conflict.\n- Before using Bash, use the `stateful-command-policy` skill.\n- Use MCP tools `state_intent_declare` and `state_lease_acquire` for coordination. Do not run `stateful intent declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For process checks, use `{binary} sandbox process find --contains <literal>` or `--name <comm>` with selectors.\n- For build or test commands, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command '<cmd>'`; the build profile prepares scratch under `/tmp/stateful/<session>/<scratch-purpose>/`.\n- For local git operations, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; use `--network enabled` only for networked git operations.\n- For GitHub pull request list/view/status/create, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`.\n- For file edits, declare exact intent, acquire the same-session file lease successfully, then use native Codex edit tools such as `apply_patch` or Edit.\n- For command-shaped writes, declare exact intent, acquire the matching file or directory lease successfully, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`, `{binary} sandbox run --fs write-targets --create-target <file> --command '<cmd>'`, or `{binary} sandbox run --fs write-targets --write-dir <repo-dir> --command '<cmd>'`; repo `tmp` is a normal repo path and still needs a matching lease."
     )
 }
 
@@ -472,6 +481,45 @@ fn refresh_post_tool_lease_observations(
     }
 }
 
+fn release_post_tool_leases(
+    input: &SessionEventInput,
+    runtime: &ServerRuntime,
+    repo_root: Option<&Path>,
+    identity: Option<&RepoIdentity>,
+) {
+    let Some(identity) = identity else {
+        return;
+    };
+    let Some(repo_root) = repo_root else {
+        return;
+    };
+    let Ok(targets) = post_tool_refresh_targets(input, repo_root) else {
+        return;
+    };
+    let workspace_id = effective_workspace_id(runtime, Some(identity));
+    let mut paths = BTreeSet::new();
+    for target in targets {
+        paths.insert(target.path);
+        if let Some(new_path) = target.new_path {
+            paths.insert(new_path);
+        }
+    }
+
+    for path in paths {
+        let body = json!({
+            "session_id": input.stateful_session_id(),
+            "workspace_id": workspace_id,
+            "path": path,
+        });
+        let Ok(response) = post_json(runtime, "/v1/lease/release", &body) else {
+            continue;
+        };
+        if !(200..300).contains(&response.status_code) {
+            continue;
+        }
+    }
+}
+
 fn post_tool_refresh_targets(
     input: &SessionEventInput,
     repo_root: &Path,
@@ -521,7 +569,15 @@ fn handle_pre_tool_use_with_runtime(
     });
 
     match input.tool_name.as_str() {
-        "Bash" => authorize_bash(&input),
+        "Bash" => {
+            let outcome = authorize_bash(&input)?;
+            Ok(with_file_tool_live_context(
+                outcome,
+                &input,
+                runtime,
+                identity.as_ref(),
+            ))
+        }
         "apply_patch" => authorize_apply_patch(&input, runtime, repo_root, cwd, identity.as_ref()),
         "file_change" => {
             authorize_file_change_tool(&input, runtime, repo_root, cwd, identity.as_ref())
@@ -897,15 +953,19 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 }
 
 fn bash_policy_guidance() -> String {
-    let binary = stateful_binary_placeholder_for_guidance();
+    let binary = stateful_binary_for_guidance();
     format!(
-        "Use the `stateful-command-policy` skill before Bash. Raw Bash is denied. Use MCP tools `state_intent_declare` and `state_lease_acquire` for coordination. Do not run `stateful intent declare` or `stateful mcp call` through Bash. For read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`; for process checks use `{} sandbox process find --contains <literal>`; for build or test commands use `{} sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command '<cmd>'` after declaring and leasing that scoped tmp child; for local git operations use `{} sandbox run --fs git --network disabled --command 'git <args>'` and use network enabled only for networked git operations; for GitHub pull request list/view/status/create use `{} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`; for command-shaped repo writes use `{} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`; for approved repo-external writes use `{} external-run request --purpose '<purpose>' --write-dir <dir> --command '<cmd>'`.",
+        "Inspect current state first with `state_context_render` or `state.current.read`, then use the `stateful-command-policy` skill before Bash. Raw Bash is denied. Use MCP tools `state_intent_declare` and `state_lease_acquire` for coordination. Do not run `stateful intent declare` or `stateful mcp call` through Bash. For read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`; for process checks use `{} sandbox process find --contains <literal>`; for build or test commands use `{} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command '<cmd>'`, which writes scratch under `/tmp/stateful/<session>/<scratch-purpose>/`; for local git operations use `{} sandbox run --fs git --network disabled --command 'git <args>'` and use network enabled only for networked git operations; for GitHub pull request list/view/status/create use `{} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`; for command-shaped repo writes use `{} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`; for approved repo-external writes use `{} external-run request --purpose '<purpose>' --write-dir <dir> --command '<cmd>'`.",
         binary, binary, binary, binary, binary, binary, binary
     )
 }
 
-fn stateful_binary_placeholder_for_guidance() -> &'static str {
-    "<absolute-stateful-binary>"
+fn stateful_binary_for_guidance() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.canonicalize().ok().or(Some(path)))
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<absolute-stateful-binary>".to_string())
 }
 
 #[cfg(feature = "codex-benchmark")]
@@ -1276,24 +1336,36 @@ fn with_file_tool_live_context(
     let Some(runtime) = runtime else {
         return outcome;
     };
-    let Ok(prompt_text) =
-        render_context_prompt_text(runtime, input.stateful_session_id(), identity)
+    let Ok(context_response) =
+        render_context_response(runtime, input.stateful_session_id(), identity)
     else {
         return outcome;
     };
-    if prompt_text.trim().is_empty() {
+    if context_response.prompt_text.trim().is_empty() {
         return outcome;
     }
 
     match outcome {
-        HookOutcome::Allow => HookOutcome::AllowWithContext {
-            message: prompt_text,
-        },
+        HookOutcome::Allow if context_response_has_actionable_items(&context_response) => {
+            HookOutcome::AllowWithContext {
+                message: context_response.prompt_text,
+            }
+        }
+        HookOutcome::Allow => HookOutcome::Allow,
         HookOutcome::AllowWithContext { .. } => outcome,
         HookOutcome::Deny { reason } => HookOutcome::Deny {
-            reason: format!("{reason}\n\n{prompt_text}"),
+            reason: format!("{reason}\n\n{}", context_response.prompt_text),
         },
     }
+}
+
+fn context_response_has_actionable_items(response: &ContextRenderResponse) -> bool {
+    response.items.iter().any(|item| {
+        matches!(
+            item.severity,
+            ContextRenderSeverity::Block | ContextRenderSeverity::Warn
+        )
+    })
 }
 
 fn authorize_file_change_tool(
@@ -1906,7 +1978,22 @@ struct UserPromptSubmitInput {
 
 #[derive(Debug, Deserialize)]
 struct ContextRenderResponse {
+    #[serde(default)]
+    items: Vec<ContextRenderItem>,
     prompt_text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContextRenderItem {
+    severity: ContextRenderSeverity,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ContextRenderSeverity {
+    Block,
+    Warn,
+    Info,
 }
 
 impl SessionStartInput {
@@ -1967,10 +2054,13 @@ mod tests {
     }
 
     #[test]
-    fn stateful_command_policy_reminder_mentions_process_find_local_git_and_github_pr_profiles() {
+    fn stateful_command_policy_reminder_mentions_process_find_local_git_github_pr_and_binary_path()
+    {
         let reminder = stateful_command_policy_reminder();
         let current_exe = std::env::current_exe()
             .expect("current executable should resolve")
+            .canonicalize()
+            .expect("current executable should canonicalize")
             .to_string_lossy()
             .to_string();
 
@@ -1987,12 +2077,8 @@ mod tests {
             "reminder should mention GitHub PR profile: {reminder}"
         );
         assert!(
-            reminder.contains("<absolute-stateful-binary>"),
-            "reminder should use a placeholder instead of rendering a local path: {reminder}"
-        );
-        assert!(
-            !reminder.contains(&current_exe),
-            "reminder should not expose the local executable path: {reminder}"
+            reminder.contains(&current_exe),
+            "reminder should show the trusted executable path: {reminder}"
         );
 
         let guidance = bash_policy_guidance();
@@ -2009,12 +2095,8 @@ mod tests {
             "denial guidance should mention networked git exception: {guidance}"
         );
         assert!(
-            guidance.contains("<absolute-stateful-binary>"),
-            "denial guidance should use a placeholder instead of rendering a local path: {guidance}"
-        );
-        assert!(
-            !guidance.contains(&current_exe),
-            "denial guidance should not expose the local executable path: {guidance}"
+            guidance.contains(&current_exe),
+            "denial guidance should show the trusted executable path: {guidance}"
         );
     }
 

@@ -28,20 +28,18 @@ Available requests may grant immediately. Conflicting requests queue FIFO.
 Retrying the same `request_id` after reservation expiry requeues the same waiter
 in place instead of creating a duplicate or permanently consuming the key.
 
-`intent/claim` is the official reservation claim path. It creates
+`intent/claim` is the manual reservation claim path. It creates
 write-authorizing intent and active leases only for the reservation owner.
-Implicit claim-on-authorize has been removed from the official path for
-`/v1/authorize`; clients must reread the reserved target, call
-`state.intent.claim` or `stateful intent claim --wait-id <id>`, then retry the
-write after the claim creates write-authorizing intent and active same-session
-leases.
+Clients must reread the reserved target before writing. Manual MCP/CLI flows
+then call `state.intent.claim` or `stateful intent claim --wait-id <id>`;
+native edit hooks and sandbox `write-targets` authorization may lazy-claim the
+reservation at the retried write boundary.
 
 Current implementation status: `/v1/intent/request`, `/v1/intent/claim`, and
 `/v1/intent/cancel` are implemented with MCP tools and CLI commands. Immediate
 availability returns a `reserved` request state; the reserved session must still
-reread the target and call `intent/claim`. `/v1/authorize` no longer claims a
-reservation implicitly; it returns `reservation_claim_required` for the reserved
-session until the session explicitly claims the reservation.
+reread the target. Manual MCP/CLI flows call `intent/claim`; hook and sandbox
+authorization sources may lazy-claim the reservation when the write is retried.
 
 `intent/cancel` cancels queued or reserved requests owned by the caller. It must
 not cancel another session's reservation or reorder waiters.
@@ -56,17 +54,16 @@ Raw Bash commands are not a write-authorizing or test execution path. Official
 test execution uses the trusted sandbox wrapper:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." tmp/
-stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"tmp/"}'
-stateful sandbox run --fs build --network enabled --command <cmd>
+stateful sandbox run --fs build --network enabled --write-dir test-run --command <cmd>
 ```
 
 Hook-mediated Bash must be a single strict invocation of the trusted absolute
 `stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
-<cmd>`. The build profile is limited to the `tmp/` artifact tree; source-tree
-edits use native Codex edit tools such as `apply_patch` or Edit after exact
-intent declaration and a successful same-session file lease. Command-shaped
-source writes require exact `--write-target` or `--create-target` entries.
+<cmd>`. The build profile writes disposable artifacts under
+`/tmp/stateful/<session>/<purpose>/`; source-tree edits use native Codex edit
+tools such as `apply_patch` or Edit after exact intent declaration and a
+successful same-session file lease. Command-shaped source writes require exact
+`--write-target` or `--create-target` entries.
 
 ## Protocol Envelope
 
@@ -159,8 +156,9 @@ edits.
 
 Command-shaped writes remain outside MCP and must use
 `stateful sandbox run --fs write-targets` with exact `--write-target` or
-`--create-target` entries. Artifact-producing tests use `--fs build` after
-exact `tmp/` intent and a successful same-session directory lease.
+`--create-target` entries. Artifact-producing tests use
+`--fs build --write-dir <scratch-purpose>`, which writes disposable artifacts
+under `/tmp/stateful/<session>/<purpose>/`.
 
 Structured git writes should remain narrower than arbitrary git. `stateful
 commit` remains the default local wrapper, while MCP git tools can expose

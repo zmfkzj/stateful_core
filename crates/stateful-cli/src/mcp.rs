@@ -6,7 +6,10 @@ use std::{
 use serde_json::Value;
 use stateful_mcp::{ToolCall, map_tool_to_http, protocol_tool_name, tool_descriptors};
 
-use crate::runtime::read_current_session_file_for_mcp;
+use crate::runtime::{
+    current_stateful_session_id, read_current_session_file_for_mcp,
+    write_current_session_file_for_explicit_session,
+};
 use crate::{
     CurrentSession, GlobalPaths, HttpResponse, IntentCancelArgs, IntentClaimArgs,
     IntentDeclareArgs, IntentRequestArgs, RepoGate, RepoIdentity, ServerRuntime,
@@ -39,21 +42,74 @@ pub fn call_mcp_tool_in_repo(
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;
     match repo_gate(&paths, start)? {
         RepoGate::Enabled { repo_root } => {
-            let current_session = match current_session_for_mcp_tool(protocol_name, &repo_root) {
+            let mut current_session = match current_session_for_mcp_tool(protocol_name, &repo_root)
+            {
                 Ok(current_session) => current_session,
-                Err(response) => return Ok(response),
+                Err(error) if is_not_found_error(&error) => None,
+                Err(error) => {
+                    return Ok(current_session_resolution_response(
+                        protocol_name,
+                        error.to_string(),
+                    ));
+                }
             };
-            if let Some(response) = reject_mismatched_current_session(
-                protocol_name,
-                &arguments,
-                current_session.as_ref(),
-            ) {
+            if protocol_name != "state.session.register"
+                && current_session.is_some()
+                && let Some(response) = reject_mismatched_current_session(
+                    protocol_name,
+                    &arguments,
+                    current_session.as_ref(),
+                )
+            {
                 return Ok(response);
             }
             if !runtime_env_override_is_configured() {
                 ensure_server(&paths)?;
             }
             let runtime = discover_runtime_with_global(&repo_root, &paths)?;
+            if current_session.is_none() && is_session_bound_mcp_tool(protocol_name) {
+                current_session = Some(
+                    match current_session_from_env_or_existing(
+                        protocol_name,
+                        &repo_root,
+                        &paths,
+                        &runtime,
+                        None,
+                    ) {
+                        Ok(current_session) => current_session,
+                        Err(response) => return Ok(response),
+                    },
+                );
+            }
+            if protocol_name != "state.session.register"
+                && let Some(response) = reject_mismatched_current_session(
+                    protocol_name,
+                    &arguments,
+                    current_session.as_ref(),
+                )
+            {
+                return Ok(response);
+            }
+            if protocol_name == "state.session.register" {
+                current_session = Some(
+                    match current_session_for_register(
+                        &repo_root,
+                        &paths,
+                        &runtime,
+                        current_session.as_ref(),
+                    ) {
+                        Ok(current_session) => current_session,
+                        Err(response) => return Ok(response),
+                    },
+                );
+                if let Some(response) = reject_mismatched_current_session(
+                    protocol_name,
+                    &arguments,
+                    current_session.as_ref(),
+                ) {
+                    return Ok(response);
+                }
+            }
             call_mcp_tool(
                 &runtime,
                 &repo_root,
@@ -72,6 +128,78 @@ pub fn call_mcp_tool_in_repo(
             .to_string(),
         }),
     }
+}
+
+fn current_session_for_mcp_tool(
+    protocol_name: &str,
+    repo_root: &Path,
+) -> anyhow::Result<Option<CurrentSession>> {
+    if !is_session_bound_mcp_tool(protocol_name) {
+        return Ok(None);
+    }
+
+    read_current_session_file_for_mcp(repo_root).map(Some)
+}
+
+fn is_not_found_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn current_session_for_register(
+    repo_root: &Path,
+    paths: &GlobalPaths,
+    runtime: &ServerRuntime,
+    existing: Option<&CurrentSession>,
+) -> Result<CurrentSession, HttpResponse> {
+    if let Some(existing) = existing {
+        return Ok(existing.clone());
+    }
+
+    match read_current_session_file_for_mcp(repo_root) {
+        Ok(current_session) => return Ok(current_session),
+        Err(error) if is_not_found_error(&error) => {}
+        Err(error) => {
+            return Err(current_session_resolution_response(
+                "state.session.register",
+                error.to_string(),
+            ));
+        }
+    }
+
+    current_session_from_env_or_existing(
+        "state.session.register",
+        repo_root,
+        paths,
+        runtime,
+        existing,
+    )
+}
+
+fn current_session_from_env_or_existing(
+    tool_name: &str,
+    repo_root: &Path,
+    paths: &GlobalPaths,
+    runtime: &ServerRuntime,
+    existing: Option<&CurrentSession>,
+) -> Result<CurrentSession, HttpResponse> {
+    let Some(session_id) = current_stateful_session_id()
+        .map_err(|error| current_session_resolution_response(tool_name, error.to_string()))?
+    else {
+        return existing.cloned().ok_or_else(|| {
+            current_session_resolution_response(
+                tool_name,
+                "CODEX_THREAD_ID or STATEFUL_SESSION_ID is required".to_string(),
+            )
+        });
+    };
+    let identity = repo_identity_for_enabled_repo(paths, repo_root).ok();
+    let workspace_id = effective_workspace_id_for_repo(&runtime.workspace_id, identity.as_ref());
+    let current_session = CurrentSession::new(session_id, workspace_id);
+    write_current_session_file_for_explicit_session(repo_root, &current_session)
+        .map_err(|error| current_session_resolution_response(tool_name, error.to_string()))?;
+    Ok(current_session)
 }
 
 fn call_mcp_tool(
@@ -116,19 +244,6 @@ fn call_mcp_tool(
         }
         method => anyhow::bail!("unsupported MCP HTTP method: {method}"),
     }
-}
-
-fn current_session_for_mcp_tool(
-    protocol_name: &str,
-    repo_root: &Path,
-) -> Result<Option<CurrentSession>, HttpResponse> {
-    if !is_session_bound_mcp_tool(protocol_name) {
-        return Ok(None);
-    }
-
-    read_current_session_file_for_mcp(repo_root)
-        .map(Some)
-        .map_err(|error| current_session_resolution_response(protocol_name, error.to_string()))
 }
 
 fn reject_mismatched_current_session(

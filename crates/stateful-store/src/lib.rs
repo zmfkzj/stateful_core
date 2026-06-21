@@ -1,8 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use stateful_core::{
-    CurrentEvidenceKind, CurrentFreshness, CurrentItem, CurrentItemKind, CurrentSeverity,
-    IntentScope, PolicyState, normalize_relative_path,
+    CURRENT_SESSION_SCOPE_SOURCE_REF, CurrentEvidenceKind, CurrentFreshness, CurrentItem,
+    CurrentItemKind, CurrentSeverity, IntentScope, PolicyState, normalize_relative_path,
 };
 use std::path::Path;
 use std::time::Duration as StdDuration;
@@ -481,9 +481,8 @@ impl Store {
             if workspace_filter.is_some_and(|filter| workspace_id != filter) {
                 continue;
             }
-            if identity_filter.exclude_session_id == Some(session_id.as_str()) {
-                continue;
-            }
+            let current_session_scope =
+                identity_filter.exclude_session_id == Some(session_id.as_str());
             if !identity_filter_matches(
                 identity_filter,
                 repo_id.as_deref(),
@@ -504,25 +503,39 @@ impl Store {
                 if !resource_matches_filter(&resource, resource_filter) {
                     continue;
                 }
-                items.push(
-                    CurrentItem::new(
-                        CurrentItemKind::Intent,
-                        CurrentSeverity::Info,
-                        CurrentFreshness::Live,
-                        resource.clone(),
-                        purpose.clone(),
-                        format!("Session {session_id} declared intent for {resource}."),
+                let summary = if current_session_scope {
+                    format!("This session declared intent for {resource}.")
+                } else {
+                    format!("Session {session_id} declared intent for {resource}.")
+                };
+                let next_action = if current_session_scope {
+                    format!(
+                        "Before writing {resource}, keep an exact same-session file lease active."
                     )
-                    .with_next_action(format!(
+                } else {
+                    format!(
                         "Avoid overlapping edits to {resource} unless coordinating with {session_id}."
-                    ))
-                    .with_session(session_id.clone())
-                    .with_workspace(workspace_id.clone())
-                    .with_source_ref("IntentDeclared")
-                    .with_evidence_kind(CurrentEvidenceKind::DeclaredIntent)
-                    .with_observed_at(declared_at.clone())
-                    .with_expires_at(expires_at.clone()),
-                );
+                    )
+                };
+                let mut item = CurrentItem::new(
+                    CurrentItemKind::Intent,
+                    CurrentSeverity::Info,
+                    CurrentFreshness::Live,
+                    resource.clone(),
+                    purpose.clone(),
+                    summary,
+                )
+                .with_next_action(next_action)
+                .with_session(session_id.clone())
+                .with_workspace(workspace_id.clone())
+                .with_source_ref("IntentDeclared")
+                .with_evidence_kind(CurrentEvidenceKind::DeclaredIntent)
+                .with_observed_at(declared_at.clone())
+                .with_expires_at(expires_at.clone());
+                if current_session_scope {
+                    item = item.with_source_ref(CURRENT_SESSION_SCOPE_SOURCE_REF);
+                }
+                items.push(item);
             }
         }
 
@@ -614,12 +627,9 @@ impl Store {
             if workspace_filter.is_some_and(|filter| workspace_id != filter) {
                 continue;
             }
-            if identity_filter
+            let current_session_scope = identity_filter
                 .exclude_session_id
-                .is_some_and(|excluded| session_id.as_deref() == Some(excluded))
-            {
-                continue;
-            }
+                .is_some_and(|excluded| session_id.as_deref() == Some(excluded));
             if !identity_filter.is_empty() {
                 let Some(session_id) = session_id.as_deref() else {
                     continue;
@@ -644,23 +654,39 @@ impl Store {
             } else {
                 relative_path.clone()
             };
+            let (severity, summary, next_action) = if current_session_scope {
+                (
+                    CurrentSeverity::Info,
+                    format!("This session has an active write lease on {resource}."),
+                    format!(
+                        "You can write {resource} while this same-session lease remains fresh."
+                    ),
+                )
+            } else {
+                (
+                    CurrentSeverity::Block,
+                    format!("{session_summary} has an active write lease on {resource}."),
+                    format!("Wait for the lease to release, or coordinate with {session_summary}."),
+                )
+            };
             let mut item = CurrentItem::new(
                 CurrentItemKind::Lease,
-                CurrentSeverity::Block,
+                severity,
                 CurrentFreshness::Live,
                 resource.clone(),
                 purpose,
-                format!("{session_summary} has an active write lease on {resource}."),
+                summary,
             )
-            .with_next_action(format!(
-                "Wait for the lease to release, or coordinate with {session_summary}."
-            ))
+            .with_next_action(next_action)
             .with_workspace(workspace_id.clone())
             .with_source_ref("LeaseAcquired")
             .with_evidence_kind(CurrentEvidenceKind::LeaseOnly)
             .with_expires_at(expires_at);
             if let Some(session_id) = session_id {
                 item = item.with_session(session_id);
+            }
+            if current_session_scope {
+                item = item.with_source_ref(CURRENT_SESSION_SCOPE_SOURCE_REF);
             }
             items.push(item);
         }
@@ -735,12 +761,9 @@ impl Store {
             if workspace_filter.is_some_and(|filter| workspace_id != filter) {
                 continue;
             }
-            if identity_filter
+            let current_session_scope = identity_filter
                 .exclude_session_id
-                .is_some_and(|excluded| session_id == excluded)
-            {
-                continue;
-            }
+                .is_some_and(|excluded| session_id == excluded);
             if !identity_filter_matches(
                 identity_filter,
                 repo_id.as_deref(),
@@ -798,6 +821,9 @@ impl Store {
             .with_expires_at(reservation_expires_at);
             if let Some(evidence) = evidence {
                 item = item.with_evidence(evidence);
+            }
+            if current_session_scope {
+                item = item.with_source_ref(CURRENT_SESSION_SCOPE_SOURCE_REF);
             }
             items.push(item);
         }

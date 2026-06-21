@@ -49,6 +49,10 @@ def result_files_for_run(run_dir: Path) -> list[Path]:
     return sorted(conditions_dir.glob("*/*/_/results.jsonl"))
 
 
+def result_files_for_condition(condition_dir: Path) -> list[Path]:
+    return sorted(condition_dir.glob("*/*/results.jsonl"))
+
+
 def row_subagent_used(row: dict[str, Any]) -> bool | None:
     value = row.get("subagent_used")
     if isinstance(value, bool):
@@ -71,7 +75,23 @@ def empty_stats() -> dict[str, Any]:
         "finish_reasons": Counter(),
         "subagent_observed": 0,
         "subagent_used_count": 0,
+        "orchestration_trace_observed": 0,
+        "orchestration_trace_captured": 0,
+        "orchestration_intent_events": 0,
+        "orchestration_lease_events": 0,
+        "orchestration_conflict_events": 0,
     }
+
+
+def add_orchestration_trace(stats: dict[str, Any], trace: Any) -> None:
+    if not isinstance(trace, dict):
+        return
+    stats["orchestration_trace_observed"] += 1
+    if trace.get("trace_captured") is True:
+        stats["orchestration_trace_captured"] += 1
+    stats["orchestration_intent_events"] += int_or_zero(trace.get("intent_events"))
+    stats["orchestration_lease_events"] += int_or_zero(trace.get("lease_events"))
+    stats["orchestration_conflict_events"] += int_or_zero(trace.get("conflict_events"))
 
 
 def add_row(stats: dict[str, Any], row: dict[str, Any]) -> None:
@@ -95,6 +115,8 @@ def add_row(stats: dict[str, Any], row: dict[str, Any]) -> None:
         if subagent_used:
             stats["subagent_used_count"] += 1
 
+    add_orchestration_trace(stats, row.get("orchestration_trace"))
+
 
 def add_summary(stats: dict[str, Any], summary: dict[str, Any]) -> None:
     rows = int(summary.get("rows") or 0)
@@ -111,6 +133,21 @@ def add_summary(stats: dict[str, Any], summary: dict[str, Any]) -> None:
     stats["finish_reasons"].update(summary.get("finish_reasons") or {})
     stats["subagent_observed"] += int(summary.get("subagent_observed") or 0)
     stats["subagent_used_count"] += int(summary.get("subagent_used_count") or 0)
+    stats["orchestration_trace_observed"] += int_or_zero(
+        summary.get("orchestration_trace_observed")
+    )
+    stats["orchestration_trace_captured"] += int_or_zero(
+        summary.get("orchestration_trace_captured")
+    )
+    stats["orchestration_intent_events"] += int_or_zero(
+        summary.get("orchestration_intent_events")
+    )
+    stats["orchestration_lease_events"] += int_or_zero(
+        summary.get("orchestration_lease_events")
+    )
+    stats["orchestration_conflict_events"] += int_or_zero(
+        summary.get("orchestration_conflict_events")
+    )
 
 
 def finalized_stats(
@@ -133,6 +170,11 @@ def finalized_stats(
         "subagent_used_rate": (
             stats["subagent_used_count"] / subagent_observed if subagent_observed else None
         ),
+        "orchestration_trace_observed": stats["orchestration_trace_observed"],
+        "orchestration_trace_captured": stats["orchestration_trace_captured"],
+        "orchestration_intent_events": stats["orchestration_intent_events"],
+        "orchestration_lease_events": stats["orchestration_lease_events"],
+        "orchestration_conflict_events": stats["orchestration_conflict_events"],
         "progress_rate": (
             rows / expected_instances_per_condition
             if expected_instances_per_condition
@@ -205,6 +247,19 @@ def summarize_report(
     if subagent_used_rate is None and subagent_observed:
         subagent_used_rate = subagent_used_count / subagent_observed
 
+    result_stats = empty_stats()
+    for result_path in result_files_for_condition(report_path.parent):
+        for row in read_jsonl(result_path):
+            add_row(result_stats, row)
+    finish_reasons = report.get("finish_reasons")
+    if not isinstance(finish_reasons, dict):
+        finish_reasons = dict(sorted(result_stats["finish_reasons"].items()))
+    setup_errors = (
+        int_or_zero(report.get("setup_errors"))
+        if "setup_errors" in report
+        else result_stats["setup_errors"]
+    )
+
     return {
         "run_id": run_dir.name,
         "condition_id": condition_id,
@@ -214,11 +269,26 @@ def summarize_report(
         "success_rate": success_count / rows if rows else None,
         "average_score": average_score,
         "scored_count": scored_count,
-        "setup_errors": int_or_zero(report.get("setup_errors")),
-        "finish_reasons": {},
+        "setup_errors": setup_errors,
+        "finish_reasons": finish_reasons,
         "subagent_observed": subagent_observed,
         "subagent_used_count": subagent_used_count,
         "subagent_used_rate": subagent_used_rate,
+        "orchestration_trace_observed": int_or_zero(
+            report.get("orchestration_trace_observed")
+        ),
+        "orchestration_trace_captured": int_or_zero(
+            report.get("orchestration_trace_captured")
+        ),
+        "orchestration_intent_events": int_or_zero(
+            report.get("orchestration_intent_events")
+        ),
+        "orchestration_lease_events": int_or_zero(
+            report.get("orchestration_lease_events")
+        ),
+        "orchestration_conflict_events": int_or_zero(
+            report.get("orchestration_conflict_events")
+        ),
         "progress_rate": (
             rows / expected_instances_per_condition
             if expected_instances_per_condition
@@ -293,6 +363,20 @@ def format_finish_reasons(reasons: dict[str, int]) -> str:
     return ", ".join(f"{reason}={count}" for reason, count in sorted(reasons.items()))
 
 
+def format_orchestration_trace(summary: dict[str, Any]) -> str:
+    observed = int_or_zero(summary.get("orchestration_trace_observed"))
+    captured = int_or_zero(summary.get("orchestration_trace_captured"))
+    if not observed:
+        return "-"
+    intent_events = int_or_zero(summary.get("orchestration_intent_events"))
+    lease_events = int_or_zero(summary.get("orchestration_lease_events"))
+    conflict_events = int_or_zero(summary.get("orchestration_conflict_events"))
+    return (
+        f"{captured}/{observed} captured; "
+        f"intent={intent_events}, lease={lease_events}, conflict={conflict_events}"
+    )
+
+
 def render_markdown(summary: dict[str, Any]) -> str:
     lines = [
         "# DeNovoSWE Progress",
@@ -306,8 +390,8 @@ def render_markdown(summary: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "| Condition | Rows | Progress | Success | Avg score | Setup errors | Finish reasons | Subagent |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: |",
+            "| Condition | Rows | Progress | Success | Avg score | Setup errors | Finish reasons | Subagent | Orchestration trace |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- |",
         ]
     )
     for condition in summary["conditions"]:
@@ -320,7 +404,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
             condition["subagent_used_rate"],
         )
         lines.append(
-            "| {condition_id} | {rows} | {progress} | {success} | {average_score} | {setup_errors} | {finish_reasons} | {subagent} |".format(
+            "| {condition_id} | {rows} | {progress} | {success} | {average_score} | {setup_errors} | {finish_reasons} | {subagent} | {trace} |".format(
                 condition_id=condition["condition_id"],
                 rows=rows,
                 progress=progress,
@@ -329,21 +413,22 @@ def render_markdown(summary: dict[str, Any]) -> str:
                 setup_errors=condition["setup_errors"],
                 finish_reasons=format_finish_reasons(condition["finish_reasons"]),
                 subagent=subagent,
+                trace=format_orchestration_trace(condition),
             )
         )
 
     lines.extend(
         [
             "",
-            "| Run | Condition | Agent | Rows | Success | Avg score | Setup errors | Finish reasons |",
-            "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+            "| Run | Condition | Agent | Rows | Success | Avg score | Setup errors | Finish reasons | Orchestration trace |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
         ]
     )
     for run in summary["runs"]:
         rows = run["rows"]
         success = format_count_rate(run["success_count"], rows, run["success_rate"])
         lines.append(
-            "| {run_id} | {condition_id} | {agent} | {rows} | {success} | {average_score} | {setup_errors} | {finish_reasons} |".format(
+            "| {run_id} | {condition_id} | {agent} | {rows} | {success} | {average_score} | {setup_errors} | {finish_reasons} | {trace} |".format(
                 run_id=run["run_id"],
                 condition_id=run["condition_id"],
                 agent=run["agent"],
@@ -352,6 +437,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
                 average_score=format_decimal(run["average_score"]),
                 setup_errors=run["setup_errors"],
                 finish_reasons=format_finish_reasons(run["finish_reasons"]),
+                trace=format_orchestration_trace(run),
             )
         )
     return "\n".join(lines) + "\n"

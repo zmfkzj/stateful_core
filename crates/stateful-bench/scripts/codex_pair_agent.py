@@ -111,6 +111,13 @@ def toml_table_name(line: str) -> str | None:
     return None
 
 
+def toml_key_name(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None
+    return stripped.split("=", 1)[0].strip()
+
+
 def codex_provider_config_fragment(config: str | None) -> str:
     if not config:
         return ""
@@ -132,16 +139,20 @@ def codex_provider_config_fragment(config: str | None) -> str:
             continue
 
         if include_table:
+            if toml_key_name(line) in {
+                "websocket",
+                "websocker",
+                "features.websocket",
+                "features.websocker",
+            }:
+                continue
             output.append(line)
             continue
 
         if in_table:
             continue
 
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key = stripped.split("=", 1)[0].strip()
+        key = toml_key_name(line)
         if key == "model_provider":
             output.append(line)
 
@@ -195,7 +206,7 @@ def stateful_codex_config(
 [mcp_servers.stateful]
 command = {toml_string(stateful_binary)}
 args = ["mcp", "serve"]
-env_vars = ["STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN", "STATEFUL_SESSION_ID"]
+env_vars = ["CODEX_THREAD_ID", "STATEFUL_CODEX_RUN_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN", "STATEFUL_SESSION_ID"]
 startup_timeout_sec = 20
 default_tools_approval_mode = "approve"
 """

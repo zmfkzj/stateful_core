@@ -22,6 +22,19 @@ fn matching_file_intent_allows_write() {
 }
 
 #[test]
+fn write_file_requires_exact_file_intent_in_authorization_engine() {
+    let directory = PolicyState::default().with_active_directory_intent("src/");
+    let file = PolicyState::default().with_active_file_intent("src/auth.ts");
+
+    let denied = authorize_action(&directory, AuthorizationInput::write_file("src/auth.ts"));
+    let allowed = authorize_action(&file, AuthorizationInput::write_file("src/auth.ts"));
+
+    assert_eq!(denied.decision, DecisionKind::Deny);
+    assert_eq!(denied.reason_code, "scope_mismatch");
+    assert_eq!(allowed.decision, DecisionKind::Allow);
+}
+
+#[test]
 fn matching_directory_intent_allows_write_directory() {
     let state = PolicyState::default().with_active_directory_intent("target/");
     let input = AuthorizationInput::write_directory("target/");

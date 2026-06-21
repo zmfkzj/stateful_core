@@ -859,7 +859,7 @@ fn global_codex_config_block(
 {features_section}[mcp_servers.stateful]
 command = {}
 args = ["mcp", "serve"]
-env_vars = ["STATEFUL_SESSION_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
+env_vars = ["CODEX_THREAD_ID", "STATEFUL_CODEX_RUN_ID", "STATEFUL_SESSION_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
 startup_timeout_sec = 20
 default_tools_approval_mode = "approve"
 

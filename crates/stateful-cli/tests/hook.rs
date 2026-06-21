@@ -289,6 +289,7 @@ fn pre_tool_use_raw_bash_denial_mentions_command_policy_skill_and_example() {
     };
 
     assert!(reason.contains("stateful-command-policy"));
+    assert!(reason.contains("state_context_render") || reason.contains("state.current.read"));
     assert!(reason.contains("--fs read-only --network disabled"));
     assert!(reason.contains("--fs build --network enabled"));
     assert!(reason.contains("--fs write-targets --write-target <file>"));
@@ -656,7 +657,7 @@ fn pre_tool_use_allows_sandbox_run_write_dir() {
 }
 
 #[test]
-fn pre_tool_use_denies_sandbox_run_direct_tmp_write_dir() {
+fn pre_tool_use_allows_sandbox_run_direct_tmp_write_dir() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "s1",
@@ -671,11 +672,11 @@ fn pre_tool_use_denies_sandbox_run_direct_tmp_write_dir() {
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "tmp/<purpose>");
+    assert_eq!(outcome, HookOutcome::Allow);
 }
 
 #[test]
-fn pre_tool_use_denies_sandbox_run_write_dir_outside_artifact_tree() {
+fn pre_tool_use_allows_sandbox_run_write_dir_outside_artifact_tree() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "s1",
@@ -690,7 +691,7 @@ fn pre_tool_use_denies_sandbox_run_write_dir_outside_artifact_tree() {
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "limited to the tmp/ artifact tree");
+    assert_eq!(outcome, HookOutcome::Allow);
 }
 
 #[test]
@@ -702,7 +703,7 @@ fn pre_tool_use_allows_sandbox_run_build_profile_with_scoped_tmp_write_dir() {
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
         "tool_input": {
-            "command": format!("{stateful} sandbox run --fs build --network enabled --write-dir tmp/build-tests --command 'npm test'")
+            "command": format!("{stateful} sandbox run --fs build --network enabled --write-dir build-tests --command 'npm test'")
         }
     })
     .to_string();
@@ -728,7 +729,7 @@ fn pre_tool_use_denies_sandbox_run_build_profile_without_scoped_tmp_write_dir() 
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "--write-dir tmp/<purpose>");
+    assert_bash_denial_mentions(outcome, "--write-dir <scratch-purpose>");
 }
 
 #[test]
@@ -2052,6 +2053,60 @@ fn pre_tool_use_denies_unclassified_tool_names() {
 }
 
 #[test]
+fn pre_tool_use_bash_denial_in_repo_includes_live_context() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-bash-denial-context-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared intent for src/auth.ts."}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "rg auth src"
+        }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let context_request = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("Bash denial should render live context");
+    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
+    assert!(context_request.contains("\"session_id\":\"s1\""));
+    let rendered: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
+    assert_eq!(rendered["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(
+        rendered["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("deny reason should contain rendered context")
+            .contains("Nearby Activity")
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn pre_tool_use_denies_github_remote_repository_mutation_tools() {
     for tool_name in [
         "mcp__codex_apps__github__create_file",
@@ -2359,7 +2414,7 @@ fn pre_tool_use_edit_posts_authorize_and_renders_live_context_when_server_allows
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared intent for src/auth.ts."}"#,
+        r#"{"status":"ok","items":[{"severity":"info"}],"prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared intent for src/auth.ts."}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -2393,17 +2448,10 @@ fn pre_tool_use_edit_posts_authorize_and_renders_live_context_when_server_allows
     assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
     assert!(context_request.contains("\"session_id\":\"s1\""));
     assert!(context_request.contains("\"mode\":\"brief\""));
-    let rendered: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("allow outcome should serialize");
-    assert_eq!(
-        rendered["hookSpecificOutput"]["permissionDecision"],
-        "allow"
-    );
     assert!(
-        rendered["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("allow reason should contain rendered context")
-            .contains("Nearby Activity")
+        output.stdout.is_empty(),
+        "info-only context should not be injected for allowed Edit writes: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -2687,16 +2735,169 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
     assert!(context_request.contains("\"session_id\":\"s1\""));
     assert!(context_request.contains("\"mode\":\"brief\""));
+    assert!(
+        output.stdout.is_empty(),
+        "info-only context should not be injected for allowed writes: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_apply_patch_injects_warn_context_when_server_allows() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-warn-context-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        r#"{"status":"ok","items":[{"severity":"warn"}],"prompt_text":"Warnings\n- [warn] src/auth.ts: related active work."}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "apply_patch",
+      "tool_input": {
+        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
+      }
+    }"#;
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _authorize_request = rx.recv().expect("authorize request should arrive");
+    let context_request = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("apply_patch should render live context after authorization");
+    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
     let rendered: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("allow outcome should serialize");
-    assert_eq!(
-        rendered["hookSpecificOutput"]["permissionDecision"],
-        "allow"
-    );
     assert!(
-        rendered["hookSpecificOutput"]["permissionDecisionReason"]
+        rendered["hookSpecificOutput"]["additionalContext"]
             .as_str()
-            .expect("allow reason should contain rendered context")
+            .expect("additional context should be present")
+            .contains("Warnings")
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_apply_patch_injects_block_context_when_server_allows() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-block-context-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        r#"{"status":"ok","items":[{"severity":"block"}],"prompt_text":"Blocking\n- [block] src/auth.ts: another session has a lease."}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "apply_patch",
+      "tool_input": {
+        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
+      }
+    }"#;
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _authorize_request = rx.recv().expect("authorize request should arrive");
+    let context_request = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("apply_patch should render live context after authorization");
+    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
+    let rendered: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("allow outcome should serialize");
+    assert!(
+        rendered["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("additional context should be present")
+            .contains("Blocking")
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_apply_patch_denial_keeps_info_context() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-deny-info-context-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Write target is outside active intent scope.","required_next_action":"Declare matching intent."}"#,
+        r#"{"status":"ok","items":[{"severity":"info"}],"prompt_text":"Nearby Activity\n- [info] src/session.ts: another session declared intent."}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "apply_patch",
+      "tool_input": {
+        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
+      }
+    }"#;
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _authorize_request = rx.recv().expect("authorize request should arrive");
+    let context_request = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("apply_patch should render live context after denial");
+    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
+    assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(
+        json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("deny reason should be text")
             .contains("Nearby Activity")
     );
 
@@ -3350,6 +3551,68 @@ fn post_tool_use_edit_refreshes_file_lease_observation() {
             .to_string_lossy()
             .to_string()
     );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn post_tool_use_edit_releases_file_lease_after_refresh() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-post-release-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    fs::write(repo_root.join("src/auth.ts"), b"updated contents\n")
+        .expect("observed file should be writable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"status":"ok"}"#,
+        r#"{"status":"ok"}"#,
+        r#"{"status":"ok"}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo_root,
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": "src/auth.ts",
+            "old_string": "old",
+            "new_string": "updated"
+        }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "post-tool-use"], &input);
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let heartbeat = rx.recv().expect("heartbeat request should arrive");
+    assert!(heartbeat.contains("POST /v1/session/heartbeat HTTP/1.1"));
+
+    let refresh = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("lease observation refresh request should arrive");
+    assert!(refresh.contains("POST /v1/lease/refresh-observation HTTP/1.1"));
+
+    let release = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("lease release request should arrive after refresh");
+    assert!(release.contains("POST /v1/lease/release HTTP/1.1"));
+    let body = request_json_body(&release);
+    assert_eq!(body["session_id"], "s1");
+    assert_eq!(body["workspace_id"], "w1");
+    assert_eq!(body["path"], "src/auth.ts");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

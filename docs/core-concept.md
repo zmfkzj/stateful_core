@@ -63,7 +63,8 @@ Current state is a scoped, time-bound summary of active work.
 Examples:
 
 - An agent session is exploring auth validation.
-- A subagent is editing within its parent session's declared file scope.
+- A subagent is editing under its own session identity while sharing the
+  workspace-level coordination model.
 - A session intends to edit `src/auth.ts`.
 - A file has an active advisory lease.
 - A session is testing after a change.
@@ -139,9 +140,9 @@ read-only inspection must use the trusted absolute `stateful` wrapper:
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
 --command <cmd>`. Command-shaped writes must use the wrapper with
 `--fs write-targets` and explicit target flags. Raw Bash test commands are not
-allowlisted; use `stateful sandbox run --fs build --network enabled --command
-<cmd>` after exact `tmp/` directory intent and a successful
-same-session directory lease.
+allowlisted; use `stateful sandbox run --fs build --network enabled
+--write-dir <scratch-purpose> --command <cmd>` so build artifacts go under
+`/tmp/stateful/<session>/<scratch-purpose>/`.
 
 ## Product Shape
 

@@ -168,12 +168,14 @@ triggers makes the requested resource available:
 
 The promoted waiter receives a short reservation. Reservations prevent a later
 session from taking the resource ahead of the first waiter, but they are not
-active write authority. The reserved session must reread the target, call
-`state.intent.claim` / `stateful intent claim --wait-id <id>`, and only then
-retry the write. The claim creates write-authorizing intent and the active
-same-session lease; retrying the write does not claim the reservation. The
-default reservation TTL is 120 seconds. If the reservation expires without being
-claimed, the server may promote the next eligible FIFO waiter.
+active write authority. The reserved session must reread the target. Manual
+MCP/CLI flows then call `state.intent.claim` /
+`stateful intent claim --wait-id <id>` before writing; native edit hooks and
+sandbox `write-targets` authorization can lazy-claim the reservation when the
+write is retried. Claiming creates write-authorizing intent and the active
+same-session lease. The default reservation TTL is 120 seconds. If the
+reservation expires without being claimed, the server may promote the next
+eligible FIFO waiter.
 
 Resume is notification-driven rather than process-driven. The state server
 records a pending notification when it promotes a reservation. Agents and
@@ -188,9 +190,10 @@ orchestration can build on the notification and resume APIs.
 Full scheduling works through immediate request/response plus polling. Intent
 request APIs return `queued`, `reserved`, `claimed`, `canceled`, or `expired`
 state without blocking indefinitely. Immediate availability creates a `reserved` request state;
-the session must still reread the target, claim the reservation with
-`state.intent.claim` / `stateful intent claim --wait-id <id>`, and retry only
-after the claim creates write-authorizing intent and the same-session lease.
+the session must still reread the target. Manual MCP/CLI flows claim with
+`state.intent.claim` / `stateful intent claim --wait-id <id>` before retrying,
+while native edit hooks and sandbox `write-targets` authorization can
+lazy-claim at the retry write boundary.
 Waiting is handled by polling `stateful notifications poll` or
 `stateful resume next`.
 `stateful intent wait --timeout` is not part of the v1 hardening implementation.
@@ -310,7 +313,8 @@ mismatch fails closed for write and reconciliation paths.
 
 Subagents:
 
-- may write only inside the parent session's active valid intent scope
+- coordinate in the same workspace state but use their own effective session
+  identity when the adapter exposes one
 - record activity and leases with their own `actor_id`
 - do not receive automatic override authority from a shared owner
 
@@ -404,8 +408,8 @@ Bash read-only inspection -> require a strict trusted wrapper:
   --command <cmd>
 Bash command-shaped writes -> require the trusted wrapper with
   --fs write-targets plus explicit --write-target/--create-target values
-test execution -> run through sandbox run --fs build after exact tmp/
-  directory intent and a same-session directory lease
+test execution -> run through sandbox run --fs build with
+  --write-dir <scratch-purpose>; scratch lives under /tmp/stateful/<session>/
 raw Bash or non-wrapper Bash -> deny
 ```
 
@@ -414,8 +418,7 @@ Bash denial should tell the agent to use
 --command <cmd>` for read-only inspection,
 `<absolute-stateful-binary> sandbox run --fs write-targets ... --command <cmd>`
 for command-shaped writes, native Codex edit tools for repo file edits, and
-`sandbox run --fs build` wrappers for tests after exact `tmp/` directory intent
-and a same-session directory lease.
+`sandbox run --fs build --write-dir <scratch-purpose>` wrappers for tests.
 
 The read-only sandbox profile is a write-confinement profile. It does not
 provide full process containment, and it cannot be combined with
@@ -424,23 +427,21 @@ provide full process containment, and it cannot be combined with
 There is no command-text authorization path. Command text alone does not
 authorize `rg`, `git diff`, test runners, stateful operational commands, or any
 other Bash command. Test commands should run through the trusted
-`stateful sandbox run --fs build --network enabled --command <cmd>` wrapper
-after exact `tmp/` directory intent and a successful same-session directory
-lease. Source-tree writes remain denied unless a later policy
+`stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
+--command <cmd>` wrapper. Source-tree writes remain denied unless a later policy
 explicitly permits them.
 
 Minimum sandboxed test shape:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." tmp/
-stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"tmp/"}'
-stateful sandbox run --fs build --network enabled --command <cmd>
+stateful sandbox run --fs build --network enabled --write-dir test-run --command <cmd>
 ```
 
-The build profile is limited to the `tmp/` artifact tree. Source-tree edits use
-native Codex edit tools such as `apply_patch` or Edit after exact intent
-declaration and a successful same-session file lease. Command-shaped source
-writes must use exact `--write-target` or `--create-target` entries.
+The build profile writes disposable artifacts under
+`/tmp/stateful/<session>/<purpose>/`. Source-tree edits use native Codex edit
+tools such as `apply_patch` or Edit after exact intent declaration and a
+successful same-session file lease. Command-shaped source writes must use exact
+`--write-target` or `--create-target` entries.
 
 ## Conflict Policy
 
@@ -737,10 +738,10 @@ reorder existing waiters, steal a reservation, or move the overriding session to
 the head of a queue.
 
 A v1 write-authorizing intent must be active, unexpired, belong to the same
-session, and include matching file or directory scope. Abstract task, test, port,
-or migration intent can be stored as context but does not permit writes.
-Directory scope permits writes only up to two path segments below the scoped
-directory.
+session, and include matching exact file or directory scope. Abstract task,
+test, port, or migration intent can be stored as context but does not permit
+writes. Directory scope authorizes `write_directory` for the exact directory
+resource; file writes, deletes, renames, and moves require exact file scope.
 
 Resource authorization classes:
 
@@ -828,7 +829,7 @@ Each rendered item uses:
 ```text
 - [severity] resource: summary.
   next: concrete action.
-  evidence kind: detailed mode only.
+  evidence kind: coordination signal classification.
   evidence: detailed mode only.
 ```
 

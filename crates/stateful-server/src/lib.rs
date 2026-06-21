@@ -301,6 +301,7 @@ async fn authorize(
         root: non_empty_identity(workspace.root),
         branch: non_empty_identity(workspace.branch),
         source_kind: Some(source.kind),
+        source_event: Some(source.event),
         queue_on_conflict: payload.queue_on_conflict,
         queue_purpose,
         action: payload.action,
@@ -912,6 +913,7 @@ async fn conflicts_check(
         root: None,
         branch: None,
         source_kind: None,
+        source_event: None,
         queue_on_conflict: input.queue_on_conflict,
         queue_purpose: None,
         action: input.action,
@@ -1397,6 +1399,7 @@ fn authorization_denied_audit_event(
             "relative_path": wait.record.relative_path,
             "action": wait.record.action,
             "status": wait.record.status,
+            "purpose": wait.record.purpose,
             "queue_position": wait.queue_position,
             "blocking_session_id": wait.record.blocking_session_id,
         });
@@ -1457,6 +1460,7 @@ fn authorization_json(outcome: AuthorizationOutcome) -> Value {
             "relative_path": reservation.relative_path,
             "action": reservation.action,
             "status": reservation.status,
+            "purpose": reservation.purpose,
             "reservation_expires_at": reservation.reservation_expires_at,
         });
     }

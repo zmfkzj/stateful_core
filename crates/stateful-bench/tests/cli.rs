@@ -911,11 +911,13 @@ prompt = mod.build_codex_prompt(
     benchmark_max_turns=500,
     max_steps=500,
     prompt_version="v1",
+    stateful_binary="/Users/arthur/.cargo/bin/stateful",
 )
 assert "Build a parser package." in prompt
 assert "Benchmark max turns: 500" in prompt
 assert "Maximum task steps: 500" in prompt
 assert "Do not edit benchmark artifacts" in prompt
+assert "/Users/arthur/.cargo/bin/stateful" not in prompt
 print(json.dumps({{"prompt": prompt}}))
 "#,
         agent_path = denovo_codex_agent_path_json(),
@@ -1031,6 +1033,13 @@ subprocess.run(["git", "commit", "-m", "initial"], cwd=workspace, check=True, st
 (workspace / ".coverage").write_text("coverage\n", encoding="utf-8")
 (workspace / "target" / "debug").mkdir(parents=True, exist_ok=True)
 (workspace / "target" / "debug" / "artifact").write_text("build artifact\n", encoding="utf-8")
+(workspace / "upstream").mkdir(parents=True, exist_ok=True)
+subprocess.run(["git", "init"], cwd=workspace / "upstream", check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+(workspace / "upstream" / "README.md").write_text("source clone scratch\n", encoding="utf-8")
+subprocess.run(["git", "add", "README.md"], cwd=workspace / "upstream", check=True)
+subprocess.run(["git", "config", "user.email", "bench@example.test"], cwd=workspace / "upstream", check=True)
+subprocess.run(["git", "config", "user.name", "Bench Test"], cwd=workspace / "upstream", check=True)
+subprocess.run(["git", "commit", "-m", "upstream scratch"], cwd=workspace / "upstream", check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 (workspace / "clean.sh").unlink()
 
 patch = mod.git_diff(workspace)
@@ -1048,6 +1057,8 @@ assert "__pycache__" not in patch
 assert ".coverage" not in patch
 assert "target/debug/artifact" not in patch
 assert "diff --git a/clean.sh b/clean.sh" not in patch
+assert "diff --git a/upstream b/upstream" not in patch
+assert "Subproject commit" not in patch
 print(json.dumps({{"patch": patch}}))
 "#,
         agent_path = denovo_codex_agent_path_json(),
@@ -1386,6 +1397,8 @@ source_env = {{
     "PATH": "/bin",
     "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
     "STATEFUL_SERVER_TOKEN": "token-123",
+    "CODEX_THREAD_ID": "outer-thread",
+    "STATEFUL_CODEX_RUN_ID": "outer-run",
     "STATEFUL_SESSION_ID": "outer-session",
 }}
 output = root / "adapter-output"
@@ -1415,6 +1428,7 @@ stateful_env = module.denovo_codex_environment(
     workspace=workspace,
     base_env=source_env,
     preserve_stateful_session=True,
+    stateful_session_id="denovo-issue-stateful-test",
 )
 module.prepare_codex_environment(
     stateful_env,
@@ -1428,17 +1442,24 @@ stateful_config = (stateful_home / "config.toml").read_text()
 
 print(json.dumps({{
     "no_state_home": no_state_env["HOME"],
+    "no_state_has_thread": "CODEX_THREAD_ID" in no_state_env,
+    "no_state_has_codex_run": "STATEFUL_CODEX_RUN_ID" in no_state_env,
     "no_state_has_session": "STATEFUL_SESSION_ID" in no_state_env,
     "no_state_config_exists": (no_state_home / "config.toml").exists(),
     "no_state_skill_exists": (no_state_home / "skills" / "stateful-command-policy" / "SKILL.md").exists(),
     "no_state_auth_exists": (no_state_home / "auth.json").exists(),
     "stateful_home": stateful_env["HOME"],
+    "stateful_has_thread": "CODEX_THREAD_ID" in stateful_env,
+    "stateful_has_codex_run": "STATEFUL_CODEX_RUN_ID" in stateful_env,
+    "stateful_codex_run_id": stateful_env.get("STATEFUL_CODEX_RUN_ID"),
     "stateful_has_session": "STATEFUL_SESSION_ID" in stateful_env,
+    "stateful_session_id": stateful_env.get("STATEFUL_SESSION_ID"),
     "stateful_server_url": stateful_env.get("STATEFUL_SERVER_URL"),
     "stateful_server_token": stateful_env.get("STATEFUL_SERVER_TOKEN"),
     "stateful_config": stateful_config,
     "stateful_skill_exists": (stateful_home / "skills" / "stateful-command-policy" / "SKILL.md").exists(),
     "stateful_auth_exists": (stateful_home / "auth.json").exists(),
+    "generated_session_id": module.denovo_stateful_session_id(output, "owner/repo#1", task_path, workspace),
 }}, sort_keys=True))
 "#,
         agent_path = denovo_codex_agent_path_json(),
@@ -1454,6 +1475,8 @@ print(json.dumps({{
             .ends_with("adapter-output/codex-homes/issue-no-state/home")
     );
     assert_eq!(output["no_state_has_session"], false);
+    assert_eq!(output["no_state_has_thread"], false);
+    assert_eq!(output["no_state_has_codex_run"], false);
     assert_eq!(output["no_state_config_exists"], false);
     assert_eq!(output["no_state_skill_exists"], false);
     assert_eq!(output["no_state_auth_exists"], true);
@@ -1470,14 +1493,30 @@ print(json.dumps({{
     assert!(config.contains("[mcp_servers.stateful]"));
     assert!(config.contains("command = \"/tmp/stateful\""));
     assert!(config.contains(
-        "env_vars = [\"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\", \"STATEFUL_SESSION_ID\"]"
+        "env_vars = [\"CODEX_THREAD_ID\", \"STATEFUL_CODEX_RUN_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\", \"STATEFUL_SESSION_ID\"]"
     ));
     assert!(config.contains("[[hooks.SessionStart]]"));
-    assert_eq!(output["stateful_has_session"], false);
+    assert_eq!(output["stateful_has_session"], true);
+    assert_eq!(output["stateful_has_thread"], false);
+    assert_eq!(output["stateful_has_codex_run"], true);
+    assert_eq!(output["stateful_session_id"], "denovo-issue-stateful-test");
+    assert_eq!(
+        output["stateful_codex_run_id"],
+        "denovo-issue-stateful-test"
+    );
     assert_eq!(output["stateful_server_url"], "http://127.0.0.1:43873");
     assert_eq!(output["stateful_server_token"], "token-123");
     assert_eq!(output["stateful_skill_exists"], true);
     assert_eq!(output["stateful_auth_exists"], true);
+    let generated_session_id = output["generated_session_id"]
+        .as_str()
+        .expect("generated session id should be text");
+    assert!(generated_session_id.starts_with("denovo-owner-repo-1-"));
+    assert!(
+        generated_session_id
+            .bytes()
+            .all(|byte| { byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' })
+    );
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }
@@ -1560,8 +1599,8 @@ fn denovo_progress_report_aggregates_in_progress_shards_from_results_jsonl() {
     fs::write(
         shard_a_off.join("results.jsonl"),
         [
-            r#"{"instance_id":"a-1","success":true,"score":1.0,"finish_reason":"stop","subagent_used":true}"#,
-            r#"{"instance_id":"a-2","success":false,"score":0.5,"finish_reason":"setup-error","subagent_used":false}"#,
+            r#"{"instance_id":"a-1","success":true,"score":1.0,"finish_reason":"stop","subagent_used":true,"orchestration_trace":{"trace_captured":true,"intent_events":2,"lease_events":1,"conflict_events":0}}"#,
+            r#"{"instance_id":"a-2","success":false,"score":0.5,"finish_reason":"setup-error","subagent_used":false,"orchestration_trace":{"trace_captured":false,"intent_events":0,"lease_events":0,"conflict_events":0}}"#,
         ]
         .join("\n")
             + "\n",
@@ -1623,6 +1662,11 @@ print(json.dumps(summary, sort_keys=True))
     assert_eq!(off["finish_reasons"]["context-limit"], 1);
     assert_eq!(off["subagent_used_count"], 2);
     assert_eq!(off["subagent_observed"], 3);
+    assert_eq!(off["orchestration_trace_observed"], 2);
+    assert_eq!(off["orchestration_trace_captured"], 1);
+    assert_eq!(off["orchestration_intent_events"], 2);
+    assert_eq!(off["orchestration_lease_events"], 1);
+    assert_eq!(off["orchestration_conflict_events"], 0);
     assert_eq!(off["progress_rate"], 0.75);
     assert!(
         (off["average_score"]
@@ -1667,7 +1711,7 @@ fn denovo_progress_report_prefers_cumulative_condition_report() {
     .expect("fixture results should be written");
     fs::write(
         condition_dir.join("denovo-report.json"),
-        r#"{"condition_id":"stateful-off_subagent-on","total_instances":3,"success_count":2,"average_score":0.75,"completed_instances":3,"scored_instances":3,"error_count":0,"subagent_observed_instances":3,"subagent_used_count":2,"subagent_used_rate":0.6666666667,"running_time_ms":1234}"#,
+        r#"{"condition_id":"stateful-off_subagent-on","total_instances":3,"success_count":2,"average_score":0.75,"completed_instances":3,"scored_instances":3,"error_count":0,"subagent_observed_instances":3,"subagent_used_count":2,"subagent_used_rate":0.6666666667,"orchestration_trace_observed":3,"orchestration_trace_captured":2,"orchestration_intent_events":5,"orchestration_lease_events":4,"orchestration_conflict_events":1,"running_time_ms":1234}"#,
     )
     .expect("fixture cumulative report should be written");
 
@@ -1704,11 +1748,17 @@ print(json.dumps(summary, sort_keys=True))
         .expect("condition should be summarized");
     assert_eq!(condition["rows"], 3);
     assert_eq!(condition["success_count"], 2);
-    assert_eq!(condition["setup_errors"], 0);
+    assert_eq!(condition["setup_errors"], 1);
+    assert_eq!(condition["finish_reasons"]["setup-error"], 1);
     assert_eq!(condition["average_score"], 0.75);
     assert_eq!(condition["progress_rate"], 0.5);
     assert_eq!(condition["subagent_used_count"], 2);
     assert_eq!(condition["subagent_observed"], 3);
+    assert_eq!(condition["orchestration_trace_observed"], 3);
+    assert_eq!(condition["orchestration_trace_captured"], 2);
+    assert_eq!(condition["orchestration_intent_events"], 5);
+    assert_eq!(condition["orchestration_lease_events"], 4);
+    assert_eq!(condition["orchestration_conflict_events"], 1);
 
     let run = output["runs"]
         .as_array()
@@ -1717,6 +1767,364 @@ print(json.dumps(summary, sort_keys=True))
         .expect("run summary should exist");
     assert_eq!(run["source"], "denovo-report.json");
     assert_eq!(run["rows"], 3);
+    assert_eq!(run["orchestration_trace_observed"], 3);
+    assert_eq!(run["orchestration_trace_captured"], 2);
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
+fn denovo_progress_report_uses_results_jsonl_for_report_finish_reasons() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-progress-report-finish-reasons");
+    let run_dir = temp_dir.join("runs").join("r38-denovo-shard-a");
+    let condition_dir = run_dir.join("conditions").join("stateful-off_subagent-on");
+    let result_dir = condition_dir.join("codex-cli").join("_");
+    fs::create_dir_all(&result_dir).expect("fixture result dir should be created");
+    fs::write(
+        result_dir.join("results.jsonl"),
+        [
+            r#"{"instance_id":"case-a","success":false,"score":0.0,"finish_reason":"setup-error"}"#,
+            r#"{"instance_id":"case-b","success":false,"score":0.0,"finish_reason":"codex-error"}"#,
+            r#"{"instance_id":"case-c","success":true,"score":1.0,"finish_reason":"stop"}"#,
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .expect("fixture results should be written");
+    fs::write(
+        condition_dir.join("denovo-report.json"),
+        r#"{"condition_id":"stateful-off_subagent-on","total_instances":3,"success_count":1,"average_score":0.3333333333,"completed_instances":3,"scored_instances":3,"error_count":2,"subagent_observed_instances":0,"subagent_used_count":0,"running_time_ms":1234}"#,
+    )
+    .expect("fixture cumulative report should be written");
+
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_progress_report_finish_reasons_test", {script_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+summary = module.collect_progress(
+    [Path({run_dir})],
+    expected_instances_per_condition=3,
+)
+print(json.dumps(summary, sort_keys=True))
+"#,
+        script_path = denovo_progress_report_path_json(),
+        run_dir = serde_json::to_string(&run_dir.to_string_lossy())
+            .expect("run path should encode as json"),
+    );
+    let output = run_python_json(&script);
+
+    let condition = output["conditions"]
+        .as_array()
+        .expect("conditions should be an array")
+        .iter()
+        .find(|condition| condition["condition_id"] == "stateful-off_subagent-on")
+        .expect("condition should be summarized");
+    assert_eq!(condition["rows"], 3);
+    assert_eq!(condition["setup_errors"], 1);
+    assert_eq!(condition["finish_reasons"]["setup-error"], 1);
+    assert_eq!(condition["finish_reasons"]["codex-error"], 1);
+    assert_eq!(condition["finish_reasons"]["stop"], 1);
+
+    let run = output["runs"]
+        .as_array()
+        .expect("runs should be an array")
+        .first()
+        .expect("run summary should exist");
+    assert_eq!(run["source"], "denovo-report.json");
+    assert_eq!(run["setup_errors"], 1);
+    assert_eq!(run["finish_reasons"]["setup-error"], 1);
+    assert_eq!(run["finish_reasons"]["codex-error"], 1);
+    assert_eq!(run["finish_reasons"]["stop"], 1);
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
+fn denovo_retry_overlay_report_replaces_only_codex_errors() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-retry-overlay-report");
+    let runs_root = temp_dir.join("runs");
+    let base_run = runs_root.join("r-base-denovo-12-t3-shard-a");
+    let retry_run = runs_root.join("r-retry-denovo-12-t3-codex-error-rerun-shard-a");
+    let base_off = base_run
+        .join("conditions")
+        .join("stateful-off_subagent-on")
+        .join("codex-cli")
+        .join("_");
+    let base_on = base_run
+        .join("conditions")
+        .join("stateful-on_subagent-on")
+        .join("codex-cli")
+        .join("_");
+    let retry_off = retry_run
+        .join("conditions")
+        .join("stateful-off_subagent-on")
+        .join("codex-cli")
+        .join("_");
+    let retry_on = retry_run
+        .join("conditions")
+        .join("stateful-on_subagent-on")
+        .join("codex-cli")
+        .join("_");
+    for dir in [&base_off, &base_on, &retry_off, &retry_on] {
+        fs::create_dir_all(dir).expect("fixture result dir should be created");
+    }
+    fs::write(
+        base_off.join("results.jsonl"),
+        [
+            r#"{"instance_id":"case-a","success":false,"finish_reason":"codex-error","error":"codex exited 1","subagent_used":false}"#,
+            r#"{"instance_id":"case-b","success":false,"finish_reason":"missing-runtime-image","error":"image missing"}"#,
+            r#"{"instance_id":"case-c","success":true,"score":1.0,"finish_reason":"stop","subagent_used":true}"#,
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .expect("base off results should be written");
+    fs::write(
+        base_on.join("results.jsonl"),
+        r#"{"instance_id":"case-a","success":false,"finish_reason":"codex-error","error":"codex exited 1","subagent_used":false}"#,
+    )
+    .expect("base on results should be written");
+    fs::write(
+        retry_off.join("results.jsonl"),
+        [
+            r#"{"instance_id":"case-a","success":true,"score":0.75,"finish_reason":"stop","subagent_used":true}"#,
+            r#"{"instance_id":"case-b","success":true,"score":1.0,"finish_reason":"stop","subagent_used":true}"#,
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .expect("retry off results should be written");
+    fs::write(
+        retry_on.join("results.jsonl"),
+        r#"{"instance_id":"case-a","success":false,"score":0.25,"finish_reason":"stop","subagent_used":true}"#,
+    )
+    .expect("retry on results should be written");
+
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_retry_overlay_report_test", {script_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+summary = module.collect_overlay_summary(
+    runs_root=Path({runs_root}),
+    trials=[module.TrialSpec("t3", ["r-base-denovo-12-t3-shard"], ["r-retry-denovo-12-t3-codex-error-rerun-shard"])],
+    expected_instances_per_condition=3,
+)
+print(json.dumps(summary, sort_keys=True))
+"#,
+        script_path = denovo_retry_overlay_report_path_json(),
+        runs_root = serde_json::to_string(&runs_root.to_string_lossy())
+            .expect("runs root should encode as json"),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["trial_count"], 1);
+    assert_eq!(output["total_base_rows"], 4);
+    assert_eq!(output["total_effective_rows"], 4);
+    assert_eq!(output["total_replacements"], 2);
+    assert_eq!(output["unused_retry_rows"], 1);
+
+    let off = output["conditions"]
+        .as_array()
+        .expect("conditions should be an array")
+        .iter()
+        .find(|condition| condition["condition_id"] == "stateful-off_subagent-on")
+        .expect("off condition should be present");
+    assert_eq!(off["rows"], 3);
+    assert_eq!(off["success_count"], 2);
+    assert_eq!(off["scored_count"], 2);
+    assert_eq!(
+        off["finish_reasons"]["codex-error"],
+        serde_json::Value::Null
+    );
+    assert_eq!(off["finish_reasons"]["missing-runtime-image"], 1);
+    assert_eq!(off["replacement_count"], 1);
+    assert!(
+        off["average_score"]
+            .as_f64()
+            .expect("average score should be numeric")
+            > 0.87
+    );
+
+    let on = output["conditions"]
+        .as_array()
+        .expect("conditions should be an array")
+        .iter()
+        .find(|condition| condition["condition_id"] == "stateful-on_subagent-on")
+        .expect("on condition should be present");
+    assert_eq!(on["rows"], 1);
+    assert_eq!(on["success_count"], 0);
+    assert_eq!(on["scored_count"], 1);
+    assert_eq!(on["replacement_count"], 1);
+    assert_eq!(on["finish_reasons"]["stop"], 1);
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
+fn denovo_retry_overlay_report_uses_all_trials_for_condition_progress() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-retry-overlay-progress");
+    let runs_root = temp_dir.join("runs");
+    for (trial_id, prefix) in [("t1", "r-base-denovo-12-t1"), ("t2", "r-base-denovo-12-t2")] {
+        let result_dir = runs_root
+            .join(prefix)
+            .join("conditions")
+            .join("stateful-off_subagent-on")
+            .join("codex-cli")
+            .join("_");
+        fs::create_dir_all(&result_dir).expect("fixture result dir should be created");
+        fs::write(
+            result_dir.join("results.jsonl"),
+            [
+                format!(
+                    r#"{{"instance_id":"{trial_id}-case-a","success":true,"score":1.0,"finish_reason":"stop"}}"#
+                ),
+                format!(
+                    r#"{{"instance_id":"{trial_id}-case-b","success":true,"score":1.0,"finish_reason":"stop"}}"#
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .expect("fixture results should be written");
+    }
+
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_retry_overlay_report_progress_test", {script_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+summary = module.collect_overlay_summary(
+    runs_root=Path({runs_root}),
+    trials=[
+        module.TrialSpec("t1", ["r-base-denovo-12-t1"], []),
+        module.TrialSpec("t2", ["r-base-denovo-12-t2"], []),
+    ],
+    expected_instances_per_condition=2,
+)
+print(json.dumps(summary, sort_keys=True))
+"#,
+        script_path = denovo_retry_overlay_report_path_json(),
+        runs_root = serde_json::to_string(&runs_root.to_string_lossy())
+            .expect("runs root should encode as json"),
+    );
+    let output = run_python_json(&script);
+
+    let condition = output["conditions"]
+        .as_array()
+        .expect("conditions should be an array")
+        .iter()
+        .find(|condition| condition["condition_id"] == "stateful-off_subagent-on")
+        .expect("condition should be present");
+    assert_eq!(condition["rows"], 4);
+    assert_eq!(condition["progress_rate"], 1.0);
+
+    let trials = output["trials"]
+        .as_array()
+        .expect("trials should be an array");
+    assert_eq!(trials.len(), 2);
+    for trial in trials {
+        assert_eq!(trial["rows"], 2);
+        assert_eq!(trial["progress_rate"], 1.0);
+    }
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
+fn denovo_overlay_instances_lists_only_negative_scored_deltas() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-overlay-instances");
+    let runs_root = temp_dir.join("runs");
+    let base_run = runs_root.join("r-base-denovo-12-t1");
+    let off_dir = base_run
+        .join("conditions")
+        .join("stateful-off_subagent-on")
+        .join("codex-cli")
+        .join("_");
+    let on_dir = base_run
+        .join("conditions")
+        .join("stateful-on_subagent-on")
+        .join("codex-cli")
+        .join("_");
+    fs::create_dir_all(&off_dir).expect("fixture off dir should be created");
+    fs::create_dir_all(&on_dir).expect("fixture on dir should be created");
+    fs::write(
+        off_dir.join("results.jsonl"),
+        [
+            r#"{"instance_id":"negative","success":true,"score":1.0,"finish_reason":"stop"}"#,
+            r#"{"instance_id":"zero","success":true,"score":0.5,"finish_reason":"stop"}"#,
+            r#"{"instance_id":"positive","success":true,"score":0.25,"finish_reason":"stop"}"#,
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .expect("fixture off results should be written");
+    fs::write(
+        on_dir.join("results.jsonl"),
+        [
+            r#"{"instance_id":"negative","success":true,"score":0.5,"finish_reason":"stop"}"#,
+            r#"{"instance_id":"zero","success":true,"score":0.5,"finish_reason":"stop"}"#,
+            r#"{"instance_id":"positive","success":true,"score":0.75,"finish_reason":"stop"}"#,
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .expect("fixture on results should be written");
+
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+script_path = Path({script_path})
+sys.path.insert(0, str(script_path.parent))
+spec = importlib.util.spec_from_file_location("denovo_overlay_instances_test", script_path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+summary = module.collect_instance_summary(
+    Path({runs_root}),
+    [module.TrialSpec("t1", ["r-base-denovo-12-t1"], [])],
+)
+print(json.dumps(summary, sort_keys=True))
+"#,
+        script_path = denovo_overlay_instances_path_json(),
+        runs_root = serde_json::to_string(&runs_root.to_string_lossy())
+            .expect("runs root should encode as json"),
+    );
+    let output = run_python_json(&script);
+
+    let negative = output["negative_scored_deltas"]
+        .as_array()
+        .expect("negative deltas should be an array");
+    assert_eq!(negative.len(), 1);
+    assert_eq!(negative[0]["instance_id"], "negative");
+    assert_eq!(negative[0]["score_delta_on_minus_off"], -0.5);
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }
@@ -2129,6 +2537,151 @@ asyncio.run(main())
 }
 
 #[test]
+fn denovo_codex_agent_preflights_missing_runtime_images_without_pulling() {
+    let script = format!(
+        r#"
+import asyncio
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_image_preflight_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+class FakeDockerConfig:
+    def __init__(self, pull_policy):
+        self.pull_policy = pull_policy
+
+class FakeRuntimeConfig:
+    def __init__(self, backend="docker", pull_policy="if_not_present"):
+        self.backend = backend
+        self.docker = FakeDockerConfig(pull_policy)
+
+class NotFoundError(Exception):
+    def __repr__(self):
+        return "NotFound(HTTPError('404 Client Error: Not Found for url: https://registry-1.docker.io/v2/aweaiteam/denovoswe/manifests/case-missing'))"
+
+class FakeImages:
+    def __init__(self):
+        self.calls = []
+
+    def get(self, image):
+        self.calls.append(["get", image])
+        raise NotFoundError()
+
+    def get_registry_data(self, image):
+        self.calls.append(["get_registry_data", image])
+        raise NotFoundError()
+
+    def pull(self, image):
+        self.calls.append(["pull", image])
+
+class FakeClient:
+    def __init__(self):
+        self.images = FakeImages()
+
+async def main():
+    client = FakeClient()
+    try:
+        await module.preflight_runtime_image_available(
+            FakeRuntimeConfig(),
+            "aweaiteam/denovoswe:case-missing",
+            client_factory=lambda: client,
+        )
+        result = {{"raised": False}}
+    except Exception as error:
+        row = module.instance_result_row(
+            module.instance_setup_exception_result("case-missing", error)
+        )
+        result = {{
+            "raised": True,
+            "row": row,
+            "calls": client.images.calls,
+        }}
+    print(json.dumps(result, sort_keys=True))
+
+asyncio.run(main())
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["raised"], true);
+    assert_eq!(output["row"]["finish_reason"], "missing-runtime-image");
+    assert!(
+        output["row"]["error"]
+            .as_str()
+            .expect("error should be text")
+            .contains("aweaiteam/denovoswe:case-missing")
+    );
+    assert_eq!(
+        output["calls"],
+        serde_json::json!([
+            ["get", "aweaiteam/denovoswe:case-missing"],
+            ["get_registry_data", "aweaiteam/denovoswe:case-missing"],
+        ])
+    );
+}
+
+#[test]
+fn denovo_codex_agent_harvests_repo_tmp_changes() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-harvest-repo-tmp");
+    let workspace = temp_dir.join("workspace");
+    fs::create_dir_all(workspace.join("tmp")).expect("tmp dir should be created");
+    fs::write(workspace.join("tmp/kept.txt"), "kept\n").expect("tmp file should write");
+    ProcessCommand::new("git")
+        .args(["init"])
+        .current_dir(&workspace)
+        .output()
+        .expect("git init should run");
+    fs::write(workspace.join("README.md"), "base\n").expect("base file should write");
+    ProcessCommand::new("git")
+        .args(["add", "README.md"])
+        .current_dir(&workspace)
+        .output()
+        .expect("git add should run");
+    ProcessCommand::new("git")
+        .args([
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Stateful Test",
+            "commit",
+            "-m",
+            "base",
+        ])
+        .current_dir(&workspace)
+        .output()
+        .expect("git commit should run");
+
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_harvest_tmp_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+patch = module.git_diff(Path({workspace}))
+print(json.dumps({{"contains_tmp": "tmp/kept.txt" in patch}}, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        workspace = serde_json::to_string(&workspace).expect("workspace path should encode"),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["contains_tmp"], true);
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should be removable");
+}
+
+#[test]
 fn denovo_codex_agent_cleans_nested_home_caches_without_removing_codex_logs() {
     let temp_dir = target_temp_dir("stateful-bench-denovo-codex-cache-cleanup");
     let script = format!(
@@ -2422,6 +2975,49 @@ print(json.dumps({{"used": used, "empty": empty}}, sort_keys=True))
 }
 
 #[test]
+fn denovo_codex_agent_result_row_includes_orchestration_trace_metadata() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_trace_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+result = module.InstanceResult(
+    instance_id="fake-a",
+    success=True,
+    score=1.0,
+    finish_reason="skip-eval",
+    error=None,
+    eval_result={{"details": {{"pass_rate": 1.0}}}},
+    orchestration_trace={{
+        "trace_path": "fake-a/orchestration-trace.json",
+        "trace_captured": True,
+        "intent_events": 2,
+        "lease_events": 1,
+        "conflict_events": 0,
+    }},
+)
+print(json.dumps(module.instance_result_row(result), sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(
+        output["orchestration_trace"]["trace_path"],
+        "fake-a/orchestration-trace.json"
+    );
+    assert_eq!(output["orchestration_trace"]["trace_captured"], true);
+    assert_eq!(output["orchestration_trace"]["intent_events"], 2);
+    assert_eq!(output["orchestration_trace"]["lease_events"], 1);
+}
+
+#[test]
 fn denovo_codex_agent_validate_run_skips_codex() {
     let script = format!(
         r#"
@@ -2712,9 +3308,13 @@ source_config_toml.write_text('''model_provider = "codex-lb"
 [model_providers.codex-lb]
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
+websocket = true
+websocker = true
 
 [features]
 goals = true
+websocket = true
+websocker = true
 
 [mcp_servers.stateful]
 command = "stale-stateful"
@@ -2757,12 +3357,14 @@ print(json.dumps({{
     assert!(config.contains("wire_api = \"responses\""));
     assert_eq!(output["feature_table_count"], 1);
     assert!(!config.contains("goals = true"));
+    assert!(!config.contains("websocket = true"));
+    assert!(!config.contains("websocker = true"));
     assert!(!config.contains("stale-stateful"));
     assert!(config.contains("[mcp_servers.stateful]"));
     assert!(config.contains("command = \"/tmp/stateful\""));
     assert!(config.contains("args = [\"mcp\", \"serve\"]"));
     assert!(config.contains(
-        "env_vars = [\"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\", \"STATEFUL_SESSION_ID\"]"
+        "env_vars = [\"CODEX_THREAD_ID\", \"STATEFUL_CODEX_RUN_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\", \"STATEFUL_SESSION_ID\"]"
     ));
     assert!(config.contains("[[hooks.SessionStart]]"));
     assert!(config.contains("[[hooks.PreToolUse]]"));
@@ -2770,7 +3372,7 @@ print(json.dumps({{
 
     let skill = output["skill"].as_str().expect("skill should be text");
     assert!(skill.contains("name: stateful-command-policy"));
-    assert!(skill.contains("Use MCP tools such as `state_intent_declare`"));
+    assert!(skill.contains("state_intent_declare"));
     assert_eq!(output["auth_exists"], false);
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
@@ -3515,6 +4117,22 @@ fn denovo_codex_agent_path_json() -> String {
 fn denovo_progress_report_path_json() -> String {
     serde_json::to_string(&format!(
         "{}/scripts/denovo_progress_report.py",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("path should serialize")
+}
+
+fn denovo_retry_overlay_report_path_json() -> String {
+    serde_json::to_string(&format!(
+        "{}/scripts/denovo_retry_overlay_report.py",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("path should serialize")
+}
+
+fn denovo_overlay_instances_path_json() -> String {
+    serde_json::to_string(&format!(
+        "{}/scripts/denovo_overlay_instances.py",
         env!("CARGO_MANIFEST_DIR")
     ))
     .expect("path should serialize")

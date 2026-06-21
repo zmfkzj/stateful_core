@@ -285,23 +285,25 @@ target: src/auth.ts -> allow
 target: src/session.ts -> deny
 ```
 
-Directory scopes authorize writes only up to two path segments below the scoped
-directory:
+Directory scopes authorize `write_directory` actions only for the exact scoped
+directory. They do not authorize `write_file`, delete, rename, or move actions
+for child paths:
 
 ```text
 scope: src/
-target: src/auth/auth.ts -> allow
-target: src/auth/codex/auth.ts -> deny
+action: write_directory target: src/ -> allow
+action: write_directory target: src/auth/ -> deny
+action: write_file target: src/auth.ts -> deny
 ```
 
-That depth rule applies to `write_file` authorization. `write_directory` is a
-separate action: it requires exact directory scope, and the resulting directory
-lease fences the entire subtree because command-shaped `--write-dir` execution
-can write anywhere below that directory.
+`write_directory` is the only action backed by directory intent and a matching
+directory lease. The resulting directory lease fences the entire subtree because
+command-shaped `--write-dir` execution can write anywhere below that directory.
 
-Multi-file writes are allowed only when every target matches at least one file
-or directory scope. Delete and rename/move operations require exact file scope;
-directory scope does not authorize deletes, renames, or moves.
+Multi-file writes are allowed only when every file target has exact file scope
+and every directory target has exact directory scope. Delete and rename/move
+operations require exact file scope; directory scope does not authorize file
+operations.
 
 ## Conflict Record
 
@@ -370,12 +372,13 @@ the trigger reason. Soft repo-relative conflicts do not create wait queue
 records in v1.
 
 Promotion creates a reservation, not active write authority. The waiting session
-must reread the target, then explicitly claim the reservation with
-`state.intent.claim` or `stateful intent claim --wait-id <id>`. Only that claim
-creates write-authorizing intent and active same-session leases. The default
-reservation TTL is 120 seconds. If the reservation is not claimed before
-`reservation_expires_at`, the reservation expires and the server may promote the
-next eligible FIFO waiter.
+must reread the target. Manual MCP/CLI flows then explicitly claim the
+reservation with `state.intent.claim` or `stateful intent claim --wait-id <id>`;
+native edit hooks and sandbox `write-targets` authorization can lazy-claim it at
+the retried write boundary. Claiming creates write-authorizing intent and active
+same-session leases. The default reservation TTL is 120 seconds. If the
+reservation is not claimed before `reservation_expires_at`, the reservation
+expires and the server may promote the next eligible FIFO waiter.
 
 Reservation notifications are delivery hints, not the durable reservation
 record. `stateful notifications poll` / `state.notifications.poll` returns each
@@ -444,29 +447,26 @@ parent_actor_id
 ```
 
 Subagent-specific `actor_type`, `parent_session_id`, and `parent_actor_id`
-fields are protocol vocabulary for future subagent hook adapters. The shipped
-Codex integration records session-level agent activity only. When subagent
-adapters are implemented, subagents may write only inside the parent session's
-active valid intent scope, and their activity and leases should be recorded
-under the subagent `actor_id`. Same-owner sessions do not receive automatic
+fields are protocol vocabulary for native subagent-aware adapters. The Codex
+integration records each native subagent under its own effective session
+identity when Codex exposes a thread id. Parent and child sessions coordinate
+through the same workspace state, but a child does not inherit the parent's
+same-session lease authority. Same-owner sessions do not receive automatic
 override authority.
 
 ## Sandboxed Test Execution
 
 Raw Bash test commands are denied by hooks. Agents run tests through the trusted
-wrapper after exact `tmp/` directory intent and a successful same-session
-directory lease, for example:
+build wrapper with a scratch purpose, for example:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." tmp/
-stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"tmp/"}'
-stateful sandbox run --fs build --network enabled --command 'cargo test --workspace'
+stateful sandbox run --fs build --network enabled --write-dir test-run --command 'cargo test --workspace'
 ```
 
-The build profile sets standard temp variables under `tmp/.stateful-tmp` and
-sets `CARGO_TARGET_DIR` to `tmp/target`, keeping Cargo build output inside the
-authorized artifact tree. Other tool-specific build directories should be
-configured under `tmp/`.
+The build profile sets standard temp variables under
+`/tmp/stateful/<session>/<purpose>/.stateful-tmp` and sets `CARGO_TARGET_DIR` to
+the scratch `target` child. Other tool-specific build directories should be
+configured under the same external scratch root.
 
 Source-tree edits should use native Codex edit tools such as `apply_patch` or
 Edit after exact intent declaration and a successful same-session file lease.
@@ -580,8 +580,8 @@ Freshness is required for all active coordination records.
   and `phase` to be `exploring`, `editing`, or `testing`.
 - Target `phase = blocked` keeps the activity visible but stops write
   authorization.
-- Directory intent scope permits writes only up to two path segments below that
-  directory.
+- Directory intent scope authorizes `write_directory` only for the exact
+  directory resource.
 - Delete operations require exact file scope.
 - Rename and move operations require exact file scope for both source and
   destination.
@@ -724,9 +724,10 @@ source_refs
 ```
 
 `evidence_kind` classifies the coordination signal behind the item, while
-`evidence` is optional supporting detail. Prompt text includes both fields only
-in `detailed` mode. `brief` mode is capped at 8 total bullets. `detailed` mode
-is capped at 20 total bullets. `next_action` is required for `block` and `warn`.
+`evidence` is optional supporting detail. Prompt text includes `evidence_kind`
+in both modes and includes supporting `evidence` text only in `detailed` mode.
+`brief` mode is capped at 8 total bullets. `detailed` mode is capped at 20 total
+bullets. `next_action` is required for `block` and `warn`.
 
 The renderer can place supplied expired and finalized records only under
 `Stale/Expired`, but the shipped store-backed route currently emits live

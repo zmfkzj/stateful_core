@@ -111,7 +111,7 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     assert!(first_config.contains("[mcp_servers.stateful]"));
     assert!(first_config.contains("command = \"/opt/stateful/bin/stateful\""));
     assert!(first_config.contains(
-        "env_vars = [\"STATEFUL_SESSION_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
+        "env_vars = [\"CODEX_THREAD_ID\", \"STATEFUL_CODEX_RUN_ID\", \"STATEFUL_SESSION_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
     ));
     assert!(first_config.contains(
         "approval_policy = { granular = { sandbox_approval = false, rules = true, mcp_elicitations = false, request_permissions = false, skill_approval = false } }"
@@ -192,7 +192,7 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     );
     assert!(command_policy_skill.contains("Intent declarations add"));
     assert!(command_policy_skill.contains("--fs build --network enabled"));
-    assert!(command_policy_skill.contains("--write-dir tmp"));
+    assert!(command_policy_skill.contains("--write-dir <scratch-purpose>"));
     assert!(command_policy_skill.contains("state.intent.request"));
     assert!(command_policy_skill.contains("state.notifications.poll"));
     assert!(command_policy_skill.contains("state.resume.next"));

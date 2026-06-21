@@ -460,8 +460,8 @@ fn parses_disable_command() {
 }
 
 #[test]
-fn parses_codex_wrapper_command_with_explicit_read_only_tmp_sandbox() {
-    let cli = Cli::try_parse_from([
+fn rejects_codex_wrapper_command_with_read_only_tmp_sandbox() {
+    let error = Cli::try_parse_from([
         "stateful",
         "codex",
         "--codex-bin",
@@ -472,18 +472,12 @@ fn parses_codex_wrapper_command_with_explicit_read_only_tmp_sandbox() {
         "--json",
         "-",
     ])
-    .expect("codex wrapper command should parse");
+    .expect_err("read-only-tmp sandbox mode should be removed");
 
-    assert!(matches!(
-        cli.command,
-        Command::Codex {
-            ref codex_bin,
-            sandbox: CodexSandboxMode::ReadOnlyTmp,
-            no_stateful: false,
-            ref args,
-        } if codex_bin == "/opt/codex/bin/codex"
-            && args == &vec!["exec".to_string(), "--json".to_string(), "-".to_string()]
-    ));
+    assert!(
+        error.to_string().contains("read-only-tmp"),
+        "error should name the rejected sandbox mode: {error}"
+    );
 }
 
 #[test]

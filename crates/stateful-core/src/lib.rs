@@ -5,8 +5,8 @@ mod reconcile;
 mod types;
 
 pub use context::{
-    ContextPackage, CurrentEvidenceKind, CurrentFreshness, CurrentItem, CurrentItemKind,
-    CurrentSeverity, RenderMode, render_prompt_text,
+    CURRENT_SESSION_SCOPE_SOURCE_REF, ContextPackage, CurrentEvidenceKind, CurrentFreshness,
+    CurrentItem, CurrentItemKind, CurrentSeverity, RenderMode, render_prompt_text,
 };
 pub use path::{
     normalize_directory_path, normalize_relative_path, normalized_relative_path_is_empty,

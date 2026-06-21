@@ -15,6 +15,7 @@ import tarfile
 import tempfile
 import time
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -54,8 +55,8 @@ DIFF_EXCLUDED_PATHS = (
     ".stateful-tmp/**",
     "**/.stateful-tmp",
     "**/.stateful-tmp/**",
-    "tmp",
-    "tmp/**",
+    "upstream",
+    "upstream/**",
     ".cache",
     ".cache/**",
     ".pytest_cache",
@@ -89,6 +90,7 @@ class InstanceResult:
     subagent_used: bool | None = None
     subagent_usage: dict[str, Any] | None = None
     token_usage: dict[str, int] | None = None
+    orchestration_trace: dict[str, Any] | None = None
 
 
 @dataclass
@@ -103,6 +105,13 @@ class CodexTimeoutError(TimeoutError):
 
 class StatefulRepoEnableError(RuntimeError):
     pass
+
+
+class MissingRuntimeImageError(RuntimeError):
+    def __init__(self, image: str, error: BaseException):
+        self.image = image
+        self.source_error = error
+        super().__init__(f"runtime image unavailable: {image}; {repr(error)}")
 
 
 @dataclass
@@ -133,7 +142,9 @@ def build_codex_prompt(
     prompt_version: str,
     subagent: str = "off",
     subagent_min_count: int = DEFAULT_SUBAGENT_MIN_COUNT,
+    stateful_binary: str | None = None,
 ) -> str:
+    _ = stateful_binary
     step_line = f"- Maximum task steps: {max_steps}.\n" if max_steps is not None else ""
     subagent_instruction = native_subagent_prompt_instruction(subagent, subagent_min_count)
     return f"""
@@ -158,14 +169,7 @@ Constraints:
 
 def git_diff(workspace: Path) -> str:
     add_completed = subprocess.run(
-        [
-            "git",
-            "add",
-            "-A",
-            "--",
-            ".",
-            *(f":(exclude){path}" for path in DIFF_EXCLUDED_PATHS),
-        ],
+        ["git", "add", "-A", "--", "."],
         cwd=workspace,
         text=True,
         check=False,
@@ -176,7 +180,15 @@ def git_diff(workspace: Path) -> str:
         raise RuntimeError(add_completed.stderr.strip() or "git add -A failed")
 
     diff_completed = subprocess.run(
-        ["git", "diff", "--cached", "--binary"],
+        [
+            "git",
+            "diff",
+            "--cached",
+            "--binary",
+            "--",
+            ".",
+            *(f":(exclude){path}" for path in DIFF_EXCLUDED_PATHS),
+        ],
         cwd=workspace,
         text=True,
         check=False,
@@ -430,6 +442,53 @@ async def ensure_runtime_image_available(
     return await asyncio.to_thread(_ensure)
 
 
+def is_missing_runtime_image_error(error: BaseException) -> bool:
+    text = repr(error)
+    return (
+        "ImageNotFound" in text
+        or "NotFound" in text
+        or "404 Client Error" in text
+    )
+
+
+async def preflight_runtime_image_available(
+    runtime_config: Any,
+    image: str,
+    client_factory: Any = docker_client_from_env,
+) -> None:
+    if runtime_backend(runtime_config) != "docker" or not image:
+        return
+
+    pull_policy = runtime_pull_policy(runtime_config)
+
+    def _preflight() -> None:
+        client = client_factory()
+        if pull_policy == "never":
+            client.images.get(image)
+            return
+        if pull_policy == "if_not_present":
+            try:
+                client.images.get(image)
+                return
+            except Exception as local_error:
+                if not is_missing_runtime_image_error(local_error):
+                    raise
+        elif pull_policy != "always":
+            raise ValueError(f"unsupported Docker pull policy: {pull_policy}")
+
+        registry_lookup = getattr(client.images, "get_registry_data", None)
+        if registry_lookup is None:
+            return
+        registry_lookup(image)
+
+    try:
+        await asyncio.to_thread(_preflight)
+    except Exception as error:
+        if is_missing_runtime_image_error(error):
+            raise MissingRuntimeImageError(image, error) from error
+        raise
+
+
 async def delete_runtime_image_after_instance(
     runtime_config: Any,
     image: str | None,
@@ -589,11 +648,17 @@ def denovo_codex_environment(
     workspace: Path,
     base_env: dict[str, str] | None = None,
     preserve_stateful_session: bool = False,
+    stateful_session_id: str | None = None,
 ) -> dict[str, str]:
     source_env = os.environ if base_env is None else base_env
     env = dict(source_env)
     _ = preserve_stateful_session
+    env.pop("CODEX_THREAD_ID", None)
+    env.pop("STATEFUL_CODEX_RUN_ID", None)
     env.pop("STATEFUL_SESSION_ID", None)
+    if stateful_session_id:
+        env["STATEFUL_CODEX_RUN_ID"] = stateful_session_id
+        env["STATEFUL_SESSION_ID"] = stateful_session_id
     nested_root = source_env.get(NESTED_CODEX_HOME_ROOT_ENV)
     if nested_root:
         output_scope_parts = output.parts[-4:] if len(output.parts) >= 4 else output.parts
@@ -612,6 +677,26 @@ def denovo_codex_environment(
         env["SSL_CERT_FILE"] = str(system_cert)
 
     return env
+
+
+def stateful_session_fragment(value: str) -> str:
+    fragment = "".join(
+        character if character.isalnum() or character in "_-" else "-"
+        for character in str(value)
+    ).strip("-_")
+    return fragment or "item"
+
+
+def denovo_stateful_session_id(
+    output: Path,
+    instance_id: str,
+    task_path: Path,
+    workspace: Path,
+) -> str:
+    return (
+        f"denovo-{stateful_session_fragment(instance_id)}-"
+        f"{path_scope_digest(output, task_path, workspace)}"
+    )
 
 
 def native_subagent_usage(
@@ -971,11 +1056,113 @@ def instance_result_row(result: InstanceResult) -> dict[str, Any]:
         row["subagent_usage"] = result.subagent_usage
     if result.token_usage is not None:
         row["token_usage"] = result.token_usage
+    if result.orchestration_trace is not None:
+        row["orchestration_trace"] = result.orchestration_trace
     return row
 
 
 def append_result_jsonl(path: Path, result: InstanceResult) -> None:
     append_jsonl(path, instance_result_row(result))
+
+
+def stateful_http_json(
+    env: dict[str, str],
+    path: str,
+    payload: dict[str, Any] | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    base_url = env.get("STATEFUL_SERVER_URL")
+    token = env.get("STATEFUL_SERVER_TOKEN")
+    if not base_url or not token:
+        raise RuntimeError("STATEFUL_SERVER_URL and STATEFUL_SERVER_TOKEN are required")
+    url = urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+    data = None
+    method = "GET"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        method = "POST"
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def summarize_orchestration_events(
+    events: list[dict[str, Any]],
+    session_id: str | None,
+) -> dict[str, Any]:
+    matching = [
+        event
+        for event in events
+        if not session_id or event.get("session_id") == session_id
+    ]
+    event_types = [str(event.get("event_type", "")) for event in matching]
+    return {
+        "event_count": len(matching),
+        "intent_events": sum(1 for event_type in event_types if event_type.startswith("Intent")),
+        "lease_events": sum(1 for event_type in event_types if event_type.startswith("Lease")),
+        "conflict_events": sum(
+            1
+            for event_type in event_types
+            if event_type == "AuthorizationDenied" or "Conflict" in event_type
+        ),
+    }
+
+
+def write_orchestration_trace(
+    instance_dir: Path,
+    env: dict[str, str],
+    instance_id: str,
+    session_id: str | None,
+    subagent_usage: dict[str, Any],
+    patch_path: Path | None = None,
+) -> dict[str, Any]:
+    trace_path = instance_dir / "orchestration-trace.json"
+    relative_trace_path = trace_path.relative_to(instance_dir.parent).as_posix()
+    trace: dict[str, Any] = {
+        "instance_id": instance_id,
+        "session_id": session_id,
+        "trace_captured": False,
+        "trace_path": relative_trace_path,
+        "subagent_usage": subagent_usage,
+    }
+    if patch_path is not None:
+        trace["patch_path"] = patch_path.relative_to(instance_dir.parent).as_posix()
+    try:
+        current = stateful_http_json(env, "/v1/current")
+        events_body = stateful_http_json(env, "/v1/events")
+        events = events_body.get("events", [])
+        if not isinstance(events, list):
+            events = []
+        trace.update(summarize_orchestration_events(events, session_id))
+        trace["trace_captured"] = True
+        trace["current"] = current.get("current", current)
+        trace["events"] = events
+        workspace_id = env.get("STATEFUL_WORKSPACE_ID")
+        if workspace_id:
+            trace["context"] = stateful_http_json(
+                env,
+                "/v1/context/render",
+                {
+                    "session_id": session_id,
+                    "workspace_id": workspace_id,
+                    "mode": "brief",
+                },
+            )
+    except Exception as error:  # noqa: BLE001 - trace capture must not fail the run.
+        trace["trace_error"] = repr(error)
+    write_json(trace_path, trace)
+    return {
+        "trace_path": relative_trace_path,
+        "trace_captured": trace["trace_captured"],
+        "intent_events": trace.get("intent_events", 0),
+        "lease_events": trace.get("lease_events", 0),
+        "conflict_events": trace.get("conflict_events", 0),
+    }
 
 
 def missing_runtime_image_name(error: BaseException) -> str | None:
@@ -1003,6 +1190,15 @@ def instance_setup_exception_result(
     instance_id: str,
     error: BaseException,
 ) -> InstanceResult:
+    if isinstance(error, MissingRuntimeImageError):
+        return InstanceResult(
+            instance_id,
+            False,
+            None,
+            "missing-runtime-image",
+            str(error),
+            None,
+        )
     missing_image = missing_runtime_image_name(error)
     if missing_image is not None:
         return InstanceResult(
@@ -1118,6 +1314,7 @@ async def run_one_instance_async(
     try:
         source_env = dict(os.environ)
         image = task.get_image(inst)
+        await preflight_runtime_image_available(config.runtime, image)
         await ensure_runtime_image_available(config.runtime, image)
         runtime_config = runtime_config_for_local_image(config.runtime, image, inst.workdir)
         runtime_cls = runtime_registry.get(config.runtime.backend)
@@ -1191,6 +1388,16 @@ async def run_one_instance_async(
             task_path=Path(args.data_file),
             workspace=workspace,
             base_env=source_env,
+            stateful_session_id=(
+                denovo_stateful_session_id(
+                    output=output,
+                    instance_id=inst.id,
+                    task_path=Path(args.data_file),
+                    workspace=workspace,
+                )
+                if args.agent_mode == "stateful"
+                else None
+            ),
         )
         codex_env = env
         codex_home = Path(env["CODEX_HOME"])
@@ -1263,13 +1470,34 @@ async def run_one_instance_async(
         }
         if token_usage is not None:
             command_record["token_usage"] = token_usage
-        write_json(instance_dir / "codex-command.json", command_record)
 
-        cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
-        stateful_repo_cleanup = None
+        patch_path = instance_dir / "patch.diff"
+
+        def capture_trace() -> dict[str, Any] | None:
+            if args.agent_mode != "stateful":
+                return None
+            trace = write_orchestration_trace(
+                instance_dir=instance_dir,
+                env=env,
+                instance_id=inst.id,
+                session_id=env.get("STATEFUL_SESSION_ID"),
+                subagent_usage=subagent_usage,
+                patch_path=patch_path if patch_path.exists() else None,
+            )
+            command_record["orchestration_trace"] = trace
+            return trace
+
+        def finish_command_record(orchestration_trace: dict[str, Any] | None) -> None:
+            if orchestration_trace is not None:
+                command_record["orchestration_trace"] = orchestration_trace
+            write_json(instance_dir / "codex-command.json", command_record)
 
         if returncode != 0:
-            (instance_dir / "patch.diff").write_text("", encoding="utf-8")
+            patch_path.write_text("", encoding="utf-8")
+            orchestration_trace = capture_trace()
+            finish_command_record(orchestration_trace)
+            cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
+            stateful_repo_cleanup = None
             return InstanceResult(
                 inst.id,
                 False,
@@ -1280,10 +1508,15 @@ async def run_one_instance_async(
                 subagent_used=subagent_usage["subagent_used"],
                 subagent_usage=subagent_usage,
                 token_usage=token_usage,
+                orchestration_trace=orchestration_trace,
             )
 
         if args.subagent == "on" and not subagent_usage["subagent_requirement_met"]:
-            (instance_dir / "patch.diff").write_text("", encoding="utf-8")
+            patch_path.write_text("", encoding="utf-8")
+            orchestration_trace = capture_trace()
+            finish_command_record(orchestration_trace)
+            cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
+            stateful_repo_cleanup = None
             spawn_count = subagent_usage["native_subagent"]["subagent_spawn_count"]
             return InstanceResult(
                 inst.id,
@@ -1298,10 +1531,15 @@ async def run_one_instance_async(
                 subagent_used=subagent_usage["subagent_used"],
                 subagent_usage=subagent_usage,
                 token_usage=token_usage,
+                orchestration_trace=orchestration_trace,
             )
 
         patch = git_diff(workspace)
-        (instance_dir / "patch.diff").write_text(patch, encoding="utf-8")
+        patch_path.write_text(patch, encoding="utf-8")
+        orchestration_trace = capture_trace()
+        finish_command_record(orchestration_trace)
+        cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
+        stateful_repo_cleanup = None
 
         if args.skip_eval:
             return InstanceResult(
@@ -1314,6 +1552,7 @@ async def run_one_instance_async(
                 subagent_used=subagent_usage["subagent_used"],
                 subagent_usage=subagent_usage,
                 token_usage=token_usage,
+                orchestration_trace=orchestration_trace,
             )
 
         eval_runtime = runtime_cls(
@@ -1338,6 +1577,7 @@ async def run_one_instance_async(
             subagent_used=subagent_usage["subagent_used"],
             subagent_usage=subagent_usage,
             token_usage=token_usage,
+            orchestration_trace=orchestration_trace,
         )
     except CodexTimeoutError:
         return InstanceResult(

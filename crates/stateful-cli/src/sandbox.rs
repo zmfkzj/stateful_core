@@ -20,8 +20,9 @@ use std::os::unix::process::CommandExt;
 
 use crate::{
     CurrentSession, GlobalPaths, HttpResponse, ProtocolEnvelopeArgs, RepoGate, ServerRuntime,
-    discover_runtime_with_global, ensure_server, post_json, protocol_envelope,
-    read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
+    discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server, post_json,
+    protocol_envelope, read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
+    runtime::{current_stateful_session_id, write_current_session_file_for_explicit_session},
     runtime_env_override_is_configured, shadow_guard,
     shell_command::{
         first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
@@ -30,7 +31,7 @@ use crate::{
 
 pub(crate) const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
 pub(crate) const STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV: &str = "STATEFUL_ALLOW_NESTED_SANDBOX_RUN";
-const BUILD_PROFILE_WRITE_DIR: &str = "tmp";
+const SANDBOX_TMP_ROOT: &str = "/tmp/stateful";
 #[cfg(unix)]
 const SIGTERM: i32 = 15;
 #[cfg(unix)]
@@ -243,16 +244,19 @@ pub fn run_sandbox_in_repo(
 
     let mut allowed_write_targets = Vec::new();
     let mut denied_write_targets = Vec::new();
+    let mut release_after_run: Option<SandboxLeaseReleaseContext> = None;
     let writable_paths = match request.fs {
         SandboxFsProfile::ReadOnly => Vec::new(),
         SandboxFsProfile::WriteTargets => {
-            let current_session: CurrentSession =
-                read_current_session_file(&repo_root).map_err(|_| {
-                    anyhow::anyhow!("sandbox write-targets requires a current stateful session")
-                })?;
             let runtime = runtime
                 .as_ref()
                 .expect("write-targets sandbox profile requires runtime");
+            let current_session = current_session_for_sandbox_profile(
+                &repo_root,
+                paths,
+                runtime,
+                "sandbox write-targets requires a current stateful session",
+            )?;
             let authorize_context = SandboxAuthorizeContext {
                 runtime,
                 repo_root: &repo_root,
@@ -296,13 +300,27 @@ pub fn run_sandbox_in_repo(
                 }
             }
 
+            release_after_run = Some(SandboxLeaseReleaseContext {
+                session_id: current_session.session_id.clone(),
+                workspace_id: current_session.workspace_id.clone(),
+                paths: write_targets
+                    .iter()
+                    .chain(create_targets.iter())
+                    .cloned()
+                    .chain(
+                        write_dirs
+                            .iter()
+                            .map(|path| sandbox_write_dir_display_path(path)),
+                    )
+                    .collect(),
+            });
+
             if !denied_write_targets.is_empty() {
-                let body = serde_json::json!({
-                    "status": "error",
-                    "message": "stateful sandbox run target authorization denied",
-                    "allowed_write_targets": allowed_write_targets,
-                    "denied_write_targets": denied_write_targets,
-                })
+                let body = sandbox_authorization_denied_body(
+                    &authorize_context,
+                    allowed_write_targets,
+                    denied_write_targets,
+                )
                 .to_string();
                 return Err(SandboxAuthorizationDenied::new(body).into());
             }
@@ -315,57 +333,22 @@ pub fn run_sandbox_in_repo(
             )?
         }
         SandboxFsProfile::Build => {
-            let current_session: CurrentSession =
-                read_current_session_file(&repo_root).map_err(|_| {
-                    anyhow::anyhow!("sandbox build profile requires a current stateful session")
-                })?;
             let runtime = runtime
                 .as_ref()
                 .expect("build sandbox profile requires runtime");
-            let authorize_context = SandboxAuthorizeContext {
-                runtime,
-                repo_root: &repo_root,
+            let current_session = current_session_for_sandbox_profile(
+                &repo_root,
                 paths,
-                session_id: &current_session.session_id,
-                workspace_id: &current_session.workspace_id,
-                network: request.network,
-                fs_profile: sandbox_fs_profile_name(request.fs),
-            };
-            let build_write_dirs = write_dirs.clone();
-            let build_write_dir = build_write_dirs
+                runtime,
+                "sandbox build profile requires a current stateful session",
+            )?;
+            let build_write_dir = write_dirs
                 .first()
                 .expect("build profile validation requires one write dir");
-            let authorization_path = sandbox_write_dir_display_path(build_write_dir);
-            let response = authorize_sandbox_write(
-                &authorize_context,
-                "write_directory",
-                &authorization_path,
-            )?;
-            match classify_sandbox_authorize_response(build_write_dir, response)? {
-                SandboxAuthorizeDecision::Allow => {
-                    allowed_write_targets.push(authorization_path);
-                }
-                SandboxAuthorizeDecision::Deny(body) => {
-                    let body = enrich_sandbox_write_dir_denial(body);
-                    denied_write_targets.push(serde_json::json!({
-                        "path": sandbox_write_dir_display_path(build_write_dir),
-                        "authorization": body,
-                    }));
-                }
-            }
-
-            if !denied_write_targets.is_empty() {
-                let body = serde_json::json!({
-                    "status": "error",
-                    "message": "stateful sandbox run target authorization denied",
-                    "allowed_write_targets": allowed_write_targets,
-                    "denied_write_targets": denied_write_targets,
-                })
-                .to_string();
-                return Err(SandboxAuthorizationDenied::new(body).into());
-            }
-
-            prepare_sandbox_writable_paths(&repo_root, &[], &[], &build_write_dirs)?
+            let (display_path, writable_paths) =
+                prepare_build_profile_writable_paths(&current_session.session_id, build_write_dir)?;
+            allowed_write_targets.push(sandbox_write_dir_display_path(&display_path));
+            writable_paths
         }
         SandboxFsProfile::Git => {
             allowed_write_targets
@@ -382,42 +365,51 @@ pub fn run_sandbox_in_repo(
 
     let cwd = resolve_sandbox_cwd(&repo_root)?;
     let timeout = Duration::from_secs(request.timeout_seconds.unwrap_or(300).max(1));
-    let result = match direct_command.as_ref() {
-        Some(ValidatedSandboxDirectCommand::Git(words)) => {
-            let temp_dir = sandbox_temp_dir(&writable_paths)
-                .ok_or_else(|| anyhow::anyhow!("git profile requires a temp directory"))?;
-            run_sandboxed_git_command(
-                words,
+    let result = (|| -> anyhow::Result<_> {
+        match direct_command.as_ref() {
+            Some(ValidatedSandboxDirectCommand::Git(words)) => {
+                let temp_dir = sandbox_temp_dir(&writable_paths)
+                    .ok_or_else(|| anyhow::anyhow!("git profile requires a temp directory"))?;
+                run_sandboxed_git_command(
+                    words,
+                    &cwd,
+                    &writable_paths,
+                    &temp_dir,
+                    &git_profile_hooks_dir(&repo_root),
+                    request.network,
+                    timeout,
+                )
+            }
+            Some(ValidatedSandboxDirectCommand::GithubPr(words)) => {
+                let temp_dir = sandbox_temp_dir(&writable_paths).ok_or_else(|| {
+                    anyhow::anyhow!("github-pr profile requires a temp directory")
+                })?;
+                run_sandboxed_github_pr_command(
+                    words,
+                    &cwd,
+                    &writable_paths,
+                    &temp_dir,
+                    request.network,
+                    timeout,
+                )
+            }
+            None => run_sandboxed_command(
+                &request.command,
                 &cwd,
                 &writable_paths,
-                &temp_dir,
-                &git_profile_hooks_dir(&repo_root),
+                &[],
+                false,
                 request.network,
                 timeout,
-            )?
+            ),
         }
-        Some(ValidatedSandboxDirectCommand::GithubPr(words)) => {
-            let temp_dir = sandbox_temp_dir(&writable_paths)
-                .ok_or_else(|| anyhow::anyhow!("github-pr profile requires a temp directory"))?;
-            run_sandboxed_github_pr_command(
-                words,
-                &cwd,
-                &writable_paths,
-                &temp_dir,
-                request.network,
-                timeout,
-            )?
-        }
-        None => run_sandboxed_command(
-            &request.command,
-            &cwd,
-            &writable_paths,
-            &[],
-            false,
-            request.network,
-            timeout,
-        )?,
-    };
+    })();
+    if let Some(release_context) = &release_after_run
+        && let Some(runtime) = runtime.as_ref()
+    {
+        release_sandbox_write_leases(runtime, release_context);
+    }
+    let result = result?;
 
     Ok(SandboxRunOutput {
         status: result.status,
@@ -711,6 +703,29 @@ fn parse_sandbox_fs_profile(value: &str) -> Result<SandboxFsProfile, String> {
             "stateful sandbox run supports only read-only, write-targets, build, git, and github-pr profiles"
                 .to_string(),
         ),
+    }
+}
+
+pub(crate) fn current_session_for_sandbox_profile(
+    repo_root: &Path,
+    paths: &GlobalPaths,
+    runtime: &ServerRuntime,
+    missing_message: &'static str,
+) -> anyhow::Result<CurrentSession> {
+    match read_current_session_file(repo_root) {
+        Ok(session) => Ok(session),
+        Err(_) => {
+            let Some(session_id) = current_stateful_session_id()? else {
+                anyhow::bail!(missing_message);
+            };
+            let identity = repo_identity_for_enabled_repo(paths, repo_root).ok();
+            let workspace_id =
+                effective_workspace_id_for_repo(&runtime.workspace_id, identity.as_ref());
+            let session = CurrentSession::new(session_id, workspace_id);
+            write_current_session_file_for_explicit_session(repo_root, &session)
+                .map_err(|error| anyhow::anyhow!("{missing_message}: {error}"))?;
+            Ok(session)
+        }
     }
 }
 
@@ -1350,6 +1365,89 @@ fn prepare_sandbox_writable_paths(
     Ok(writable_paths)
 }
 
+fn prepare_build_profile_writable_paths(
+    session_id: &str,
+    scratch_purpose: &str,
+) -> anyhow::Result<(String, Vec<SandboxWritablePath>)> {
+    ensure_build_scratch_purpose_target(scratch_purpose)?;
+
+    let session_fragment = sandbox_tmp_fragment(session_id);
+    let scratch_root = PathBuf::from(SANDBOX_TMP_ROOT);
+    let scratch_relative = PathBuf::from(&session_fragment).join(scratch_purpose);
+    let scratch_dir = scratch_root.join(&scratch_relative);
+
+    fs::create_dir_all(&scratch_root)?;
+    ensure_build_scratch_components_are_not_symlinks(&scratch_root, Path::new(""))?;
+    ensure_build_scratch_components_are_not_symlinks(&scratch_root, &scratch_relative)?;
+
+    fs::create_dir_all(&scratch_dir)?;
+    fs::create_dir_all(scratch_dir.join(".stateful-tmp"))?;
+    ensure_build_scratch_components_are_not_symlinks(&scratch_root, &scratch_relative)?;
+
+    let canonical_root = scratch_root.canonicalize().map_err(|error| {
+        anyhow::anyhow!(
+            "stateful sandbox build scratch root `{SANDBOX_TMP_ROOT}` must exist: {error}"
+        )
+    })?;
+    let canonical_scratch = scratch_dir.canonicalize().map_err(|error| {
+        anyhow::anyhow!(
+            "stateful sandbox build scratch dir `{}` must exist: {error}",
+            scratch_dir.display()
+        )
+    })?;
+    if !canonical_scratch.starts_with(&canonical_root) {
+        anyhow::bail!(
+            "stateful sandbox build scratch dir `{}` escapes `{SANDBOX_TMP_ROOT}`",
+            scratch_dir.display()
+        );
+    }
+
+    let mut writable_paths = vec![SandboxWritablePath::directory(scratch_dir.clone())];
+    if canonical_scratch != scratch_dir {
+        writable_paths.push(SandboxWritablePath::directory(canonical_scratch));
+    }
+
+    Ok((scratch_dir.to_string_lossy().into_owned(), writable_paths))
+}
+
+fn ensure_build_scratch_components_are_not_symlinks(
+    scratch_root: &Path,
+    relative_path: &Path,
+) -> anyhow::Result<()> {
+    if let Ok(metadata) = fs::symlink_metadata(scratch_root) {
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!(
+                "stateful sandbox build scratch root `{}` must not be a symlink",
+                scratch_root.display()
+            );
+        }
+    }
+
+    let mut cursor = scratch_root.to_path_buf();
+    for component in relative_path.components() {
+        cursor.push(component.as_os_str());
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!(
+                    "stateful sandbox build scratch path `{}` must not contain symlinked components",
+                    cursor.display()
+                );
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                anyhow::bail!(
+                    "stateful sandbox build scratch path `{}` must be a directory",
+                    cursor.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_profile_targets(
     fs: SandboxFsProfile,
     write_targets: &[String],
@@ -1370,9 +1468,6 @@ fn validate_profile_targets(
                     "write-targets profile requires at least one write target, create target, or write dir"
                 );
             }
-            for path in write_dirs {
-                ensure_artifact_write_dir_target(path)?;
-            }
         }
         SandboxFsProfile::Build => {
             if !write_targets.is_empty() || !create_targets.is_empty() {
@@ -1380,10 +1475,10 @@ fn validate_profile_targets(
             }
             if write_dirs.len() != 1 {
                 anyhow::bail!(
-                    "build profile requires exactly one scoped artifact directory with --write-dir tmp/<purpose>"
+                    "build profile requires exactly one scratch purpose with --write-dir <scratch-purpose>"
                 );
             }
-            ensure_artifact_write_dir_target(&write_dirs[0])?;
+            ensure_build_scratch_purpose_target(&write_dirs[0])?;
         }
         SandboxFsProfile::Git => {
             if !write_targets.is_empty() || !create_targets.is_empty() || !write_dirs.is_empty() {
@@ -2477,21 +2572,51 @@ enum ShellQuoteState {
     Double,
 }
 
-fn ensure_artifact_write_dir_target(relative_path: &str) -> anyhow::Result<()> {
-    let trimmed = relative_path.trim_end_matches('/');
-    let mut components = trimmed.split('/');
-    let top_level = components.next().unwrap_or_default();
-    if top_level != BUILD_PROFILE_WRITE_DIR {
+fn ensure_build_scratch_purpose_target(relative_path: &str) -> anyhow::Result<()> {
+    if relative_path.is_empty() {
         anyhow::bail!(
-            "stateful sandbox run --write-dir is limited to the tmp/ artifact tree; use native Codex edit tools or exact file write targets for source-tree edits"
+            "build profile requires exactly one scratch purpose with --write-dir <scratch-purpose>"
         );
     }
-    if components.next().is_none() {
+    if relative_path == "tmp"
+        || relative_path.starts_with("tmp/")
+        || relative_path.starts_with("tmp\\")
+    {
         anyhow::bail!(
-            "stateful sandbox run --write-dir cannot target tmp directly; use --write-dir tmp/<purpose>"
+            "build profile scratch dirs live under /tmp/stateful/<session>/<purpose>; use --write-dir <scratch-purpose>, not repo tmp paths"
+        );
+    }
+    if Path::new(relative_path).is_absolute()
+        || matches!(relative_path, "." | "..")
+        || relative_path.contains('/')
+        || relative_path.contains('\\')
+    {
+        anyhow::bail!(
+            "build profile scratch dirs live under /tmp/stateful/<session>/<purpose>; --write-dir must be one scratch purpose name, not a path"
         );
     }
     Ok(())
+}
+
+fn sandbox_tmp_fragment(value: &str) -> String {
+    let fragment = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+
+    if fragment.is_empty() || fragment == "." || fragment == ".." {
+        "session".to_string()
+    } else {
+        fragment
+    }
 }
 
 pub(crate) fn sandbox_write_dir_display_path(path: &str) -> String {
@@ -2547,6 +2672,13 @@ pub(crate) struct SandboxAuthorizeContext<'a> {
     pub(crate) fs_profile: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SandboxLeaseReleaseContext {
+    session_id: String,
+    workspace_id: String,
+    paths: Vec<String>,
+}
+
 pub(crate) fn authorize_sandbox_write(
     context: &SandboxAuthorizeContext<'_>,
     action: &str,
@@ -2576,6 +2708,27 @@ pub(crate) fn authorize_sandbox_write(
     });
 
     post_json(context.runtime, "/v1/authorize", &body)
+}
+
+fn release_sandbox_write_leases(runtime: &ServerRuntime, context: &SandboxLeaseReleaseContext) {
+    let mut paths = BTreeSet::new();
+    for path in &context.paths {
+        paths.insert(path);
+    }
+
+    for path in paths {
+        let body = serde_json::json!({
+            "session_id": context.session_id,
+            "workspace_id": context.workspace_id,
+            "path": path,
+        });
+        let Ok(response) = post_json(runtime, "/v1/lease/release", &body) else {
+            continue;
+        };
+        if !(200..300).contains(&response.status_code) {
+            continue;
+        }
+    }
 }
 
 fn sandbox_authorize_purpose(action: &str, path: &str) -> String {
@@ -2620,6 +2773,49 @@ pub(crate) fn classify_sandbox_authorize_response(
             anyhow::bail!("stateful sandbox run authorize response for `{path}` missing decision");
         }
     }
+}
+
+fn sandbox_authorization_denied_body(
+    context: &SandboxAuthorizeContext<'_>,
+    allowed_write_targets: Vec<String>,
+    denied_write_targets: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "status": "error",
+        "message": "stateful sandbox run target authorization denied",
+        "allowed_write_targets": allowed_write_targets,
+        "denied_write_targets": denied_write_targets,
+    });
+    if let Some(current_state) = sandbox_current_state_context(context) {
+        body["current_state"] = current_state;
+    }
+    body
+}
+
+fn sandbox_current_state_context(
+    context: &SandboxAuthorizeContext<'_>,
+) -> Option<serde_json::Value> {
+    let mut body = serde_json::json!({
+        "session_id": context.session_id,
+        "workspace_id": context.workspace_id,
+        "mode": "brief",
+    });
+    if let Ok(identity) = repo_identity_for_enabled_repo(context.paths, context.repo_root)
+        && let Some(object) = body.as_object_mut()
+    {
+        object.insert("repo_id".to_string(), serde_json::json!(identity.repo_id));
+        object.insert(
+            "worktree_id".to_string(),
+            serde_json::json!(identity.worktree_id),
+        );
+        object.insert("root".to_string(), serde_json::json!(identity.root));
+        object.insert("branch".to_string(), serde_json::json!(identity.branch));
+    }
+    let response = post_json(context.runtime, "/v1/context/render", &body).ok()?;
+    if !(200..300).contains(&response.status_code) {
+        return None;
+    }
+    serde_json::from_str(&response.body).ok()
 }
 
 fn is_git_internal_segment(segment: &str) -> bool {
@@ -3260,6 +3456,82 @@ mod tests {
         fs,
         path::{Path, PathBuf},
     };
+
+    const SANDBOX_SESSION_CHILD_CASE: &str = "STATEFUL_SANDBOX_SESSION_CHILD_CASE";
+    const SANDBOX_SESSION_CHILD_ROOT: &str = "STATEFUL_SANDBOX_SESSION_CHILD_ROOT";
+
+    #[test]
+    #[ignore]
+    fn sandbox_current_session_child_probe() {
+        let Ok(child_case) = std::env::var(SANDBOX_SESSION_CHILD_CASE) else {
+            return;
+        };
+        let repo_root = PathBuf::from(
+            std::env::var_os(SANDBOX_SESSION_CHILD_ROOT)
+                .expect("sandbox session child root must be configured"),
+        );
+
+        match child_case.as_str() {
+            "bootstrap_from_codex_thread_id" => {
+                let paths = GlobalPaths::new(repo_root.join("home"));
+                let runtime =
+                    ServerRuntime::new("http://127.0.0.1:9", "secret-token", "workspace-a", 42);
+                let session = current_session_for_sandbox_profile(
+                    &repo_root,
+                    &paths,
+                    &runtime,
+                    "missing session",
+                )
+                .expect("sandbox current session should bootstrap");
+
+                assert_eq!(session, CurrentSession::new("thread-a", "workspace-a"));
+                assert_eq!(
+                    crate::read_current_session_file_for_session(&repo_root, "thread-a")
+                        .expect("session-bound current session should read"),
+                    CurrentSession::new("thread-a", "workspace-a")
+                );
+                assert_eq!(
+                    read_current_session_file(&repo_root)
+                        .expect("legacy current session alias should read"),
+                    CurrentSession::new("thread-a", "workspace-a")
+                );
+            }
+            other => panic!("unknown sandbox session child case `{other}`"),
+        }
+    }
+
+    #[test]
+    fn sandbox_current_session_bootstraps_from_codex_thread_id_when_missing() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "stateful-sandbox-session-bootstrap-test-{}",
+            std::process::id()
+        ));
+        if temp_root.exists() {
+            fs::remove_dir_all(&temp_root).expect("old temp root should remove");
+        }
+        fs::create_dir_all(&temp_root).expect("temp root should create");
+
+        let output = Command::new(std::env::current_exe().expect("current test binary path"))
+            .arg("sandbox::tests::sandbox_current_session_child_probe")
+            .arg("--ignored")
+            .arg("--exact")
+            .arg("--nocapture")
+            .env_clear()
+            .env(SANDBOX_SESSION_CHILD_CASE, "bootstrap_from_codex_thread_id")
+            .env(SANDBOX_SESSION_CHILD_ROOT, &temp_root)
+            .env("CODEX_THREAD_ID", "thread-a")
+            .output()
+            .expect("sandbox session child test should run");
+
+        assert!(
+            output.status.success(),
+            "sandbox session child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        fs::remove_dir_all(&temp_root).expect("temp root should remove");
+    }
 
     #[test]
     fn sandbox_run_cli_exit_code_maps_non_exited_results_to_one() {
@@ -3985,6 +4257,13 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_tmp_fragment_sanitizes_session_ids_for_path_components() {
+        assert_eq!(sandbox_tmp_fragment("session/id"), "session-id");
+        assert_eq!(sandbox_tmp_fragment(".."), "session");
+        assert_eq!(sandbox_tmp_fragment(""), "session");
+    }
+
+    #[test]
     fn seatbelt_profile_allows_device_reads_dev_null_writes_and_targets() {
         let profile = seatbelt_profile(
             &[
@@ -4160,20 +4439,48 @@ mod tests {
 
     #[test]
     fn build_profile_rejects_explicit_write_targets() {
-        validate_profile_targets(
+        validate_profile_targets(SandboxFsProfile::Build, &[], &[], &["build".to_string()])
+            .expect("build profile should accept one scratch purpose");
+
+        let repo_tmp_write_dir = validate_profile_targets(
             SandboxFsProfile::Build,
             &[],
             &[],
             &["tmp/build".to_string()],
         )
-        .expect("build profile should accept one scoped tmp write dir");
+        .expect_err("build profile should reject repo tmp write dirs");
+        assert!(
+            repo_tmp_write_dir.to_string().contains("/tmp/stateful"),
+            "unexpected error: {repo_tmp_write_dir}"
+        );
+
+        for unsafe_purpose in [
+            "../other",
+            "/tmp/stateful/other",
+            "nested/build",
+            ".",
+            "..",
+            "nested\\build",
+        ] {
+            let error = validate_profile_targets(
+                SandboxFsProfile::Build,
+                &[],
+                &[],
+                &[unsafe_purpose.into()],
+            )
+            .expect_err("build profile should reject path-shaped scratch purposes");
+            assert!(
+                error.to_string().contains("one scratch purpose name"),
+                "unexpected error for {unsafe_purpose}: {error}"
+            );
+        }
 
         let missing_write_dir = validate_profile_targets(SandboxFsProfile::Build, &[], &[], &[])
-            .expect_err("build profile should require a scoped tmp write dir");
+            .expect_err("build profile should require a scratch purpose");
         assert!(
             missing_write_dir
                 .to_string()
-                .contains("--write-dir tmp/<purpose>")
+                .contains("--write-dir <scratch-purpose>")
         );
 
         let error = validate_profile_targets(

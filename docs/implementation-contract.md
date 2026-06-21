@@ -126,9 +126,11 @@ it returns the first active reservation that the session can claim after
 rereading the target, even if the reservation notification was already delivered
 or the client missed the poll response. `/v1/intent/claim` is the explicit
 reservation claim path; it creates write-authorizing intent and an active lease
-for the reservation owner. `/v1/authorize` must not claim reservations
-implicitly. `/v1/lease/acquire` records the target existence and content hash
-when `root` is supplied; hook-originated native file writes compare that
+for the reservation owner. `/v1/authorize` may lazy-claim an active reservation
+for hook and sandbox authorization sources after the client rereads and retries
+the write boundary; read-only conflict checks must not claim reservations.
+`/v1/lease/acquire` records the target existence and content hash when `root` is
+supplied; hook-originated native file writes compare that
 observation before each authorization. `/v1/lease/refresh-observation` refreshes
 the same-session exact file lease observation after a supported file tool has
 completed, so later same-session writes are compared against the session's own
@@ -240,11 +242,13 @@ activity finalization, or lease/reservation expiry. Promotion creates a short
 reservation and a pending notification for the waiting session.
 
 Promotion creates a reservation first. A reservation is not active write
-authority. The waiting session must reread the target, then explicitly claim the
-reservation with `state.intent.claim` or `stateful intent claim --wait-id <id>`.
-Only that claim creates write-authorizing intent and active same-session leases.
-The default reservation TTL is 120 seconds; the default lease TTL is 300 seconds
-and is refreshed by heartbeat.
+authority. The waiting session must reread the target. Manual MCP/CLI flows then
+explicitly claim with `state.intent.claim` or
+`stateful intent claim --wait-id <id>`. Hook and sandbox authorization sources
+may lazy-claim the reservation at the retried write boundary. Claiming creates
+write-authorizing intent and active same-session leases. The default reservation
+TTL is 120 seconds; the default lease TTL is 300 seconds and is refreshed by
+heartbeat.
 
 The target multi-resource model is atomic all-or-nothing: a multi-resource
 request is reservable only when it is the head entry for every requested resource
@@ -567,10 +571,9 @@ runtime loading is future hardening work.
 
 Command-shaped tests and checks run through the trusted `stateful sandbox run`
 wrapper. Build and test artifact writes are scoped with `--fs build` after
-exact `tmp/` directory intent and a successful same-session directory lease.
-The profile sets standard temp variables under `tmp/.stateful-tmp` and sets
-`CARGO_TARGET_DIR` to `tmp/target` so Cargo build output stays in the authorized
-artifact tree.
+`--write-dir <scratch-purpose>`. The profile writes disposable artifacts under
+`/tmp/stateful/<session>/<scratch-purpose>/`, sets standard temp variables under
+that scratch root, and sets `CARGO_TARGET_DIR` to its `target` child.
 
 Glob semantics should use gitignore-style path matching relative to the
 workspace root. Identity and policy checks still use normalized canonical paths

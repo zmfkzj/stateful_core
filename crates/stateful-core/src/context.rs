@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub const CURRENT_SESSION_SCOPE_SOURCE_REF: &str = "CurrentSessionScope";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
     Brief,
@@ -281,11 +283,29 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
     };
     let mut rendered = 0usize;
 
+    let active_scope = package
+        .items
+        .iter()
+        .filter(|item| {
+            item.freshness == CurrentFreshness::Live && is_current_session_scope_item(item)
+        })
+        .collect::<Vec<_>>();
+    render_section(
+        &mut output,
+        "Your Active Scope",
+        &active_scope,
+        mode,
+        max_total,
+        &mut rendered,
+    );
+
     let blocking = package
         .items
         .iter()
         .filter(|item| {
-            item.freshness == CurrentFreshness::Live && item.severity == CurrentSeverity::Block
+            item.freshness == CurrentFreshness::Live
+                && item.severity == CurrentSeverity::Block
+                && !is_current_session_scope_item(item)
         })
         .collect::<Vec<_>>();
     render_section(
@@ -305,7 +325,9 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         .items
         .iter()
         .filter(|item| {
-            item.freshness == CurrentFreshness::Live && item.severity == CurrentSeverity::Warn
+            item.freshness == CurrentFreshness::Live
+                && item.severity == CurrentSeverity::Warn
+                && !is_current_session_scope_item(item)
         })
         .collect::<Vec<_>>();
     render_section(
@@ -321,7 +343,9 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         .items
         .iter()
         .filter(|item| {
-            item.freshness == CurrentFreshness::Live && item.severity == CurrentSeverity::Info
+            item.freshness == CurrentFreshness::Live
+                && item.severity == CurrentSeverity::Info
+                && !is_current_session_scope_item(item)
         })
         .collect::<Vec<_>>();
     render_section(
@@ -340,7 +364,9 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
     let stale = package
         .items
         .iter()
-        .filter(|item| item.freshness != CurrentFreshness::Live)
+        .filter(|item| {
+            item.freshness != CurrentFreshness::Live && !is_current_session_scope_item(item)
+        })
         .take(stale_limit)
         .collect::<Vec<_>>();
     render_section(
@@ -353,6 +379,12 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
     );
 
     output
+}
+
+fn is_current_session_scope_item(item: &CurrentItem) -> bool {
+    item.source_refs
+        .iter()
+        .any(|source_ref| source_ref == CURRENT_SESSION_SCOPE_SOURCE_REF)
 }
 
 fn package_status(items: &[CurrentItem]) -> ContextStatus {
@@ -415,13 +447,15 @@ fn render_section(
             "  purpose: {}\n",
             trim_trailing_period(&item.purpose)
         ));
-        if let Some(next_action) = &item.next_action {
-            output.push_str(&format!("  next: {}\n", trim_trailing_period(next_action)));
+        if item.severity != CurrentSeverity::Info {
+            if let Some(next_action) = &item.next_action {
+                output.push_str(&format!("  next: {}\n", trim_trailing_period(next_action)));
+            }
+        }
+        if let Some(evidence_kind) = item.evidence_kind {
+            output.push_str(&format!("  evidence kind: {}\n", evidence_kind.as_str()));
         }
         if matches!(mode, RenderMode::Detailed) {
-            if let Some(evidence_kind) = item.evidence_kind {
-                output.push_str(&format!("  evidence kind: {}\n", evidence_kind.as_str()));
-            }
             if let Some(evidence) = &item.evidence {
                 output.push_str(&format!("  evidence: {}\n", trim_trailing_period(evidence)));
             }

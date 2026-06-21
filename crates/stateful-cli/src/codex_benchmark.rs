@@ -18,13 +18,13 @@ use crate::sandbox::{
     SandboxAuthorizationDenied, SandboxAuthorizeContext, SandboxAuthorizeDecision,
     SandboxCommandResult, SandboxNetworkPolicy, SandboxRunOutput, SandboxWritablePath,
     SandboxWritablePathKind, authorize_sandbox_write, classify_sandbox_authorize_response,
-    enrich_sandbox_write_dir_denial, ensure_repo_dir_target, normalize_sandbox_target_path,
-    push_seatbelt_device_read_allows, resolve_sandbox_cwd, sandbox_temp_dir,
-    sandbox_write_dir_display_path, seatbelt_escape,
+    current_session_for_sandbox_profile, enrich_sandbox_write_dir_denial, ensure_repo_dir_target,
+    normalize_sandbox_target_path, push_seatbelt_device_read_allows, resolve_sandbox_cwd,
+    sandbox_temp_dir, sandbox_write_dir_display_path, seatbelt_escape,
 };
 use crate::{
-    CurrentSession, GlobalPaths, RepoGate, discover_runtime_with_global, ensure_server,
-    read_current_session_file, repo_gate, runtime_env_override_is_configured,
+    GlobalPaths, RepoGate, discover_runtime_with_global, ensure_server, repo_gate,
+    runtime_env_override_is_configured,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,9 +87,12 @@ pub fn run_nested_codex_benchmark_sandbox_in_repo(
         .map(validate_nested_codex_benchmark_docker_socket)
         .transpose()?;
 
-    let current_session: CurrentSession = read_current_session_file(&repo_root).map_err(|_| {
-        anyhow::anyhow!("sandbox run-nested-codex-benchmark requires a current stateful session")
-    })?;
+    let current_session = current_session_for_sandbox_profile(
+        &repo_root,
+        paths,
+        &runtime,
+        "sandbox run-nested-codex-benchmark requires a current stateful session",
+    )?;
     let authorize_context = SandboxAuthorizeContext {
         runtime: &runtime,
         repo_root: &repo_root,
@@ -314,6 +317,7 @@ fn apply_nested_codex_benchmark_env(
     command.env(STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV, "1");
     command.env("STATEFUL_SERVER_URL", &runtime.base_url);
     command.env("STATEFUL_SERVER_TOKEN", &runtime.token);
+    command.env_remove("CODEX_THREAD_ID");
     command.env_remove("STATEFUL_SESSION_ID");
     if let Some(docker_socket) = docker_socket {
         command.env("DOCKER_HOST", format!("unix://{}", docker_socket.display()));
@@ -473,6 +477,12 @@ mod tests {
                 .find(|(key, _)| key == "STATEFUL_SERVER_TOKEN")
                 .map(|(_, value)| value),
             Some(&Some("token-123".to_string()))
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "CODEX_THREAD_ID")
+                .map(|(_, value)| value),
+            Some(&None)
         );
         assert_eq!(
             env.iter()

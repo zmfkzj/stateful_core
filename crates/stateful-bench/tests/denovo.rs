@@ -1,8 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
 use stateful_bench::{
     DeNovoAgentKind, DeNovoCodexRunOptions, DeNovoComparisonReport, DeNovoCondition,
@@ -569,6 +565,65 @@ out.mkdir(parents=True, exist_ok=True)
 }
 
 #[test]
+fn denovo_codex_agent_git_diff_ignores_gitignored_pytest_cache() {
+    let root = temp_root("stateful-bench-denovo-git-diff-ignored-cache");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace should exist");
+
+    run_git(&workspace, &["init"]);
+    run_git(&workspace, &["config", "user.email", "codex@example.com"]);
+    run_git(&workspace, &["config", "user.name", "Codex"]);
+    fs::write(workspace.join(".gitignore"), ".pytest_cache/\n")
+        .expect("gitignore should be written");
+    fs::write(workspace.join("tracked.py"), "before\n").expect("tracked file should be written");
+    run_git(&workspace, &["add", "."]);
+    run_git(&workspace, &["commit", "-m", "initial"]);
+
+    fs::write(workspace.join("tracked.py"), "after\n").expect("tracked file should be modified");
+    fs::create_dir_all(workspace.join(".pytest_cache")).expect("pytest cache dir should exist");
+    fs::write(workspace.join(".pytest_cache/README"), "cache\n")
+        .expect("ignored cache file should be written");
+
+    let adapter_script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/denovo_codex_agent.py");
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(
+            r#"
+import importlib.util
+import pathlib
+import sys
+
+script = pathlib.Path(sys.argv[1])
+workspace = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("denovo_codex_agent", script)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+print(module.git_diff(workspace))
+"#,
+        )
+        .arg(adapter_script)
+        .arg(&workspace)
+        .output()
+        .expect("python should run git_diff");
+
+    assert!(
+        output.status.success(),
+        "git_diff should ignore gitignored pytest cache\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let patch = String::from_utf8(output.stdout).expect("patch should be utf8");
+    assert!(patch.contains("tracked.py"));
+    assert!(patch.contains("+after"));
+    assert!(!patch.contains(".pytest_cache"));
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
 fn denovo_condition_run_routes_codex_cli_to_adapter_and_writes_metadata() {
     let root = temp_root("stateful-bench-denovo-codex-cli-adapter");
     let aweagent = root.join("AweAgent");
@@ -686,10 +741,7 @@ out.mkdir(parents=True, exist_ok=True)
 
 #[test]
 fn denovo_condition_run_resolves_relative_codex_adapter_script_from_caller_cwd() {
-    let root = PathBuf::from("../..").join("tmp/target").join(format!(
-        "stateful-bench-denovo-relative-adapter-{}",
-        std::process::id()
-    ));
+    let root = temp_root("stateful-bench-denovo-relative-adapter");
     if root.exists() {
         fs::remove_dir_all(&root).expect("old temp root should clean up");
     }
@@ -995,10 +1047,7 @@ out.mkdir(parents=True, exist_ok=True)
 
 #[test]
 fn denovo_extract_relative_paths_are_resolved_from_caller_cwd() {
-    let root = PathBuf::from("../..").join("tmp/target").join(format!(
-        "stateful-bench-denovo-extract-relative-{}",
-        std::process::id()
-    ));
+    let root = temp_root("stateful-bench-denovo-extract-relative");
     if root.exists() {
         fs::remove_dir_all(&root).expect("old temp root should clean up");
     }
@@ -1048,7 +1097,7 @@ out.mkdir(parents=True, exist_ok=True)
 
     assert!(metadata.results_jsonl.starts_with(&output));
     assert!(output.join("extract_patch_fake/results.jsonl").is_file());
-    assert!(!root.join("AweAgent").join(&output).exists());
+    assert!(!root.join("AweAgent/extracts").exists());
 
     let received: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(output.join("extract_patch_fake/received.json"))
@@ -1068,4 +1117,18 @@ fn temp_root(name: &str) -> std::path::PathBuf {
         fs::remove_dir_all(&root).expect("old temp root should clean up");
     }
     root
+}
+
+fn run_git(workspace: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

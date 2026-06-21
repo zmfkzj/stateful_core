@@ -122,9 +122,9 @@ fn current_session_file_child_probe() {
 }
 
 #[test]
-fn current_session_file_prefers_stateful_session_id_over_codex_aliases() {
+fn current_session_file_prefers_codex_thread_id_over_stateful_session_id() {
     let temp_root = std::env::temp_dir().join(format!(
-        "stateful-current-session-generic-env-test-{}",
+        "stateful-current-session-codex-thread-env-test-{}",
         std::process::id()
     ));
     if temp_root.exists() {
@@ -153,7 +153,7 @@ fn current_session_file_prefers_stateful_session_id_over_codex_aliases() {
         .arg("--exact")
         .arg("--nocapture")
         .env_clear()
-        .env(CURRENT_SESSION_CHILD_CASE, "read_uses_stateful_session_id")
+        .env(CURRENT_SESSION_CHILD_CASE, "read_prefers_codex_thread_id")
         .env(CURRENT_SESSION_CHILD_ROOT, &temp_root)
         .env("STATEFUL_SESSION_ID", "session-child")
         .env("STATEFUL_CODEX_RUN_ID", "root-session")
@@ -172,9 +172,9 @@ fn current_session_file_prefers_stateful_session_id_over_codex_aliases() {
 }
 
 #[test]
-fn current_session_file_ignores_codex_aliases_without_stateful_session_id() {
+fn current_session_file_uses_codex_thread_id_without_stateful_session_id() {
     let temp_root = std::env::temp_dir().join(format!(
-        "stateful-current-session-ignore-codex-env-test-{}",
+        "stateful-current-session-codex-thread-test-{}",
         std::process::id()
     ));
     if temp_root.exists() {
@@ -190,6 +190,12 @@ fn current_session_file_ignores_codex_aliases_without_stateful_session_id() {
         &CurrentSession::new("legacy-session", "w1"),
     )
     .expect("matching session-bound current session should write");
+    write_current_session_file_for_session(
+        &temp_root,
+        "thread-child",
+        &CurrentSession::new("thread-child", "w1"),
+    )
+    .expect("codex thread-bound current session should write");
 
     let output = Command::new(std::env::current_exe().expect("current test binary path"))
         .arg("current_session_file_child_probe")
@@ -197,7 +203,7 @@ fn current_session_file_ignores_codex_aliases_without_stateful_session_id() {
         .arg("--exact")
         .arg("--nocapture")
         .env_clear()
-        .env(CURRENT_SESSION_CHILD_CASE, "read_uses_legacy_session")
+        .env(CURRENT_SESSION_CHILD_CASE, "read_prefers_codex_thread_id")
         .env(CURRENT_SESSION_CHILD_ROOT, &temp_root)
         .env("STATEFUL_CODEX_RUN_ID", "root-session")
         .env("CODEX_THREAD_ID", "thread-child")
@@ -731,12 +737,9 @@ fn current_session_file_refuses_non_regular_file_before_writing() {
     fs::create_dir_all(temp_root.join(".stateful_core/runtime"))
         .expect("runtime dir should be creatable");
     let session_path = temp_root.join(".stateful_core/runtime/session.json");
-    let listener =
-        std::os::unix::net::UnixListener::bind(&session_path).expect("session socket should bind");
+    fs::create_dir(&session_path).expect("session path should be non-regular");
 
     run_current_session_child(&temp_root, "write_non_regular_error");
-
-    drop(listener);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

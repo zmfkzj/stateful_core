@@ -111,9 +111,11 @@ blocked -> queued -> reserved -> claimed -> active
 A conflicting writer is blocked by the active lease and can enter a FIFO wait
 queue. When the active lease is released or the owning activity finalizes, the
 first waiter receives a short reservation. The reserved session must reread the
-target, call `state.intent.claim` / `stateful intent claim --wait-id <id>`, and
-then retry the write. The claim creates write-authorizing intent and the active
-same-session lease. The default reservation TTL is 120 seconds.
+target. Manual MCP/CLI flows then call `state.intent.claim` /
+`stateful intent claim --wait-id <id>`; native edit hooks and sandbox
+`write-targets` authorization can lazy-claim the reservation when the write is
+retried. Claiming creates write-authorizing intent and the active same-session
+lease. The default reservation TTL is 120 seconds.
 
 Detailed queue states, lease expiry behavior, and promotion rules are covered
 in the state model and implementation contract docs.
@@ -288,12 +290,12 @@ The sandbox runner reads the current session file created by lifecycle hooks, so
 declaring an arbitrary `--session-id` in a plain terminal is not enough for
 `--fs write-targets`.
 
-First call `state_intent_declare` with `files_planned: ["tmp/test-run/"]`, then
-call `state_lease_acquire` with `path: "tmp/test-run/"`. After the directory
-lease succeeds, run:
+Use a scratch purpose name, not a repo path. The build profile writes disposable
+artifacts under `/tmp/stateful/<session>/<purpose>/`, sets standard temp
+variables below that directory, and points Cargo output there:
 
 ```bash
-<absolute-stateful-binary> sandbox run --fs build --network enabled --write-dir tmp/test-run --command 'cargo test --workspace'
+<absolute-stateful-binary> sandbox run --fs build --network enabled --write-dir test-run --command 'cargo test --workspace'
 ```
 
 Run `stateful doctor` from a plain terminal when you want to check local
@@ -336,24 +338,24 @@ installation health.
   queued/reserved write request. Retrying the same `request_id` after its
   reservation expires requeues the same waiter instead of creating a duplicate.
   The path must be non-empty after normalization.
-- `stateful intent claim --wait-id <id>` claims a reserved request after the
-  session rereads the target; the claim creates write-authorizing intent and an
-  active lease for the reservation owner.
+- `stateful intent claim --wait-id <id>` manually claims a reserved request
+  after the session rereads the target; native edit hooks and sandbox
+  `write-targets` authorization may lazy-claim a reserved request at the retry
+  write boundary.
 - `stateful intent cancel --request-id <id>` cancels a queued or reserved
   request owned by the active session.
 - `stateful notifications poll` reads pending coordination notifications.
 - `stateful resume next` reads the next reservation available to the active
   session.
-- `stateful sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command <cmd>`
-  runs build or test commands with artifact writes limited to a scoped tmp child
-  after exact directory intent and a successful same-session directory lease.
-  The profile is language-independent for filesystem access and sets
-  `CARGO_TARGET_DIR` to `tmp/<purpose>/target` for Cargo commands; configure
-  other tool-specific build caches to live under the same scoped tmp child when
-  they do not use standard temp variables.
-- `stateful sandbox run --fs write-targets --write-dir tmp/<purpose> --command <cmd>`
-  runs command-shaped artifact writes with writes limited to a scoped tmp child
-  after exact directory intent and a successful same-session directory lease.
+- `stateful sandbox run --fs build --network enabled --write-dir <purpose> --command <cmd>`
+  runs build or test commands with disposable artifact writes under
+  `/tmp/stateful/<session>/<purpose>/`. The profile is language-independent for
+  filesystem access and sets `CARGO_TARGET_DIR` to that scratch target for Cargo
+  commands; configure other tool-specific build caches under the same external
+  scratch root when they do not use standard temp variables.
+- `stateful sandbox run --fs write-targets --write-dir <repo-dir> --command <cmd>`
+  runs command-shaped repo directory writes after exact directory intent and a
+  successful same-session directory lease for that directory.
 - `stateful sandbox run --fs git --network enabled --command 'git <args>'`
   runs a single git command with the repo worktree and Git internals writable
   inside the OS sandbox. The wrapper rejects shell-dispatching git options and
@@ -367,11 +369,9 @@ installation health.
   been pushed. The profile manages transient PR state automatically and rejects
   explicit write targets and write dirs. Use the GitHub connector instead when
   that connector is explicitly allowlisted for the repo.
-- `stateful codex [--codex-bin <path>] [--sandbox passthrough|read-only-tmp] [--no-stateful] -- <args...>`
+- `stateful codex [--codex-bin <path>] [--sandbox passthrough] [--no-stateful] -- <args...>`
   runs Codex with pass-through session configuration by default.
-  `--sandbox read-only-tmp` remains available as a Codex filesystem profile,
-  not as a Bash authorization signal, and `--no-stateful` disables Codex
-  lifecycle hooks for that run.
+  `--no-stateful` disables Codex lifecycle hooks for that run.
 - `stateful mcp serve` exposes the MCP adapter over stdio.
 - `stateful mcp call <tool> [arguments_json]` calls an MCP tool from a plain
   terminal. In Codex sessions, call the MCP tools directly instead of routing
@@ -439,18 +439,15 @@ The v1 authorization API currently supports `write_file`, `write_directory`,
 `delete_file`, `rename_file`, and `move_file`.
 
 File intent authorizes writes only to the exact file. Directory intent
-authorizes writes one or two path segments below that directory. Delete,
-rename, and move operations require exact file intents for the affected paths;
+authorizes only `write_directory` for the exact directory resource. File writes,
+deletes, renames, and moves require exact file intents for the affected paths;
 directory intent does not authorize them. Writes without matching active intent
 are denied, and active leases held by another session block conflicting writes.
-The depth limit applies to `write_file` authorization from a directory intent.
-`write_directory` is separate: it requires exact directory intent, and the
-matching directory lease fences the whole directory subtree because
-`--write-dir` grants a command-shaped sandbox writable access to that subtree.
 A blocked writer can queue with `queue_on_conflict`; after promotion, the
-reserved session must reread the target, claim the reservation with
-`state.intent.claim` / `stateful intent claim --wait-id <id>`, and then retry
-the write.
+reserved session must reread the target. Manual MCP/CLI flows claim with
+`state.intent.claim` / `stateful intent claim --wait-id <id>`, while native edit
+hooks and sandbox `write-targets` authorization can lazy-claim during the
+retried write.
 
 Repo file edits should use native Codex edit tools such as `apply_patch`, Edit,
 or `Write` after exact intent declaration and a successful same-session file lease. Hooks
@@ -479,13 +476,12 @@ instead when that connector is explicitly allowlisted for the repo. The profile
 rejects explicit write targets and write dirs.
 
 Build and test commands should use
-`stateful sandbox run --fs build --network enabled --write-dir tmp/<purpose> --command <cmd>`
-after exact scoped directory intent and a successful same-session directory
-lease. The build profile grants writable access to that scoped tmp child, sets
-standard temp variables under `tmp/<purpose>/.stateful-tmp`, and points
-`CARGO_TARGET_DIR` at `tmp/<purpose>/target`; tools with other language-specific
-build directories should be configured to place those directories under the same
-scoped tmp child.
+`stateful sandbox run --fs build --network enabled --write-dir <purpose> --command <cmd>`.
+The build profile grants writable access to
+`/tmp/stateful/<session>/<purpose>/`, sets standard temp variables under that
+external scratch root, and points `CARGO_TARGET_DIR` at its `target` child;
+tools with other language-specific build directories should be configured to
+place those directories under the same scratch root.
 
 Other command-shaped writes should use
 `stateful sandbox run --fs write-targets --write-target <path> ... --command <cmd>`,
@@ -584,19 +580,16 @@ payloads also reject empty or normalized-empty `path` with `missing_scope`.
 ## Sandboxed Tests
 
 Raw Bash test commands are denied by hooks. Use the trusted `stateful sandbox
-run` wrapper after exact scoped tmp directory intent and a successful
-same-session directory lease before commands that write build output. In Codex
-sessions, call `state_intent_declare` and `state_lease_acquire` as MCP tools
-directly before invoking Bash:
+run` wrapper with a scratch purpose before commands that write build output:
 
 ```bash
-<absolute-stateful-binary> sandbox run --fs build --network enabled --write-dir tmp/test-run --command 'cargo test --workspace'
+<absolute-stateful-binary> sandbox run --fs build --network enabled --write-dir test-run --command 'cargo test --workspace'
 ```
 
 Use `--network enabled` when tests bind or connect loopback sockets. The build
-profile is limited to the `tmp/` artifact tree; source file edits should use
-native Codex edit tools such as `apply_patch` or Edit after exact intent and a
-successful same-session file lease.
+profile writes only under `/tmp/stateful/<session>/<purpose>/`; source file
+edits should use native Codex edit tools such as `apply_patch` or Edit after
+exact intent and a successful same-session file lease.
 
 ## Core Loop
 

@@ -15,6 +15,8 @@ use crate::repo_registry::RepoIdentity;
 use serde::{Deserialize, Serialize};
 
 pub const STATEFUL_SESSION_ID_ENV: &str = "STATEFUL_SESSION_ID";
+const CODEX_THREAD_ID_ENV: &str = "CODEX_THREAD_ID";
+const STATEFUL_CODEX_RUN_ID_ENV: &str = "STATEFUL_CODEX_RUN_ID";
 const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
 static SECRET_JSON_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -271,6 +273,21 @@ pub fn write_current_session_file_for_current_stateful_session(
     Ok(())
 }
 
+pub(crate) fn write_current_session_file_for_explicit_session(
+    repo_root: impl AsRef<Path>,
+    session: &CurrentSession,
+) -> anyhow::Result<()> {
+    let repo_root = repo_root.as_ref();
+    validate_session_id(&session.session_id, "session_id")?;
+    write_current_session_file_for_session(repo_root, &session.session_id, session)?;
+    if current_session_file_is_untrusted(&current_session_file_path(repo_root))? {
+        return Ok(());
+    }
+
+    write_legacy_current_session_file(repo_root, session)?;
+    Ok(())
+}
+
 fn write_legacy_current_session_file(
     repo_root: &Path,
     session: &CurrentSession,
@@ -315,7 +332,22 @@ pub fn read_current_session_file_for_mcp(
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<CurrentSession> {
     let repo_root = repo_root.as_ref();
-    if let Some(session_id) = current_stateful_session_id()? {
+    if let Some(session_id) = current_env_session_id(CODEX_THREAD_ID_ENV)? {
+        return read_current_session_file_for_session(repo_root, &session_id);
+    }
+
+    if std::env::var_os(STATEFUL_CODEX_RUN_ID_ENV).is_some() {
+        match read_verified_legacy_current_session_file(
+            repo_root,
+            LegacySessionFallback::RequireSessionBoundFile,
+        ) {
+            Ok(session) => return Ok(session),
+            Err(error) if is_not_found_error(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    if let Some(session_id) = current_env_session_id(STATEFUL_SESSION_ID_ENV)? {
         return read_current_session_file_for_session(repo_root, &session_id);
     }
 
@@ -897,12 +929,19 @@ fn current_session_file_path_for_session(
         .join(format!("{session_file_id}.json")))
 }
 
-fn current_stateful_session_id() -> anyhow::Result<Option<String>> {
-    let Some(session_id) = std::env::var_os(STATEFUL_SESSION_ID_ENV) else {
+pub(crate) fn current_stateful_session_id() -> anyhow::Result<Option<String>> {
+    if let Some(session_id) = current_env_session_id(CODEX_THREAD_ID_ENV)? {
+        return Ok(Some(session_id));
+    }
+    current_env_session_id(STATEFUL_SESSION_ID_ENV)
+}
+
+fn current_env_session_id(env_name: &str) -> anyhow::Result<Option<String>> {
+    let Some(session_id) = std::env::var_os(env_name) else {
         return Ok(None);
     };
     let session_id = session_id.to_string_lossy().into_owned();
-    validate_session_id(&session_id, STATEFUL_SESSION_ID_ENV)?;
+    validate_session_id(&session_id, env_name)?;
     Ok(Some(session_id))
 }
 

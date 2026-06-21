@@ -19,12 +19,7 @@ impl IntentScope {
 
     pub fn allows_write(&self, target: impl AsRef<str>) -> bool {
         let target = normalize_relative_path(target.as_ref());
-        match self {
-            Self::File(path) => path == &target,
-            Self::Directory(scope) => {
-                directory_depth(scope, &target).is_some_and(|depth| (1..=2).contains(&depth))
-            }
-        }
+        matches!(self, Self::File(path) if path == &target)
     }
 
     pub fn allows_write_directory(&self, target: impl AsRef<str>) -> bool {
@@ -152,7 +147,7 @@ pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decis
 
     match input {
         AuthorizationInput::WriteFile { path } if scopes.allows_write(&path) => {
-            Decision::allow("authorized", "Write target is inside active intent scope.")
+            Decision::allow("authorized", "Write target has exact active file intent.")
         }
         AuthorizationInput::WriteDirectory { path } if scopes.allows_write_directory(&path) => {
             Decision::allow(
@@ -179,21 +174,7 @@ pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decis
         | AuthorizationInput::MoveFile { .. } => Decision::deny(
             "scope_mismatch",
             "Target is outside active intent scope.",
-            "Declare intent for the exact file, or for write-directory actions the exact directory scope.",
+            "Declare exact file intent for file actions, or exact directory intent for write-directory actions.",
         ),
     }
-}
-
-fn directory_depth(scope: &str, target: &str) -> Option<usize> {
-    let remainder = target.strip_prefix(scope)?;
-    if remainder.is_empty() {
-        return None;
-    }
-
-    Some(
-        remainder
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .count(),
-    )
 }
