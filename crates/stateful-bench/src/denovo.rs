@@ -35,8 +35,25 @@ impl DeNovoRunMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeNovoCliRuntime {
+    Codex,
+    Omp,
+}
+
+impl DeNovoCliRuntime {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Omp => "omp",
+        }
+    }
+}
+
 const DEFAULT_CODEX_BIN: &str = "codex";
+const DEFAULT_OMP_BIN: &str = "omp";
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.4-mini";
+const DEFAULT_OMP_MODEL: &str = "deepseek-v4-flash";
 const DEFAULT_CODEX_REASONING_EFFORT: &str = "low";
 const DEFAULT_CODEX_MODEL_CONTEXT_WINDOW: usize = 256000;
 const DEFAULT_CODEX_TEMPERATURE: &str = "1";
@@ -51,6 +68,7 @@ const DEFAULT_CODEX_TIMEOUT_SECONDS: u64 = 7200;
 pub enum DeNovoAgentKind {
     Official,
     CodexCli,
+    OmpCli,
 }
 
 #[derive(Debug, Subcommand)]
@@ -98,10 +116,12 @@ pub enum DeNovoCommand {
         agent: DeNovoAgentKind,
         #[arg(long, default_value = DEFAULT_CODEX_BIN)]
         codex_bin: String,
+        #[arg(long, default_value = DEFAULT_OMP_BIN)]
+        omp_bin: String,
         #[arg(long, default_value = "stateful")]
         stateful_binary: String,
-        #[arg(long, default_value = DEFAULT_CODEX_MODEL)]
-        benchmark_model: String,
+        #[arg(long)]
+        benchmark_model: Option<String>,
         #[arg(long, default_value = DEFAULT_CODEX_REASONING_EFFORT)]
         benchmark_reasoning_effort: String,
         #[arg(long, default_value_t = DEFAULT_CODEX_MODEL_CONTEXT_WINDOW)]
@@ -234,6 +254,7 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
             condition,
             agent,
             codex_bin,
+            omp_bin,
             stateful_binary,
             benchmark_model,
             benchmark_reasoning_effort,
@@ -264,6 +285,10 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
                 .iter()
                 .map(|condition| parse_denovo_condition(condition))
                 .collect::<Result<Vec<_>>>()?;
+            let benchmark_model = benchmark_model.unwrap_or_else(|| match agent {
+                DeNovoAgentKind::OmpCli => DEFAULT_OMP_MODEL.to_string(),
+                _ => DEFAULT_CODEX_MODEL.to_string(),
+            });
             let reports = run_denovo_matrix(DeNovoMatrixRunOptions {
                 run_id: run_id.clone(),
                 aweagent_root,
@@ -274,6 +299,7 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
                 conditions,
                 agent,
                 codex_bin,
+                omp_bin,
                 stateful_binary,
                 benchmark_model,
                 benchmark_reasoning_effort,
@@ -399,6 +425,7 @@ pub struct DeNovoCodexRunOptions {
     pub prompt_version: String,
     pub verbose: bool,
     pub codex_bin: String,
+    pub omp_bin: String,
     pub stateful_binary: String,
     pub benchmark_model: String,
     pub benchmark_reasoning_effort: String,
@@ -409,6 +436,7 @@ pub struct DeNovoCodexRunOptions {
     pub max_resumes: usize,
     pub codex_timeout_seconds: u64,
     pub adapter_script: Option<PathBuf>,
+    pub cli_runtime: DeNovoCliRuntime,
 }
 
 pub fn build_denovo_extract_recipe_command(
@@ -525,8 +553,12 @@ pub fn build_denovo_codex_adapter_command(options: DeNovoCodexRunOptions) -> Res
         subagent.to_string(),
         "--aweagent-root".to_string(),
         path_arg(&options.aweagent_root),
+        "--cli-runtime".to_string(),
+        options.cli_runtime.as_str().to_string(),
         "--codex-bin".to_string(),
         options.codex_bin,
+        "--omp-bin".to_string(),
+        options.omp_bin,
         "--stateful-binary".to_string(),
         options.stateful_binary,
         "--benchmark-model".to_string(),
@@ -636,6 +668,7 @@ pub struct DeNovoConditionRunOptions {
     pub condition: DeNovoCondition,
     pub agent: DeNovoAgentKind,
     pub codex_bin: String,
+    pub omp_bin: String,
     pub stateful_binary: String,
     pub benchmark_model: String,
     pub benchmark_reasoning_effort: String,
@@ -703,6 +736,7 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
     let agent_dir_name = match options.agent {
         DeNovoAgentKind::Official => "official",
         DeNovoAgentKind::CodexCli => "codex-cli",
+        DeNovoAgentKind::OmpCli => "omp-cli",
     };
     let agent_output_dir = condition_dir.join(agent_dir_name);
     fs::create_dir_all(&agent_output_dir)
@@ -738,36 +772,44 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
             prompt_version: options.prompt_version,
             verbose: options.verbose,
         }),
-        DeNovoAgentKind::CodexCli => build_denovo_codex_adapter_command(DeNovoCodexRunOptions {
-            aweagent_root: options.aweagent_root.clone(),
-            python: options.python,
-            data_file: command_data_file,
-            output: command_output_dir,
-            base_config: options.base_config,
-            condition: options.condition.clone(),
-            mode: options.mode,
-            instance_ids: options.instance_ids,
-            max_steps: options.max_steps,
-            max_concurrent: options.max_concurrent,
-            skip_eval: options.skip_eval,
-            validate_run: options.validate_run,
-            eval_iters: options.eval_iters,
-            del_done_images: options.del_done_images,
-            dump_clean_snapshot: options.dump_clean_snapshot,
-            prompt_version: options.prompt_version,
-            verbose: options.verbose,
-            codex_bin: options.codex_bin,
-            stateful_binary: options.stateful_binary,
-            benchmark_model: options.benchmark_model,
-            benchmark_reasoning_effort: options.benchmark_reasoning_effort,
-            benchmark_model_context_window: options.benchmark_model_context_window,
-            benchmark_temperature: options.benchmark_temperature,
-            benchmark_max_turns: options.benchmark_max_turns,
-            subagent_min_count: options.subagent_min_count,
-            max_resumes: options.max_resumes,
-            codex_timeout_seconds: options.codex_timeout_seconds,
-            adapter_script: command_adapter_script,
-        }),
+        DeNovoAgentKind::CodexCli | DeNovoAgentKind::OmpCli => {
+            let cli_runtime = match options.agent {
+                DeNovoAgentKind::OmpCli => DeNovoCliRuntime::Omp,
+                _ => DeNovoCliRuntime::Codex,
+            };
+            build_denovo_codex_adapter_command(DeNovoCodexRunOptions {
+                aweagent_root: options.aweagent_root.clone(),
+                python: options.python,
+                data_file: command_data_file,
+                output: command_output_dir,
+                base_config: options.base_config,
+                condition: options.condition.clone(),
+                mode: options.mode,
+                instance_ids: options.instance_ids,
+                max_steps: options.max_steps,
+                max_concurrent: options.max_concurrent,
+                skip_eval: options.skip_eval,
+                validate_run: options.validate_run,
+                eval_iters: options.eval_iters,
+                del_done_images: options.del_done_images,
+                dump_clean_snapshot: options.dump_clean_snapshot,
+                prompt_version: options.prompt_version,
+                verbose: options.verbose,
+                codex_bin: options.codex_bin,
+                omp_bin: options.omp_bin,
+                stateful_binary: options.stateful_binary,
+                benchmark_model: options.benchmark_model,
+                benchmark_reasoning_effort: options.benchmark_reasoning_effort,
+                benchmark_model_context_window: options.benchmark_model_context_window,
+                benchmark_temperature: options.benchmark_temperature,
+                benchmark_max_turns: options.benchmark_max_turns,
+                subagent_min_count: options.subagent_min_count,
+                max_resumes: options.max_resumes,
+                codex_timeout_seconds: options.codex_timeout_seconds,
+                adapter_script: command_adapter_script,
+                cli_runtime,
+            })
+        }
     }?;
 
     let stdout_log = condition_dir.join("command.stdout.log");
@@ -851,6 +893,7 @@ pub struct DeNovoMatrixRunOptions {
     pub conditions: Vec<DeNovoCondition>,
     pub agent: DeNovoAgentKind,
     pub codex_bin: String,
+    pub omp_bin: String,
     pub stateful_binary: String,
     pub benchmark_model: String,
     pub benchmark_reasoning_effort: String,
@@ -910,6 +953,7 @@ fn flush_denovo_condition_aggregate(
     let agent_dir_name = match options.agent {
         DeNovoAgentKind::Official => "official",
         DeNovoAgentKind::CodexCli => "codex-cli",
+        DeNovoAgentKind::OmpCli => "omp-cli",
     };
     let agent_output_dir = aggregate
         .official_dir
@@ -1056,6 +1100,7 @@ pub fn run_denovo_matrix(options: DeNovoMatrixRunOptions) -> Result<Vec<DeNovoCo
                 condition,
                 agent: options.agent,
                 codex_bin: options.codex_bin.clone(),
+                omp_bin: options.omp_bin.clone(),
                 stateful_binary: options.stateful_binary.clone(),
                 benchmark_model: options.benchmark_model.clone(),
                 benchmark_reasoning_effort: options.benchmark_reasoning_effort.clone(),

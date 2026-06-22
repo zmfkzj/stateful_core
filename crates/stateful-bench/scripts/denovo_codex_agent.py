@@ -251,6 +251,35 @@ def run_codex_with_timeout(
     return CodexExecutionSummary(returncode=returncode, token_usage=token_usage)
 
 
+def run_omp_with_timeout(
+    command: list[str],
+    workspace: Path,
+    env: dict[str, str] | None,
+    timeout_seconds: float,
+    runner: Any = subprocess.run,
+) -> CodexExecutionSummary:
+    if timeout_seconds <= 0:
+        raise CodexTimeoutError(f"omp timed out after {timeout_seconds:g}s")
+    try:
+        completed = runner(
+            command,
+            cwd=workspace,
+            text=True,
+            check=False,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise CodexTimeoutError(f"omp timed out after {timeout_seconds:g}s") from error
+    return CodexExecutionSummary(
+        returncode=completed.returncode,
+        token_usage=empty_codex_token_usage(),
+    )
+
+
 def empty_codex_token_usage() -> dict[str, int]:
     return {
         "turns": 0,
@@ -641,6 +670,27 @@ def codex_command_for_profile(
     return command
 
 
+def omp_command_for_profile(
+    workspace: Path,
+    prompt_path: Path,
+    omp_bin: str,
+    benchmark_model: str,
+) -> list[str]:
+    return [
+        omp_bin,
+        "-p",
+        "--mode",
+        "json",
+        "--model",
+        benchmark_model,
+        "--cwd",
+        str(workspace),
+        "--approval-mode",
+        "yolo",
+        f"@{prompt_path.resolve()}",
+    ]
+
+
 def denovo_codex_environment(
     output: Path,
     instance_id: str,
@@ -679,6 +729,56 @@ def denovo_codex_environment(
     return env
 
 
+def denovo_omp_environment(
+    output: Path,
+    instance_id: str,
+    task_path: Path,
+    workspace: Path,
+    base_env: dict[str, str] | None = None,
+    stateful_session_id: str | None = None,
+) -> dict[str, str]:
+    source_env = os.environ if base_env is None else base_env
+    env = dict(source_env)
+    for key in (
+        "CODEX_HOME",
+        "CODEX_THREAD_ID",
+        "STATEFUL_CODEX_RUN_ID",
+        "STATEFUL_SESSION_ID",
+    ):
+        env.pop(key, None)
+    if stateful_session_id is not None:
+        env["STATEFUL_SESSION_ID"] = stateful_session_id
+    home = output / "omp-homes" / path_fragment(instance_id) / "home"
+    env["HOME"] = str(home)
+    env["STATEFUL_HOME"] = str(home)
+    env["PI_CODING_AGENT_DIR"] = str(home / ".omp" / "agent")
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+    env["XDG_CACHE_HOME"] = str(home / ".cache")
+    return env
+
+
+def prepare_omp_environment(
+    env: dict[str, str],
+    enable_stateful: bool,
+    stateful_binary: str,
+    runner: Any = subprocess.run,
+) -> None:
+    Path(env["PI_CODING_AGENT_DIR"]).mkdir(parents=True, exist_ok=True)
+    if not enable_stateful:
+        return
+    completed = runner(
+        [stateful_binary, "install", "--agent", "omp", "--yes"],
+        text=True,
+        check=False,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout).strip()
+        raise StatefulRepoEnableError(message or f"stateful omp install exited {completed.returncode}")
+
+
 def stateful_session_fragment(value: str) -> str:
     fragment = "".join(
         character if character.isalnum() or character in "_-" else "-"
@@ -715,6 +815,24 @@ def native_subagent_usage(
         "subagent_min_count": subagent_min_count,
         "subagent_used": bool(native_usage["subagent_used"]),
         "subagent_requirement_met": requirement_met,
+        "native_subagent": native_usage,
+    }
+
+
+def empty_native_subagent_usage(subagent_min_count: int) -> dict[str, Any]:
+    native_usage = annotate_native_subagent_usage(
+        {
+            "subagent_used": False,
+            "sources": [],
+            "counts": empty_subagent_usage_counts(),
+        },
+        subagent_min_count,
+    )
+    return {
+        "mode": "off",
+        "subagent_min_count": subagent_min_count,
+        "subagent_used": False,
+        "subagent_requirement_met": True,
         "native_subagent": native_usage,
     }
 
@@ -778,17 +896,19 @@ def profile_metadata(
     agent_mode: str,
     subagent: str,
     subagent_min_count: int = DEFAULT_SUBAGENT_MIN_COUNT,
+    cli_runtime: str = "codex",
 ) -> dict[str, Any]:
+    codex_subagents = cli_runtime == "codex" and subagent == "on"
     return {
-        "agent_kind": "codex-cli",
+        "agent_kind": "omp-cli" if cli_runtime == "omp" else "codex-cli",
         "agent_mode": agent_mode,
         "subagent": subagent,
-        "subagent_required": subagent == "on",
+        "subagent_required": codex_subagents,
         "subagent_min_count": subagent_min_count,
-        "subagent_mode": "native_codex_subagents" if subagent == "on" else "off",
+        "subagent_mode": "native_codex_subagents" if codex_subagents else "off",
         "official_benchmark_protocol": OFFICIAL_BENCHMARK_PROTOCOL,
         "agent_rollouts_per_instance": 1,
-        "native_subagent_required": subagent == "on",
+        "native_subagent_required": codex_subagents,
         "eval_feedback_loop": False,
         "eval_feedback_attempts": 0,
         "resume_policy": RESUME_POLICY_CONTEXT_OR_TOKEN_ONLY,
@@ -810,7 +930,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--agent-mode", choices=["stateful", "no-state"], required=True)
     parser.add_argument("--subagent", choices=["on", "off"], required=True)
     parser.add_argument("--aweagent-root", required=True)
+    parser.add_argument("--cli-runtime", choices=["codex", "omp"], default="codex")
     parser.add_argument("--codex-bin", required=True)
+    parser.add_argument("--omp-bin", default="omp")
     parser.add_argument("--stateful-binary", required=True)
     parser.add_argument("--benchmark-model", required=True)
     parser.add_argument("--benchmark-reasoning-effort", required=True)
@@ -1268,7 +1390,7 @@ def run_fake_instances(args: argparse.Namespace) -> int:
     write_adapter_metadata(
         output,
         {
-            **profile_metadata(args.agent_mode, args.subagent, args.subagent_min_count),
+            **profile_metadata(args.agent_mode, args.subagent, args.subagent_min_count, args.cli_runtime),
             **subagent_usage_metadata([], args.subagent_min_count),
             "fake": True,
             "results": len(result_rows),
@@ -1332,10 +1454,12 @@ async def run_one_instance_async(
             benchmark_max_turns=args.benchmark_max_turns,
             max_steps=args.max_steps,
             prompt_version=args.prompt_version,
-            subagent=args.subagent,
+            subagent=args.subagent if args.cli_runtime == "codex" else "off",
             subagent_min_count=args.subagent_min_count,
         )
         write_json(instance_dir / "prompt.json", {"prompt": prompt})
+        prompt_path = instance_dir / "prompt.txt"
+        prompt_path.write_text(prompt, encoding="utf-8")
 
         if not should_run_codex(args):
             patch = ""
@@ -1370,37 +1494,63 @@ async def run_one_instance_async(
                 eval_data,
             )
 
-        command = codex_command_for_profile(
-            workspace=workspace,
-            agent_mode=args.agent_mode,
-            subagent=args.subagent,
-            codex_bin=args.codex_bin,
-            stateful_binary=args.stateful_binary,
-            benchmark_model=args.benchmark_model,
-            benchmark_reasoning_effort=args.benchmark_reasoning_effort,
-            benchmark_model_context_window=args.benchmark_model_context_window,
-            benchmark_temperature=args.benchmark_temperature,
-            base_env=source_env,
-        )
-        env = denovo_codex_environment(
-            output=output,
-            instance_id=inst.id,
-            task_path=Path(args.data_file),
-            workspace=workspace,
-            base_env=source_env,
-            stateful_session_id=(
-                denovo_stateful_session_id(
-                    output=output,
-                    instance_id=inst.id,
-                    task_path=Path(args.data_file),
-                    workspace=workspace,
-                )
-                if args.agent_mode == "stateful"
-                else None
-            ),
-        )
-        codex_env = env
-        codex_home = Path(env["CODEX_HOME"])
+        if args.cli_runtime == "omp":
+            command = omp_command_for_profile(
+                workspace=workspace,
+                prompt_path=prompt_path,
+                omp_bin=args.omp_bin,
+                benchmark_model=args.benchmark_model,
+            )
+            env = denovo_omp_environment(
+                output=output,
+                instance_id=inst.id,
+                task_path=Path(args.data_file),
+                workspace=workspace,
+                base_env=source_env,
+                stateful_session_id=(
+                    denovo_stateful_session_id(
+                        output=output,
+                        instance_id=inst.id,
+                        task_path=Path(args.data_file),
+                        workspace=workspace,
+                    )
+                    if args.agent_mode == "stateful"
+                    else None
+                ),
+            )
+            codex_home = Path(env["PI_CODING_AGENT_DIR"])
+        else:
+            command = codex_command_for_profile(
+                workspace=workspace,
+                agent_mode=args.agent_mode,
+                subagent=args.subagent,
+                codex_bin=args.codex_bin,
+                stateful_binary=args.stateful_binary,
+                benchmark_model=args.benchmark_model,
+                benchmark_reasoning_effort=args.benchmark_reasoning_effort,
+                benchmark_model_context_window=args.benchmark_model_context_window,
+                benchmark_temperature=args.benchmark_temperature,
+                base_env=source_env,
+            )
+            env = denovo_codex_environment(
+                output=output,
+                instance_id=inst.id,
+                task_path=Path(args.data_file),
+                workspace=workspace,
+                base_env=source_env,
+                stateful_session_id=(
+                    denovo_stateful_session_id(
+                        output=output,
+                        instance_id=inst.id,
+                        task_path=Path(args.data_file),
+                        workspace=workspace,
+                    )
+                    if args.agent_mode == "stateful"
+                    else None
+                ),
+            )
+            codex_env = env
+            codex_home = Path(env["CODEX_HOME"])
         if args.agent_mode == "stateful":
             runtime_env_error = stateful_runtime_env_error(env)
             if runtime_env_error is not None:
@@ -1412,26 +1562,33 @@ async def run_one_instance_async(
                     runtime_env_error,
                     None,
                 )
-        seeded_auth = prepare_codex_environment(
-            env,
-            source_env=source_env,
-            enable_stateful=args.agent_mode == "stateful",
-            stateful_binary=args.stateful_binary,
-            stateful_integration=(
-                STATEFUL_INTEGRATION_FULL
-                if args.agent_mode == "stateful"
-                else STATEFUL_INTEGRATION_NONE
-            ),
-        )
-        if seeded_auth is None:
-            return InstanceResult(
-                inst.id,
-                False,
-                None,
-                "setup-error",
-                "Codex auth could not be seeded into the isolated CODEX_HOME",
-                None,
+        if args.cli_runtime == "omp":
+            prepare_omp_environment(
+                env,
+                enable_stateful=args.agent_mode == "stateful",
+                stateful_binary=args.stateful_binary,
             )
+        else:
+            seeded_auth = prepare_codex_environment(
+                env,
+                source_env=source_env,
+                enable_stateful=args.agent_mode == "stateful",
+                stateful_binary=args.stateful_binary,
+                stateful_integration=(
+                    STATEFUL_INTEGRATION_FULL
+                    if args.agent_mode == "stateful"
+                    else STATEFUL_INTEGRATION_NONE
+                ),
+            )
+            if seeded_auth is None:
+                return InstanceResult(
+                    inst.id,
+                    False,
+                    None,
+                    "setup-error",
+                    "Codex auth could not be seeded into the isolated CODEX_HOME",
+                    None,
+                )
 
         if args.agent_mode == "stateful":
             stateful_repo_cleanup = enable_stateful_repo(
@@ -1441,25 +1598,37 @@ async def run_one_instance_async(
             )
 
         started_at = time.monotonic()
-        codex_summary = run_codex_with_timeout(
-            command,
-            prompt,
-            workspace,
-            env,
-            max_resumes=args.max_resumes,
-            timeout_seconds=args.codex_timeout_seconds,
-        )
-        returncode = codex_summary.returncode
+        if args.cli_runtime == "omp":
+            execution_summary = run_omp_with_timeout(
+                command,
+                workspace,
+                env,
+                timeout_seconds=args.codex_timeout_seconds,
+            )
+        else:
+            execution_summary = run_codex_with_timeout(
+                command,
+                prompt,
+                workspace,
+                env,
+                max_resumes=args.max_resumes,
+                timeout_seconds=args.codex_timeout_seconds,
+            )
+        returncode = execution_summary.returncode
         token_usage = (
-            codex_summary.token_usage
-            if codex_summary.token_usage.get("turns", 0) > 0
+            execution_summary.token_usage
+            if execution_summary.token_usage.get("turns", 0) > 0
             else None
         )
         duration = time.monotonic() - started_at
-        subagent_usage = native_subagent_usage(
-            args.subagent,
-            args.subagent_min_count,
-            codex_home,
+        subagent_usage = (
+            native_subagent_usage(
+                args.subagent,
+                args.subagent_min_count,
+                codex_home,
+            )
+            if args.cli_runtime == "codex"
+            else empty_native_subagent_usage(args.subagent_min_count)
         )
         command_record = {
             "command": command,
@@ -1502,8 +1671,8 @@ async def run_one_instance_async(
                 inst.id,
                 False,
                 None,
-                "codex-error",
-                f"codex exited {returncode}",
+                f"{args.cli_runtime}-error",
+                f"{args.cli_runtime} exited {returncode}",
                 None,
                 subagent_used=subagent_usage["subagent_used"],
                 subagent_usage=subagent_usage,
@@ -1511,7 +1680,7 @@ async def run_one_instance_async(
                 orchestration_trace=orchestration_trace,
             )
 
-        if args.subagent == "on" and not subagent_usage["subagent_requirement_met"]:
+        if args.cli_runtime == "codex" and args.subagent == "on" and not subagent_usage["subagent_requirement_met"]:
             patch_path.write_text("", encoding="utf-8")
             orchestration_trace = capture_trace()
             finish_command_record(orchestration_trace)
@@ -1584,8 +1753,8 @@ async def run_one_instance_async(
             inst.id,
             False,
             None,
-            "codex-timeout",
-            f"codex timed out after {args.codex_timeout_seconds}s",
+            f"{args.cli_runtime}-timeout",
+            f"{args.cli_runtime} timed out after {args.codex_timeout_seconds}s",
             None,
         )
     except StatefulRepoEnableError as error:
@@ -1615,7 +1784,7 @@ async def run_real_instances_async(args: argparse.Namespace) -> int:
         write_adapter_metadata(
             output,
             {
-                **profile_metadata(args.agent_mode, args.subagent, args.subagent_min_count),
+                **profile_metadata(args.agent_mode, args.subagent, args.subagent_min_count, args.cli_runtime),
                 **subagent_usage_metadata(results, args.subagent_min_count),
                 "fake": False,
                 "results": len(results),
@@ -1664,7 +1833,7 @@ async def run_real_instances_async(args: argparse.Namespace) -> int:
     write_adapter_metadata(
         output,
         {
-            **profile_metadata(args.agent_mode, args.subagent, args.subagent_min_count),
+            **profile_metadata(args.agent_mode, args.subagent, args.subagent_min_count, args.cli_runtime),
             **subagent_usage_metadata(results, args.subagent_min_count),
             "fake": False,
             "results": len(results),

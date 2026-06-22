@@ -187,6 +187,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     );
     let extension = fs::read_to_string(&omp_extension).expect("omp extension should read");
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
+    assert!(extension.contains("process.env.STATEFUL_SESSION_ID ||"));
     assert!(extension.contains("pre-tool-use"));
     assert!(plan.files.iter().any(|path| path.ends_with("mcp.json")));
 }

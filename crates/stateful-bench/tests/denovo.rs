@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
 use stateful_bench::{
-    DeNovoAgentKind, DeNovoCodexRunOptions, DeNovoComparisonReport, DeNovoCondition,
-    DeNovoConditionRunOptions, DeNovoExtractOptions, DeNovoExtractRecipeOptions,
+    DeNovoAgentKind, DeNovoCliRuntime, DeNovoCodexRunOptions, DeNovoComparisonReport,
+    DeNovoCondition, DeNovoConditionRunOptions, DeNovoExtractOptions, DeNovoExtractRecipeOptions,
     DeNovoMatrixRunOptions, DeNovoOfficialResult, DeNovoRunMode, DeNovoRunRecipeOptions,
     build_denovo_codex_adapter_command, build_denovo_condition_report,
     build_denovo_extract_recipe_command, build_denovo_run_recipe_command, compare_denovo_reports,
@@ -408,6 +408,7 @@ fn denovo_codex_adapter_command_uses_stateful_adapter_and_condition_axes() {
         prompt_version: "v1".to_string(),
         verbose: true,
         codex_bin: "/opt/homebrew/bin/codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "/Users/arthur/.cargo/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
@@ -418,6 +419,7 @@ fn denovo_codex_adapter_command_uses_stateful_adapter_and_condition_axes() {
         max_resumes: 2,
         codex_timeout_seconds: 7200,
         adapter_script: Some("crates/stateful-bench/scripts/denovo_codex_agent.py".into()),
+        cli_runtime: DeNovoCliRuntime::Codex,
     })
     .expect("codex adapter command should build");
 
@@ -474,6 +476,75 @@ fn denovo_codex_adapter_command_uses_stateful_adapter_and_condition_axes() {
 }
 
 #[test]
+fn denovo_omp_adapter_command_uses_existing_adapter_with_omp_runtime() {
+    let command = build_denovo_codex_adapter_command(DeNovoCodexRunOptions {
+        aweagent_root: "../AweAgent".into(),
+        python: "python3".to_string(),
+        data_file: "denovoswe_with_patches.jsonl".into(),
+        output: "target/stateful-bench/denovo/runs/dev/omp-cli".into(),
+        base_config: "configs/tasks/denovoswe.yaml".into(),
+        condition: DeNovoCondition::new(true, true),
+        mode: DeNovoRunMode::Batch,
+        instance_ids: vec!["PyCQA_pep8_pr970".to_string()],
+        max_steps: Some(500),
+        max_concurrent: Some(1),
+        skip_eval: false,
+        validate_run: true,
+        eval_iters: 1,
+        del_done_images: false,
+        dump_clean_snapshot: None,
+        prompt_version: "v2".to_string(),
+        verbose: true,
+        codex_bin: "/opt/homebrew/bin/codex".to_string(),
+        omp_bin: "/opt/homebrew/bin/omp".to_string(),
+        stateful_binary: "/Users/arthur/.cargo/bin/stateful".to_string(),
+        benchmark_model: "deepseek-v4-flash".to_string(),
+        benchmark_reasoning_effort: "low".to_string(),
+        benchmark_model_context_window: 256000,
+        benchmark_temperature: "1".to_string(),
+        benchmark_max_turns: 500,
+        subagent_min_count: 4,
+        max_resumes: 2,
+        codex_timeout_seconds: 7200,
+        adapter_script: Some("crates/stateful-bench/scripts/denovo_codex_agent.py".into()),
+        cli_runtime: DeNovoCliRuntime::Omp,
+    })
+    .expect("omp adapter command should build");
+
+    assert_eq!(command.program, "python3");
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--cli-runtime", "omp"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--omp-bin", "/opt/homebrew/bin/omp"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--benchmark-model", "deepseek-v4-flash"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--agent-mode", "stateful"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--subagent", "on"])
+    );
+}
+
+#[test]
 fn denovo_condition_run_executes_fake_recipe_and_writes_metadata() {
     let root = temp_root("stateful-bench-denovo-fake-recipe");
     let aweagent = root.join("AweAgent");
@@ -515,6 +586,7 @@ out.mkdir(parents=True, exist_ok=True)
         condition,
         agent: DeNovoAgentKind::Official,
         codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
@@ -661,6 +733,7 @@ out.mkdir(parents=True, exist_ok=True)
         condition: DeNovoCondition::new(false, true),
         agent: DeNovoAgentKind::CodexCli,
         codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
@@ -777,6 +850,7 @@ out.mkdir(parents=True, exist_ok=True)
         condition: DeNovoCondition::new(false, true),
         agent: DeNovoAgentKind::CodexCli,
         codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
@@ -846,6 +920,7 @@ sys.exit(2)
         condition: DeNovoCondition::new(false, true),
         agent: DeNovoAgentKind::CodexCli,
         codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
@@ -960,6 +1035,7 @@ score = 1.0 if "stateful" in args.config else 0.5
         ],
         agent: DeNovoAgentKind::Official,
         codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),

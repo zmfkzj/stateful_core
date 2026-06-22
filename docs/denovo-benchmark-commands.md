@@ -98,6 +98,8 @@ Set these values before reusing the commands:
 
 ```bash
 REPO_ROOT=/absolute/path/to/stateful_core
+AWEAGENT_ROOT=/absolute/path/to/AweAgent
+PYTHON=/absolute/path/to/python3
 STATEFUL_BIN=/absolute/path/to/stateful
 TMUX=/absolute/path/to/tmux
 TMUX_SOCKET=/absolute/path/to/tmux/socket
@@ -105,6 +107,43 @@ RUN_SERIES=rNN-denovo
 TRIAL=1
 RUN_ID=$RUN_SERIES-t$TRIAL
 ```
+
+## OMP CLI Variant
+
+Use `--agent omp-cli` to run the same DeNovoSWE condition matrix through OMP.
+For OMP runs, use `deepseek-v4-flash` unless deliberately testing another
+model:
+
+```bash
+stateful-bench denovo run \
+  --agent omp-cli \
+  --aweagent-root "$AWEAGENT_ROOT" \
+  --python "$PYTHON" \
+  --data-file "$REPO_ROOT/datasets/denovo/shards/denovoswe_public_shard_a.jsonl" \
+  --output-dir "$REPO_ROOT/.stateful_bench/denovo/runs" \
+  --run-id "$RUN_ID-shard-a-omp" \
+  --mode batch \
+  --condition stateful:off,subagent:off \
+  --condition stateful:on,subagent:off \
+  --condition stateful:off,subagent:on \
+  --condition stateful:on,subagent:on \
+  --omp-bin ${OMP_BIN:-omp} \
+  --stateful-binary "$STATEFUL_BIN" \
+  --benchmark-model deepseek-v4-flash \
+  --benchmark-reasoning-effort low \
+  --benchmark-model-context-window 256000 \
+  --benchmark-temperature 1 \
+  --benchmark-max-turns 500 \
+  --prompt-version v2 \
+  --eval-iters 1
+```
+
+OMP `stateful:on`/`off` both use isolated OMP home/profile state. Neither
+inherits host Codex config, session, rules, or skills. Only `stateful:on`
+receives stateful OMP install/config; `stateful:off` does not.
+
+The `subagent` axis is retained for matrix shape, but OMP does not use Codex
+native subagent enforcement or Codex subagent usage counters.
 
 Shard launch scripts are expected at:
 

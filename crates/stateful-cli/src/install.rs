@@ -1171,17 +1171,21 @@ function isYolo(event, ctx) {{
   return values.some((value) => value === true || value === "yolo" || value === "auto-approve");
 }}
 
+function sessionId(event, ctx) {{
+  return process.env.STATEFUL_SESSION_ID || event?.sessionId || ctx?.sessionManager?.session?.id || "omp-session";
+}}
+
 module.exports = function statefulOmpExtension(pi) {{
   pi.setLabel("Stateful");
   pi.on("session_start", async (event, ctx) => {{
     runStatefulHook("session-start", {{
-      session_id: event?.sessionId || ctx?.sessionManager?.session?.id || "omp-session",
+      session_id: sessionId(event, ctx),
       cwd: ctx.cwd,
     }});
   }});
   pi.on("tool_call", async (event, ctx) => {{
     const decision = runStatefulHook("pre-tool-use", {{
-      session_id: event?.sessionId || ctx?.sessionManager?.session?.id || "omp-session",
+      session_id: sessionId(event, ctx),
       cwd: ctx.cwd,
       yolo: isYolo(event, ctx),
       tool_name: event.toolName,
@@ -1193,7 +1197,7 @@ module.exports = function statefulOmpExtension(pi) {{
   }});
   pi.on("tool_result", async (event, ctx) => {{
     runStatefulHook("post-tool-use", {{
-      session_id: event?.sessionId || ctx?.sessionManager?.session?.id || "omp-session",
+      session_id: sessionId(event, ctx),
       cwd: ctx.cwd,
       tool_name: event.toolName,
       tool_input: event.input || {{}},
@@ -1201,7 +1205,7 @@ module.exports = function statefulOmpExtension(pi) {{
   }});
   pi.on("session_shutdown", async (event, ctx) => {{
     runStatefulHook("stop", {{
-      session_id: event?.sessionId || ctx?.sessionManager?.session?.id || "omp-session",
+      session_id: sessionId(event, ctx),
       cwd: ctx.cwd,
     }});
   }});

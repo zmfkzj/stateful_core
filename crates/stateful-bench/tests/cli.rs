@@ -257,11 +257,61 @@ fn denovo_run_command_parses_codex_cli_agent_options() {
             ]
             && codex_bin == "/opt/homebrew/bin/codex"
             && stateful_binary == "/Users/arthur/.cargo/bin/stateful"
-            && benchmark_model == "gpt-5.4-mini"
+            && benchmark_model.as_deref() == Some("gpt-5.4-mini")
             && benchmark_reasoning_effort == "low"
             && benchmark_temperature == "1"
             && codex_adapter_script.as_deref()
                 == Some(std::path::Path::new("crates/stateful-bench/scripts/denovo_codex_agent.py"))
+    ));
+}
+
+#[test]
+fn denovo_run_command_parses_omp_cli_agent_options() {
+    let cli = Cli::try_parse_from([
+        "stateful-bench",
+        "denovo",
+        "run",
+        "--agent",
+        "omp-cli",
+        "--aweagent-root",
+        "../AweAgent",
+        "--data-file",
+        ".stateful_bench/denovo/extracts/dev/results.jsonl",
+        "--output-dir",
+        "target/stateful-bench/denovo/runs",
+        "--run-id",
+        "dev-denovo-omp",
+        "--condition",
+        "stateful:off,subagent:on",
+        "--condition",
+        "stateful:on,subagent:on",
+        "--omp-bin",
+        "/opt/homebrew/bin/omp",
+        "--stateful-binary",
+        "/Users/arthur/.cargo/bin/stateful",
+        "--benchmark-model",
+        "deepseek-v4-flash",
+    ])
+    .expect("denovo omp run command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Denovo {
+            command: DeNovoCommand::Run {
+                agent: stateful_bench::DeNovoAgentKind::OmpCli,
+                ref run_id,
+                ref condition,
+                ref omp_bin,
+                ref benchmark_model,
+                ..
+            }
+        } if run_id == "dev-denovo-omp"
+            && condition == &vec![
+                "stateful:off,subagent:on".to_string(),
+                "stateful:on,subagent:on".to_string(),
+            ]
+            && omp_bin == "/opt/homebrew/bin/omp"
+            && benchmark_model.as_deref() == Some("deepseek-v4-flash")
     ));
 }
 
@@ -361,6 +411,7 @@ with results.open("w", encoding="utf-8") as handle:
         ],
         agent: DeNovoAgentKind::CodexCli,
         codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
@@ -464,6 +515,7 @@ with results.open("w", encoding="utf-8") as handle:
         ],
         agent: DeNovoAgentKind::CodexCli,
         codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
@@ -1162,6 +1214,48 @@ print(json.dumps({{"fast": fast.returncode, "token_usage": fast.token_usage, "em
 }
 
 #[test]
+fn denovo_codex_agent_omp_timeout_wrapper_runs_command_without_stdin() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_omp_timeout_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+calls = []
+def runner(command, cwd, text, check, env, stdin, stdout, stderr, timeout):
+    calls.append({{"command": command, "cwd": str(cwd), "timeout": timeout, "stdin_is_devnull": stdin == module.subprocess.DEVNULL}})
+    class Result:
+        returncode = 0
+        stdout = '{{"type":"done"}}\n'
+        stderr = ""
+    return Result()
+
+summary = module.run_omp_with_timeout(
+    ["omp", "-p", "@/tmp/prompt.txt"],
+    Path("/tmp/workspace"),
+    {{"HOME": "/tmp/home"}},
+    timeout_seconds=5,
+    runner=runner,
+)
+print(json.dumps({{"returncode": summary.returncode, "token_usage": summary.token_usage, "calls": calls}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+    assert_eq!(output["returncode"], 0);
+    assert_eq!(output["token_usage"]["turns"], 0);
+    assert_eq!(output["calls"][0]["command"][0], "omp");
+    assert_eq!(output["calls"][0]["cwd"], "/tmp/workspace");
+    assert_eq!(output["calls"][0]["stdin_is_devnull"], true);
+}
+
+#[test]
 fn denovo_codex_agent_safe_extract_allows_internal_symlink_members() {
     let dir = target_temp_dir("denovo-codex-safe-extract-internal-link");
     let script = format!(
@@ -1373,6 +1467,87 @@ print(json.dumps({{"no_state": no_state, "stateful": stateful, "nested_no_state"
 }
 
 #[test]
+fn denovo_codex_agent_builds_omp_command_without_codex_flags() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_omp_agent_command_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+command = module.omp_command_for_profile(
+    workspace=Path("/tmp/workspace"),
+    prompt_path=Path("/tmp/instance/prompt.txt"),
+    omp_bin="/opt/homebrew/bin/omp",
+    benchmark_model="deepseek-v4-flash",
+)
+relative_command = module.omp_command_for_profile(
+    workspace=Path("/tmp/workspace"),
+    prompt_path=Path("relative/prompt.txt"),
+    omp_bin="/opt/homebrew/bin/omp",
+    benchmark_model="deepseek-v4-flash",
+)
+relative_prompt_arg = next(arg for arg in relative_command if arg.startswith("@"))
+command_prompt_arg = next(arg for arg in command if arg.startswith("@"))
+print(json.dumps({{"command": command, "command_prompt_arg": command_prompt_arg, "relative_prompt_arg": relative_prompt_arg}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+    let command = output["command"]
+        .as_array()
+        .expect("command should be an array");
+    let relative_prompt_arg = output["relative_prompt_arg"]
+        .as_str()
+        .expect("relative prompt arg should be a string");
+    let command_prompt_arg = output["command_prompt_arg"]
+        .as_str()
+        .expect("command prompt arg should be a string");
+
+    assert!(
+        relative_prompt_arg.starts_with("@/"),
+        "relative prompt arg should be absolute: {relative_prompt_arg}"
+    );
+    assert!(
+        relative_prompt_arg.ends_with("/relative/prompt.txt"),
+        "relative prompt arg should keep the prompt suffix: {relative_prompt_arg}"
+    );
+
+    assert_eq!(command[0], "/opt/homebrew/bin/omp");
+    assert!(command_contains(command, "-p"));
+    assert!(command_contains(command, "--mode"));
+    assert!(command_contains(command, "json"));
+    assert!(command_contains(command, "--model"));
+    assert!(command_contains(command, "deepseek-v4-flash"));
+    assert!(command_contains(command, "--cwd"));
+    assert!(command_contains(command, "/tmp/workspace"));
+    assert!(command_contains(command, "--approval-mode"));
+    assert!(command_contains(command, "yolo"));
+    assert!(
+        command_prompt_arg.starts_with("@/"),
+        "command prompt arg should be absolute: {command_prompt_arg}"
+    );
+    assert!(
+        command_prompt_arg.ends_with("/tmp/instance/prompt.txt")
+            || command_prompt_arg.ends_with("/private/tmp/instance/prompt.txt"),
+        "command prompt arg should keep the prompt suffix: {command_prompt_arg}"
+    );
+    assert!(!command_contains(command, "exec"));
+    assert!(!command_contains(command, "--json"));
+    assert!(!command_contains(command, "--ignore-rules"));
+    assert!(!command_contains(command, "--ignore-user-config"));
+    assert!(!command_contains(
+        command,
+        "--dangerously-bypass-hook-trust"
+    ));
+}
+
+#[test]
 fn denovo_codex_agent_prepares_local_isolated_profiles_without_nested_root() {
     let temp_dir = target_temp_dir("stateful-bench-denovo-codex-local-profiles");
     let script = format!(
@@ -1517,6 +1692,184 @@ print(json.dumps({{
             .bytes()
             .all(|byte| { byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' })
     );
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
+fn denovo_codex_agent_prepares_isolated_omp_profiles_with_stateful_only_on() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-omp-profiles");
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_omp_profiles_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+root = Path({temp_dir})
+source_home = root / "source-home"
+(source_home / ".codex").mkdir(parents=True, exist_ok=True)
+(source_home / ".codex" / "config.toml").write_text("[mcp_servers.stateful]\ncommand = 'leak'\n")
+source_env = {{
+    "HOME": str(source_home),
+    "PATH": "/bin",
+    "CODEX_HOME": str(source_home / ".codex"),
+    "CODEX_THREAD_ID": "outer-thread",
+    "STATEFUL_CODEX_RUN_ID": "outer-run",
+    "STATEFUL_SESSION_ID": "outer-session",
+    "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
+    "STATEFUL_SERVER_TOKEN": "token-123",
+    "XDG_CONFIG_HOME": str(root / "host-config"),
+    "XDG_CACHE_HOME": str(root / "host-cache"),
+}}
+output = root / "adapter-output"
+workspace = root / "workspace"
+workspace.mkdir(parents=True, exist_ok=True)
+task_path = root / "extracts" / "results.jsonl"
+
+commands = []
+def fake_runner(command, text, check, env, stdout, stderr):
+    commands.append({{"command": command, "home": env.get("HOME"), "stateful_home": env.get("STATEFUL_HOME")}})
+    Path(env["PI_CODING_AGENT_DIR"]).mkdir(parents=True, exist_ok=True)
+    (Path(env["PI_CODING_AGENT_DIR"]) / "config.yml").write_text("stateful: true\n")
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    return Result()
+
+no_state_env = module.denovo_omp_environment(output, "issue/no-state", task_path, workspace, source_env)
+module.prepare_omp_environment(no_state_env, enable_stateful=False, stateful_binary="/tmp/stateful", runner=fake_runner)
+no_state_agent = Path(no_state_env["PI_CODING_AGENT_DIR"])
+
+stateful_env = module.denovo_omp_environment(output, "issue/stateful", task_path, workspace, source_env)
+module.prepare_omp_environment(stateful_env, enable_stateful=True, stateful_binary="/tmp/stateful", runner=fake_runner)
+stateful_agent = Path(stateful_env["PI_CODING_AGENT_DIR"])
+explicit_stateful_env = module.denovo_omp_environment(
+    output,
+    "issue/explicit-stateful",
+    task_path,
+    workspace,
+    source_env,
+    stateful_session_id="denovo-issue-stateful-test",
+)
+expected_no_state_home = output / "omp-homes" / module.path_fragment("issue/no-state") / "home"
+expected_stateful_home = output / "omp-homes" / module.path_fragment("issue/stateful") / "home"
+expected_no_state_config_home = expected_no_state_home / ".config"
+expected_no_state_cache_home = expected_no_state_home / ".cache"
+expected_stateful_config_home = expected_stateful_home / ".config"
+expected_stateful_cache_home = expected_stateful_home / ".cache"
+
+
+print(json.dumps({{
+    "no_state_home": no_state_env["HOME"],
+    "no_state_agent": no_state_env["PI_CODING_AGENT_DIR"],
+    "no_state_has_codex_home": "CODEX_HOME" in no_state_env,
+    "no_state_has_codex_thread": "CODEX_THREAD_ID" in no_state_env,
+    "no_state_has_codex_run": "STATEFUL_CODEX_RUN_ID" in no_state_env,
+    "no_state_has_session": "STATEFUL_SESSION_ID" in no_state_env,
+    "no_state_config_exists": (no_state_agent / "config.yml").exists(),
+    "no_state_xdg_config_home": no_state_env["XDG_CONFIG_HOME"],
+    "no_state_xdg_cache_home": no_state_env["XDG_CACHE_HOME"],
+    "stateful_home": stateful_env["HOME"],
+    "stateful_agent": stateful_env["PI_CODING_AGENT_DIR"],
+    "stateful_has_codex_home": "CODEX_HOME" in stateful_env,
+    "stateful_has_codex_thread": "CODEX_THREAD_ID" in stateful_env,
+    "stateful_has_codex_run": "STATEFUL_CODEX_RUN_ID" in stateful_env,
+    "stateful_has_session": "STATEFUL_SESSION_ID" in stateful_env,
+    "stateful_config_exists": (stateful_agent / "config.yml").exists(),
+    "stateful_xdg_config_home": stateful_env["XDG_CONFIG_HOME"],
+    "stateful_xdg_cache_home": stateful_env["XDG_CACHE_HOME"],
+    "explicit_stateful_has_session": "STATEFUL_SESSION_ID" in explicit_stateful_env,
+    "explicit_stateful_session_id": explicit_stateful_env.get("STATEFUL_SESSION_ID"),
+    "explicit_stateful_has_codex_run": "STATEFUL_CODEX_RUN_ID" in explicit_stateful_env,
+    "explicit_stateful_codex_run_id": explicit_stateful_env.get("STATEFUL_CODEX_RUN_ID"),
+    "install_command": commands[0]["command"] if commands else [],
+    "expected_no_state_home": str(expected_no_state_home),
+    "expected_stateful_home": str(expected_stateful_home),
+    "expected_no_state_config_home": str(expected_no_state_config_home),
+    "expected_no_state_cache_home": str(expected_no_state_cache_home),
+    "expected_stateful_config_home": str(expected_stateful_config_home),
+    "expected_stateful_cache_home": str(expected_stateful_cache_home),
+}}, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        temp_dir = serde_json::to_string(&temp_dir.to_string_lossy())
+            .expect("temp dir should encode as json"),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["no_state_home"], output["expected_no_state_home"]);
+    assert_eq!(output["stateful_home"], output["expected_stateful_home"]);
+    let expected_no_state_agent = format!(
+        "{}/.omp/agent",
+        output["expected_no_state_home"]
+            .as_str()
+            .expect("expected no-state home should be text")
+    );
+    assert_eq!(
+        output["no_state_agent"]
+            .as_str()
+            .expect("no-state agent should be text"),
+        expected_no_state_agent
+    );
+    let expected_stateful_agent = format!(
+        "{}/.omp/agent",
+        output["expected_stateful_home"]
+            .as_str()
+            .expect("expected stateful home should be text")
+    );
+    assert_eq!(
+        output["stateful_agent"]
+            .as_str()
+            .expect("stateful agent should be text"),
+        expected_stateful_agent
+    );
+    assert_eq!(output["no_state_has_codex_home"], false);
+    assert_eq!(output["stateful_has_codex_home"], false);
+    assert_eq!(output["no_state_has_codex_thread"], false);
+    assert_eq!(output["stateful_has_codex_thread"], false);
+    assert_eq!(output["no_state_has_codex_run"], false);
+    assert_eq!(output["stateful_has_codex_run"], false);
+    assert_eq!(output["no_state_has_session"], false);
+    assert_eq!(output["stateful_has_session"], false);
+    assert_eq!(
+        output["no_state_xdg_config_home"],
+        output["expected_no_state_config_home"]
+    );
+    assert_eq!(
+        output["no_state_xdg_cache_home"],
+        output["expected_no_state_cache_home"]
+    );
+    assert_eq!(
+        output["stateful_xdg_config_home"],
+        output["expected_stateful_config_home"]
+    );
+    assert_eq!(
+        output["stateful_xdg_cache_home"],
+        output["expected_stateful_cache_home"]
+    );
+    assert_eq!(output["explicit_stateful_has_session"], true);
+    assert_eq!(
+        output["explicit_stateful_session_id"],
+        "denovo-issue-stateful-test"
+    );
+    assert_eq!(output["explicit_stateful_has_codex_run"], false);
+    assert!(output["explicit_stateful_codex_run_id"].is_null());
+    assert_eq!(output["no_state_config_exists"], false);
+    assert_eq!(output["stateful_config_exists"], true);
+    let install_command = output["install_command"]
+        .as_array()
+        .expect("install command should be captured");
+    assert!(command_contains(install_command, "install"));
+    assert!(command_contains(install_command, "--agent"));
+    assert!(command_contains(install_command, "omp"));
+    assert!(command_contains(install_command, "--yes"));
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }
@@ -2870,6 +3223,32 @@ print(json.dumps(module.profile_metadata("stateful", "on"), sort_keys=True))
     assert_eq!(output["resume_policy"], "context_or_token_failure_only");
     assert_eq!(output["subagent_required"], true);
     assert_eq!(output["stateful_mcp"], true);
+}
+
+#[test]
+fn denovo_codex_agent_metadata_marks_omp_subagent_axis_as_not_enforced() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_omp_agent_protocol_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+print(json.dumps(module.profile_metadata("stateful", "on", cli_runtime="omp"), sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["agent_kind"], "omp-cli");
+    assert_eq!(output["subagent"], "on");
+    assert_eq!(output["subagent_mode"], "off");
+    assert_eq!(output["native_subagent_required"], false);
+    assert_eq!(output["subagent_required"], false);
 }
 
 #[test]
