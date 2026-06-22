@@ -245,20 +245,25 @@ Codex lifecycle hooks
 This gives useful control without forking Codex immediately.
 
 The prototype supports user-level installation with repo allowlist gating.
-`stateful install --yes` configures global Codex hooks and MCP. `stateful enable`
-opts the current repo into enforcement. Repo-local hooks remain available through
+`stateful install --yes` configures global Codex hooks and MCP. For OMP, it
+writes OMP config containing the stateful extension under the isolated
+`~/.omp/profiles/stateful/agent` profile and sets `tools.approvalMode: write`;
+the OMP global/default profile is not modified. `stateful enable` opts the
+current repo into enforcement. Repo-local hooks remain available through
 `stateful enable --repo-local-codex` as a compatibility fallback.
 
 ```text
 global Codex hooks and MCP config
+isolated OMP `stateful` profile config
 repo allowlist entry
 optional <repo>/.codex/hooks.json compatibility fallback
 <repo>/.stateful/config.yml
 stateful binary available by absolute path or PATH lookup
 ```
 
-The hook event model stays the same across global hooks, repo-local
-compatibility hooks, and managed hooks; only the configuration and script
+The hook event model stays the same across global Codex hooks, isolated OMP
+profile hooks, repo-local compatibility hooks, and managed hooks; only the
+configuration and script
 location change. Plugin packaging is deferred to team beta for distribution and
 update UX, while managed hooks remain the long-term organization-enforcement
 path.
@@ -266,13 +271,17 @@ path.
 Hook scripts are thin integration adapters. They parse Codex hook input,
 classify runtime-specific tool calls, extract action and targets when
 supported, call the local HTTP state server for store-backed coordination
-policy, and translate the decision back into Codex hook output. Adapter-local
+policy, and translate the decision back into runtime hook output. Adapter-local
 policy is limited to fail-closed classification and trusted wrapper validation
 for command-shaped execution. V1 implementation is Rust-only, so hooks invoke
 the compiled `stateful` binary.
 
 Every hook request should include a `protocol_version`. A major protocol
 mismatch fails closed for write and reconciliation paths.
+
+OMP adapters preserve stateful hard blocks: stateful allow maps to allow, while
+stateful denial or unavailable state maps to block even when OMP yolo metadata is
+present.
 
 ### Hook Responsibilities
 
@@ -623,6 +632,9 @@ human save path: fail open with warning
 non-Bash read/search/diff path: allow
 ```
 
+At the OMP adapter boundary, a stateful hook deny or unavailable result is
+returned as block, not warning, regardless of OMP yolo metadata.
+
 When the state server is unavailable:
 
 - supported writes are denied because active intent, lease conflict, and
@@ -659,6 +671,9 @@ They can intercept important supported paths such as shell commands,
 `apply_patch`, and MCP calls, but they do not make the state protocol a full
 security boundary. Post-action hooks also cannot undo side effects that already
 happened.
+
+For OMP, yolo metadata does not downgrade a stateful denial to a warning; deny
+and unavailable-state decisions remain hard blocks.
 
 IDE save interception has the same character. It can warn before many human
 saves, but it cannot guarantee exclusive file ownership.

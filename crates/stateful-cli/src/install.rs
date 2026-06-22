@@ -181,7 +181,7 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
     let mcp_path = agent_dir.join("mcp.json");
     let skill_path = omp_command_policy_skill_path(&options.paths);
     plan.summary = format!(
-        "{mode}: install stateful global files under {} and configure OMP",
+        "{mode}: install stateful files under {} and configure the OMP stateful profile",
         options.paths.home.display()
     );
     plan.files.push(config_path);
@@ -227,7 +227,7 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
     write_omp_mcp_config(&mcp_path, &options.binary_path)?;
     write_omp_command_policy_skill(&options.paths)?;
     plan.summary = format!(
-        "apply: installed stateful global files under {} and configured OMP",
+        "apply: installed stateful files under {} and configured the OMP stateful profile",
         options.paths.home.display()
     );
     Ok(plan)
@@ -1070,7 +1070,12 @@ prefix_rule(
 }
 
 fn default_omp_agent_dir(paths: &GlobalPaths) -> PathBuf {
-    paths.home.join(".omp").join("agent")
+    paths
+        .home
+        .join(".omp")
+        .join("profiles")
+        .join("stateful")
+        .join("agent")
 }
 
 fn write_or_create_text_file(config_path: &Path, contents: &str) -> anyhow::Result<()> {
@@ -1126,6 +1131,7 @@ fn write_omp_config(config_path: &Path, extension_path: &Path) -> anyhow::Result
 fn ensure_omp_approval_mode(mut contents: String) -> String {
     let mut tools_offset = None;
     let mut in_tools = false;
+    let mut approval_offset = None;
     for (index, line) in contents.lines().enumerate() {
         let trimmed = line.trim();
         let is_top_level = !line.starts_with(char::is_whitespace);
@@ -1138,13 +1144,22 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
             in_tools = false;
         }
         if in_tools && trimmed.starts_with("approvalMode:") {
-            return contents;
+            approval_offset = Some(index);
+            break;
         }
+    }
+
+    if let Some(offset) = approval_offset {
+        let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
+        lines[offset] = "  approvalMode: write".to_string();
+        contents = lines.join("\n");
+        contents.push('\n');
+        return contents;
     }
 
     if let Some(offset) = tools_offset {
         let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
-        lines.insert(offset + 1, "  approvalMode: yolo".to_string());
+        lines.insert(offset + 1, "  approvalMode: write".to_string());
         contents = lines.join("\n");
         contents.push('\n');
         return contents;
@@ -1153,7 +1168,7 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
     if !contents.is_empty() && !contents.ends_with('\n') {
         contents.push('\n');
     }
-    contents.push_str("tools:\n  approvalMode: yolo\n");
+    contents.push_str("tools:\n  approvalMode: write\n");
     contents
 }
 
@@ -1170,7 +1185,7 @@ function runStatefulHook(event, payload) {{
     encoding: "utf8",
   }});
   if (result.status !== 0) {{
-    return {{ decision: "warn", reason: result.stderr || "stateful hook failed" }};
+    return {{ decision: "block", reason: result.stderr || "stateful hook failed" }};
   }}
   const text = (result.stdout || "").trim();
   return text ? JSON.parse(text) : {{ decision: "allow" }};

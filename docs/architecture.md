@@ -113,20 +113,25 @@ other POST routes still use flat request bodies.
 ## Hook Packaging
 
 The prototype supports user-level installation with repo allowlist gating.
-`stateful install --yes` configures global Codex hooks and MCP. `stateful enable`
-opts the current repo into enforcement. Repo-local hooks remain available through
+`stateful install --yes` configures global Codex hooks and MCP. For OMP, it
+writes OMP config containing the stateful extension under the isolated
+`~/.omp/profiles/stateful/agent` profile and sets `tools.approvalMode: write`;
+the OMP global/default profile is not modified. `stateful enable` opts the
+current repo into enforcement. Repo-local hooks remain available through
 `stateful enable --repo-local-codex` as a compatibility fallback.
 
 ```text
 global Codex hooks and MCP config
+isolated OMP `stateful` profile config
 repo allowlist entry
 optional <repo>/.codex/hooks.json compatibility fallback
 <repo>/.stateful/config.yml
 stateful binary available by absolute path or PATH lookup
 ```
 
-The runtime event model stays the same across global hooks, repo-local
-compatibility hooks, and later managed hooks. The later managed version should
+The runtime event model stays the same across global Codex hooks, isolated OMP
+profile hooks, repo-local compatibility hooks, and later managed hooks. The
+later managed version should
 move the same thin hook adapters to administrator-controlled paths and configure
 them from `requirements.toml`.
 
@@ -142,7 +147,7 @@ parse Codex hook input
 classify tool call and extract action/targets when supported
 call local HTTP state server for store-backed coordination policy
 deny unclassified write/execute-capable tools in enabled repos
-translate decision into Codex hook output
+translate decision into runtime hook output
 append local outbox event when observation cannot reach the server
 ```
 
@@ -151,6 +156,9 @@ are Rust commands from the compiled `stateful` binary and include fail-closed
 tool classification plus Bash sandbox-wrapper validation. If the state server
 is unavailable, the hook follows the availability policy: agent writes and
 reconciliation fail closed; read/search/diff remains allowed.
+
+For OMP, a stateful allow translates to OMP allow; stateful deny or unavailable
+server translates to a hard block, even when OMP yolo metadata is present.
 
 Hook scripts should resolve paths from the git root. Envelope-enforced routes
 include `protocol_version`; a major protocol mismatch fails closed on those
@@ -560,6 +568,8 @@ The system should prefer explicit uncertainty:
 - missing heartbeat -> expire or mark unknown, not success
 - interrupted session -> keep last state until TTL expires
 - hook failure -> warn and fail closed only for high-risk writes
+- OMP stateful hook deny or unavailable result -> block, never warn because of
+  yolo metadata
 - state server unavailable -> deny supported writes that cannot prove active
   intent
 - state server unavailable -> deny raw Bash and any Bash call that is not a

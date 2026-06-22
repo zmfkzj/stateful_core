@@ -66,6 +66,8 @@ fn install_omp_dry_run_plans_command_policy_skill_without_writing() {
         .paths
         .home
         .join(".omp")
+        .join("profiles")
+        .join("stateful")
         .join("agent")
         .join("skills")
         .join("stateful-command-policy")
@@ -188,7 +190,13 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     })
     .expect("omp install should apply");
 
-    let omp_agent_dir = fixture.paths.home.join(".omp").join("agent");
+    let omp_agent_dir = fixture
+        .paths
+        .home
+        .join(".omp")
+        .join("profiles")
+        .join("stateful")
+        .join("agent");
     let omp_config = omp_agent_dir.join("config.yml");
     let omp_mcp = omp_agent_dir.join("mcp.json");
     let omp_extension = omp_agent_dir
@@ -211,7 +219,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(
         fs::read_to_string(&omp_config)
             .expect("omp config should read")
-            .contains("tools:\n  approvalMode: yolo\n")
+            .contains("tools:\n  approvalMode: write\n")
     );
     assert!(
         fs::read_to_string(&omp_mcp)
@@ -222,6 +230,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
     assert!(extension.contains("process.env.STATEFUL_SESSION_ID ||"));
     assert!(extension.contains("pre-tool-use"));
+    assert!(extension.contains("decision: \"block\""));
     let command_policy_skill = fs::read_to_string(&omp_skill).expect("omp skill should read");
     let source_command_policy_skill = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/stateful-command-policy/SKILL.md"),
@@ -246,7 +255,13 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
     apply_omp_install(options()).expect("first omp install should apply");
     apply_omp_install(options()).expect("second omp install should be idempotent");
 
-    let omp_agent_dir = fixture.paths.home.join(".omp").join("agent");
+    let omp_agent_dir = fixture
+        .paths
+        .home
+        .join(".omp")
+        .join("profiles")
+        .join("stateful")
+        .join("agent");
     let omp_config = omp_agent_dir.join("config.yml");
     let omp_mcp = omp_agent_dir.join("mcp.json");
     let omp_extension = omp_agent_dir
@@ -255,7 +270,7 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert_eq!(count(&config, "stateful-omp-extension.js"), 1);
-    assert_eq!(count(&config, "approvalMode: yolo"), 1);
+    assert_eq!(count(&config, "approvalMode: write"), 1);
     assert!(
         fs::read_to_string(&omp_mcp)
             .expect("omp mcp should read")
@@ -269,9 +284,15 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
 }
 
 #[test]
-fn install_omp_yes_preserves_existing_config_and_passes_yolo() {
+fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
     let fixture = TestFixture::new("omp-install-existing");
-    let omp_agent_dir = fixture.paths.home.join(".omp").join("agent");
+    let omp_agent_dir = fixture
+        .paths
+        .home
+        .join(".omp")
+        .join("profiles")
+        .join("stateful")
+        .join("agent");
     fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
     let omp_config = omp_agent_dir.join("config.yml");
     fs::write(
@@ -292,7 +313,7 @@ fn install_omp_yes_preserves_existing_config_and_passes_yolo() {
     assert!(config.contains("model: gpt-5.5"));
     assert!(config.contains("existing-extension.js"));
     assert!(config.contains("stateful-omp-extension.js"));
-    assert!(config.contains("tools:\n  approvalMode: yolo\n"));
+    assert!(config.contains("tools:\n  approvalMode: write\n"));
     let extension = fs::read_to_string(
         omp_agent_dir
             .join("extensions")
@@ -306,12 +327,18 @@ fn install_omp_yes_preserves_existing_config_and_passes_yolo() {
 #[test]
 fn install_omp_yes_merges_approval_mode_into_existing_tools_config() {
     let fixture = TestFixture::new("omp-install-tools");
-    let omp_agent_dir = fixture.paths.home.join(".omp").join("agent");
+    let omp_agent_dir = fixture
+        .paths
+        .home
+        .join(".omp")
+        .join("profiles")
+        .join("stateful")
+        .join("agent");
     fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
     let omp_config = omp_agent_dir.join("config.yml");
     fs::write(
         &omp_config,
-        "model: gpt-5.5\ntools:\n  approval:\n    bash: prompt\n",
+        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    bash: prompt\n",
     )
     .expect("existing config should write");
 
@@ -324,9 +351,9 @@ fn install_omp_yes_merges_approval_mode_into_existing_tools_config() {
     .expect("omp install should apply");
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
-    assert!(config.contains("tools:\n  approvalMode: yolo\n  approval:\n"));
+    assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n"));
     assert!(config.contains("bash: prompt"));
-    assert_eq!(count(&config, "approvalMode: yolo"), 1);
+    assert_eq!(count(&config, "approvalMode: write"), 1);
 }
 
 #[test]

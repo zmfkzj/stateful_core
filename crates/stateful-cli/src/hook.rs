@@ -42,17 +42,6 @@ pub enum OmpHookOutcome {
 }
 
 impl OmpHookOutcome {
-    fn yolo_downgrade(reason: impl Into<String>) -> Self {
-        Self::WarnAllow {
-            reason: format!(
-                "stateful authorization denied but OMP yolo is active: {}",
-                reason.into()
-            ),
-        }
-    }
-}
-
-impl OmpHookOutcome {
     fn to_stdout_json(&self) -> serde_json::Value {
         match self {
             Self::Allow => json!({ "decision": "allow" }),
@@ -309,23 +298,11 @@ fn omp_pre_tool_action(
                         .to_string(),
                 });
             }
-            if input.yolo {
-                return Ok(OmpPreToolAction::WarnAllow {
-                    reason: "targetless repo-internal bash allowed because OMP yolo is active"
-                        .to_string(),
-                });
-            }
             Ok(OmpPreToolAction::Block {
                 reason: "targetless repo-internal bash requires explicit stateful write targets"
                     .to_string(),
             })
         }
-        _ if input.yolo => Ok(OmpPreToolAction::WarnAllow {
-            reason: format!(
-                "unclassified OMP tool {} allowed because OMP yolo is active",
-                input.tool_name
-            ),
-        }),
         _ => Ok(OmpPreToolAction::Block {
             reason: format!(
                 "unclassified OMP tool {} may write or execute and requires explicit stateful classification",
@@ -353,11 +330,7 @@ fn authorize_omp_targets(
             "{} writes require a reachable stateful server, exact file intent, and a same-session file lease",
             input.tool_name
         );
-        return Ok(if input.yolo {
-            OmpHookOutcome::yolo_downgrade(reason)
-        } else {
-            OmpHookOutcome::Block { reason }
-        });
+        return Ok(OmpHookOutcome::Block { reason });
     };
 
     let workspace_id = input
@@ -391,11 +364,7 @@ fn authorize_omp_targets(
             Ok(response) => response,
             Err(error) => {
                 let reason = authorization_unavailable_reason(&error);
-                return Ok(if input.yolo {
-                    OmpHookOutcome::yolo_downgrade(reason)
-                } else {
-                    OmpHookOutcome::Block { reason }
-                });
+                return Ok(OmpHookOutcome::Block { reason });
             }
         };
 
@@ -404,31 +373,19 @@ fn authorize_omp_targets(
                 "stateful authorization failed with HTTP {}: {}",
                 response.status_code, response.body
             );
-            return Ok(if input.yolo {
-                OmpHookOutcome::yolo_downgrade(reason)
-            } else {
-                OmpHookOutcome::Block { reason }
-            });
+            return Ok(OmpHookOutcome::Block { reason });
         }
 
         let decision: AuthorizeDecision = match serde_json::from_str(&response.body) {
             Ok(decision) => decision,
             Err(error) => {
                 let reason = authorization_unavailable_reason(&error);
-                return Ok(if input.yolo {
-                    OmpHookOutcome::yolo_downgrade(reason)
-                } else {
-                    OmpHookOutcome::Block { reason }
-                });
+                return Ok(OmpHookOutcome::Block { reason });
             }
         };
         if decision.decision != "allow" {
             let reason = authorization_denial_reason(decision);
-            return Ok(if input.yolo {
-                OmpHookOutcome::yolo_downgrade(reason)
-            } else {
-                OmpHookOutcome::Block { reason }
-            });
+            return Ok(OmpHookOutcome::Block { reason });
         }
     }
 

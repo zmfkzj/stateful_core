@@ -198,6 +198,14 @@ stateful command-policy skill:
 stateful install --agent codex --yes
 ```
 
+Install the OMP integration when you want stateful OMP hooks and MCP in the
+isolated `stateful` profile. This leaves the default/global OMP profile alone
+and uses `tools.approvalMode: write`:
+
+```bash
+stateful install --agent omp --yes
+```
+
 Opt the current git repository into stateful enforcement:
 
 ```bash
@@ -312,6 +320,9 @@ installation health.
 - `stateful install --agent codex [--yes] [--codex-config <path>] [--binary <path>]`
   installs global stateful files, installs the global
   `stateful-command-policy` skill, and merges Codex config.
+- `stateful install --agent omp [--yes]` installs the stateful OMP extension
+  into `~/.omp/profiles/stateful/agent` with `tools.approvalMode: write`,
+  leaving the default/global OMP profile untouched.
 - `stateful enable [--repo <path>]`, `stateful disable`, and
   `stateful repos list` manage the repo allowlist used by global hooks.
 - `stateful server start` starts the HTTP state server detached by default and
@@ -395,16 +406,18 @@ Run `stateful <command> --help` for command-specific options.
 
 ## Codex Hooks and Sessions
 
-Global installation merges stateful MCP, MCP tool approval policy, external-run
+Codex installation merges stateful MCP, MCP tool approval policy, external-run
 approval rules, and hook configuration into the Codex config. Stateful MCP tools
 default to automatic approval. Repo-external writes remain gated by a Codex
 execpolicy prompt for `stateful external-run request`; after that approval, the
 request validates the normalized external write scope and runs immediately.
 `stateful enable` opts a repo into enforcement, while disabled repos are no-ops
 for hooks and MCP. `stateful install --agent omp --yes` installs the OMP
-extension and MCP config under `$STATEFUL_HOME/.omp/agent` (default
-`~/.stateful_core/.omp/agent`), and sets `tools.approvalMode: yolo` so plain
-`omp` launches expose the stateful approval context to the extension.
+extension and MCP config into the isolated `stateful` OMP profile at
+`~/.omp/profiles/stateful/agent`, sets `tools.approvalMode: write`, and leaves
+the global/default OMP profile untouched. Stateful hook allows become OMP
+allows; denials or unavailable authorization remain hard OMP blocks even if OMP
+yolo metadata is present.
 
 The generated hook configuration covers:
 

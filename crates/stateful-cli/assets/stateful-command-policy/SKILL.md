@@ -1,6 +1,6 @@
 ---
 name: stateful-command-policy
-description: Use before Bash, file writes, sandboxed tests, commits, pushes, nested benchmarks, subagent write recovery, same-session file lease denials, missing_intent, missing_lease, lease_conflict, stateful-on source-tree reconstruction, or stateful hook denials in a repo with stateful Codex hooks
+description: Use before Bash, file writes, sandboxed tests, commits, pushes, OMP yolo/write approval, nested benchmarks, subagent write recovery, same-session file lease denials, missing_intent, missing_lease, lease_conflict, stateful-on source-tree reconstruction, or stateful hook denials in a repo with stateful Codex hooks
 ---
 
 # Stateful Command Policy
@@ -19,6 +19,8 @@ Benchmark prompts must not be injected through this skill except for instruction
 - In Codex sessions with Stateful MCP exposed under the `mcp__stateful__` namespace, use the exact qualified tools shown in the active tool list: `mcp__stateful__state_context_render`, `mcp__stateful__state_current_read`, `mcp__stateful__state_session_register`, `mcp__stateful__state_intent_declare`, `mcp__stateful__state_lease_acquire`, `mcp__stateful__state_intent_request`, `mcp__stateful__state_notifications_poll`, `mcp__stateful__state_resume_next`, and `mcp__stateful__state_intent_claim`. Do not emit namespace-less short-name function calls such as `state_lease_acquire`; transcript logs may display `name: state_lease_acquire` with `namespace: mcp__stateful`, but the callable tool is the qualified MCP tool. Do not run `stateful intent declare` or `stateful mcp call` through Bash.
 - Declare exact file intent first using `mcp__stateful__state_intent_declare` when qualified Stateful MCP tools are present.
 - Installed Codex config auto-approves Stateful MCP tools, but prompts for `stateful external-run request` through Codex execpolicy rules. Treat that prompt as the approval boundary for validating the external write scope and running the external command.
+- OMP installs the stateful integration into the isolated `~/.omp/profiles/stateful/agent` profile with the stateful extension and `tools.approvalMode: write`. Stateful hook authorization is a hard authorization block in OMP: hook allow -> OMP allow; hook deny/unavailable -> OMP block. OMP yolo metadata does not bypass `missing_intent`, `missing_lease`, lease conflicts, or any stateful denial, and must not downgrade them to warnings or allow decisions.
+- In OMP, repo-internal raw Bash still needs explicit stateful targets. Use `sandbox run --fs write-targets` with exact `--write-target`, `--create-target`, or narrow `--write-dir` after matching intent and a same-session lease; do not rely on OMP yolo/write approval for shell redirects, `cp`, `rm`, generators, or raw git/test commands.
 - Intent declarations add to the session's active scope in that workspace; declaring a build/test directory does not remove earlier file scopes. When adding targets, declare each active file or directory you still need before acquiring leases.
 - Keep declared paths narrow; prefer exact files for edits, deletes, renames, and moves.
 - Edit repo files with native Codex edit tools such as `apply_patch` or Edit after exact intent and a successful same-session file lease.

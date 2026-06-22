@@ -2585,7 +2585,7 @@ fn omp_repo_external_raw_bash_warns_for_omp_approval_handoff() {
 }
 
 #[test]
-fn omp_yolo_downgrades_server_denial_to_warn_allow() {
+fn omp_yolo_does_not_downgrade_server_denial() {
     let (runtime, _rx) =
         spawn_fake_stateful_server(r#"{"decision":"deny","message":"missing lease"}"#);
     let input = serde_json::json!({
@@ -2606,7 +2606,7 @@ fn omp_yolo_downgrades_server_denial_to_warn_allow() {
             Some(Path::new("/repo"))
         )
         .unwrap(),
-        OmpHookOutcome::WarnAllow { .. }
+        OmpHookOutcome::Block { .. }
     ));
 }
 
