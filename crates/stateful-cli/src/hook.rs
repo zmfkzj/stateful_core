@@ -12,7 +12,7 @@ use stateful_core::normalize_relative_path;
 use crate::outbox::queue_session_heartbeat_outbox;
 use crate::runtime::write_current_session_file_for_explicit_session;
 use crate::sandbox::{
-    SandboxFsProfile, SandboxNetworkPolicy, parse_sandbox_process_find_bash_invocation,
+    SandboxFsProfile, parse_sandbox_process_find_bash_invocation,
     parse_sandbox_run_bash_invocation, validate_process_find_request,
     validate_sandbox_run_request_shape,
 };
@@ -140,9 +140,12 @@ fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
             }
         }
         HookCommand::PostToolUse => {
-            if let Err(error) =
-                handle_omp_post_tool_use_with_identity(&input, &runtime, identity.as_ref())
-            {
+            if let Err(error) = handle_omp_post_tool_use_with_identity(
+                &input,
+                &runtime,
+                Some(&repo_root),
+                identity.as_ref(),
+            ) {
                 eprintln!("stateful omp post-tool-use warning: {error}");
             }
         }
@@ -504,28 +507,152 @@ pub fn handle_omp_post_tool_use_with_runtime(
     runtime: &ServerRuntime,
 ) -> anyhow::Result<()> {
     let input: OmpSessionEventInput = serde_json::from_str(input)?;
-    post_omp_session_event(
-        runtime,
-        "/v1/session/heartbeat",
-        "omp_post_tool_use",
-        &input,
-        None,
-    )
+    post_omp_post_tool_use_event(runtime, &input, None, None)
 }
 
 fn handle_omp_post_tool_use_with_identity(
     input: &str,
     runtime: &ServerRuntime,
+    repo_root: Option<&Path>,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
     let input: OmpSessionEventInput = serde_json::from_str(input)?;
+    post_omp_post_tool_use_event(runtime, &input, repo_root, identity)
+}
+
+fn post_omp_post_tool_use_event(
+    runtime: &ServerRuntime,
+    input: &OmpSessionEventInput,
+    repo_root: Option<&Path>,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
     post_omp_session_event(
         runtime,
         "/v1/session/heartbeat",
         "omp_post_tool_use",
-        &input,
+        input,
         identity,
-    )
+    )?;
+    refresh_omp_post_tool_lease_observations(input, runtime, repo_root, identity);
+    release_omp_post_tool_leases(input, runtime, repo_root, identity);
+    Ok(())
+}
+
+fn refresh_omp_post_tool_lease_observations(
+    input: &OmpSessionEventInput,
+    runtime: &ServerRuntime,
+    repo_root: Option<&Path>,
+    identity: Option<&RepoIdentity>,
+) {
+    let Some(identity) = identity else {
+        return;
+    };
+    let Some(repo_root) = repo_root else {
+        return;
+    };
+    let Ok(targets) = omp_post_tool_refresh_targets(input, repo_root) else {
+        return;
+    };
+    let workspace_id = input
+        .workspace_id
+        .clone()
+        .unwrap_or_else(|| effective_workspace_id(runtime, Some(identity)));
+    let mut paths = BTreeSet::new();
+    for target in targets {
+        paths.insert(target.path);
+        if let Some(new_path) = target.new_path {
+            paths.insert(new_path);
+        }
+    }
+
+    for path in paths {
+        let body = json!({
+            "session_id": input.session_id,
+            "workspace_id": workspace_id,
+            "path": path,
+            "root": identity.root,
+        });
+        let Ok(response) = post_json(runtime, "/v1/lease/refresh-observation", &body) else {
+            continue;
+        };
+        if !(200..300).contains(&response.status_code) {
+            continue;
+        }
+    }
+}
+
+fn release_omp_post_tool_leases(
+    input: &OmpSessionEventInput,
+    runtime: &ServerRuntime,
+    repo_root: Option<&Path>,
+    identity: Option<&RepoIdentity>,
+) {
+    let Some(identity) = identity else {
+        return;
+    };
+    let Some(repo_root) = repo_root else {
+        return;
+    };
+    let Ok(targets) = omp_post_tool_refresh_targets(input, repo_root) else {
+        return;
+    };
+    let workspace_id = input
+        .workspace_id
+        .clone()
+        .unwrap_or_else(|| effective_workspace_id(runtime, Some(identity)));
+    let mut paths = BTreeSet::new();
+    for target in targets {
+        paths.insert(target.path);
+        if let Some(new_path) = target.new_path {
+            paths.insert(new_path);
+        }
+    }
+
+    for path in paths {
+        let body = json!({
+            "session_id": input.session_id,
+            "workspace_id": workspace_id,
+            "path": path,
+        });
+        let Ok(response) = post_json(runtime, "/v1/lease/release", &body) else {
+            continue;
+        };
+        if !(200..300).contains(&response.status_code) {
+            continue;
+        }
+    }
+}
+
+fn omp_post_tool_refresh_targets(
+    input: &OmpSessionEventInput,
+    repo_root: &Path,
+) -> anyhow::Result<Vec<PatchTarget>> {
+    let cwd = input.cwd.as_deref();
+    let targets = match input.tool_name.as_deref() {
+        Some("write") => {
+            let Some(path) = input
+                .tool_input
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            else {
+                return Ok(Vec::new());
+            };
+            vec![PatchTarget::write(path)]
+        }
+        Some("edit") => extract_omp_edit_targets(&input.tool_input),
+        Some("bash") | Some("python") => match input
+            .command()
+            .and_then(|command| omp_sandbox_run_action(command))
+        {
+            Some(OmpPreToolAction::Targets(targets)) => targets,
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+
+    normalize_targets(targets, Some(repo_root), cwd).map(|targets| targets.unwrap_or_default())
 }
 
 fn post_omp_session_event(
@@ -2382,6 +2509,10 @@ impl OmpSessionEventInput {
             "raw_runtime_payload": self.tool_input,
         })
     }
+
+    fn command(&self) -> Option<&str> {
+        self.tool_input.get("command")?.as_str()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2619,6 +2750,56 @@ mod tests {
             stateful_core::normalize_relative_path("src/auth.ts")
         );
 
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+    #[test]
+    fn omp_post_tool_targets_include_write_path() {
+        let temp =
+            std::env::temp_dir().join(format!("stateful-omp-post-write-{}", std::process::id()));
+        let repo = temp.join("repo");
+        let cwd = repo.join("src");
+        std::fs::create_dir_all(&cwd).expect("repo dirs should create");
+        let input = OmpSessionEventInput {
+            session_id: "omp-session-1".to_string(),
+            parent_session_id: None,
+            omp_agent_id: None,
+            workspace_id: None,
+            cwd: Some(cwd),
+            commit_id: None,
+            tool_name: Some("write".to_string()),
+            tool_input: serde_json::json!({ "path": "../README.md" }),
+        };
+
+        let targets =
+            omp_post_tool_refresh_targets(&input, &repo).expect("targets should normalize");
+
+        assert_eq!(targets, vec![PatchTarget::write("README.md")]);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn omp_post_tool_targets_include_edit_hashlines() {
+        let temp =
+            std::env::temp_dir().join(format!("stateful-omp-post-edit-{}", std::process::id()));
+        let repo = temp.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir should create");
+        let input = OmpSessionEventInput {
+            session_id: "omp-session-1".to_string(),
+            parent_session_id: None,
+            omp_agent_id: None,
+            workspace_id: None,
+            cwd: Some(repo.clone()),
+            commit_id: None,
+            tool_name: Some("edit".to_string()),
+            tool_input: serde_json::json!({
+                "input": "[src/lib.rs#ABCD]\nSWAP 1.=1:\n+pub fn value() -> u8 { 1 }\n"
+            }),
+        };
+
+        let targets =
+            omp_post_tool_refresh_targets(&input, &repo).expect("targets should normalize");
+
+        assert_eq!(targets, vec![PatchTarget::write("src/lib.rs")]);
         let _ = std::fs::remove_dir_all(&temp);
     }
 }

@@ -1902,8 +1902,12 @@ task_path = root / "extracts" / "results.jsonl"
 commands = []
 def fake_runner(command, text, check, env, stdout, stderr):
     commands.append({{"command": command, "home": env.get("HOME"), "stateful_home": env.get("STATEFUL_HOME")}})
-    Path(env["PI_CODING_AGENT_DIR"]).mkdir(parents=True, exist_ok=True)
-    (Path(env["PI_CODING_AGENT_DIR"]) / "config.yml").write_text("stateful: true\n")
+    agent = Path(env["PI_CODING_AGENT_DIR"])
+    agent.mkdir(parents=True, exist_ok=True)
+    extension = agent / "extensions" / "stateful-omp-extension.js"
+    extension.parent.mkdir(parents=True, exist_ok=True)
+    extension.write_text("extension")
+    (agent / "config.yml").write_text(f"extensions:\n  - {{extension}}\ntools:\n  approvalMode: write\n")
     class Result:
         returncode = 0
         stdout = ""
@@ -1915,7 +1919,14 @@ module.prepare_omp_environment(no_state_env, enable_stateful=False, stateful_bin
 no_state_agent = Path(no_state_env["PI_CODING_AGENT_DIR"])
 
 stateful_env = module.denovo_omp_environment(output, "issue/stateful", task_path, workspace, source_env)
-module.prepare_omp_environment(stateful_env, enable_stateful=True, stateful_binary="/tmp/stateful", runner=fake_runner, runtime_stateful_binary="/container/stateful")
+module.prepare_omp_environment(
+    stateful_env,
+    enable_stateful=True,
+    stateful_binary="/tmp/stateful",
+    runner=fake_runner,
+    runtime_stateful_binary="/container/stateful",
+    runtime_omp_home="/home/stateful",
+)
 stateful_agent = Path(stateful_env["PI_CODING_AGENT_DIR"])
 explicit_stateful_env = module.denovo_omp_environment(
     output,
@@ -1933,6 +1944,8 @@ expected_stateful_config_home = expected_stateful_home / ".config"
 expected_stateful_cache_home = expected_stateful_home / ".cache"
 
 
+stateful_config = (stateful_agent / "config.yml").read_text()
+
 print(json.dumps({{
     "no_state_home": no_state_env["HOME"],
     "no_state_agent": no_state_env["PI_CODING_AGENT_DIR"],
@@ -1949,6 +1962,7 @@ print(json.dumps({{
     "stateful_has_codex_thread": "CODEX_THREAD_ID" in stateful_env,
     "stateful_has_codex_run": "STATEFUL_CODEX_RUN_ID" in stateful_env,
     "stateful_has_session": "STATEFUL_SESSION_ID" in stateful_env,
+    "stateful_config": stateful_config,
     "stateful_config_exists": (stateful_agent / "config.yml").exists(),
     "stateful_xdg_config_home": stateful_env["XDG_CONFIG_HOME"],
     "stateful_xdg_cache_home": stateful_env["XDG_CACHE_HOME"],
@@ -2030,6 +2044,23 @@ print(json.dumps({{
     assert!(output["explicit_stateful_codex_run_id"].is_null());
     assert_eq!(output["no_state_config_exists"], false);
     assert_eq!(output["stateful_config_exists"], true);
+    let stateful_config = output["stateful_config"]
+        .as_str()
+        .expect("stateful config should be text");
+    assert!(
+        stateful_config.contains(
+            "/home/stateful/.omp/profiles/stateful/agent/extensions/stateful-omp-extension.js"
+        ),
+        "Docker OMP config should use container-visible extension path: {stateful_config}"
+    );
+    assert!(
+        !stateful_config.contains(
+            output["expected_stateful_home"]
+                .as_str()
+                .expect("expected stateful home should be text")
+        ),
+        "Docker OMP config must not keep host-only extension paths: {stateful_config}"
+    );
     let install_command = output["install_command"]
         .as_array()
         .expect("install command should be captured");
@@ -2734,6 +2765,7 @@ workspace.mkdir(parents=True, exist_ok=True)
 home = root / "home"
 env = {{
     "HOME": str(home),
+    "STATEFUL_HOME": str(home),
     "CODEX_HOME": str(home / ".codex"),
     "PATH": "/bin",
 }}
@@ -2755,6 +2787,21 @@ def fake_runner(command, cwd, env, text, check, stdout, stderr):
         "stdout_pipe": stdout is subprocess.PIPE,
         "stderr_pipe": stderr is subprocess.PIPE,
     }})
+    repos = Path(env["STATEFUL_HOME"]) / "repos"
+    repos.mkdir(parents=True, exist_ok=True)
+    (repos / "repo-test.json").write_text(json.dumps({{
+        "repo_id": "repo-test",
+        "root": str(workspace),
+        "enabled": True,
+        "policy_config_path": str(workspace / ".stateful" / "config.yml"),
+    }}))
+    (Path(env["STATEFUL_HOME"]) / "config.yml").write_text(
+        "repos:\n"
+        "- repo_id: repo-test\n"
+        f"  root: {{workspace}}\n"
+        "  enabled: true\n"
+        f"  policy_config_path: {{workspace / '.stateful' / 'config.yml'}}\n"
+    )
     return Completed()
 
 module.enable_stateful_repo(
@@ -2762,8 +2809,17 @@ module.enable_stateful_repo(
     workspace=workspace,
     stateful_binary="/tmp/stateful",
     runner=fake_runner,
+    runtime_workspace="/workspace",
 )
-print(json.dumps({{"calls": calls, "workspace": str(workspace), "home": str(home)}}, sort_keys=True))
+repo_metadata = json.loads((home / "repos" / "repo-test.json").read_text())
+registry_config = (home / "config.yml").read_text()
+print(json.dumps({{
+    "calls": calls,
+    "workspace": str(workspace),
+    "home": str(home),
+    "repo_metadata": repo_metadata,
+    "registry_config": registry_config,
+}}, sort_keys=True))
 "#,
         agent_path = denovo_codex_agent_path_json(),
         temp_dir = serde_json::to_string(&temp_dir.to_string_lossy())
@@ -2801,6 +2857,30 @@ print(json.dumps({{"calls": calls, "workspace": str(workspace), "home": str(home
     assert_eq!(call["stdout_pipe"], true);
     assert_eq!(call["stderr_pipe"], true);
 
+    assert_eq!(output["repo_metadata"]["root"], "/workspace");
+    assert_eq!(
+        output["repo_metadata"]["policy_config_path"],
+        "/workspace/.stateful/config.yml"
+    );
+    let registry_config = output["registry_config"]
+        .as_str()
+        .expect("registry config should be text");
+    assert!(
+        registry_config.contains("root: /workspace"),
+        "Docker registry config should use container workspace: {registry_config}"
+    );
+    assert!(
+        registry_config.contains("policy_config_path: /workspace/.stateful/config.yml"),
+        "Docker registry config should use container policy path: {registry_config}"
+    );
+    assert!(
+        !registry_config.contains(
+            output["workspace"]
+                .as_str()
+                .expect("workspace should be text")
+        ),
+        "Docker registry config must not keep host-only paths: {registry_config}"
+    );
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }
 

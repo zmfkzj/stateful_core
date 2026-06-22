@@ -78,9 +78,12 @@ debug run:
   runs, unless the experiment explicitly compares agent CLIs or models.
 - Isolated OMP homes must have the benchmark model's API key seeded, or the
   equivalent provider API key must be present in the launch environment.
-- For Docker-isolated OMP agent runs, add `--agent-docker-image <image>`;
-  `--agent-docker-stateful-binary <path>` only needs to be set when the image's
-  `stateful` binary is not at `/usr/local/bin/stateful`.
+- For Docker-isolated OMP agent runs, build or tag the image from
+  `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`; it includes
+  Bun-installed `omp` plus the Linux `stateful` binary. Add
+  `--agent-docker-image <image>`. `--agent-docker-stateful-binary <path>` only
+  needs to be set when the image's `stateful` binary is not at
+  `/usr/local/bin/stateful`.
 
 Historical runs may use `--prompt-version v1`; do not mix v1 and v2 results in
 the same comparison table.
@@ -129,6 +132,24 @@ as exploratory.
 
 OMP retains the `subagent` axis for matrix compatibility, but it does not use
 Codex native subagent enforcement or Codex subagent usage counters.
+
+## Docker OMP Stateful Lifecycle
+
+Docker OMP runs execute the agent in a dedicated container instead of using the
+host OMP binary. For `stateful:on`, the adapter uses `/home/stateful` as the
+container runtime home so the isolated OMP `stateful` profile and extension path
+are visible in the container. It rewrites the mounted `$STATEFUL_HOME/config.yml`
+repo registry and `repos/*.json` metadata from host workspace paths to the
+container workspace path `/workspace`.
+
+Use lifecycle events to distinguish a valid stateful-on Docker run from an OMP
+process that merely completed. A successful stateful-on Docker smoke run should
+show `SessionRegistered`, repeated `SessionHeartbeat`, and `ActivityFinalized`
+events for the nested OMP session. The verified run
+`r110-denovo-one-omp-docker-stateful-onoff-subagent-on` completed the
+stateful-off/stateful-on subagent-on pair with that event sequence. Treat missing
+registration, no heartbeat, or missing finalization as lifecycle evidence
+failure, not as a model-quality result.
 
 ## Reporting Rules
 

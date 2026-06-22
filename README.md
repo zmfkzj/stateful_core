@@ -722,9 +722,10 @@ bundled.
 - `run`: execute no-state or stateful paired-agent runs.
 - `report` and `compare`: summarize one run or compare stateful/no-state runs.
 - `synthetic`: run the built-in synthetic coordination benchmark.
-- `denovo`: wrap AweAgent DeNovoSWE extract/evaluation workflows and run either
-  the official AweAgent agent recipe or a host Codex CLI adapter while recording
-  `stateful`, `subagent`, and `running_time_ms` comparison axes.
+- `denovo`: wrap AweAgent DeNovoSWE extract/evaluation workflows and run the
+  official AweAgent agent recipe, a host Codex CLI adapter, or an OMP CLI
+  adapter while recording `stateful`, `subagent`, and `running_time_ms`
+  comparison axes.
 
 For Codex-backed paired-agent runs, `stateful-bench run --mode stateful`
 starts a per-pair stateful server and prepares each isolated nested Codex home
@@ -815,6 +816,24 @@ The Codex CLI adapter uses isolated `CODEX_HOME` directories for both profiles:
 - `stateful:on`: isolated `CODEX_HOME` seeded with auth plus generated stateful
   `config.toml`, stateful MCP server config, lifecycle hooks, and
   `stateful-command-policy` skill; does not pass `--ignore-user-config`.
+
+Run with the OMP CLI adapter when you want DeNovoSWE generation through OMP
+instead of Codex. Add `--agent-docker-image <image>` to run OMP inside a
+container; the repository image definition is
+`crates/stateful-bench/docker/denovo-omp-agent.Dockerfile` and includes
+Bun-installed `omp` plus the Linux `stateful` binary. In Docker mode, `--omp-bin`
+names the OMP executable inside the image, and
+`--agent-docker-stateful-binary` is only needed when the in-image `stateful`
+binary is somewhere other than `/usr/local/bin/stateful`.
+
+For Docker OMP `stateful:on`, the adapter uses `/home/stateful` as the runtime
+home so the isolated OMP `stateful` profile is visible in the container. It also
+rewrites the mounted `$STATEFUL_HOME/config.yml` repo registry and `repos/*.json`
+metadata from host workspace paths to `/workspace`. A lifecycle-valid
+stateful-on Docker run emits `SessionRegistered`, repeated `SessionHeartbeat`,
+and `ActivityFinalized`
+events; the verified smoke run
+`r110-denovo-one-omp-docker-stateful-onoff-subagent-on` produced that sequence.
 
 Generate reports:
 

@@ -17,7 +17,7 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -852,6 +852,7 @@ def prepare_omp_environment(
     stateful_binary: str,
     runner: Any = subprocess.run,
     runtime_stateful_binary: str | None = None,
+    runtime_omp_home: str | None = None,
 ) -> None:
     Path(env["PI_CODING_AGENT_DIR"]).mkdir(parents=True, exist_ok=True)
     if not enable_stateful:
@@ -870,6 +871,18 @@ def prepare_omp_environment(
     if completed.returncode != 0:
         message = (completed.stderr or completed.stdout).strip()
         raise StatefulRepoEnableError(message or f"stateful omp install exited {completed.returncode}")
+    if runtime_omp_home is not None:
+        rewrite_omp_config_for_runtime_home(env, runtime_omp_home)
+
+
+def rewrite_omp_config_for_runtime_home(env: dict[str, str], runtime_omp_home: str) -> None:
+    host_home = Path(env["HOME"])
+    config_path = Path(env["PI_CODING_AGENT_DIR"]) / "config.yml"
+    if not config_path.exists():
+        raise StatefulRepoEnableError(f"OMP stateful config missing: {config_path}")
+    contents = config_path.read_text(encoding="utf-8")
+    rewritten = contents.replace(str(host_home), runtime_omp_home.rstrip("/"))
+    config_path.write_text(rewritten, encoding="utf-8")
 
 
 def stateful_session_fragment(value: str) -> str:
@@ -935,6 +948,7 @@ def enable_stateful_repo(
     workspace: Path,
     stateful_binary: str,
     runner: Any = subprocess.run,
+    runtime_workspace: str | None = None,
 ) -> StatefulRepoEnableCleanup:
     stateful_dir = workspace / ".stateful"
     policy_config = stateful_dir / "config.yml"
@@ -957,7 +971,55 @@ def enable_stateful_repo(
         if not message:
             message = f"stateful enable exited {completed.returncode}"
         raise StatefulRepoEnableError(message)
+    if runtime_workspace is not None:
+        rewrite_stateful_repo_metadata_for_runtime_workspace(env, workspace, runtime_workspace)
     return cleanup
+
+
+def rewrite_stateful_repo_metadata_for_runtime_workspace(
+    env: dict[str, str],
+    workspace: Path,
+    runtime_workspace: str,
+) -> None:
+    stateful_home = Path(env.get("STATEFUL_HOME") or env["HOME"])
+    repos_dir = stateful_home / "repos"
+    if not repos_dir.exists():
+        raise StatefulRepoEnableError(f"stateful repo metadata missing: {repos_dir}")
+    registry_path = stateful_home / "config.yml"
+    if not registry_path.exists():
+        raise StatefulRepoEnableError(f"stateful repo registry missing: {registry_path}")
+    host_workspace_strings = sorted(
+        {str(workspace), str(workspace.resolve())},
+        key=len,
+        reverse=True,
+    )
+    registry = registry_path.read_text(encoding="utf-8")
+    for host_workspace in host_workspace_strings:
+        registry = registry.replace(host_workspace, runtime_workspace.rstrip("/"))
+    registry_path.write_text(registry, encoding="utf-8")
+    host_workspaces = [workspace, workspace.resolve()]
+    runtime_workspace_path = PurePosixPath(runtime_workspace.rstrip("/"))
+    for metadata_path in repos_dir.glob("*.json"):
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        changed = False
+        for key in ("root", "policy_config_path"):
+            value = metadata.get(key)
+            if not isinstance(value, str):
+                continue
+            host_value = Path(value)
+            for host_workspace in host_workspaces:
+                try:
+                    relative = host_value.relative_to(host_workspace)
+                except ValueError:
+                    continue
+                metadata[key] = str(runtime_workspace_path / PurePosixPath(relative.as_posix()))
+                changed = True
+                break
+        if changed:
+            metadata_path.write_text(
+                json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
 
 
 def cleanup_stateful_repo_enable(
@@ -1663,6 +1725,7 @@ async def run_one_instance_async(
                 runtime_stateful_binary=(
                     args.agent_docker_stateful_binary if args.agent_docker_image else None
                 ),
+                runtime_omp_home=OMP_AGENT_DOCKER_HOME if args.agent_docker_image else None,
             )
             if args.agent_docker_image:
                 command = docker_omp_command_for_profile(
@@ -1708,6 +1771,7 @@ async def run_one_instance_async(
                 env=env,
                 workspace=workspace,
                 stateful_binary=args.stateful_binary,
+                runtime_workspace=OMP_AGENT_DOCKER_WORKSPACE if args.agent_docker_image else None,
             )
 
         started_at = time.monotonic()
