@@ -179,6 +179,7 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
         .join("extensions")
         .join("stateful-omp-extension.js");
     let mcp_path = agent_dir.join("mcp.json");
+    let skill_path = omp_command_policy_skill_path(&options.paths);
     plan.summary = format!(
         "{mode}: install stateful global files under {} and configure OMP",
         options.paths.home.display()
@@ -186,6 +187,7 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
     plan.files.push(config_path);
     plan.files.push(extension_path);
     plan.files.push(mcp_path);
+    plan.files.push(skill_path);
     Ok(plan)
 }
 
@@ -223,6 +225,7 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
     write_omp_config(&config_path, &extension_path)?;
     write_omp_extension(&extension_path, &options.binary_path)?;
     write_omp_mcp_config(&mcp_path, &options.binary_path)?;
+    write_omp_command_policy_skill(&options.paths)?;
     plan.summary = format!(
         "apply: installed stateful global files under {} and configured OMP",
         options.paths.home.display()
@@ -340,6 +343,22 @@ fn write_global_command_policy_skill(codex_config_path: &Path) -> anyhow::Result
 
 fn global_command_policy_skill_path(codex_config_path: &Path) -> PathBuf {
     containing_dir(codex_config_path)
+        .join("skills")
+        .join("stateful-command-policy")
+        .join("SKILL.md")
+}
+
+fn write_omp_command_policy_skill(paths: &GlobalPaths) -> anyhow::Result<()> {
+    let path = omp_command_policy_skill_path(paths);
+    let parent = containing_dir(&path);
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create OMP skills directory {}", parent.display()))?;
+    fs::write(&path, stateful_command_policy_skill())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn omp_command_policy_skill_path(paths: &GlobalPaths) -> PathBuf {
+    default_omp_agent_dir(paths)
         .join("skills")
         .join("stateful-command-policy")
         .join("SKILL.md")

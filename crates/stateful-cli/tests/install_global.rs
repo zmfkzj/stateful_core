@@ -6,7 +6,7 @@ use std::{
 use stateful_cli::{
     CodexInstallOptions, GlobalPaths, InstallOptions, OmpInstallOptions, RepoRegistry,
     apply_codex_install, apply_global_install, apply_omp_install, plan_codex_install,
-    plan_global_install,
+    plan_global_install, plan_omp_install,
 };
 
 #[cfg(unix)]
@@ -48,6 +48,34 @@ fn install_codex_dry_run_plans_codex_config_without_writing() {
     assert!(plan.files.contains(&skill_path));
     assert!(!fixture.paths.home.exists());
     assert!(!fixture.codex_config.exists());
+}
+
+#[test]
+fn install_omp_dry_run_plans_command_policy_skill_without_writing() {
+    let fixture = TestFixture::new("omp-dry-run-skill");
+    let options = OmpInstallOptions {
+        yes: false,
+        paths: fixture.paths.clone(),
+        binary_path: "/opt/stateful/bin/stateful".to_string(),
+        project_config_path: None,
+    };
+
+    let plan = plan_omp_install(&options).expect("omp install should plan");
+    let applied = apply_omp_install(options).expect("dry-run omp install should succeed");
+    let skill_path = fixture
+        .paths
+        .home
+        .join(".omp")
+        .join("agent")
+        .join("skills")
+        .join("stateful-command-policy")
+        .join("SKILL.md");
+
+    assert!(plan.summary.contains("dry-run"));
+    assert!(applied.summary.contains("dry-run"));
+    assert!(plan.files.contains(&skill_path));
+    assert!(!fixture.paths.home.exists());
+    assert!(!skill_path.exists());
 }
 
 #[test]
@@ -166,10 +194,15 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     let omp_extension = omp_agent_dir
         .join("extensions")
         .join("stateful-omp-extension.js");
+    let omp_skill = omp_agent_dir
+        .join("skills")
+        .join("stateful-command-policy")
+        .join("SKILL.md");
 
     assert!(omp_config.is_file());
     assert!(omp_mcp.is_file());
     assert!(omp_extension.is_file());
+    assert!(omp_skill.is_file());
     assert!(
         fs::read_to_string(&omp_config)
             .expect("omp config should read")
@@ -189,6 +222,14 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
     assert!(extension.contains("process.env.STATEFUL_SESSION_ID ||"));
     assert!(extension.contains("pre-tool-use"));
+    let command_policy_skill = fs::read_to_string(&omp_skill).expect("omp skill should read");
+    let source_command_policy_skill = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/stateful-command-policy/SKILL.md"),
+    )
+    .expect("source stateful command policy skill should exist");
+    assert_eq!(command_policy_skill, source_command_policy_skill);
+    assert!(command_policy_skill.contains("name: stateful-command-policy"));
+    assert!(plan.files.contains(&omp_skill));
     assert!(plan.files.iter().any(|path| path.ends_with("mcp.json")));
 }
 
