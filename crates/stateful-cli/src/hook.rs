@@ -303,6 +303,7 @@ fn omp_pre_tool_action(
                     .to_string(),
             })
         }
+        "read" | "find" | "grep" => Ok(OmpPreToolAction::Allow),
         _ => Ok(OmpPreToolAction::Block {
             reason: format!(
                 "unclassified OMP tool {} may write or execute and requires explicit stateful classification",

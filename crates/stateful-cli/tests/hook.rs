@@ -2562,6 +2562,31 @@ fn omp_repo_internal_raw_bash_allows_read_like_and_blocks_other_targetless_comma
 }
 
 #[test]
+fn omp_allows_classified_read_only_tools() {
+    for tool_name in ["read", "find", "grep"] {
+        let input = serde_json::json!({
+            "session_id": "omp-parent",
+            "cwd": "/repo",
+            "yolo": false,
+            "tool_name": tool_name,
+            "tool_input": { "path": "README.md" }
+        })
+        .to_string();
+
+        assert_eq!(
+            handle_omp_pre_tool_use_with_runtime(
+                &input,
+                None,
+                Some(Path::new("/repo")),
+                Some(Path::new("/repo"))
+            )
+            .unwrap(),
+            OmpHookOutcome::Allow
+        );
+    }
+}
+
+#[test]
 fn omp_repo_external_raw_bash_warns_for_omp_approval_handoff() {
     let input = serde_json::json!({
         "session_id": "omp-parent",

@@ -281,8 +281,11 @@ policy is limited to fail-closed classification and trusted wrapper validation
 for command-shaped execution. V1 implementation is Rust-only, so hooks invoke
 the compiled `stateful` binary.
 
-Every hook request should include a `protocol_version`. A major protocol
-mismatch fails closed for write and reconciliation paths.
+Envelope-enforced write authorization, intent, and reconciliation requests
+include `protocol_version`; a major protocol mismatch fails closed on those
+paths. OMP `SessionStart`, `PostToolUse`, and `Stop` lifecycle posts use flat
+session-event bodies with `metadata` and `source`, while OMP `PreToolUse`
+authorization still uses the v1 envelope.
 
 OMP adapters preserve stateful hard blocks: stateful allow maps to allow, while
 stateful denial or unavailable state maps to block even when OMP yolo metadata is

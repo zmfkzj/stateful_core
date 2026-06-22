@@ -67,7 +67,8 @@ successful same-session file lease. Command-shaped source writes require exact
 
 ## Protocol Envelope
 
-Side-effecting HTTP requests must use a v1 envelope:
+Envelope-enforced write authorization, intent, and reconciliation HTTP requests
+must use a v1 envelope:
 
 ```json
 {
@@ -93,6 +94,11 @@ Side-effecting HTTP requests must use a v1 envelope:
   "payload": {}
 }
 ```
+
+Lifecycle session events are intentionally smaller in the shipped OMP adapter:
+`SessionStart`, `PostToolUse`, and `Stop`/finalize post flat session-event
+bodies with `session_id`, `workspace_id`, `source`, and `metadata`. OMP
+`PreToolUse` authorization remains envelope-based.
 
 Recommended rollout:
 
