@@ -82,6 +82,24 @@ debug run:
 Historical runs may use `--prompt-version v1`; do not mix v1 and v2 results in
 the same comparison table.
 
+## Prompt Policy
+
+Do not add ad hoc prompt instructions for normal scored, patch-quality, or
+stateful/no-state comparison runs. Keep the agent prompt limited to the
+benchmark task, official prompt version behavior, and declared condition axes.
+Extra strategy hints, orchestration instructions, lifecycle reminders, role
+assignments, or implementation guidance can bias the rollout and make the result
+non-comparable.
+
+Stateful lifecycle enforcement belongs in hooks, extensions, MCP/tool policy,
+installed skills, and runtime configuration rather than in benchmark task
+prompt text.
+
+If a run intentionally tests lifecycle, concurrency, or other agent-behavior
+mechanics with injected instructions, label it as a debug or behavior test,
+record the exact prompt addition, and do not use the result as a scored
+stateful/no-state comparison.
+
 ## Local Comparison Design
 
 For stateful/no-state comparisons, prefer a paired matrix:

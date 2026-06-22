@@ -134,18 +134,6 @@ Native Codex subagent requirements:
 """.rstrip()
 
 
-def stateful_prompt_instruction(stateful_binary: str | None) -> str:
-    if not stateful_binary:
-        return ""
-    return """
-
-Stateful command policy:
-- First inspect current state with canonical Stateful MCP tools: `state_current_read` or `state_context_render`.
-- In OMP, if Stateful MCP tools are not active yet, call `search_tool_bm25` once with query `stateful state current read`, then call the activated runtime-specific tool name.
-- Use canonical names in reasoning (`state_intent_declare`, `state_lease_acquire`); when the active tool list shows wrapper names, call the exact shown equivalent.
-- Do not use raw Bash for stateful coordination.
-""".rstrip()
-
 
 def build_codex_prompt(
     instance_id: str,
@@ -157,7 +145,6 @@ def build_codex_prompt(
     subagent_min_count: int = DEFAULT_SUBAGENT_MIN_COUNT,
     stateful_binary: str | None = None,
 ) -> str:
-    stateful_instruction = stateful_prompt_instruction(stateful_binary)
     step_line = f"- Maximum task steps: {max_steps}.\n" if max_steps is not None else ""
     subagent_instruction = native_subagent_prompt_instruction(subagent, subagent_min_count)
     return f"""
@@ -176,7 +163,6 @@ Constraints:
 - Leave the workspace containing the final code changes.
 - Benchmark max turns: {benchmark_max_turns}.
 {step_line}- Prompt version: {prompt_version}.
-{stateful_instruction}
 {subagent_instruction}
 """.strip()
 

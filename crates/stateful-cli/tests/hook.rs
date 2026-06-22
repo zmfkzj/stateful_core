@@ -15,7 +15,8 @@ use stateful_cli::{
     ServerRuntime, allow_tool_for_repo, enable_repo, handle_omp_post_tool_use_with_runtime,
     handle_omp_pre_tool_use_with_runtime, handle_omp_session_start_with_runtime,
     handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
-    read_current_session_file_for_session, tool_list_for_repo, write_global_runtime_file,
+    read_current_session_file_for_session, tool_list_for_repo, workspace_id_for_enabled_repo,
+    write_global_runtime_file,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -2560,6 +2561,95 @@ fn run_hook_omp_pre_tool_use_prints_extension_decision() {
     assert_eq!(stdout["decision"], "allow");
     let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
     assert_eq!(body["session"]["session_id"], "omp-parent");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn run_hook_omp_env_runtime_derives_workspace_id_from_enabled_repo() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-omp-env-runtime-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
+    enable_test_repo(&paths, &repo_root);
+    let expected_workspace_id =
+        workspace_id_for_enabled_repo(&paths, &repo_root).expect("repo workspace id should load");
+    let expected_root = repo_root
+        .canonicalize()
+        .expect("repo root should canonicalize");
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"status":"ok"}"#,
+        r#"{"decision":"allow","message":"ok"}"#,
+    ]);
+    let extra_env = [
+        ("STATEFUL_SERVER_URL", runtime.base_url.as_str()),
+        ("STATEFUL_SERVER_TOKEN", runtime.token.as_str()),
+    ];
+
+    let session_start = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": repo_root,
+        "omp_agent_id": "main"
+    })
+    .to_string();
+    let output = run_hook_subprocess_with_extra_env(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "session-start"],
+        &session_start,
+        &extra_env,
+    );
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let register = request_json_body(&rx.recv().expect("session register should arrive"));
+    assert_eq!(register["session_id"], "omp-parent");
+    assert_eq!(register["workspace_id"], expected_workspace_id);
+    assert_ne!(register["workspace_id"], "unknown");
+
+    let pre_tool = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": repo_root,
+        "yolo": false,
+        "omp_agent_id": "main",
+        "tool_name": "write",
+        "tool_input": { "path": "docs/a.md", "content": "hello" }
+    })
+    .to_string();
+    let output = run_hook_subprocess_with_extra_env(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "pre-tool-use"],
+        &pre_tool,
+        &extra_env,
+    );
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
+    assert_eq!(stdout["decision"], "allow");
+    let authorize = request_json_body(&rx.recv().expect("authorize request should arrive"));
+    assert_eq!(authorize["session"]["session_id"], "omp-parent");
+    assert_eq!(
+        authorize["workspace"]["workspace_id"],
+        expected_workspace_id
+    );
+    assert_eq!(
+        authorize["workspace"]["root"],
+        expected_root.to_string_lossy().as_ref()
+    );
+    assert_ne!(authorize["workspace"]["workspace_id"], "unknown");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

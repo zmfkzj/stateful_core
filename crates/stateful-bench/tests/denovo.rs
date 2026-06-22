@@ -410,6 +410,8 @@ fn denovo_codex_adapter_command_uses_stateful_adapter_and_condition_axes() {
         codex_bin: "/opt/homebrew/bin/codex".to_string(),
         omp_bin: "omp".to_string(),
         stateful_binary: "/Users/arthur/.cargo/bin/stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -498,6 +500,8 @@ fn denovo_omp_adapter_command_uses_existing_adapter_with_omp_runtime() {
         codex_bin: "/opt/homebrew/bin/codex".to_string(),
         omp_bin: "/opt/homebrew/bin/omp".to_string(),
         stateful_binary: "/Users/arthur/.cargo/bin/stateful".to_string(),
+        agent_docker_image: Some("ghcr.io/stateful/omp-agent:latest".to_string()),
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "deepseek-v4-flash".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -541,6 +545,18 @@ fn denovo_omp_adapter_command_uses_existing_adapter_with_omp_runtime() {
             .args
             .windows(2)
             .any(|pair| pair == ["--subagent", "on"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--agent-docker-image", "ghcr.io/stateful/omp-agent:latest"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--agent-docker-stateful-binary", "/usr/local/bin/stateful"])
     );
 }
 
@@ -588,6 +604,8 @@ out.mkdir(parents=True, exist_ok=True)
         codex_bin: "codex".to_string(),
         omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -735,6 +753,8 @@ out.mkdir(parents=True, exist_ok=True)
         codex_bin: "codex".to_string(),
         omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -852,6 +872,8 @@ out.mkdir(parents=True, exist_ok=True)
         codex_bin: "codex".to_string(),
         omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -922,6 +944,8 @@ sys.exit(2)
         codex_bin: "codex".to_string(),
         omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -1037,6 +1061,8 @@ score = 1.0 if "stateful" in args.config else 0.5
         codex_bin: "codex".to_string(),
         omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,

@@ -172,6 +172,14 @@ OMP `stateful:on`/`off` both use isolated OMP home/profile state. Neither
 inherits host Codex config, session, rules, or skills. Only `stateful:on`
 receives stateful OMP install/config.
 
+Add `--agent-docker-image <image>` to run the OMP CLI inside a dedicated
+container instead of the host OMP binary. In this mode, `--omp-bin` names the
+OMP executable inside the image. The adapter mounts only the instance
+workspace, prompt file, and isolated OMP home into that container. For
+`stateful:on`, the in-container `stateful` binary path defaults to
+`/usr/local/bin/stateful`; override it with
+`--agent-docker-stateful-binary <path>` when the image uses another path.
+
 The `subagent` axis is retained for matrix shape, but OMP does not use Codex
 native subagent enforcement or Codex subagent usage counters.
 

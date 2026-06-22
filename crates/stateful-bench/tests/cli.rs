@@ -969,9 +969,9 @@ assert "Build a parser package." in prompt
 assert "Benchmark max turns: 500" in prompt
 assert "Maximum task steps: 500" in prompt
 assert "Do not edit benchmark artifacts" in prompt
-assert "Stateful command policy" in prompt
-assert "state_current_read" in prompt
-assert "search_tool_bm25" in prompt
+assert "Stateful command policy" not in prompt
+assert "state_current_read" not in prompt
+assert "search_tool_bm25" not in prompt
 assert "/Users/arthur/.cargo/bin/stateful" not in prompt
 print(json.dumps({{"prompt": prompt}}))
 "#,

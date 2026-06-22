@@ -119,30 +119,42 @@ fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
         ensure_server(&paths)?;
     }
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
+    let identity = repo_identity_for_enabled_repo(&paths, &repo_root).ok();
 
     match command {
         HookCommand::PreToolUse => {
-            let outcome = handle_omp_pre_tool_use_with_runtime(
+            let outcome = handle_omp_pre_tool_use_with_identity(
                 &input,
                 Some(&runtime),
                 Some(&repo_root),
                 Some(start.as_path()),
+                identity.as_ref(),
             )?;
             println!("{}", outcome.to_stdout_json());
         }
         HookCommand::SessionStart => {
-            if let Err(error) = handle_omp_session_start_with_runtime(&input, &runtime) {
+            if let Err(error) =
+                handle_omp_session_start_with_identity(&input, &runtime, identity.as_ref())
+            {
                 eprintln!("stateful omp session-start warning: {error}");
             }
         }
         HookCommand::PostToolUse => {
-            if let Err(error) = handle_omp_post_tool_use_with_runtime(&input, &runtime) {
+            if let Err(error) =
+                handle_omp_post_tool_use_with_identity(&input, &runtime, identity.as_ref())
+            {
                 eprintln!("stateful omp post-tool-use warning: {error}");
             }
         }
         HookCommand::Stop => {
             let input: OmpSessionEventInput = serde_json::from_str(&input)?;
-            post_omp_session_event(&runtime, "/v1/activity/finalize", "omp_stop", &input)?;
+            post_omp_session_event(
+                &runtime,
+                "/v1/activity/finalize",
+                "omp_stop",
+                &input,
+                identity.as_ref(),
+            )?;
         }
         HookCommand::UserPromptSubmit => {
             anyhow::bail!("OMP hook user-prompt-submit is not supported");
@@ -225,12 +237,22 @@ pub fn handle_omp_pre_tool_use_with_runtime(
     repo_root: Option<&Path>,
     cwd: Option<&Path>,
 ) -> anyhow::Result<OmpHookOutcome> {
+    handle_omp_pre_tool_use_with_identity(input, runtime, repo_root, cwd, None)
+}
+
+fn handle_omp_pre_tool_use_with_identity(
+    input: &str,
+    runtime: Option<&ServerRuntime>,
+    repo_root: Option<&Path>,
+    cwd: Option<&Path>,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<OmpHookOutcome> {
     let input: OmpPreToolUseInput = serde_json::from_str(input)?;
     match omp_pre_tool_action(&input, repo_root, cwd)? {
         OmpPreToolAction::Allow => Ok(OmpHookOutcome::Allow),
         OmpPreToolAction::Block { reason } => Ok(OmpHookOutcome::Block { reason }),
         OmpPreToolAction::Targets(targets) => {
-            authorize_omp_targets(&input, runtime, repo_root, cwd, targets)
+            authorize_omp_targets(&input, runtime, repo_root, cwd, identity, targets)
         }
     }
 }
@@ -342,6 +364,7 @@ fn authorize_omp_targets(
     runtime: Option<&ServerRuntime>,
     repo_root: Option<&Path>,
     cwd: Option<&Path>,
+    identity: Option<&RepoIdentity>,
     targets: Vec<PatchTarget>,
 ) -> anyhow::Result<OmpHookOutcome> {
     let Some(targets) = normalize_targets(targets, repo_root, cwd)? else {
@@ -361,7 +384,7 @@ fn authorize_omp_targets(
     let workspace_id = input
         .workspace_id
         .clone()
-        .unwrap_or_else(|| runtime.workspace_id.clone());
+        .unwrap_or_else(|| effective_workspace_id(runtime, identity));
     for target in targets {
         let mut payload = json!({
             "action": target.action,
@@ -376,7 +399,7 @@ fn authorize_omp_targets(
             request_id: uuid::Uuid::new_v4().to_string(),
             session_id: input.session_id.clone(),
             workspace_id: workspace_id.clone(),
-            identity: None,
+            identity: identity.cloned(),
             source_kind: "hook",
             event: "omp_pre_tool_use",
             source_ref: "hook:omp_pre_tool_use",
@@ -452,7 +475,28 @@ pub fn handle_omp_session_start_with_runtime(
     runtime: &ServerRuntime,
 ) -> anyhow::Result<()> {
     let input: OmpSessionEventInput = serde_json::from_str(input)?;
-    post_omp_session_event(runtime, "/v1/session/register", "omp_session_start", &input)
+    post_omp_session_event(
+        runtime,
+        "/v1/session/register",
+        "omp_session_start",
+        &input,
+        None,
+    )
+}
+
+fn handle_omp_session_start_with_identity(
+    input: &str,
+    runtime: &ServerRuntime,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
+    let input: OmpSessionEventInput = serde_json::from_str(input)?;
+    post_omp_session_event(
+        runtime,
+        "/v1/session/register",
+        "omp_session_start",
+        &input,
+        identity,
+    )
 }
 
 pub fn handle_omp_post_tool_use_with_runtime(
@@ -465,6 +509,22 @@ pub fn handle_omp_post_tool_use_with_runtime(
         "/v1/session/heartbeat",
         "omp_post_tool_use",
         &input,
+        None,
+    )
+}
+
+fn handle_omp_post_tool_use_with_identity(
+    input: &str,
+    runtime: &ServerRuntime,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
+    let input: OmpSessionEventInput = serde_json::from_str(input)?;
+    post_omp_session_event(
+        runtime,
+        "/v1/session/heartbeat",
+        "omp_post_tool_use",
+        &input,
+        identity,
     )
 }
 
@@ -473,11 +533,12 @@ fn post_omp_session_event(
     path: &str,
     event: &str,
     input: &OmpSessionEventInput,
+    identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
     let workspace_id = input
         .workspace_id
         .clone()
-        .unwrap_or_else(|| runtime.workspace_id.clone());
+        .unwrap_or_else(|| effective_workspace_id(runtime, identity));
     let body = json!({
         "session_id": &input.session_id,
         "workspace_id": workspace_id,

@@ -52,6 +52,7 @@ impl DeNovoCliRuntime {
 
 const DEFAULT_CODEX_BIN: &str = "codex";
 const DEFAULT_OMP_BIN: &str = "omp";
+const DEFAULT_OMP_AGENT_DOCKER_STATEFUL_BINARY: &str = "/usr/local/bin/stateful";
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.4-mini";
 const DEFAULT_OMP_MODEL: &str = "deepseek-v4-flash";
 const DEFAULT_CODEX_REASONING_EFFORT: &str = "low";
@@ -120,6 +121,10 @@ pub enum DeNovoCommand {
         omp_bin: String,
         #[arg(long, default_value = "stateful")]
         stateful_binary: String,
+        #[arg(long)]
+        agent_docker_image: Option<String>,
+        #[arg(long, default_value = DEFAULT_OMP_AGENT_DOCKER_STATEFUL_BINARY)]
+        agent_docker_stateful_binary: String,
         #[arg(long)]
         benchmark_model: Option<String>,
         #[arg(long, default_value = DEFAULT_CODEX_REASONING_EFFORT)]
@@ -256,6 +261,8 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
             codex_bin,
             omp_bin,
             stateful_binary,
+            agent_docker_image,
+            agent_docker_stateful_binary,
             benchmark_model,
             benchmark_reasoning_effort,
             benchmark_model_context_window,
@@ -301,6 +308,8 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
                 codex_bin,
                 omp_bin,
                 stateful_binary,
+                agent_docker_image,
+                agent_docker_stateful_binary,
                 benchmark_model,
                 benchmark_reasoning_effort,
                 benchmark_model_context_window,
@@ -427,6 +436,8 @@ pub struct DeNovoCodexRunOptions {
     pub codex_bin: String,
     pub omp_bin: String,
     pub stateful_binary: String,
+    pub agent_docker_image: Option<String>,
+    pub agent_docker_stateful_binary: String,
     pub benchmark_model: String,
     pub benchmark_reasoning_effort: String,
     pub benchmark_model_context_window: usize,
@@ -582,6 +593,15 @@ pub fn build_denovo_codex_adapter_command(options: DeNovoCodexRunOptions) -> Res
         "--prompt-version".to_string(),
         options.prompt_version,
     ];
+    push_optional_string(
+        &mut args,
+        "--agent-docker-image",
+        options.agent_docker_image.as_deref(),
+    );
+    if options.agent_docker_image.is_some() {
+        args.push("--agent-docker-stateful-binary".to_string());
+        args.push(options.agent_docker_stateful_binary);
+    }
     push_optional_usize(&mut args, "--max-steps", options.max_steps);
     push_optional_usize(&mut args, "--max-concurrent", options.max_concurrent);
     push_repeated(&mut args, "--instance-id", options.instance_ids);
@@ -670,6 +690,8 @@ pub struct DeNovoConditionRunOptions {
     pub codex_bin: String,
     pub omp_bin: String,
     pub stateful_binary: String,
+    pub agent_docker_image: Option<String>,
+    pub agent_docker_stateful_binary: String,
     pub benchmark_model: String,
     pub benchmark_reasoning_effort: String,
     pub benchmark_model_context_window: usize,
@@ -798,6 +820,8 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
                 codex_bin: options.codex_bin,
                 omp_bin: options.omp_bin,
                 stateful_binary: options.stateful_binary,
+                agent_docker_image: options.agent_docker_image,
+                agent_docker_stateful_binary: options.agent_docker_stateful_binary,
                 benchmark_model: options.benchmark_model,
                 benchmark_reasoning_effort: options.benchmark_reasoning_effort,
                 benchmark_model_context_window: options.benchmark_model_context_window,
@@ -895,6 +919,8 @@ pub struct DeNovoMatrixRunOptions {
     pub codex_bin: String,
     pub omp_bin: String,
     pub stateful_binary: String,
+    pub agent_docker_image: Option<String>,
+    pub agent_docker_stateful_binary: String,
     pub benchmark_model: String,
     pub benchmark_reasoning_effort: String,
     pub benchmark_model_context_window: usize,
@@ -1102,6 +1128,8 @@ pub fn run_denovo_matrix(options: DeNovoMatrixRunOptions) -> Result<Vec<DeNovoCo
                 codex_bin: options.codex_bin.clone(),
                 omp_bin: options.omp_bin.clone(),
                 stateful_binary: options.stateful_binary.clone(),
+                agent_docker_image: options.agent_docker_image.clone(),
+                agent_docker_stateful_binary: options.agent_docker_stateful_binary.clone(),
                 benchmark_model: options.benchmark_model.clone(),
                 benchmark_reasoning_effort: options.benchmark_reasoning_effort.clone(),
                 benchmark_model_context_window: options.benchmark_model_context_window,
