@@ -238,12 +238,13 @@ integration risk rather than immediate physical file overwrite.
 Queued requests are promoted FIFO. The shipped queue stores one requested path
 per wait request, and a request is reservable only when that requested resource
 is available. Promotion is triggered by explicit lease release, session or
-activity finalization, or lease/reservation expiry. Promotion creates a short
-reservation and a pending notification for the waiting session.
+activity finalization, lease/reservation expiry, or current-state materialization
+that finds an already-unblocked queued waiter. Promotion creates short
+reservations and pending notifications for the waiting sessions.
 
-Promotion creates a reservation first. A reservation is not active write
-authority. The waiting session must reread the target. Manual MCP/CLI flows then
-explicitly claim with `state.intent.claim` or
+Promotion creates reservations first. A reservation is not active write
+authority. Each waiting session must reread the target. Manual MCP/CLI flows
+then explicitly claim with `state.intent.claim` or
 `stateful intent claim --wait-id <id>`. Hook and sandbox authorization sources
 may lazy-claim the reservation at the retried write boundary. Claiming creates
 write-authorizing intent and active same-session leases. The default reservation

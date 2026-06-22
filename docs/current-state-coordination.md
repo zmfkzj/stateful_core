@@ -159,23 +159,23 @@ shipped v1 policy. They require exact source and destination file intent and
 leases, but conflicting rename/move attempts do not enqueue wait records until
 the multi-resource scheduler is implemented.
 
-The server promotes the first eligible queued waiter when one of these grant
+The server promotes every eligible queued waiter when one of these grant
 triggers makes the requested resource available:
 
 - explicit lease release
 - session or activity finalization
 - lease expiry
 
-The promoted waiter receives a short reservation. Reservations prevent a later
-session from taking the resource ahead of the first waiter, but they are not
-active write authority. The reserved session must reread the target. Manual
-MCP/CLI flows then call `state.intent.claim` /
+Each promoted waiter receives a short reservation. Reservations prevent a later
+session from taking the same resource ahead of an earlier conflicting waiter, but
+they are not active write authority. The reserved session must reread the
+target. Manual MCP/CLI flows then call `state.intent.claim` /
 `stateful intent claim --wait-id <id>` before writing; native edit hooks and
 sandbox `write-targets` authorization can lazy-claim the reservation when the
 write is retried. Claiming creates write-authorizing intent and the active
-same-session lease. The default reservation TTL is 120 seconds. If the
-reservation expires without being claimed, the server may promote the next
-eligible FIFO waiter.
+same-session lease. The default reservation TTL is 120 seconds. If a reservation
+expires without being claimed, the server may promote the next eligible FIFO
+waiter.
 
 Resume is notification-driven rather than process-driven. The state server
 records a pending notification when it promotes a reservation. Agents and

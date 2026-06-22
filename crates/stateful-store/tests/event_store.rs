@@ -2665,6 +2665,187 @@ fn released_directory_lease_promotes_child_file_waiter_to_reservation() {
 }
 
 #[test]
+fn released_directory_lease_promotes_all_non_conflicting_child_file_waiters() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    acquire_test_lease(&store, "s1", "w1", "target/");
+    let first = store
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target/a.txt",
+            "write_file",
+            "Queue first file write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("first child file waiter should enqueue");
+    let second = store
+        .enqueue_waiter(
+            "s3",
+            "w1",
+            "target/b.txt",
+            "write_file",
+            "Queue second file write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("second child file waiter should enqueue");
+
+    store
+        .release_lease("s1", "w1", "target/")
+        .expect("directory lease should release");
+
+    let first_reservation = store
+        .active_reservation("w1", "target/a.txt")
+        .expect("first reservation lookup should succeed")
+        .expect("first child file waiter should be reserved");
+    assert_eq!(first_reservation.wait_id, first.wait_id);
+    let second_reservation = store
+        .active_reservation("w1", "target/b.txt")
+        .expect("second reservation lookup should succeed")
+        .expect("second child file waiter should be reserved");
+    assert_eq!(second_reservation.wait_id, second.wait_id);
+}
+
+#[test]
+fn released_directory_lease_keeps_same_session_conflicting_waiter_queued() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    acquire_test_lease(&store, "s1", "w1", "target/");
+    let first = store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-1",
+            session_id: "s2",
+            workspace_id: "w1",
+            relative_path: "target/a.txt",
+            action: "write_file",
+            purpose: "Queue first file write after blocker clears.",
+            blocking_session_id: Some("s1"),
+        })
+        .expect("first child file waiter should enqueue");
+    let second = store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-2",
+            session_id: "s2",
+            workspace_id: "w1",
+            relative_path: "target/a.txt",
+            action: "write_file",
+            purpose: "Queue second file write after blocker clears.",
+            blocking_session_id: Some("s1"),
+        })
+        .expect("second child file waiter should enqueue");
+
+    store
+        .release_lease("s1", "w1", "target/")
+        .expect("directory lease should release");
+
+    let reservation = store
+        .active_reservation("w1", "target/a.txt")
+        .expect("reservation lookup should succeed")
+        .expect("first waiter should be reserved");
+    assert_eq!(reservation.wait_id, first.wait_id);
+    assert_eq!(
+        store
+            .waiter_status(&second.wait_id)
+            .expect("second waiter status should load")
+            .as_deref(),
+        Some("queued")
+    );
+}
+
+#[test]
+fn live_current_state_rolls_back_unblocked_promotion_when_notification_fails() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-live-current-promotion-rollback-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let wait = store
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target/a.txt",
+            "write_file",
+            "Queue file write after a blocker that already cleared.",
+            Some("s1"),
+        )
+        .expect("waiter should enqueue");
+
+    let trigger_conn = Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_current_notification
+             BEFORE INSERT ON notifications
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated current notification failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let error = store
+        .live_current_state(Some("target/a.txt"))
+        .expect_err("current-state promotion should surface notification failure");
+    assert!(
+        error
+            .to_string()
+            .contains("simulated current notification failure"),
+        "error should report trigger failure: {error}"
+    );
+    assert_eq!(
+        store
+            .waiter_status(&wait.wait_id)
+            .expect("waiter status should load")
+            .as_deref(),
+        Some("queued")
+    );
+    assert!(
+        store
+            .active_reservation("w1", "target/a.txt")
+            .expect("reservation lookup should succeed")
+            .is_none(),
+        "failed live current promotion should not leave a reservation"
+    );
+
+    drop(trigger_conn);
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn live_current_state_promotes_queued_waiter_without_active_conflict() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    let wait = store
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target/a.txt",
+            "write_file",
+            "Queue file write after a blocker that already cleared.",
+            Some("s1"),
+        )
+        .expect("waiter should enqueue");
+
+    let live = store
+        .live_current_state(Some("target/a.txt"))
+        .expect("live current state should load");
+
+    assert!(
+        live.items
+            .iter()
+            .all(|item| item.kind != CurrentItemKind::WaitQueue)
+    );
+    let reservation = store
+        .active_reservation("w1", "target/a.txt")
+        .expect("reservation lookup should succeed")
+        .expect("unblocked waiter should be reserved");
+    assert_eq!(reservation.wait_id, wait.wait_id);
+}
+
+#[test]
 fn released_directory_lease_promotes_child_directory_waiter_to_reservation() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 

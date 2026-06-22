@@ -367,16 +367,17 @@ Multi-resource `resources[]`, explicit `queue_sequence`, `blocked_by_lease_id`,
 and recorded `grant_trigger` fields are target model for future hardening.
 
 Promotion is triggered by explicit lease release, session or activity
-finalization, or lease/reservation expiry, but the current row does not persist
+finalization, lease/reservation expiry, or current-state materialization that
+finds an already-unblocked queued waiter, but the current row does not persist
 the trigger reason. Soft repo-relative conflicts do not create wait queue
 records in v1.
 
-Promotion creates a reservation, not active write authority. The waiting session
+Promotion creates reservations, not active write authority. Each waiting session
 must reread the target. Manual MCP/CLI flows then explicitly claim the
 reservation with `state.intent.claim` or `stateful intent claim --wait-id <id>`;
 native edit hooks and sandbox `write-targets` authorization can lazy-claim it at
 the retried write boundary. Claiming creates write-authorizing intent and active
-same-session leases. The default reservation TTL is 120 seconds. If the
+same-session leases. The default reservation TTL is 120 seconds. If a
 reservation is not claimed before `reservation_expires_at`, the reservation
 expires and the server may promote the next eligible FIFO waiter.
 

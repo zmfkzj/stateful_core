@@ -405,7 +405,7 @@ impl Store {
         identity_filter: CurrentStateIdentityFilter<'_>,
         resource_filter: Option<&str>,
     ) -> StoreResult<LiveCurrentState> {
-        self.expire_stale()?;
+        self.refresh_live_current_state()?;
         let summary = self.current_summary_filtered(workspace_filter, identity_filter)?;
         let resource_filter = resource_filter.map(normalize_relative_path);
         let mut items = Vec::new();
@@ -2903,6 +2903,30 @@ impl Store {
         result
     }
 
+    fn refresh_live_current_state(&self) -> StoreResult<()> {
+        let now = now_timestamp();
+        if !self.conn.is_autocommit() {
+            self.expire_stale_at_inner(&now)?;
+            self.promote_unblocked_waiters()?;
+            return Ok(());
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<()> {
+            self.expire_stale_at_inner(&now)?;
+            self.promote_unblocked_waiters()?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
     fn expire_stale_at_inner(&self, now: &str) -> StoreResult<()> {
         self.conn.execute(
             "UPDATE intents
@@ -3532,9 +3556,52 @@ impl Store {
         workspace_id: &str,
         relative_path: &str,
     ) -> StoreResult<()> {
-        self.promote_next_waiter_after_path_release(workspace_id, relative_path)?;
+        while self
+            .promote_next_waiter_after_path_release(workspace_id, relative_path)?
+            .is_some()
+        {}
 
         Ok(())
+    }
+
+    fn promote_unblocked_waiters(&self) -> StoreResult<()> {
+        loop {
+            let mut statement = self.conn.prepare(
+                "SELECT
+                    wait_id,
+                    session_id,
+                    workspace_id,
+                    relative_path,
+                    action,
+                    status,
+                    requested_at,
+                    reservation_expires_at,
+                    blocking_session_id,
+                    purpose
+                 FROM wait_queue
+                 WHERE status = 'queued'
+                 ORDER BY rowid ASC",
+            )?;
+            let waiters = statement
+                .query_map([], wait_record_from_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+
+            let mut promoted = false;
+            for waiter in waiters {
+                if self.waiter_has_active_conflict(&waiter)? {
+                    continue;
+                }
+                if self.promote_waiter_by_id(&waiter.wait_id)?.is_some() {
+                    promoted = true;
+                    break;
+                }
+            }
+
+            if !promoted {
+                return Ok(());
+            }
+        }
     }
 
     fn promote_next_waiter_after_path_release(
@@ -3613,36 +3680,89 @@ impl Store {
 
     fn waiter_has_active_conflict(&self, waiter: &WaitRecord) -> StoreResult<bool> {
         if waiter.action == "write_directory" {
-            return Ok(self
-                .active_lease_conflict_owner_for_directory(
+            let directory_prefix = format!("{}/", waiter.relative_path);
+            let active_lease_conflict = self.conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM leases
+                    WHERE workspace_id = ?1
+                       AND session_id != ?2
+                       AND status = 'active'
+                       AND (
+                           (action = 'write_directory' AND relative_path = ?3)
+                           OR substr(relative_path, 1, ?4) = ?5
+                           OR (action = 'write_directory'
+                              AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
+                       )
+                )",
+                params![
                     &waiter.workspace_id,
-                    &waiter.relative_path,
                     &waiter.session_id,
-                )?
-                .is_some()
-                || self
-                    .active_reservation_conflict_for_directory(
-                        &waiter.workspace_id,
-                        &waiter.relative_path,
-                        &waiter.session_id,
-                    )?
-                    .is_some());
+                    &waiter.relative_path,
+                    directory_prefix.len() as i64,
+                    &directory_prefix,
+                ],
+                |row| row.get::<_, bool>(0),
+            )?;
+            let active_reservation_conflict = self.conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM wait_queue
+                    WHERE workspace_id = ?1
+                       AND wait_id != ?2
+                       AND status = 'reserved'
+                       AND (
+                           (action = 'write_directory' AND relative_path = ?3)
+                           OR substr(relative_path, 1, ?4) = ?5
+                           OR (action = 'write_directory'
+                              AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
+                       )
+                )",
+                params![
+                    &waiter.workspace_id,
+                    &waiter.wait_id,
+                    &waiter.relative_path,
+                    directory_prefix.len() as i64,
+                    &directory_prefix,
+                ],
+                |row| row.get::<_, bool>(0),
+            )?;
+            return Ok(active_lease_conflict || active_reservation_conflict);
         }
 
-        Ok(self
-            .active_lease_conflict_owner_for_path(
+        let active_lease_conflict = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM leases
+                WHERE workspace_id = ?1
+                   AND session_id != ?2
+                   AND status = 'active'
+                   AND (
+                       (action = 'write_file' AND relative_path = ?3)
+                       OR (action = 'write_directory'
+                          AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
+                   )
+            )",
+            params![
                 &waiter.workspace_id,
-                &waiter.relative_path,
                 &waiter.session_id,
-            )?
-            .is_some()
-            || self
-                .active_reservation_conflict_for_path(
-                    &waiter.workspace_id,
-                    &waiter.relative_path,
-                    &waiter.session_id,
-                )?
-                .is_some())
+                &waiter.relative_path
+            ],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let active_reservation_conflict = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM wait_queue
+                WHERE workspace_id = ?1
+                   AND wait_id != ?2
+                   AND status = 'reserved'
+                   AND (
+                       (action = 'write_file' AND relative_path = ?3)
+                       OR (action = 'write_directory'
+                          AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
+                   )
+            )",
+            params![&waiter.workspace_id, &waiter.wait_id, &waiter.relative_path],
+            |row| row.get::<_, bool>(0),
+        )?;
+        Ok(active_lease_conflict || active_reservation_conflict)
     }
 
     fn promote_waiter_by_id(&self, wait_id: &str) -> StoreResult<Option<WaitRecord>> {

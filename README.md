@@ -112,9 +112,10 @@ blocked -> queued -> reserved -> claimed -> active
 ```
 
 A conflicting writer is blocked by the active lease and can enter a FIFO wait
-queue. When the active lease is released or the owning activity finalizes, the
-first waiter receives a short reservation. The reserved session must reread the
-target. Manual MCP/CLI flows then call `state.intent.claim` /
+queue. When the active lease is released or the owning activity finalizes, each
+eligible waiter whose requested resource no longer conflicts receives a short
+reservation in FIFO order. The reserved session must reread the target. Manual
+MCP/CLI flows then call `state.intent.claim` /
 `stateful intent claim --wait-id <id>`; native edit hooks and sandbox
 `write-targets` authorization can lazy-claim the reservation when the write is
 retried. Claiming creates write-authorizing intent and the active same-session
