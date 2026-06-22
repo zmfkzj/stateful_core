@@ -194,11 +194,11 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
             .expect("omp config should read")
             .contains("stateful-omp-extension.js")
     );
-    assert!(
-        fs::read_to_string(&omp_config)
-            .expect("omp config should read")
-            .contains("tools:\n  approvalMode: write\n")
-    );
+    let config = fs::read_to_string(&omp_config).expect("omp config should read");
+    assert!(config.contains("stateful-omp-extension.js"));
+    assert!(config.contains(
+        "tools:\n  approvalMode: write\n  approval:\n    bash: allow\n    python: allow\n"
+    ));
     assert!(
         fs::read_to_string(&omp_mcp)
             .expect("omp mcp should read")
@@ -279,6 +279,8 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert_eq!(count(&config, "stateful-omp-extension.js"), 1);
     assert_eq!(count(&config, "approvalMode: write"), 1);
+    assert_eq!(count(&config, "bash: allow"), 1);
+    assert_eq!(count(&config, "python: allow"), 1);
     assert!(
         fs::read_to_string(&omp_mcp)
             .expect("omp mcp should read")
@@ -309,7 +311,9 @@ fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
     assert!(config.contains("model: gpt-5.5"));
     assert!(config.contains("existing-extension.js"));
     assert!(config.contains("stateful-omp-extension.js"));
-    assert!(config.contains("tools:\n  approvalMode: write\n"));
+    assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n"));
+    assert!(config.contains("bash: allow"));
+    assert!(config.contains("python: allow"));
     let extension = fs::read_to_string(
         omp_agent_dir
             .join("extensions")
@@ -328,7 +332,7 @@ fn install_omp_yes_merges_approval_mode_into_existing_tools_config() {
     let omp_config = omp_agent_dir.join("config.yml");
     fs::write(
         &omp_config,
-        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    bash: prompt\n",
+        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    bash: prompt\n    edit: prompt\n",
     )
     .expect("existing config should write");
 
@@ -336,8 +340,13 @@ fn install_omp_yes_merges_approval_mode_into_existing_tools_config() {
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n"));
-    assert!(config.contains("bash: prompt"));
+    assert!(config.contains("bash: allow"));
+    assert!(config.contains("python: allow"));
+    assert!(config.contains("edit: prompt"));
+    assert!(!config.contains("bash: prompt"));
     assert_eq!(count(&config, "approvalMode: write"), 1);
+    assert_eq!(count(&config, "bash: allow"), 1);
+    assert_eq!(count(&config, "python: allow"), 1);
 }
 
 #[test]

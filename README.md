@@ -202,8 +202,9 @@ stateful install --agent codex --yes
 ```
 
 Install the OMP integration when you want stateful OMP hooks and MCP in the
-isolated `stateful` profile. This leaves the default/global OMP profile alone
-and uses `tools.approvalMode: write`:
+isolated `stateful` profile. This leaves the default/global OMP profile alone,
+uses `tools.approvalMode: write`, and explicitly allows OMP's Bash/Python
+approval gate so stateful sandbox wrappers can make the policy decision:
 
 ```bash
 stateful install --agent omp --yes
@@ -328,8 +329,9 @@ installation health.
   `stateful-command-policy` skill, and merges Codex config.
 - `stateful install --agent omp [--yes]` installs the stateful OMP extension
   into the OMP `stateful` profile agent directory
-  (`~/.omp/profiles/stateful/agent`) with `tools.approvalMode: write`, leaving
-  the default/global OMP profile untouched.
+  (`~/.omp/profiles/stateful/agent`) with `tools.approvalMode: write` and
+  `tools.approval.{bash,python}: allow`, leaving the default/global OMP profile
+  untouched.
 - `stateful enable [--repo <path>]`, `stateful disable`, and
   `stateful repos list` manage the repo allowlist used by global hooks.
 - `stateful tools list`, `stateful tools allow <tool>`, and

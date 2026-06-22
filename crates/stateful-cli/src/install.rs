@@ -1150,47 +1150,98 @@ fn write_omp_config(config_path: &Path, extension_path: &Path) -> anyhow::Result
 }
 
 fn ensure_omp_approval_mode(mut contents: String) -> String {
-    let mut tools_offset = None;
-    let mut in_tools = false;
-    let mut approval_offset = None;
-    for (index, line) in contents.lines().enumerate() {
-        let trimmed = line.trim();
-        let is_top_level = !line.starts_with(char::is_whitespace);
-        if is_top_level && trimmed == "tools:" {
-            tools_offset = Some(index);
-            in_tools = true;
-            continue;
+    let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
+    let tools_offset = find_omp_top_level_section(&lines, "tools");
+
+    if tools_offset.is_none() {
+        if !contents.is_empty() && !contents.ends_with('\n') {
+            contents.push('\n');
         }
-        if in_tools && is_top_level && !trimmed.is_empty() && !trimmed.starts_with('#') {
-            in_tools = false;
-        }
-        if in_tools && trimmed.starts_with("approvalMode:") {
-            approval_offset = Some(index);
-            break;
-        }
+        contents.push_str(
+            "tools:\n  approvalMode: write\n  approval:\n    bash: allow\n    python: allow\n",
+        );
+        return contents;
     }
 
-    if let Some(offset) = approval_offset {
-        let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
+    let tools_offset = tools_offset.expect("tools section was just found");
+    let mut tools_end = find_omp_top_level_section_end(&lines, tools_offset);
+    let approval_mode_offset = lines[tools_offset + 1..tools_end]
+        .iter()
+        .position(|line| line.trim_start().starts_with("approvalMode:"))
+        .map(|offset| tools_offset + 1 + offset);
+
+    if let Some(offset) = approval_mode_offset {
         lines[offset] = "  approvalMode: write".to_string();
-        contents = lines.join("\n");
-        contents.push('\n');
-        return contents;
+    } else {
+        lines.insert(tools_offset + 1, "  approvalMode: write".to_string());
+        tools_end += 1;
     }
 
-    if let Some(offset) = tools_offset {
-        let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
-        lines.insert(offset + 1, "  approvalMode: write".to_string());
-        contents = lines.join("\n");
-        contents.push('\n');
-        return contents;
-    }
+    let approval_offset = lines[tools_offset + 1..tools_end]
+        .iter()
+        .position(|line| line.trim_start() == "approval:")
+        .map(|offset| tools_offset + 1 + offset);
 
-    if !contents.is_empty() && !contents.ends_with('\n') {
-        contents.push('\n');
-    }
-    contents.push_str("tools:\n  approvalMode: write\n");
+    let approval_offset = if let Some(offset) = approval_offset {
+        offset
+    } else {
+        let insert_offset = tools_offset + 2;
+        lines.insert(insert_offset, "  approval:".to_string());
+        tools_end += 1;
+        insert_offset
+    };
+
+    ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "bash");
+    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
+    ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "python");
+
+    contents = lines.join("\n");
+    contents.push('\n');
     contents
+}
+
+fn find_omp_top_level_section(lines: &[String], section: &str) -> Option<usize> {
+    let header = format!("{section}:");
+    lines
+        .iter()
+        .position(|line| !line.starts_with(char::is_whitespace) && line.trim() == header)
+}
+
+fn find_omp_top_level_section_end(lines: &[String], section_offset: usize) -> usize {
+    lines[section_offset + 1..]
+        .iter()
+        .position(|line| {
+            !line.starts_with(char::is_whitespace)
+                && !line.trim().is_empty()
+                && !line.trim_start().starts_with('#')
+        })
+        .map_or(lines.len(), |offset| section_offset + 1 + offset)
+}
+
+fn ensure_omp_tool_approval(
+    lines: &mut Vec<String>,
+    approval_offset: usize,
+    tools_end: usize,
+    tool: &str,
+) {
+    let approval_end = lines[approval_offset + 1..tools_end]
+        .iter()
+        .position(|line| {
+            !line.trim().is_empty()
+                && !line.trim_start().starts_with('#')
+                && line.chars().take_while(|ch| ch.is_whitespace()).count() <= 2
+        })
+        .map_or(tools_end, |offset| approval_offset + 1 + offset);
+    let prefix = format!("{tool}:");
+    if let Some(offset) = lines[approval_offset + 1..approval_end]
+        .iter()
+        .position(|line| line.trim_start().starts_with(&prefix))
+        .map(|offset| approval_offset + 1 + offset)
+    {
+        lines[offset] = format!("    {tool}: allow");
+    } else {
+        lines.insert(approval_offset + 1, format!("    {tool}: allow"));
+    }
 }
 
 fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Result<()> {
