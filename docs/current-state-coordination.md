@@ -169,7 +169,7 @@ triggers makes the requested resource available:
 Each promoted waiter receives a short reservation. Reservations prevent a later
 session from taking the same resource ahead of an earlier conflicting waiter, but
 they are not active write authority. The reserved session must reread the
-target. Manual MCP/CLI flows then call `state.intent.claim` /
+target. Manual MCP/CLI flows then call `state_intent_claim` /
 `stateful intent claim --wait-id <id>` before writing; native edit hooks and
 sandbox `write-targets` authorization can lazy-claim the reservation when the
 write is retried. Claiming creates write-authorizing intent and the active
@@ -183,7 +183,7 @@ orchestrators discover that signal by polling notifications, asking for the
 next resumable reservation, or receiving that context from a lifecycle hook.
 Polling returns each pending notification once and marks it delivered; callers
 that miss or discard a poll response should use `stateful resume next` /
-`state.resume.next` to rediscover any still-active reservation.
+`state_resume_next` to rediscover any still-active reservation.
 The state server does not wake a sleeping Codex process by itself; external
 orchestration can build on the notification and resume APIs.
 
@@ -191,7 +191,7 @@ Full scheduling works through immediate request/response plus polling. Intent
 request APIs return `queued`, `reserved`, `claimed`, `canceled`, or `expired`
 state without blocking indefinitely. Immediate availability creates a `reserved` request state;
 the session must still reread the target. Manual MCP/CLI flows claim with
-`state.intent.claim` / `stateful intent claim --wait-id <id>` before retrying,
+`state_intent_claim` / `stateful intent claim --wait-id <id>` before retrying,
 while native edit hooks and sandbox `write-targets` authorization can
 lazy-claim at the retry write boundary.
 Waiting is handled by polling `stateful notifications poll` or
@@ -207,7 +207,7 @@ returns the existing request state and must not create duplicate queue entries o
 replace the original purpose. Repeating an expired request requeues the same
 waiter in place, preserving its original FIFO row while requiring a new
 reservation and claim before writing. A queued or reserved request can be
-canceled explicitly with `state.intent.cancel` /
+canceled explicitly with `state_intent_cancel` /
 `stateful intent cancel --request-id <id>`. Session or activity finalization
 releases that session's active leases, cancels that session's queued and
 reserved requests, and promotes the next eligible waiter for any released or
@@ -312,10 +312,9 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 - intercept supported tool calls before execution
 - deny supported write calls when the session has no active intent
-- deny Codex raw Bash with sandbox guidance. For OMP, block repo-internal raw
-  Bash unless it uses the trusted sandbox-run read-only profile or explicit
-  write targets; targetless repo-external OMP Bash returns a warning directing
-  the external-run approval handoff.
+- deny Codex raw Bash with sandbox guidance. For OMP, block raw Bash unless it
+  uses the trusted sandbox-run wrapper; targetless repo-external OMP Bash returns
+  a warning directing agents to `sandbox run --fs external --purpose ...`.
 - check whether requested files or resources conflict with active leases
 - deny, warn, or add context based on policy
 
@@ -332,7 +331,7 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 - post activity finalization for the session
 - release the session's leases through finalization
-- leave explicit `state.activity.finalize` available for manual final status
+- leave explicit `state_activity_finalize` available for manual final status
   updates before shutdown
 
 Subagents:
@@ -344,37 +343,38 @@ Subagents:
 
 ### MCP Responsibilities
 
-The MCP surface should expose structured tools for the agent and hooks:
+The MCP surface should expose structured tools for the agent and hooks. Canonical
+callable tool names map to dotted protocol names:
 
 ```text
-state.session.register
-state.session.heartbeat
-state.intent.declare
-state.intent.request
-state.intent.claim
-state.intent.cancel
-state.lease.acquire
-state.lease.release
-state.activity.observe
-state.activity.finalize
-state.conflicts.check
-state.current.read
-state.events.read
-state.context.render
-state.reconcile.ack
-state.notifications.poll
-state.resume.next
+state_session_register (state.session.register)
+state_session_heartbeat (state.session.heartbeat)
+state_intent_declare (state.intent.declare)
+state_intent_request (state.intent.request)
+state_intent_claim (state.intent.claim)
+state_intent_cancel (state.intent.cancel)
+state_lease_acquire (state.lease.acquire)
+state_lease_release (state.lease.release)
+state_activity_observe (state.activity.observe)
+state_activity_finalize (state.activity.finalize)
+state_conflicts_check (state.conflicts.check)
+state_current_read (state.current.read)
+state_events_read (state.events.read)
+state_context_render (state.context.render)
+state_reconcile_ack (state.reconcile.ack)
+state_notifications_poll (state.notifications.poll)
+state_resume_next (state.resume.next)
 ```
 
-`state.intent.declare` and `state.intent.request` require a non-empty `purpose`.
+`state_intent_declare` and `state_intent_request` require a non-empty `purpose`.
 The caller must infer that purpose from the user or agent instruction when it is
 not explicit; the server must not synthesize a fallback purpose.
-`state.intent.declare` also requires non-empty `files_planned`; empty arrays
+`state_intent_declare` also requires non-empty `files_planned`; empty arrays
 and empty or normalized-empty entries are rejected with `missing_scope`.
-`state.intent.request` also requires a non-empty `path`; empty or
+`state_intent_request` also requires a non-empty `path`; empty or
 normalized-empty request paths are rejected with `missing_scope`.
-`state.intent.request` and `state.intent.cancel` expose the explicit scheduling
-queue. `state.intent.claim` is the explicit reservation claim path.
+`state_intent_request` and `state_intent_cancel` expose the explicit scheduling
+queue. `state_intent_claim` is the explicit reservation claim path.
 
 Hooks should call the same state server API as MCP tools so policy remains
 centralized. Native edit tools with hook-visible targets are the repo file edit
@@ -438,8 +438,8 @@ Bash command-shaped repo writes -> require the trusted wrapper with
   --fs write-targets plus explicit --write-target/--create-target values
 test execution -> run through sandbox run --fs build with
   --write-dir <scratch-purpose>; scratch lives under /tmp/stateful/<session>/
-Codex raw Bash or repo-internal non-wrapper Bash -> deny
-targetless repo-external OMP Bash -> warn with external-run approval handoff
+Codex raw Bash or non-wrapper Bash -> deny
+targetless repo-external OMP Bash -> warn with external sandbox guidance
 ```
 
 Bash denial should tell the agent to use native read/search/diff tools for
@@ -447,8 +447,10 @@ ordinary read work,
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
 --command <cmd>` for shell-based read-only inspection,
 `<absolute-stateful-binary> sandbox run --fs write-targets ... --command <cmd>`
-for command-shaped repo writes, native edit tools for repo file edits, and
-`sandbox run --fs build --write-dir <scratch-purpose>` wrappers for tests.
+for command-shaped repo writes after intent and same-session lease,
+`<absolute-stateful-binary> sandbox run --fs external --purpose ... --command
+<cmd>` for approved repo-external writes, native edit tools for repo file edits,
+and `sandbox run --fs build --write-dir <scratch-purpose>` wrappers for tests.
 
 The read-only sandbox profile is a write-confinement profile. It does not
 provide full process containment, and it cannot be combined with
@@ -469,10 +471,11 @@ stateful sandbox run --fs build --network enabled --write-dir test-run --command
 ```
 
 The build profile writes disposable artifacts under
-`/tmp/stateful/<session>/<purpose>/`. Source-tree edits use native Codex edit
-tools such as `apply_patch` or Edit after exact intent declaration and a
-successful same-session file lease. Command-shaped source writes must use exact
-`--write-target` or `--create-target` entries.
+`/tmp/stateful/<session>/<purpose>/`. Source-tree edits use native edit tools
+with hook-visible targets, such as Codex `apply_patch` or Edit, after exact
+intent declaration and a successful same-session file lease; the completed write
+transaction releases the authorizing lease. Command-shaped source writes must
+use exact `--write-target` or `--create-target` entries.
 
 ## Conflict Policy
 
@@ -485,9 +488,9 @@ Initial policy should prefer advisory leases:
 - supported write after session finalization: deny
 - supported write outside matching exact file scope or exact directory
   `write_directory` scope: deny
-- Codex raw Bash or repo-internal Bash that is not a strict trusted
+- Codex raw Bash or Bash that is not a strict trusted
   `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper: deny
-- targetless repo-external OMP Bash: warn with external-run approval handoff
+- targetless repo-external OMP Bash: warn with external sandbox guidance
 - directory intent and directory lease authorize only `write_directory` for the
   exact directory resource; they do not authorize `write_file`, delete, rename,
   or move actions on child paths
@@ -659,7 +662,7 @@ non-Bash read/search/diff path: allow
 
 At the OMP adapter boundary, a stateful hook deny or unavailable result is
 returned as block, not warning, regardless of OMP yolo metadata. The targetless
-repo-external Bash approval handoff is a classified warning path, not a yolo
+repo-external Bash warning points to the external sandbox profile, not a yolo
 override of a deny.
 
 When the state server is unavailable:
@@ -815,8 +818,8 @@ fail because no active write-authorizing intent remains.
 
 The shipped hook path records target existence and content hash when an exact
 file lease is acquired with `root`, denies hook-originated native file writes
-when that file changes before authorization, and refreshes the same-session
-exact file lease observation after supported file tools complete. This is a
+when that file changes before authorization, and releases the same-session lease
+after a completed native edit or `write-targets` transaction. This is a
 per-lease freshness check, not a filesystem watcher or IDE human-save observer.
 
 Override policy:
@@ -839,7 +842,7 @@ record and authorization path.
 Prompt context rendering:
 
 ```text
-state.context.render(workspace, session_id, resources?, mode)
+state_context_render(workspace, session_id, resources?, mode)
 mode: brief | detailed
 sections: Blocking, Required Next Action, Warnings, Nearby Activity, Stale/Expired
 ```

@@ -358,20 +358,22 @@ fn install_omp_yes_merges_approval_mode_into_existing_tools_config() {
 }
 
 #[test]
-fn install_codex_yes_creates_external_run_prompt_rule() {
+fn install_codex_yes_creates_sandbox_external_prompt_rule() {
     let fixture = TestFixture::new("codex-rules");
 
     apply_codex_install(fixture.codex_options(true)).expect("install should apply");
 
     let rules = fs::read_to_string(fixture.codex_rules_path()).expect("rules should read");
     assert!(rules.contains("prefix_rule("));
-    assert!(
-        rules.contains("pattern = [\"/opt/stateful/bin/stateful\", \"external-run\", \"request\"]")
-    );
+    assert!(rules.contains(
+        "pattern = [\"/opt/stateful/bin/stateful\", \"sandbox\", \"run\", \"--fs\", \"external\"]"
+    ));
     assert!(rules.contains("decision = \"prompt\""));
-    assert!(rules.contains("stateful external-run request"));
-    assert!(!rules.contains("stateful external-run approve"));
-    assert!(!rules.contains("stateful external-run run"));
+    assert!(rules.contains("stateful sandbox run --fs external"));
+    assert!(rules.contains(
+        "/opt/stateful/bin/stateful sandbox run --fs external --purpose 'install rebuilt binaries'"
+    ));
+    assert!(!rules.contains("external-run"));
 
     apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");
 
@@ -396,7 +398,10 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     .expect("source stateful command policy skill should exist");
     assert_eq!(command_policy_skill, source_command_policy_skill);
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
-    assert!(command_policy_skill.contains("In Codex sessions with Stateful MCP exposed"));
+    assert!(command_policy_skill.contains("Use canonical Stateful MCP tool names"));
+    assert!(command_policy_skill.contains("state_intent_declare"));
+    assert!(command_policy_skill.contains("state_lease_acquire"));
+    assert!(command_policy_skill.contains("runtime-specific tool names"));
     assert!(
         command_policy_skill
             .contains("Do not run `stateful intent declare` or `stateful mcp call` through Bash")
@@ -404,10 +409,10 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     assert!(command_policy_skill.contains("Intent declarations add"));
     assert!(command_policy_skill.contains("--fs build --network enabled"));
     assert!(command_policy_skill.contains("--write-dir <scratch-purpose>"));
-    assert!(command_policy_skill.contains("state.intent.request"));
-    assert!(command_policy_skill.contains("state.notifications.poll"));
-    assert!(command_policy_skill.contains("state.resume.next"));
-    assert!(command_policy_skill.contains("state.intent.claim"));
+    assert!(command_policy_skill.contains("state_intent_request"));
+    assert!(command_policy_skill.contains("state_notifications_poll"));
+    assert!(command_policy_skill.contains("state_resume_next"));
+    assert!(command_policy_skill.contains("state_intent_claim"));
     assert!(!command_policy_skill.contains("Intent declarations replace"));
     assert!(
         !command_policy_skill.contains("--fs write-targets --network enabled --write-dir target")
@@ -459,7 +464,7 @@ fn install_yes_preserves_existing_features_and_enables_hooks() {
 }
 
 #[test]
-fn install_yes_replaces_existing_approval_policy_for_external_run_rules() {
+fn install_yes_replaces_existing_approval_policy_for_sandbox_external_rules() {
     let fixture = TestFixture::new("approval-policy");
     let existing = "approval_policy = \"on-request\"\nmodel = \"gpt-5.5\"\n";
     fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");

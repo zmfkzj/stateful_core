@@ -209,12 +209,13 @@ command-shaped inspection uses `<absolute-stateful-binary> sandbox run --fs
 read-only --network disabled --command <cmd>`; the read-only profile rejects
 `--network enabled`. Command-shaped repo writes use `--fs write-targets` with
 explicit `--write-target` / `--create-target` values and target authorization.
-OMP repo-internal raw Bash follows the same block-unless-wrapper rule. When an
-OMP Bash call is targetless and classified as repo-external rather than
-repo-internal, the hook returns a warning directing the approval handoff through
-`<absolute-stateful-binary> external-run request`; external-run validates the
-normalized external write scope, rejects repo-internal targets, and does not
-require repo intent or lease. Git operations use `--fs git` for one `git ...`
+OMP raw Bash follows the same block-unless-wrapper rule. When an OMP Bash call
+is targetless and classified as repo-external rather than repo-internal, the
+hook returns a warning directing the request through
+`<absolute-stateful-binary> sandbox run --fs external --purpose ...`; the
+external sandbox profile validates absolute external write scopes, rejects
+repo-internal targets, runs through the sandbox, and does not require repo intent
+or lease. Git operations use `--fs git` for one `git ...`
 command. GitHub pull request list/view/status/create commands use
 `<absolute-stateful-binary> sandbox run --fs github-pr --network enabled
 --command 'gh pr <list|view|status|create> ...'`; use the GitHub connector
@@ -259,7 +260,7 @@ reservations and pending notifications for the waiting sessions.
 
 Promotion creates reservations first. A reservation is not active write
 authority. Each waiting session must reread the target. Manual MCP/CLI flows
-then explicitly claim with `state.intent.claim` or
+then explicitly claim with `state_intent_claim` or
 `stateful intent claim --wait-id <id>`. Hook and sandbox authorization sources
 may lazy-claim the reservation at the retried write boundary. Claiming creates
 write-authorizing intent and active same-session leases. The default reservation
@@ -523,11 +524,12 @@ stateful push [remote branch]
 ```
 
 `stateful install --agent codex --yes` configures global Codex hooks, MCP, MCP
-tool approval policy, and external-run approval rules. Codex installs wire
+tool approval policy, and external sandbox approval rules. Codex installs wire
 `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`.
-Stateful MCP tools default to automatic approval; `stateful external-run
-request` is gated by a Codex execpolicy prompt before it validates the external
-write scope and runs the command. `stateful install --agent omp --yes` wires the
+Stateful MCP tools default to automatic approval; `stateful sandbox run --fs
+external --purpose ...` is gated by a Codex execpolicy prompt before it validates
+the external write scope and runs the command through the sandbox. `stateful
+install --agent omp --yes` wires the
 OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
 extension events to `stateful hook omp session-start`, `pre-tool-use`,
 `post-tool-use`, and `stop`; OMP does not expose a stateful
@@ -613,7 +615,7 @@ Implemented v1 behavior must have tests for:
 - Bash full-deny classification and sandbox-gated hook authorization
 - nested Codex benchmark sandbox hook authorization only when the
   `codex-benchmark` cargo feature is enabled
-- native Codex edit hook authorization plus Bash sandbox fixtures
+- native edit hook authorization plus Bash sandbox fixtures
 - prompt renderer golden output for shipped store-backed rendering
 - heartbeat refresh of activities, capped active intent TTL, and active leases
   still covered by active intent

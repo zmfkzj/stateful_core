@@ -70,12 +70,6 @@ struct NestedCodexBenchmarkSandboxInvocation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct StatefulExternalRunInvocation {
-    executable: String,
-    subcommand: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct StatefulControlInvocation {
     executable: String,
 }
@@ -304,7 +298,10 @@ fn omp_pre_tool_action(
                     .to_string(),
             })
         }
-        "read" | "find" | "grep" => Ok(OmpPreToolAction::Allow),
+        "read" | "find" | "grep" | "search" | "web_search" | "browser" | "search_tool_bm25" => {
+            Ok(OmpPreToolAction::Allow)
+        }
+        tool_name if is_stateful_control_plane_tool(tool_name) => Ok(OmpPreToolAction::Allow),
         _ => Ok(OmpPreToolAction::Block {
             reason: format!(
                 "unclassified OMP tool {} may write or execute and requires explicit stateful classification",
@@ -782,7 +779,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 fn stateful_command_policy_reminder() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- First inspect current state with canonical Stateful MCP tool names such as `state_current_read` or `state.context.render` so you know who is active, what you already hold, and what may conflict.\n- Before using Bash, use the `stateful-command-policy` skill.\n- Use canonical Stateful MCP tool names (`state_intent_declare`, `state_lease_acquire`) for coordination. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied; use native read/search tools first when available, then `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` only as the read-only shell fallback.\n- For process checks, use `{binary} sandbox process find --contains <literal>`.\n- For build or test commands, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose-dir> --command '<cmd>'` unless the command writes exact repo outputs; for exact repo writes, declare intent and acquire same-session leases, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`.\n- For repo-external writes, use `{binary} external-run request ...` for the approval handoff.\n- For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; for GitHub PR operations, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <args>'`.",
+        "Stateful command policy reminder:\n- First inspect current state with canonical Stateful MCP tool names such as `state_current_read` or `state_context_render` so you know who is active, what you already hold, and what may conflict.\n- Before using Bash, use the `stateful-command-policy` skill.\n- Use canonical Stateful MCP tool names (`state_intent_declare`, `state_lease_acquire`) for coordination. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied for Codex; OMP repo-internal raw Bash is blocked unless it uses the trusted sandbox-run read-only profile or explicit write targets, while targetless repo-external OMP Bash warns with the sandbox external approval handoff.\n- For file search and inspection, use native read/search tools first when available; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` only as the read-only shell fallback.\n- For process checks, use `{binary} sandbox process find --contains <literal>`.\n- For build or test commands, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose-dir> --command '<cmd>'` unless the command writes exact repo outputs; for exact repo writes, declare intent and acquire same-session leases, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`.\n- For repo-external writes, use `{binary} sandbox run --fs external --purpose '<purpose>' --write-target /absolute/path --command '<cmd>'` for the approval handoff.\n- For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; for GitHub PR operations, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <args>'`.",
     )
 }
 
@@ -1043,6 +1040,7 @@ fn is_builtin_safe_tool(tool_name: &str) -> bool {
             | "update_plan"
             | "tool_search"
             | "tool_search_tool"
+            | "search_tool_bm25"
             | "get_goal"
             | "create_goal"
             | "update_goal"
@@ -1161,11 +1159,6 @@ fn authorize_bash(input: &PreToolUseInput) -> anyhow::Result<HookOutcome> {
     #[cfg(feature = "codex-benchmark")]
     if let Some(tmux) = authorize_tmux_nested_codex_benchmark_bash(command) {
         return Ok(tmux);
-    }
-
-    let external = authorize_external_run_bash(command);
-    if external == HookOutcome::Allow || command_mentions_external_run(command) {
-        return Ok(external);
     }
 
     let control = authorize_stateful_control_bash(command);
@@ -1346,26 +1339,6 @@ fn authorize_tmux_nested_codex_benchmark_bash(command: &str) -> Option<HookOutco
     }
 }
 
-fn authorize_external_run_bash(command: &str) -> HookOutcome {
-    let invocation = match parse_external_run_invocation(command) {
-        Ok(invocation) => invocation,
-        Err(reason) => return bash_policy_deny(reason),
-    };
-
-    if !is_trusted_stateful_executable(&invocation.executable) {
-        return bash_policy_deny(
-            "stateful external-run requires the trusted absolute stateful binary",
-        );
-    }
-    HookOutcome::Allow
-}
-
-fn command_mentions_external_run(command: &str) -> bool {
-    split_simple_command_words(command)
-        .ok()
-        .is_some_and(|words| words.len() >= 2 && words[1] == "external-run")
-}
-
 fn authorize_stateful_control_bash(command: &str) -> HookOutcome {
     let invocation = match parse_stateful_control_invocation(command) {
         Ok(invocation) => invocation,
@@ -1390,7 +1363,7 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 fn bash_policy_guidance() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Inspect current state first with `state_current_read` or `state.current.read`, then use the `stateful-command-policy` skill before Bash. Raw Bash is denied. Use canonical Stateful MCP tool names (`state_intent_declare`, `state_lease_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first when available; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` only as the read-only shell fallback. For process checks use `{binary} sandbox process find --contains <literal>`; for build or test commands use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose-dir> --command '<cmd>'`; for exact repo writes use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'` after declaring exact intent and acquiring the same-session lease; for repo-external writes use `{binary} external-run request ...` for the approval handoff; for local git use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; for GitHub PR operations use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <args>'`.",
+        "Inspect current state first with `state_current_read` or `state_context_render`, then use the `stateful-command-policy` skill before Bash. Raw Bash is denied for Codex; OMP repo-internal raw Bash is blocked unless it uses the trusted sandbox-run read-only profile or explicit write targets, while targetless repo-external OMP Bash warns with the external sandbox approval handoff. Use canonical Stateful MCP tool names (`state_intent_declare`, `state_lease_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first when available; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` only as the read-only shell fallback. For process checks use `{binary} sandbox process find --contains <literal>`; for build or test commands use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose-dir> --command '<cmd>'`; for exact repo writes use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'` after declaring exact intent and acquiring the same-session lease; for repo-external writes use `{binary} sandbox run --fs external --purpose '<purpose>' --write-target /absolute/path --command '<cmd>'` for the approval handoff; for local git use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; for GitHub PR operations use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <args>'`.",
     )
 }
 
@@ -1621,32 +1594,6 @@ fn is_denovo_tmux_session_name(session_name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
-fn parse_external_run_invocation(command: &str) -> Result<StatefulExternalRunInvocation, String> {
-    reject_outer_shell_syntax(command, "Bash wrapper must be a single stateful command")?;
-    let words = split_simple_command_words(command)?;
-    if words.is_empty() {
-        return Err(
-            "Bash commands must use stateful sandbox run or stateful external-run".to_string(),
-        );
-    }
-    if first_word_is_env_assignment(&words[0]) {
-        return Err("Bash wrapper must not use outer environment assignments".to_string());
-    }
-    if words.len() < 3 || words[1] != "external-run" {
-        return Err(
-            "Bash commands must use stateful sandbox run or stateful external-run".to_string(),
-        );
-    }
-    if !matches!(words[2].as_str(), "request" | "help") {
-        return Err("stateful external-run supports only request".to_string());
-    }
-
-    Ok(StatefulExternalRunInvocation {
-        executable: words[0].clone(),
-        subcommand: words[2].clone(),
-    })
-}
-
 fn parse_stateful_control_invocation(command: &str) -> Result<StatefulControlInvocation, String> {
     reject_outer_shell_syntax(command, "Bash wrapper must be a single stateful command")?;
     let words = split_simple_command_words(command)?;
@@ -1658,7 +1605,7 @@ fn parse_stateful_control_invocation(command: &str) -> Result<StatefulControlInv
     }
     if words.len() < 2 || !is_stateful_control_command(&words[1]) {
         return Err(
-            "Bash commands must use stateful sandbox run, stateful external-run, or a trusted stateful server command"
+            "Bash commands must use stateful sandbox run or a trusted stateful server command"
                 .to_string(),
         );
     }
@@ -2059,17 +2006,17 @@ fn authorization_denial_reason(decision: AuthorizeDecision) -> String {
         reason.push_str(&format!(" Track {}.", wait_details.join(", ")));
     }
     let has_resume_guidance = [
-        "state.notifications.poll",
-        "state.resume.next",
+        "state_notifications_poll",
+        "state_resume_next",
         "reread",
-        "state.intent.claim",
+        "state_intent_claim",
     ]
     .iter()
     .all(|term| reason.contains(term));
     if !has_resume_guidance {
         let target = wait.path.as_deref().unwrap_or("the target");
         reason.push_str(&format!(
-            " Resume by polling state.notifications.poll or state.resume.next for wait_id {}; when reserved, reread {}, then call state.intent.claim with wait_id {} before retrying the write.",
+            " Resume by polling state_notifications_poll or state_resume_next for wait_id {}; when reserved, reread {}, then call state_intent_claim with wait_id {} before retrying the write.",
             wait.wait_id, target, wait.wait_id
         ));
     }

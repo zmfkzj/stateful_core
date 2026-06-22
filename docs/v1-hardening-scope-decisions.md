@@ -31,14 +31,14 @@ in place instead of creating a duplicate or permanently consuming the key.
 `intent/claim` is the manual reservation claim path. It creates
 write-authorizing intent and active leases only for the reservation owner.
 Clients must reread the reserved target before writing. Manual MCP/CLI flows
-then call `state.intent.claim` or `stateful intent claim --wait-id <id>`;
+then call `state_intent_claim` or `stateful intent claim --wait-id <id>`;
 native edit hooks and sandbox `write-targets` authorization may lazy-claim the
 reservation at the retried write boundary.
 
 Current implementation status: `/v1/intent/request`, `/v1/intent/claim`, and
 `/v1/intent/cancel` are implemented with MCP tools and CLI commands. Immediate
 availability returns a `reserved` request state; the reserved session must still
-reread the target. Manual MCP/CLI flows call `intent/claim`; hook and sandbox
+reread the target. Manual MCP/CLI flows call `state_intent_claim`; hook and sandbox
 authorization sources may lazy-claim the reservation when the write is retried.
 
 `intent/cancel` cancels queued or reserved requests owned by the caller. It must
@@ -60,10 +60,11 @@ stateful sandbox run --fs build --network enabled --write-dir test-run --command
 Hook-mediated Bash must be a single strict invocation of the trusted absolute
 `stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
 <cmd>`. The build profile writes disposable artifacts under
-`/tmp/stateful/<session>/<purpose>/`; source-tree edits use native Codex edit
-tools such as `apply_patch` or Edit after exact intent declaration and a
-successful same-session file lease. Command-shaped source writes require exact
-`--write-target` or `--create-target` entries.
+`/tmp/stateful/<session>/<purpose>/`; source-tree edits use native edit tools
+with hook-visible targets, such as Codex `apply_patch` or Edit, after exact
+intent declaration and a successful same-session file lease. The completed write
+transaction releases the authorizing lease. Command-shaped source writes require
+exact `--write-target` or `--create-target` entries.
 
 ## Protocol Envelope
 
@@ -242,7 +243,7 @@ distribution story for hook-capable agents:
 5. Done: implement explicit `intent/request`, `intent/claim`, and
    `intent/cancel`.
 6. Done: enforce sandbox-run write-target policy semantics.
-7. Remaining: add IDE save gate API and harden native Codex edit hook target
+7. Remaining: add IDE save gate API and harden native edit hook target
    extraction.
 8. Done: add background expiration, retention pruning, and active-intent rolling
    maximum.

@@ -969,6 +969,9 @@ assert "Build a parser package." in prompt
 assert "Benchmark max turns: 500" in prompt
 assert "Maximum task steps: 500" in prompt
 assert "Do not edit benchmark artifacts" in prompt
+assert "Stateful command policy" in prompt
+assert "state_current_read" in prompt
+assert "search_tool_bm25" in prompt
 assert "/Users/arthur/.cargo/bin/stateful" not in prompt
 print(json.dumps({{"prompt": prompt}}))
 "#,
@@ -1843,7 +1846,7 @@ print(json.dumps({{
     assert_eq!(output["no_state_home"], output["expected_no_state_home"]);
     assert_eq!(output["stateful_home"], output["expected_stateful_home"]);
     let expected_no_state_agent = format!(
-        "{}/.omp/agent",
+        "{}/.omp/profiles/stateful/agent",
         output["expected_no_state_home"]
             .as_str()
             .expect("expected no-state home should be text")
@@ -1855,7 +1858,7 @@ print(json.dumps({{
         expected_no_state_agent
     );
     let expected_stateful_agent = format!(
-        "{}/.omp/agent",
+        "{}/.omp/profiles/stateful/agent",
         output["expected_stateful_home"]
             .as_str()
             .expect("expected stateful home should be text")
@@ -3787,14 +3790,10 @@ print(json.dumps({{
 
     let skill = output["skill"].as_str().expect("skill should be text");
     assert!(skill.contains("name: stateful-command-policy"));
-    assert!(skill.contains("mcp__stateful__state_intent_declare"));
-    assert!(skill.contains("mcp__stateful__state_lease_acquire"));
-    assert!(
-        !skill
-            .contains("call Stateful MCP tools directly for coordination: `state_intent_declare`")
-    );
-    assert!(!skill.contains("Use MCP in this subagent session: `state_session_register`"));
-    assert!(!skill.contains("Declare exact file intent first with `state_intent_declare`"));
+    assert!(skill.contains("Use canonical Stateful MCP tool names"));
+    assert!(skill.contains("state_intent_declare"));
+    assert!(skill.contains("state_lease_acquire"));
+    assert!(skill.contains("runtime-specific tool names"));
     assert_eq!(output["auth_exists"], false);
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");

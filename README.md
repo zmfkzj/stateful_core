@@ -115,7 +115,7 @@ A conflicting writer is blocked by the active lease and can enter a FIFO wait
 queue. When the active lease is released or the owning activity finalizes, each
 eligible waiter whose requested resource no longer conflicts receives a short
 reservation in FIFO order. The reserved session must reread the target. Manual
-MCP/CLI flows then call `state.intent.claim` /
+MCP/CLI flows then call `state_intent_claim` /
 `stateful intent claim --wait-id <id>`; native edit hooks and sandbox
 `write-targets` authorization can lazy-claim the reservation when the write is
 retried. Claiming creates write-authorizing intent and the active same-session
@@ -376,6 +376,10 @@ installation health.
 - `stateful sandbox run --fs write-targets --write-dir <repo-dir> --command <cmd>`
   runs command-shaped repo directory writes after exact directory intent and a
   successful same-session directory lease for that directory.
+- `stateful sandbox run --fs external --purpose <purpose> --write-target <absolute-external-path> --command <cmd>`
+  runs command-shaped repo-external writes after Codex approval through the
+  external sandbox profile. External targets must be absolute, must resolve
+  outside the repo, and do not require repo intent or a same-session lease.
 - `stateful sandbox run --fs git --network enabled --command 'git <args>'`
   runs a single git command with the repo worktree and Git internals writable
   inside the OS sandbox. The wrapper rejects shell-dispatching git options and
@@ -414,11 +418,13 @@ Run `stateful <command> --help` for command-specific options.
 
 ## Codex and OMP Hooks and Sessions
 
-Codex installation merges stateful MCP, MCP tool approval policy, external-run
-approval rules, and hook configuration into the Codex config. Stateful MCP tools
-default to automatic approval. Repo-external writes remain gated by a Codex
-execpolicy prompt for `stateful external-run request`; after that approval, the
-request validates the normalized external write scope and runs immediately.
+Codex installation merges stateful MCP, MCP tool approval policy, external
+sandbox approval rules, and hook configuration into the Codex config. Stateful
+MCP tools default to automatic approval. Repo-external writes are gated by a
+Codex execpolicy prompt for `stateful sandbox run --fs external --purpose ...`;
+after that approval, the external sandbox profile validates the normalized
+external write scope, rejects repo-internal targets, and runs the command in the
+sandbox.
 `stateful enable` opts a repo into enforcement, while disabled repos are no-ops
 for hooks and MCP. `stateful install --agent omp --yes` installs the OMP
 extension and MCP config into the isolated `stateful` OMP profile agent
@@ -446,9 +452,9 @@ The OMP extension covers `SessionStart`, `PreToolUse`, `PostToolUse`, and
 used by CLI and MCP calls. In Codex, `UserPromptSubmit` renders brief
 current-state context. `PreToolUse` authorizes supported tool actions; server-side
 authorization records an implicit session heartbeat for the checked session.
-`PostToolUse` records activity or heartbeats and refreshes same-session exact
-file lease observations after supported file tools complete. `Stop` posts
-`state.activity.finalize`, finalizing activity and releasing the session's
+Codex `PostToolUse` records activity or heartbeats and releases same-session
+repo-write leases after completed native edit and `write-targets` transactions; OMP `PostToolUse` records heartbeat/activity for supported tool results.
+`Stop` posts `state_activity_finalize`, finalizing activity and releasing the session's
 leases.
 
 Hooks use the runtime payload `session_id` as the Stateful session id. They
@@ -478,7 +484,7 @@ directory intent does not authorize them. Writes without matching active intent
 are denied, and active leases held by another session block conflicting writes.
 A blocked writer can queue with `queue_on_conflict`; after promotion, the
 reserved session must reread the target. Manual MCP/CLI flows claim with
-`state.intent.claim` / `stateful intent claim --wait-id <id>`, while native edit
+`state_intent_claim` / `stateful intent claim --wait-id <id>`, while native edit
 hooks and sandbox `write-targets` authorization can lazy-claim during the
 retried write.
 
@@ -491,13 +497,13 @@ successful same-session file lease. Hooks extract the native tool target, call
 authorizing lease after the completed write transaction.
 
 Codex raw Bash commands are denied by stateful hooks with sandbox guidance. For
-OMP, repo-internal raw Bash is blocked unless it uses the trusted sandbox-run
-read-only profile or explicit write targets; targetless repo-external OMP Bash
-warns with an external-run approval handoff. Bash tool calls for repo-internal
-shell work are authorized only when the outer command is a single strict
-invocation of the trusted absolute `stateful` binary running
-`<absolute-stateful-binary> sandbox run ... --command <cmd>`. Use agent-native
-read, search, and diff tools for ordinary read work when they are available.
+OMP, raw Bash is blocked unless it uses the trusted sandbox-run wrapper;
+targetless repo-external OMP Bash warns with guidance to use `stateful sandbox
+run --fs external --purpose ...`. Bash hook calls are authorized only when the
+outer command is a single strict invocation of the trusted absolute `stateful`
+binary running `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Use
+agent-native read, search, and diff tools for ordinary read work when they are
+available.
 When read-only inspection genuinely needs a shell through a Bash hook, use
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
 --command <cmd>`. Use `--fs write-targets` with explicit targets for Bash-hook
@@ -520,47 +526,41 @@ external scratch root, and points `CARGO_TARGET_DIR` at its `target` child;
 tools with other language-specific build directories should be configured to
 place those directories under the same scratch root.
 
-Other command-shaped writes should use
+Repo-internal command-shaped writes should use
 `stateful sandbox run --fs write-targets --write-target <path> ... --command <cmd>`,
 optionally with `--create-target` for files that should be pre-created before
-sandboxing. Artifact-producing commands that are not build/test commands should
-declare a scoped directory intent such as `tmp/reports/`, acquire the
-same-session directory lease, and use `--write-dir tmp/reports`. Inside a Bash
-hook tool call, the outer executable must be the trusted absolute binary path
-from the hook
-configuration, for example `<absolute-stateful-binary> sandbox run --fs
-write-targets ... --command <cmd>`. The wrapper authorizes `--write-target` and
-`--create-target` entries with `/v1/authorize` as `write_file`, and authorizes
-`--write-dir` entries as `write_directory`; if any target is denied, the command
-is not executed and the response includes both allowed and denied target lists.
-When all targets are allowed, the command runs through an OS sandbox with only
-the listed files or directory subtrees writable. This is write confinement, not
-full process containment: sandboxed commands can still read host files permitted
-by the OS sandbox profile. The hook and runner reject
-`--fs read-only --network enabled` so read-only shell inspection cannot combine
-broad host reads with network egress. macOS uses Seatbelt via
-`/usr/bin/sandbox-exec`; this is the verified first-class backend. Linux
-bubblewrap (`bwrap`) support is implemented with a read-only root bind plus
-writable file and directory binds, but it is experimental until it is verified
-in a Linux release environment.
+sandboxing. `--fs write-targets` targets are repo-relative and repo-internal;
+they require matching intent and a same-session lease. Artifact-producing
+commands that are not build/test commands should declare a scoped directory
+intent such as `tmp/reports/`, acquire the same-session directory lease, and use
+`--write-dir tmp/reports`. Inside a Bash hook tool call, the outer executable
+must be the trusted absolute binary path from the hook configuration, for
+example `<absolute-stateful-binary> sandbox run --fs write-targets ... --command
+<cmd>`. The wrapper authorizes `--write-target` and `--create-target` entries
+with `/v1/authorize` as `write_file`, and authorizes `--write-dir` entries as
+`write_directory`; if any target is denied, the command is not executed and the
+response includes both allowed and denied target lists. When all targets are
+allowed, the command runs through an OS sandbox with only the listed files or
+directory subtrees writable.
 
-Repo-external command-shaped writes use `stateful external-run`, not
-`sandbox run`. `external-run` classifies targets by normalized path: targets
-that resolve inside the repo are rejected, while targets outside the repo can
-be listed with `--write-target`, `--create-target`, or `--write-dir`. These
-requests do not require repo intent or lease. Codex prompts on the external-run
-request before execution:
+Repo-external command-shaped writes use the external sandbox profile:
 
 ```bash
-stateful external-run request \
+stateful sandbox run --fs external \
   --purpose "install rebuilt stateful binaries" \
   --write-dir "$HOME/.cargo/bin" \
   --command 'install -m 755 target/release/stateful "$HOME/.cargo/bin/stateful"'
 ```
 
-After approval, the command runs immediately and prints the external sandbox
-command result as JSON. In OMP, repo-external targetless Bash is reported as an
-approval-handoff case; use the external-run flow for writes outside the repo.
+External sandbox targets must be absolute paths that resolve outside the repo.
+They may be listed with `--write-target`, `--create-target`, or `--write-dir`;
+the profile also supports `--connect-socket`, `--allow-signal`, and `--network`
+for approved external operations. Repo-external writes do not require repo intent
+or a same-session lease, but Codex prompts on
+`stateful sandbox run --fs external --purpose ...` before execution. After
+approval, the command runs through the sandbox and prints the sandbox command
+result as JSON. In OMP, repo-external targetless Bash warns with guidance to use
+the external sandbox profile for writes outside the repo.
 
 ## HTTP And MCP Surface
 

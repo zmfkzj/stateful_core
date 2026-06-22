@@ -219,16 +219,17 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 `PreToolUse`:
 
 - deny supported write calls when the session has no active intent
-- deny Codex raw Bash with sandbox guidance. For OMP, block repo-internal raw
-  Bash unless it uses the trusted `stateful sandbox run` read-only profile or
-  explicit write targets; targetless repo-external OMP Bash returns a warning
-  that directs the agent to the external-run approval handoff. Hook-mediated
-  repo-internal shell execution must be a single strict invocation of the
-  trusted absolute `stateful` binary running
-  `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
-  command-shaped inspection uses `--fs read-only --network disabled`; the hook
-  rejects `--fs read-only --network enabled`. Command-shaped repo writes use
-  `--fs write-targets` with explicit write/create targets.
+- deny Codex raw Bash with sandbox guidance. For OMP, block raw Bash unless it
+  uses the trusted `stateful sandbox run` wrapper; targetless repo-external OMP
+  Bash returns a warning that directs the agent to
+  `stateful sandbox run --fs external --purpose ...`. Hook-mediated shell
+  execution must be a single strict invocation of the trusted absolute
+  `stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
+  <cmd>`. Read-only command-shaped inspection uses `--fs read-only --network
+  disabled`; the hook rejects `--fs read-only --network enabled`. Command-shaped
+  repo writes use `--fs write-targets` with explicit write/create targets and
+  repo intent plus same-session leases. Repo-external writes use `--fs external`
+  with absolute external targets and Codex approval.
 - check leases and planned edits for likely conflicts
 - return allow, warning context, or deny based on policy
 
@@ -245,31 +246,32 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 - post activity finalization for the session
 - release the session's leases through finalization
-- leave explicit `state.activity.finalize` available for manual final status
+- leave explicit `state_activity_finalize` available for manual final status
   updates before shutdown
 
 ## MCP Surface
 
-The v1 MCP/tool surface is intentionally narrow:
+The v1 MCP/tool surface is intentionally narrow. Canonical callable tool names
+map to dotted protocol names:
 
 ```text
-state.session.register
-state.session.heartbeat
-state.intent.declare
-state.intent.request
-state.intent.claim
-state.intent.cancel
-state.lease.acquire
-state.lease.release
-state.activity.observe
-state.activity.finalize
-state.conflicts.check
-state.current.read
-state.events.read
-state.context.render
-state.reconcile.ack
-state.notifications.poll
-state.resume.next
+state_session_register (state.session.register)
+state_session_heartbeat (state.session.heartbeat)
+state_intent_declare (state.intent.declare)
+state_intent_request (state.intent.request)
+state_intent_claim (state.intent.claim)
+state_intent_cancel (state.intent.cancel)
+state_lease_acquire (state.lease.acquire)
+state_lease_release (state.lease.release)
+state_activity_observe (state.activity.observe)
+state_activity_finalize (state.activity.finalize)
+state_conflicts_check (state.conflicts.check)
+state_current_read (state.current.read)
+state_events_read (state.events.read)
+state_context_render (state.context.render)
+state_reconcile_ack (state.reconcile.ack)
+state_notifications_poll (state.notifications.poll)
+state_resume_next (state.resume.next)
 ```
 
 Hooks and MCP tools should call the same state server API. Policy must live in
@@ -292,16 +294,16 @@ V1 enforcement is strict about write target extraction:
   `edit` and `write`: enforce by inspecting hook-exposed targets after exact
   intent declaration and a successful same-session file lease. The completed
   write transaction releases the lease that authorized it.
-- Bash commands: Codex raw Bash is denied with sandbox guidance. OMP
-  repo-internal raw Bash is blocked unless it is the trusted wrapper in
-  `read-only` mode with network disabled or `write-targets` mode with explicit
-  targets; targetless repo-external OMP Bash warns and directs the agent to the
-  external-run approval handoff. Ordinary read work should use native
-  read/search/diff tools when available. Read-only command-shaped inspection
-  that genuinely needs a shell uses `--fs read-only --network disabled`; the
-  read-only profile cannot enable network. Command-shaped repo writes use
-  `--fs write-targets` with explicit `--write-target` / `--create-target` values
-  and target authorization.
+- Bash commands: Codex raw Bash is denied with sandbox guidance. OMP raw Bash is
+  blocked unless it is the trusted sandbox wrapper; targetless repo-external OMP
+  Bash warns and directs the agent to `stateful sandbox run --fs external
+  --purpose ...`. Ordinary read work should use native read/search/diff tools
+  when available. Read-only command-shaped inspection that genuinely needs a
+  shell uses `--fs read-only --network disabled`; the read-only profile cannot
+  enable network. Command-shaped repo writes use `--fs write-targets` with
+  explicit `--write-target` / `--create-target` values and target authorization.
+  Repo-external writes use `--fs external` with absolute external targets, no
+  repo intent or lease, and Codex approval.
 - Test execution: run only through sandboxed test actions such as
   `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`.
   Build artifacts live under `/tmp/stateful/<session>/<purpose>/`.
@@ -534,7 +536,7 @@ Stale/Expired
 Raw event logs should not be dumped into prompts. The rendered view should help
 the agent decide what to avoid, wait for, or coordinate.
 
-`state.context.render` supports `brief` and `detailed` modes plus an optional
+`state_context_render` supports `brief` and `detailed` modes plus an optional
 resource filter. `brief` is for session start and prompt submit context.
 `detailed` is for denied actions or focused resource checks. Rendered output
 must include concrete next actions when a block or warning is present.
@@ -595,8 +597,8 @@ The system should prefer explicit uncertainty:
 - interrupted session -> keep last state until TTL expires
 - hook failure -> warn and fail closed only for high-risk writes
 - OMP stateful hook deny or unavailable result -> block, never warn because of
-  yolo metadata; the targetless repo-external Bash approval handoff is a
-  classified warning path, not a yolo override of a deny
+  yolo metadata; the targetless repo-external Bash warning directs agents to the
+  external sandbox profile, not to raw Bash
 - state server unavailable -> deny supported writes that cannot prove active
   intent
 - state server unavailable -> deny Codex raw Bash and repo-internal Bash that is

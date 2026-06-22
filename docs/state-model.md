@@ -374,7 +374,7 @@ records in v1.
 
 Promotion creates reservations, not active write authority. Each waiting session
 must reread the target. Manual MCP/CLI flows then explicitly claim the
-reservation with `state.intent.claim` or `stateful intent claim --wait-id <id>`;
+reservation with `state_intent_claim` or `stateful intent claim --wait-id <id>`;
 native edit hooks and sandbox `write-targets` authorization can lazy-claim it at
 the retried write boundary. Claiming creates write-authorizing intent and active
 same-session leases. The default reservation TTL is 120 seconds. If a
@@ -382,9 +382,9 @@ reservation is not claimed before `reservation_expires_at`, the reservation
 expires and the server may promote the next eligible FIFO waiter.
 
 Reservation notifications are delivery hints, not the durable reservation
-record. `stateful notifications poll` / `state.notifications.poll` returns each
+record. `stateful notifications poll` / `state_notifications_poll` returns each
 pending notification once and marks it delivered. If the client misses that
-response, `stateful resume next` / `state.resume.next` can still rediscover the
+response, `stateful resume next` / `state_resume_next` can still rediscover the
 active reservation until it is claimed or expires.
 
 For target multi-resource requests, a request is eligible only when it is at the
@@ -624,11 +624,12 @@ When the state server is unavailable, coordination must fail closed for agent
 write authorization and fail open for human saves.
 
 - Supported writes are denied.
-- Codex raw Bash and repo-internal Bash calls that are not a strict
+- Codex raw Bash and Bash calls that are not a strict
   `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper are
-  denied. Targetless repo-external OMP Bash is a warning path that directs the
-  external-run approval handoff. Command-shaped repo writes through
-  `--fs write-targets` fail closed when target authorization cannot be proven.
+  denied. Targetless repo-external OMP Bash is a warning path that directs
+  agents to `sandbox run --fs external --purpose ...`. Command-shaped repo
+  writes through `--fs write-targets` fail closed when target authorization
+  cannot be proven.
 - write-target sandbox authorization fails closed and does not execute the
   command.
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block.
@@ -693,7 +694,7 @@ Expected materialized views:
 - finalization summaries by session
 - prompt context package for Codex hooks and MCP tools
 
-The current server exposes `/v1/context/render` and `state.context.render` as a
+The current server exposes `/v1/context/render` and `state_context_render` as a
 store-backed live view over active intents, active leases, and queued or reserved
 wait records. Responses include current summary counts, structured `items`, and
 prompt-ready `prompt_text`; an empty live state produces an empty prompt.

@@ -344,7 +344,26 @@ fn pre_tool_use_requires_read_only_sandbox_for_shell_read_fallback() {
 }
 
 #[test]
-fn pre_tool_use_allows_external_run_request_for_repo_external_write_approval_path() {
+fn pre_tool_use_allows_sandbox_external_for_repo_external_write_approval_path() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs external --purpose 'write external artifact' --write-target /tmp/stateful-outside.txt --command 'printf ok > /tmp/stateful-outside.txt'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_denies_external_run_request_for_repo_external_write() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "s1",
@@ -359,7 +378,7 @@ fn pre_tool_use_allows_external_run_request_for_repo_external_write_approval_pat
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_denial_mentions(outcome, "stateful sandbox run");
 }
 
 #[test]
@@ -940,7 +959,7 @@ fn pre_tool_use_denies_tmux_send_keys_even_for_benchmark_sessions() {
 }
 
 #[test]
-fn pre_tool_use_allows_external_run_request() {
+fn pre_tool_use_denies_external_run_request() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "s1",
@@ -955,7 +974,7 @@ fn pre_tool_use_allows_external_run_request() {
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_eq!(outcome, HookOutcome::Allow);
+    assert_bash_denial_mentions(outcome, "stateful sandbox run");
 }
 
 #[test]
@@ -974,7 +993,7 @@ fn pre_tool_use_denies_external_run_approve_and_run() {
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "stateful external-run supports only request");
+    assert_bash_denial_mentions(outcome, "stateful sandbox run");
 }
 
 #[test]
@@ -993,7 +1012,7 @@ fn pre_tool_use_denies_external_run_run() {
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "stateful external-run supports only request");
+    assert_bash_denial_mentions(outcome, "stateful sandbox run");
 }
 
 #[test]
@@ -1048,6 +1067,7 @@ fn pre_tool_use_allows_trusted_stateful_server_control() {
         assert_eq!(outcome, HookOutcome::Allow);
     }
 }
+
 #[test]
 fn pre_tool_use_denies_external_run_with_outer_command_separator() {
     let stateful = trusted_stateful_path();
@@ -1064,7 +1084,7 @@ fn pre_tool_use_denies_external_run_with_outer_command_separator() {
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(outcome, "single stateful command");
+    assert_bash_denial_mentions(outcome, "single stateful sandbox run command");
 }
 
 #[test]
@@ -1153,7 +1173,7 @@ fn pre_tool_use_denies_invalid_nested_codex_benchmark_sandbox_wrappers() {
             format!(
                 "{stateful} sandbox run --fs relaxed --network enabled --write-dir target --command 'cargo test'"
             ),
-            "supports only read-only, write-targets, build, git, and github-pr profiles",
+            "supports only read-only, write-targets, external, build, git, and github-pr profiles",
         ),
         (
             "build profile with explicit write target",
@@ -1257,7 +1277,7 @@ fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
         (
             "invalid fs",
             format!("{stateful} sandbox run --fs read-write --command 'rg auth src'"),
-            "supports only read-only, write-targets, build, git, and github-pr profiles",
+            "supports only read-only, write-targets, external, build, git, and github-pr profiles",
         ),
         (
             "invalid network",
@@ -2069,6 +2089,7 @@ fn pre_tool_use_allows_known_non_repo_write_tools_without_runtime() {
         "tool_search",
         "tool_search_tool",
         "get_goal",
+        "search_tool_bm25",
         "create_goal",
         "update_goal",
         "request_user_input",
@@ -2661,8 +2682,20 @@ fn omp_repo_internal_bash_requires_sandbox_run_for_reads_and_write_targets() {
 }
 
 #[test]
-fn omp_allows_classified_read_only_tools() {
-    for tool_name in ["read", "find", "grep"] {
+fn omp_allows_classified_read_only_and_stateful_activation_tools() {
+    for tool_name in [
+        "read",
+        "find",
+        "grep",
+        "search",
+        "web_search",
+        "browser",
+        "search_tool_bm25",
+        "mcp__stateful_state_current_read",
+        "mcp__stateful_state_intent_declare",
+        "state_current_read",
+        "state_intent_declare",
+    ] {
         let input = serde_json::json!({
             "session_id": "omp-parent",
             "cwd": "/repo",
@@ -3960,10 +3993,10 @@ fn pre_tool_use_apply_patch_denial_includes_wait_id_guidance() {
     assert!(reason.contains("wait-123"));
     assert!(reason.contains("queue position 2"));
     assert!(reason.contains("blocked by session s2"));
-    assert!(reason.contains("state.notifications.poll"));
-    assert!(reason.contains("state.resume.next"));
+    assert!(reason.contains("state_notifications_poll"));
+    assert!(reason.contains("state_resume_next"));
     assert!(reason.contains("reread"));
-    assert!(reason.contains("state.intent.claim"));
+    assert!(reason.contains("state_intent_claim"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
