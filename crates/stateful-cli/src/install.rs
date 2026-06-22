@@ -12,6 +12,7 @@ use std::{
 };
 
 use anyhow::Context;
+use serde_json::json;
 
 use crate::{GlobalPaths, RepoRegistry};
 
@@ -31,6 +32,14 @@ pub struct CodexInstallOptions {
     pub paths: GlobalPaths,
     pub codex_config_path: PathBuf,
     pub binary_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OmpInstallOptions {
+    pub yes: bool,
+    pub paths: GlobalPaths,
+    pub binary_path: String,
+    pub project_config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +161,72 @@ pub fn apply_codex_install(options: CodexInstallOptions) -> anyhow::Result<Insta
         options.codex_config_path.display()
     );
 
+    Ok(plan)
+}
+
+pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPlan> {
+    let mode = if options.yes { "apply" } else { "dry-run" };
+    let mut plan = plan_global_install(&InstallOptions {
+        yes: options.yes,
+        paths: options.paths.clone(),
+    })?;
+    let agent_dir = default_omp_agent_dir(&options.paths);
+    let config_path = options
+        .project_config_path
+        .clone()
+        .unwrap_or_else(|| agent_dir.join("config.yml"));
+    let extension_path = agent_dir
+        .join("extensions")
+        .join("stateful-omp-extension.js");
+    let mcp_path = agent_dir.join("mcp.json");
+    plan.summary = format!(
+        "{mode}: install stateful global files under {} and configure OMP",
+        options.paths.home.display()
+    );
+    plan.files.push(config_path);
+    plan.files.push(extension_path);
+    plan.files.push(mcp_path);
+    Ok(plan)
+}
+
+pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPlan> {
+    validate_no_control_chars(&options.binary_path)?;
+    let mut plan = plan_omp_install(&options)?;
+    if !options.yes {
+        return Ok(plan);
+    }
+
+    apply_global_install(InstallOptions {
+        yes: true,
+        paths: options.paths.clone(),
+    })?;
+    let agent_dir = default_omp_agent_dir(&options.paths);
+    let config_path = options
+        .project_config_path
+        .clone()
+        .unwrap_or_else(|| agent_dir.join("config.yml"));
+    let extension_path = agent_dir
+        .join("extensions")
+        .join("stateful-omp-extension.js");
+    let mcp_path = agent_dir.join("mcp.json");
+    fs::create_dir_all(
+        extension_path
+            .parent()
+            .expect("extension path should have parent"),
+    )?;
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = mcp_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_omp_config(&config_path, &extension_path)?;
+    write_omp_extension(&extension_path, &options.binary_path)?;
+    write_omp_mcp_config(&mcp_path, &options.binary_path)?;
+    plan.summary = format!(
+        "apply: installed stateful global files under {} and configured OMP",
+        options.paths.home.display()
+    );
     Ok(plan)
 }
 
@@ -803,6 +878,49 @@ fn write_text_file_with_mode(path: &Path, contents: &str, _mode: Option<()>) -> 
 }
 
 #[cfg(unix)]
+fn private_file_mode() -> Option<u32> {
+    Some(0o600)
+}
+
+#[cfg(not(unix))]
+fn private_file_mode() -> Option<()> {
+    None
+}
+
+#[cfg(unix)]
+fn write_or_replace_text_file_with_mode(
+    path: &Path,
+    contents: &str,
+    mode: Option<u32>,
+) -> anyhow::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    if let Some(mode) = mode {
+        options.mode(mode);
+    }
+
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    if let Some(mode) = mode {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_or_replace_text_file_with_mode(
+    path: &Path,
+    contents: &str,
+    _mode: Option<()>,
+) -> anyhow::Result<()> {
+    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))
+}
+
+#[cfg(unix)]
 fn file_mode(path: &Path) -> anyhow::Result<Option<u32>> {
     if !path.exists() {
         return Ok(None);
@@ -845,7 +963,7 @@ fn global_codex_config_block(
     include_features_section: bool,
 ) -> anyhow::Result<String> {
     let quoted_binary = shell_quote_posix(binary_path)?;
-    let hook_prefix = format!("{quoted_binary} hook");
+    let hook_prefix = format!("{quoted_binary} hook codex");
     let features_section = if include_features_section {
         "[features]\nhooks = true\n\n"
     } else {
@@ -930,6 +1048,180 @@ prefix_rule(
 {GLOBAL_CODEX_BLOCK_END}
 "#
     ))
+}
+
+fn default_omp_agent_dir(paths: &GlobalPaths) -> PathBuf {
+    paths.home.join(".omp").join("agent")
+}
+
+fn write_or_create_text_file(config_path: &Path, contents: &str) -> anyhow::Result<()> {
+    if config_path.exists() {
+        fs::write(config_path, contents).with_context(|| {
+            format!(
+                "failed to write existing OMP config {}",
+                config_path.display()
+            )
+        })
+    } else {
+        write_text_file_with_mode(config_path, contents, private_file_mode())
+    }
+}
+
+fn write_omp_config(config_path: &Path, extension_path: &Path) -> anyhow::Result<()> {
+    let extension = extension_path.to_string_lossy();
+    let entry = format!("  - {extension}");
+    let mut contents = if config_path.exists() {
+        fs::read_to_string(config_path).with_context(|| {
+            format!(
+                "failed to read existing OMP config {}",
+                config_path.display()
+            )
+        })?
+    } else {
+        String::new()
+    };
+
+    if !contents.lines().any(|line| line.trim() == entry.trim()) {
+        if let Some(offset) = contents
+            .lines()
+            .position(|line| line.trim() == "extensions:")
+        {
+            let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
+            lines.insert(offset + 1, entry);
+            contents = lines.join("\n");
+            contents.push('\n');
+        } else {
+            if !contents.is_empty() && !contents.ends_with('\n') {
+                contents.push('\n');
+            }
+            contents.push_str("extensions:\n");
+            contents.push_str(&entry);
+            contents.push('\n');
+        }
+    }
+
+    let contents = ensure_omp_approval_mode(contents);
+    write_or_create_text_file(config_path, &contents)
+}
+
+fn ensure_omp_approval_mode(mut contents: String) -> String {
+    let mut tools_offset = None;
+    let mut in_tools = false;
+    for (index, line) in contents.lines().enumerate() {
+        let trimmed = line.trim();
+        let is_top_level = !line.starts_with(char::is_whitespace);
+        if is_top_level && trimmed == "tools:" {
+            tools_offset = Some(index);
+            in_tools = true;
+            continue;
+        }
+        if in_tools && is_top_level && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            in_tools = false;
+        }
+        if in_tools && trimmed.starts_with("approvalMode:") {
+            return contents;
+        }
+    }
+
+    if let Some(offset) = tools_offset {
+        let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
+        lines.insert(offset + 1, "  approvalMode: yolo".to_string());
+        contents = lines.join("\n");
+        contents.push('\n');
+        return contents;
+    }
+
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str("tools:\n  approvalMode: yolo\n");
+    contents
+}
+
+fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Result<()> {
+    let binary_json = serde_json::to_string(binary_path)?;
+    let contents = format!(
+        r#"const {{ spawnSync }} = require("node:child_process");
+
+const STATEFUL = {binary_json};
+
+function runStatefulHook(event, payload) {{
+  const result = spawnSync(STATEFUL, ["hook", "omp", event], {{
+    input: JSON.stringify(payload),
+    encoding: "utf8",
+  }});
+  if (result.status !== 0) {{
+    return {{ decision: "warn", reason: result.stderr || "stateful hook failed" }};
+  }}
+  const text = (result.stdout || "").trim();
+  return text ? JSON.parse(text) : {{ decision: "allow" }};
+}}
+
+function isYolo(event, ctx) {{
+  const values = [
+    event?.yolo,
+    event?.autoApprove,
+    event?.approvalMode,
+    ctx?.yolo,
+    ctx?.autoApprove,
+    ctx?.approvalMode,
+    ctx?.config?.approvalMode,
+    ctx?.config?.tools?.approvalMode,
+  ];
+  return values.some((value) => value === true || value === "yolo" || value === "auto-approve");
+}}
+
+module.exports = function statefulOmpExtension(pi) {{
+  pi.setLabel("Stateful");
+  pi.on("session_start", async (event, ctx) => {{
+    runStatefulHook("session-start", {{
+      session_id: event?.sessionId || ctx?.sessionManager?.session?.id || "omp-session",
+      cwd: ctx.cwd,
+    }});
+  }});
+  pi.on("tool_call", async (event, ctx) => {{
+    const decision = runStatefulHook("pre-tool-use", {{
+      session_id: event?.sessionId || ctx?.sessionManager?.session?.id || "omp-session",
+      cwd: ctx.cwd,
+      yolo: isYolo(event, ctx),
+      tool_name: event.toolName,
+      tool_input: event.input || {{}},
+    }});
+    if (decision.decision === "block") {{
+      return {{ block: true, reason: decision.reason }};
+    }}
+  }});
+  pi.on("tool_result", async (event, ctx) => {{
+    runStatefulHook("post-tool-use", {{
+      session_id: event?.sessionId || ctx?.sessionManager?.session?.id || "omp-session",
+      cwd: ctx.cwd,
+      tool_name: event.toolName,
+      tool_input: event.input || {{}},
+    }});
+  }});
+  pi.on("session_shutdown", async (event, ctx) => {{
+    runStatefulHook("stop", {{
+      session_id: event?.sessionId || ctx?.sessionManager?.session?.id || "omp-session",
+      cwd: ctx.cwd,
+    }});
+  }});
+}};
+"#
+    );
+    write_or_replace_text_file_with_mode(extension_path, &contents, private_file_mode())
+}
+
+fn write_omp_mcp_config(mcp_path: &Path, binary_path: &str) -> anyhow::Result<()> {
+    let contents = serde_json::to_string_pretty(&json!({
+        "mcpServers": {
+            "stateful": {
+                "type": "stdio",
+                "command": binary_path,
+                "args": ["mcp", "serve"]
+            }
+        }
+    }))?;
+    write_or_replace_text_file_with_mode(mcp_path, &format!("{contents}\n"), private_file_mode())
 }
 
 fn shell_quote_posix(value: &str) -> anyhow::Result<String> {

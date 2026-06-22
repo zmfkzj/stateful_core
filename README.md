@@ -386,9 +386,9 @@ installation health.
   `stateful sandbox run --fs write-targets ... --command ...` for
   command-shaped writes.
 - `stateful sync-outbox` replays pending local outbox records to the server.
-- `stateful hook <event>` runs Codex hook integration entry points:
+- `stateful hook codex <event>` runs Codex hook integration entry points:
   `session-start`, `user-prompt-submit`, `pre-tool-use`, `post-tool-use`, and
-  `stop`.
+  `stop`. `stateful hook omp <event>` exposes OMP extension entry points.
 
 Run `stateful <command> --help` for command-specific options.
 
@@ -400,7 +400,10 @@ default to automatic approval. Repo-external writes remain gated by a Codex
 execpolicy prompt for `stateful external-run request`; after that approval, the
 request validates the normalized external write scope and runs immediately.
 `stateful enable` opts a repo into enforcement, while disabled repos are no-ops
-for hooks and MCP.
+for hooks and MCP. `stateful install --agent omp --yes` installs the OMP
+extension and MCP config under `$STATEFUL_HOME/.omp/agent` (default
+`~/.stateful_core/.omp/agent`), and sets `tools.approvalMode: yolo` so plain
+`omp` launches expose the stateful approval context to the extension.
 
 The generated hook configuration covers:
 

@@ -20,10 +20,10 @@ use crate::shell_command::{
     first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
 };
 use crate::{
-    CurrentSession, GlobalPaths, HookCommand, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
-    ServerRuntime, discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server,
-    get_json, post_json, protocol_envelope, record_unclassified_tool_for_repo, repo_gate,
-    repo_identity_for_enabled_repo, runtime_env_override_is_configured,
+    CurrentSession, GlobalPaths, HookCommand, HookRuntime, ProtocolEnvelopeArgs, RepoGate,
+    RepoIdentity, ServerRuntime, discover_runtime_with_global, effective_workspace_id_for_repo,
+    ensure_server, get_json, post_json, protocol_envelope, record_unclassified_tool_for_repo,
+    repo_gate, repo_identity_for_enabled_repo, runtime_env_override_is_configured,
     tool_allowed_for_enabled_repo,
 };
 
@@ -32,6 +32,40 @@ pub enum HookOutcome {
     Allow,
     AllowWithContext { message: String },
     Deny { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OmpHookOutcome {
+    Allow,
+    WarnAllow { reason: String },
+    Block { reason: String },
+}
+
+impl OmpHookOutcome {
+    fn yolo_downgrade(reason: impl Into<String>) -> Self {
+        Self::WarnAllow {
+            reason: format!(
+                "stateful authorization denied but OMP yolo is active: {}",
+                reason.into()
+            ),
+        }
+    }
+}
+
+impl OmpHookOutcome {
+    fn to_stdout_json(&self) -> serde_json::Value {
+        match self {
+            Self::Allow => json!({ "decision": "allow" }),
+            Self::WarnAllow { reason } => json!({
+                "decision": "warn",
+                "reason": reason,
+            }),
+            Self::Block { reason } => json!({
+                "decision": "block",
+                "reason": reason,
+            }),
+        }
+    }
 }
 
 #[cfg(feature = "codex-benchmark")]
@@ -81,7 +115,64 @@ impl HookOutcome {
     }
 }
 
-pub fn run_hook(command: HookCommand) -> anyhow::Result<()> {
+pub fn run_hook(runtime: HookRuntime) -> anyhow::Result<()> {
+    match runtime {
+        HookRuntime::Codex { command } => run_codex_hook(command),
+        HookRuntime::Omp { command } => run_omp_hook(command),
+    }
+}
+
+fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
+    let start = hook_start_dir(&input)?;
+    let paths = GlobalPaths::from_env()?;
+    let repo_root = match repo_gate(&paths, &start)? {
+        RepoGate::Enabled { repo_root } => repo_root,
+        RepoGate::Disabled | RepoGate::OutsideGitRepo => {
+            if matches!(command, HookCommand::PreToolUse) {
+                println!("{}", json!({ "decision": "allow" }));
+            }
+            return Ok(());
+        }
+    };
+    if !runtime_env_override_is_configured() {
+        ensure_server(&paths)?;
+    }
+    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
+
+    match command {
+        HookCommand::PreToolUse => {
+            let outcome = handle_omp_pre_tool_use_with_runtime(
+                &input,
+                Some(&runtime),
+                Some(&repo_root),
+                Some(start.as_path()),
+            )?;
+            println!("{}", outcome.to_stdout_json());
+        }
+        HookCommand::SessionStart => {
+            if let Err(error) = handle_omp_session_start_with_runtime(&input, &runtime) {
+                eprintln!("stateful omp session-start warning: {error}");
+            }
+        }
+        HookCommand::PostToolUse => {
+            if let Err(error) = handle_omp_post_tool_use_with_runtime(&input, &runtime) {
+                eprintln!("stateful omp post-tool-use warning: {error}");
+            }
+        }
+        HookCommand::Stop => {
+            let input: OmpSessionEventInput = serde_json::from_str(&input)?;
+            post_omp_session_event(&runtime, "/v1/activity/finalize", "omp_stop", &input)?;
+        }
+        HookCommand::UserPromptSubmit => {
+            anyhow::bail!("OMP hook user-prompt-submit is not supported");
+        }
+    }
+    Ok(())
+}
+
+fn run_codex_hook(command: HookCommand) -> anyhow::Result<()> {
     match command {
         HookCommand::SessionStart => {
             let mut input = String::new();
@@ -147,6 +238,350 @@ pub fn handle_pre_tool_use_in_repo(
         Some(&repo_root),
         Some(start.as_path()),
     )
+}
+
+pub fn handle_omp_pre_tool_use_with_runtime(
+    input: &str,
+    runtime: Option<&ServerRuntime>,
+    repo_root: Option<&Path>,
+    cwd: Option<&Path>,
+) -> anyhow::Result<OmpHookOutcome> {
+    let input: OmpPreToolUseInput = serde_json::from_str(input)?;
+    match omp_pre_tool_action(&input, repo_root, cwd)? {
+        OmpPreToolAction::Allow => Ok(OmpHookOutcome::Allow),
+        OmpPreToolAction::WarnAllow { reason } => Ok(OmpHookOutcome::WarnAllow { reason }),
+        OmpPreToolAction::Block { reason } => Ok(OmpHookOutcome::Block { reason }),
+        OmpPreToolAction::Targets(targets) => {
+            authorize_omp_targets(&input, runtime, repo_root, cwd, targets)
+        }
+    }
+}
+
+enum OmpPreToolAction {
+    Targets(Vec<PatchTarget>),
+    Allow,
+    WarnAllow { reason: String },
+    Block { reason: String },
+}
+
+fn omp_pre_tool_action(
+    input: &OmpPreToolUseInput,
+    repo_root: Option<&Path>,
+    cwd: Option<&Path>,
+) -> anyhow::Result<OmpPreToolAction> {
+    match input.tool_name.as_str() {
+        "write" => {
+            let Some(path) = input
+                .tool_input
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            else {
+                return Ok(OmpPreToolAction::Block {
+                    reason: "write requires a path target for stateful authorization".to_string(),
+                });
+            };
+            Ok(OmpPreToolAction::Targets(vec![PatchTarget::write(path)]))
+        }
+        "edit" => {
+            let targets = extract_omp_edit_targets(&input.tool_input);
+            if targets.is_empty() {
+                return Ok(OmpPreToolAction::Block {
+                    reason: "edit requires hashline file targets for stateful authorization"
+                        .to_string(),
+                });
+            }
+            Ok(OmpPreToolAction::Targets(targets))
+        }
+        "bash" => {
+            let command = input.command().unwrap_or_default();
+            let targets = extract_omp_bash_explicit_targets(command);
+            if !targets.is_empty() {
+                return Ok(OmpPreToolAction::Targets(targets));
+            }
+            if is_omp_read_like_bash(command) {
+                return Ok(OmpPreToolAction::Allow);
+            }
+            if !cwd_is_inside_repo(repo_root, cwd) {
+                return Ok(OmpPreToolAction::WarnAllow {
+                    reason: "targetless repo-external bash requires OMP approval handoff"
+                        .to_string(),
+                });
+            }
+            if input.yolo {
+                return Ok(OmpPreToolAction::WarnAllow {
+                    reason: "targetless repo-internal bash allowed because OMP yolo is active"
+                        .to_string(),
+                });
+            }
+            Ok(OmpPreToolAction::Block {
+                reason: "targetless repo-internal bash requires explicit stateful write targets"
+                    .to_string(),
+            })
+        }
+        _ if input.yolo => Ok(OmpPreToolAction::WarnAllow {
+            reason: format!(
+                "unclassified OMP tool {} allowed because OMP yolo is active",
+                input.tool_name
+            ),
+        }),
+        _ => Ok(OmpPreToolAction::Block {
+            reason: format!(
+                "unclassified OMP tool {} may write or execute and requires explicit stateful classification",
+                input.tool_name
+            ),
+        }),
+    }
+}
+
+fn authorize_omp_targets(
+    input: &OmpPreToolUseInput,
+    runtime: Option<&ServerRuntime>,
+    repo_root: Option<&Path>,
+    cwd: Option<&Path>,
+    targets: Vec<PatchTarget>,
+) -> anyhow::Result<OmpHookOutcome> {
+    let Some(targets) = normalize_targets(targets, repo_root, cwd)? else {
+        return Ok(OmpHookOutcome::Block {
+            reason: format!("{} target is outside the enabled repo", input.tool_name),
+        });
+    };
+
+    let Some(runtime) = runtime else {
+        let reason = format!(
+            "{} writes require a reachable stateful server, exact file intent, and a same-session file lease",
+            input.tool_name
+        );
+        return Ok(if input.yolo {
+            OmpHookOutcome::yolo_downgrade(reason)
+        } else {
+            OmpHookOutcome::Block { reason }
+        });
+    };
+
+    let workspace_id = input
+        .workspace_id
+        .clone()
+        .unwrap_or_else(|| runtime.workspace_id.clone());
+    for target in targets {
+        let mut payload = json!({
+            "action": target.action,
+            "path": target.path,
+        });
+        if let Some(new_path) = &target.new_path {
+            payload["old_path"] = json!(target.path);
+            payload["new_path"] = json!(new_path);
+        }
+        let mut body = protocol_envelope(ProtocolEnvelopeArgs {
+            runtime,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            session_id: input.session_id.clone(),
+            workspace_id: workspace_id.clone(),
+            identity: None,
+            source_kind: "hook",
+            event: "omp_pre_tool_use",
+            source_ref: "hook:omp_pre_tool_use",
+            source_tool_name: Some(input.tool_name.as_str()),
+            payload,
+        });
+        body["metadata"] = input.audit_metadata();
+
+        let response = match post_json(runtime, "/v1/authorize", &body) {
+            Ok(response) => response,
+            Err(error) => {
+                let reason = authorization_unavailable_reason(&error);
+                return Ok(if input.yolo {
+                    OmpHookOutcome::yolo_downgrade(reason)
+                } else {
+                    OmpHookOutcome::Block { reason }
+                });
+            }
+        };
+
+        if !(200..300).contains(&response.status_code) {
+            let reason = format!(
+                "stateful authorization failed with HTTP {}: {}",
+                response.status_code, response.body
+            );
+            return Ok(if input.yolo {
+                OmpHookOutcome::yolo_downgrade(reason)
+            } else {
+                OmpHookOutcome::Block { reason }
+            });
+        }
+
+        let decision: AuthorizeDecision = match serde_json::from_str(&response.body) {
+            Ok(decision) => decision,
+            Err(error) => {
+                let reason = authorization_unavailable_reason(&error);
+                return Ok(if input.yolo {
+                    OmpHookOutcome::yolo_downgrade(reason)
+                } else {
+                    OmpHookOutcome::Block { reason }
+                });
+            }
+        };
+        if decision.decision != "allow" {
+            let reason = authorization_denial_reason(decision);
+            return Ok(if input.yolo {
+                OmpHookOutcome::yolo_downgrade(reason)
+            } else {
+                OmpHookOutcome::Block { reason }
+            });
+        }
+    }
+
+    Ok(OmpHookOutcome::Allow)
+}
+
+fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {
+    let Some(edit_input) = input.get("input").and_then(serde_json::Value::as_str) else {
+        return Vec::new();
+    };
+    edit_input
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let header = line.strip_prefix('[')?.strip_suffix(']')?;
+            let (path, _) = header.split_once('#')?;
+            let path = path.trim();
+            (!path.is_empty()).then(|| PatchTarget::write(path))
+        })
+        .collect()
+}
+
+fn extract_omp_bash_explicit_targets(command: &str) -> Vec<PatchTarget> {
+    let Ok(words) = split_simple_command_words(command) else {
+        return Vec::new();
+    };
+    let Some(executable) = words.first() else {
+        return Vec::new();
+    };
+    if !is_trusted_stateful_executable(executable) {
+        return Vec::new();
+    }
+    if !words.iter().any(|word| word == "sandbox") || !words.iter().any(|word| word == "run") {
+        return Vec::new();
+    }
+
+    let mut targets = Vec::new();
+    let mut index = 0;
+    while index < words.len() {
+        match words[index].as_str() {
+            "--write-target" | "--create-target" => {
+                if let Some(path) = words.get(index + 1) {
+                    targets.push(PatchTarget::write(path));
+                }
+                index += 2;
+            }
+            "--write-dir" => {
+                if let Some(path) = words.get(index + 1) {
+                    targets.push(PatchTarget::write_directory(path));
+                }
+                index += 2;
+            }
+            _ => index += 1,
+        }
+    }
+    targets
+}
+
+fn is_omp_read_like_bash(command: &str) -> bool {
+    if reject_outer_shell_syntax(
+        command,
+        "OMP bash read-like commands must be single commands",
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let Ok(words) = split_simple_command_words(command) else {
+        return false;
+    };
+    if words.iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint" | "-fprint0"
+        ) || word.starts_with("-fprintf")
+            || word.starts_with("-fls")
+    }) {
+        return false;
+    }
+    matches!(
+        words.first().map(String::as_str),
+        Some("pwd" | "ls" | "find" | "stat" | "wc")
+    )
+}
+
+fn cwd_is_inside_repo(repo_root: Option<&Path>, cwd: Option<&Path>) -> bool {
+    let Some(repo_root) = repo_root else {
+        return true;
+    };
+    let base = cwd.unwrap_or(repo_root);
+    let repo_root = normalize_path(
+        repo_root
+            .canonicalize()
+            .unwrap_or_else(|_| repo_root.to_path_buf()),
+    );
+    let base = normalize_path(base.canonicalize().unwrap_or_else(|_| base.to_path_buf()));
+    base.starts_with(repo_root)
+}
+
+pub fn handle_omp_session_start_with_runtime(
+    input: &str,
+    runtime: &ServerRuntime,
+) -> anyhow::Result<()> {
+    let input: OmpSessionEventInput = serde_json::from_str(input)?;
+    post_omp_session_event(runtime, "/v1/session/register", "omp_session_start", &input)
+}
+
+pub fn handle_omp_post_tool_use_with_runtime(
+    input: &str,
+    runtime: &ServerRuntime,
+) -> anyhow::Result<()> {
+    let input: OmpSessionEventInput = serde_json::from_str(input)?;
+    post_omp_session_event(
+        runtime,
+        "/v1/session/heartbeat",
+        "omp_post_tool_use",
+        &input,
+    )
+}
+
+fn post_omp_session_event(
+    runtime: &ServerRuntime,
+    path: &str,
+    event: &str,
+    input: &OmpSessionEventInput,
+) -> anyhow::Result<()> {
+    let workspace_id = input
+        .workspace_id
+        .clone()
+        .unwrap_or_else(|| runtime.workspace_id.clone());
+    let mut body = protocol_envelope(ProtocolEnvelopeArgs {
+        runtime,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        session_id: input.session_id.clone(),
+        workspace_id,
+        identity: None,
+        source_kind: "hook",
+        event,
+        source_ref: "hook:omp_session",
+        source_tool_name: input.tool_name.as_deref(),
+        payload: json!({}),
+    });
+    body["metadata"] = input.audit_metadata();
+
+    let response = post_json(runtime, path, &body)?;
+    if !(200..300).contains(&response.status_code) {
+        anyhow::bail!(
+            "OMP session event failed with HTTP {}: {}",
+            response.status_code,
+            response.body
+        );
+    }
+    Ok(())
 }
 
 fn prepare_pre_tool_use_runtime(
@@ -1824,6 +2259,14 @@ impl PatchTarget {
         }
     }
 
+    fn write_directory(path: &str) -> Self {
+        Self {
+            action: "write_directory",
+            path: path.trim().to_string(),
+            new_path: None,
+        }
+    }
+
     fn delete(path: &str) -> Self {
         Self {
             action: "delete_file",
@@ -1880,6 +2323,74 @@ fn normalize_path(path: PathBuf) -> PathBuf {
         }
     }
     normalized
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OmpPreToolUseInput {
+    session_id: String,
+    #[serde(default)]
+    parent_session_id: Option<String>,
+    #[serde(default)]
+    omp_agent_id: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    yolo: bool,
+    #[serde(default)]
+    commit_id: Option<String>,
+    tool_name: String,
+    #[serde(default)]
+    tool_input: serde_json::Value,
+}
+
+impl OmpPreToolUseInput {
+    fn audit_metadata(&self) -> serde_json::Value {
+        json!({
+            "runtime": "omp",
+            "parent_session_id": self.parent_session_id,
+            "omp_agent_id": self.omp_agent_id,
+            "commit_id": self.commit_id,
+            "cwd": self.cwd,
+        })
+    }
+
+    fn command(&self) -> Option<&str> {
+        self.tool_input.get("command")?.as_str()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OmpSessionEventInput {
+    session_id: String,
+    #[serde(default)]
+    parent_session_id: Option<String>,
+    #[serde(default)]
+    omp_agent_id: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    commit_id: Option<String>,
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(default)]
+    tool_input: serde_json::Value,
+}
+
+impl OmpSessionEventInput {
+    fn audit_metadata(&self) -> serde_json::Value {
+        json!({
+            "runtime": "omp",
+            "parent_session_id": self.parent_session_id,
+            "omp_agent_id": self.omp_agent_id,
+            "commit_id": self.commit_id,
+            "cwd": self.cwd,
+            "raw_runtime_payload": self.tool_input,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]

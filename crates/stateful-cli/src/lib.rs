@@ -29,13 +29,15 @@ pub use commit::{CommitRequest, CommitResult, run_structured_commit};
 pub use external_run::{ExternalRunRequest, request_external_run};
 pub use global_paths::GlobalPaths;
 pub use hook::{
-    HookOutcome, handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
+    HookOutcome, OmpHookOutcome, handle_omp_post_tool_use_with_runtime,
+    handle_omp_pre_tool_use_with_runtime, handle_omp_session_start_with_runtime,
+    handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
     handle_session_start_in_repo, handle_stop_in_repo, handle_user_prompt_submit_in_repo,
 };
 pub use install::{
-    CodexInstallOptions, InstallOptions, InstallPlan, apply_codex_install, apply_global_install,
-    current_stateful_binary_path, default_codex_config_path, plan_codex_install,
-    plan_global_install,
+    CodexInstallOptions, InstallOptions, InstallPlan, OmpInstallOptions, apply_codex_install,
+    apply_global_install, apply_omp_install, current_stateful_binary_path,
+    default_codex_config_path, plan_codex_install, plan_global_install, plan_omp_install,
 };
 pub use lan::{
     ServerJoinOptions, ServerJoinResult, ServerStartRuntimeOptions, ServerStartRuntimeResult,
@@ -144,12 +146,25 @@ pub enum Command {
     Mcp(McpCommand),
     SyncOutbox,
     #[command(subcommand)]
-    Hook(HookCommand),
+    Hook(HookRuntime),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum InstallAgent {
     Codex,
+    Omp,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HookRuntime {
+    Codex {
+        #[command(subcommand)]
+        command: HookCommand,
+    },
+    Omp {
+        #[command(subcommand)]
+        command: HookCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -379,12 +394,17 @@ pub fn run() -> anyhow::Result<()> {
             binary,
         } => {
             let paths = GlobalPaths::from_env()?;
+            let binary_path = match binary {
+                Some(path) => Some(path),
+                None if agents.is_empty() => None,
+                None => Some(current_stateful_binary_path()?),
+            };
             let plan = if agents.is_empty() {
                 if codex_config.is_some() {
                     anyhow::bail!("--codex-config requires --agent codex");
                 }
-                if binary.is_some() {
-                    anyhow::bail!("--binary requires --agent codex");
+                if binary_path.is_some() {
+                    anyhow::bail!("--binary requires --agent codex or --agent omp");
                 }
                 apply_global_install(InstallOptions { yes, paths })?
             } else if agents.contains(&InstallAgent::Codex) {
@@ -392,15 +412,21 @@ pub fn run() -> anyhow::Result<()> {
                     Some(path) => path,
                     None => default_codex_config_path()?,
                 };
-                let binary_path = match binary {
-                    Some(path) => path,
-                    None => current_stateful_binary_path()?,
-                };
                 apply_codex_install(CodexInstallOptions {
                     yes,
                     paths,
                     codex_config_path,
-                    binary_path,
+                    binary_path: binary_path.expect("agent install should resolve binary"),
+                })?
+            } else if agents.contains(&InstallAgent::Omp) {
+                if codex_config.is_some() {
+                    anyhow::bail!("--codex-config requires --agent codex");
+                }
+                apply_omp_install(OmpInstallOptions {
+                    yes,
+                    paths,
+                    binary_path: binary_path.expect("agent install should resolve binary"),
+                    project_config_path: None,
                 })?
             } else {
                 anyhow::bail!("no supported install agents selected");

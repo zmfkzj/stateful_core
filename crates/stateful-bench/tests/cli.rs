@@ -3434,6 +3434,8 @@ print(json.dumps({{
     assert!(config.contains("[[hooks.SessionStart]]"));
     assert!(config.contains("[[hooks.PreToolUse]]"));
     assert!(config.contains("[[hooks.Stop]]"));
+    assert!(config.contains("/tmp/stateful hook codex session-start"));
+    assert!(config.contains("/tmp/stateful hook codex pre-tool-use"));
     assert_eq!(output["skill_exists"], false);
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");

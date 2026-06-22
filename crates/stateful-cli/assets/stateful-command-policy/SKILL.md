@@ -49,7 +49,7 @@ When a native Codex subagent hits `apply_patch writes require ... same-session f
 
 For disposable repo `tmp/` directory lease conflicts, prefer a different session-unique scratch child over waiting when the artifact is truly disposable. A conflict on `tmp/<purpose>/` usually means another agent chose the same generic scratch name, not that the source-tree edit is blocked. Declare and lease a new child such as `tmp/<purpose>-<short-session-id>/`, then retry the command-shaped repo write with the exact same `--write-dir`. Build/test commands should use the build profile's external `/tmp/stateful` scratch instead of repo `tmp/`.
 
-Do not diagnose these failures by running `stateful hook session-start`, `stateful current`, `stateful notifications`, `stateful resume`, `strings <stateful>`, reading `$CODEX_HOME/shell_snapshots`, or setting `STATEFUL_SESSION_ID`. Those probes do not create the same-session lease required by hooks and usually waste the task budget.
+Do not diagnose these failures by running `stateful hook codex session-start`, `stateful current`, `stateful notifications`, `stateful resume`, `strings <stateful>`, reading `$CODEX_HOME/shell_snapshots`, or setting `STATEFUL_SESSION_ID`. Those probes do not create the same-session lease required by hooks and usually waste the task budget.
 
 For large source-tree reconstruction work, the parent agent must prove the write path before dispatching implementation subagents:
 
@@ -159,7 +159,7 @@ Request a repo-external write. Codex prompts on `external-run request`; after ap
 
 - Raw Bash is denied by stateful hooks; use a sandbox-run wrapper through the trusted absolute `stateful` binary or MCP/native tools instead. Raw read-only Bash is also denied, including commands such as `rg`, `git status`, and `sed`.
 - Outer shell wrappers around the sandbox command: environment assignments, command substitution, outer redirects, outer pipelines, multiple commands, duplicate `--command`, or an untrusted executable path.
-- Session-repair probes such as `stateful hook session-start`, `stateful current`, `stateful notifications`, `stateful resume`, `stateful intent declare/request/claim`, `strings <stateful>`, `$CODEX_HOME/shell_snapshots`, or outer `STATEFUL_SESSION_ID=...` assignments to force a lease. Use MCP session, intent, and lease tools instead.
+- Session-repair probes such as `stateful hook codex session-start`, `stateful current`, `stateful notifications`, `stateful resume`, `stateful intent declare/request/claim`, `strings <stateful>`, `$CODEX_HOME/shell_snapshots`, or outer `STATEFUL_SESSION_ID=...` assignments to force a lease. Use MCP session, intent, and lease tools instead.
 - Shell write syntax outside a sandbox-run `--command`: `>`, `>>`, heredocs, and `| tee`.
 - Direct file mutation: `rm`, `mv`, `cp`, `mkdir`, `touch`, `chmod`, `chown`.
 - Raw process inspection such as `ps`, `pgrep`, `ps auxww`, `ps -ef`, `ps -eo pid,args`, or `ps e...` inside `sandbox run --command`; use `stateful sandbox process find` instead.

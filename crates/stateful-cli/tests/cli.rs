@@ -1,7 +1,7 @@
 use clap::Parser;
 use stateful_cli::{
-    Cli, CodexSandboxMode, Command, ExternalRunCommand, GlobalPaths, HookCommand, InstallAgent,
-    McpCommand, NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand,
+    Cli, CodexSandboxMode, Command, ExternalRunCommand, GlobalPaths, HookCommand, HookRuntime,
+    InstallAgent, McpCommand, NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand,
     SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, ToolsCommand, allow_tool_for_repo,
     doctor_report_with_global, enable_repo, record_unclassified_tool_for_repo,
 };
@@ -566,6 +566,21 @@ fn parses_install_agent_codex_command() {
 }
 
 #[test]
+fn parses_install_agent_omp_command() {
+    let cli = Cli::try_parse_from(["stateful", "install", "--agent", "omp", "--yes"])
+        .expect("install --agent omp command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Install {
+            yes: true,
+            ref agents,
+            ..
+        } if agents == &vec![InstallAgent::Omp]
+    ));
+}
+
+#[test]
 fn rejects_install_codex_subcommand() {
     assert!(Cli::try_parse_from(["stateful", "install", "codex", "--yes"]).is_err());
 }
@@ -713,14 +728,34 @@ fn parses_resume_next_command() {
 }
 
 #[test]
-fn hook_pre_tool_use_command_parses() {
-    let cli = Cli::try_parse_from(["stateful", "hook", "pre-tool-use"])
-        .expect("hook pre-tool-use command should parse");
+fn hook_codex_pre_tool_use_command_parses() {
+    let cli = Cli::try_parse_from(["stateful", "hook", "codex", "pre-tool-use"])
+        .expect("hook codex pre-tool-use command should parse");
 
     assert!(matches!(
         cli.command,
-        Command::Hook(HookCommand::PreToolUse)
+        Command::Hook(HookRuntime::Codex {
+            command: HookCommand::PreToolUse,
+        })
     ));
+}
+
+#[test]
+fn hook_omp_pre_tool_use_command_parses() {
+    let cli = Cli::try_parse_from(["stateful", "hook", "omp", "pre-tool-use"])
+        .expect("hook omp pre-tool-use command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Hook(HookRuntime::Omp {
+            command: HookCommand::PreToolUse,
+        })
+    ));
+}
+
+#[test]
+fn hook_legacy_pre_tool_use_command_is_rejected() {
+    assert!(Cli::try_parse_from(["stateful", "hook", "pre-tool-use"]).is_err());
 }
 
 #[test]

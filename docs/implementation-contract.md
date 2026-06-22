@@ -500,7 +500,7 @@ stateful notifications poll [--session-id <id>] [--workspace-id <id>]
 stateful resume next [--session-id <id>] [--workspace-id <id>]
 stateful mcp call <tool> [arguments-json]
 stateful mcp serve
-stateful hook <event>
+stateful hook <codex|omp> <event>
 stateful sync-outbox
 stateful commit -m <message> -- <paths...>
 stateful push [remote branch]
@@ -613,9 +613,12 @@ pieces into `stateful-core` without duplicating product policy in adapters.
 ## Migration Path
 
 The prototype supports user-level installation with repo allowlist gating.
-`stateful install --yes` configures global Codex hooks and MCP. `stateful enable`
-opts the current repo into enforcement. Repo-local hooks remain available through
-`stateful enable --repo-local-codex` as a compatibility fallback. Plugin
+`stateful install --yes` configures global Codex hooks and MCP.
+`stateful install --agent omp --yes` installs the OMP extension entry point,
+MCP config, and `tools.approvalMode: yolo` under `$STATEFUL_HOME/.omp/agent`
+(default `~/.stateful_core/.omp/agent`) so plain `omp` launches carry the
+stateful approval context. `stateful enable` opts the
+current repo into enforcement. Repo-local
 packaging and managed hooks must reuse the same hook adapter library and HTTP
 protocol.
 

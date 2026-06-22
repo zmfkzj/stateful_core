@@ -179,7 +179,7 @@ def hook_override(event_name: str, command: str, status_message: str, matcher: s
 
 
 def stateful_hook_overrides(stateful_binary: str) -> list[str]:
-    hook_prefix = f'"{stateful_binary}" hook'
+    hook_prefix = f'"{stateful_binary}" hook codex'
     return [
         "features.hooks=true",
         hook_override(
@@ -202,7 +202,7 @@ def stateful_codex_config(
     include_mcp: bool = True,
     base_config: str | None = None,
 ) -> str:
-    hook_prefix = f"{shlex.quote(stateful_binary)} hook"
+    hook_prefix = f"{shlex.quote(stateful_binary)} hook codex"
     mcp_config = ""
     if include_mcp:
         mcp_config = f"""

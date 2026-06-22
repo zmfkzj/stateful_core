@@ -11,10 +11,11 @@ use std::{
 };
 
 use stateful_cli::{
-    CurrentSession, GlobalPaths, HookOutcome, STATEFUL_SESSION_ID_ENV, ServerRuntime,
-    allow_tool_for_repo, enable_repo, handle_post_tool_use_in_repo, handle_pre_tool_use,
-    handle_pre_tool_use_in_repo, read_current_session_file_for_session, tool_list_for_repo,
-    write_global_runtime_file,
+    CurrentSession, GlobalPaths, HookOutcome, OmpHookOutcome, STATEFUL_SESSION_ID_ENV,
+    ServerRuntime, allow_tool_for_repo, enable_repo, handle_omp_post_tool_use_with_runtime,
+    handle_omp_pre_tool_use_with_runtime, handle_omp_session_start_with_runtime,
+    handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
+    read_current_session_file_for_session, tool_list_for_repo, write_global_runtime_file,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -93,7 +94,12 @@ fn session_start_records_current_session_under_thread_id_when_present() {
       "hook_event_name": "SessionStart"
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "session-start"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "session-start"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -136,7 +142,12 @@ fn session_start_derives_workspace_id_for_default_local_runtime() {
       "hook_event_name": "SessionStart"
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "session-start"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "session-start"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -186,7 +197,12 @@ fn session_start_derives_workspace_id_for_default_shared_runtime() {
       "hook_event_name": "SessionStart"
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "session-start"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "session-start"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -240,7 +256,12 @@ fn pre_tool_use_authorization_uses_thread_id_when_present() {
       }
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -1367,7 +1388,12 @@ fn pre_tool_use_in_repo_records_current_session_for_mcp() {
       }
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -1412,7 +1438,7 @@ fn pre_tool_use_records_current_session_for_stateful_session_id() {
     let output = run_hook_subprocess_with_extra_env(
         &repo_root,
         &paths,
-        &["hook", "pre-tool-use"],
+        &["hook", "codex", "pre-tool-use"],
         input,
         &[(STATEFUL_SESSION_ID_ENV, "s-current")],
     );
@@ -1459,7 +1485,7 @@ fn pre_tool_use_from_enabled_subdir_records_session_at_repo_root() {
       }
     }"#;
 
-    let output = run_hook_subprocess(&subdir, &paths, &["hook", "pre-tool-use"], input);
+    let output = run_hook_subprocess(&subdir, &paths, &["hook", "codex", "pre-tool-use"], input);
 
     assert!(
         output.status.success(),
@@ -1535,7 +1561,7 @@ fn pre_tool_use_allows_read_only_sandbox_when_runtime_unreachable() {
     let output = run_hook_subprocess_with_extra_env(
         &repo_root,
         &paths,
-        &["hook", "pre-tool-use"],
+        &["hook", "codex", "pre-tool-use"],
         &input,
         &[
             ("STATEFUL_SERVER_URL", "http://127.0.0.1:9"),
@@ -1583,7 +1609,7 @@ fn pre_tool_use_denies_native_write_when_runtime_unreachable() {
     let output = run_hook_subprocess_with_extra_env(
         &repo_root,
         &paths,
-        &["hook", "pre-tool-use"],
+        &["hook", "codex", "pre-tool-use"],
         input,
         &[
             ("STATEFUL_SERVER_URL", "http://127.0.0.1:9"),
@@ -1766,7 +1792,7 @@ fn run_hook_pre_tool_use_denies_raw_bash_with_legacy_trusted_sandbox_env() {
     let output = run_hook_subprocess_with_extra_env(
         &repo_root,
         &paths,
-        &["hook", "pre-tool-use"],
+        &["hook", "codex", "pre-tool-use"],
         input,
         &[("STATEFUL_HOOK_TRUSTED_SANDBOX", trusted_sandbox.as_str())],
     );
@@ -2083,7 +2109,12 @@ fn pre_tool_use_bash_denial_in_repo_includes_live_context() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
 
     assert!(
         output.status.success(),
@@ -2161,7 +2192,12 @@ fn pre_tool_use_records_unclassified_tools_for_tools_list() {
         "tool_input": {}
     })
     .to_string();
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
 
     assert!(
         output.status.success(),
@@ -2213,7 +2249,7 @@ fn pre_tool_use_allows_repo_tool_allowlist_but_preserves_hard_denies() {
     let output = run_hook_subprocess(
         &repo_root,
         &paths,
-        &["hook", "pre-tool-use"],
+        &["hook", "codex", "pre-tool-use"],
         &allowed_input,
     );
     assert!(
@@ -2235,7 +2271,12 @@ fn pre_tool_use_allows_repo_tool_allowlist_but_preserves_hard_denies() {
         "tool_input": {}
     })
     .to_string();
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &denied_input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &denied_input,
+    );
     assert!(
         output.status.success(),
         "stateful hook failed: {}",
@@ -2292,6 +2333,329 @@ fn pre_tool_use_denies_edit_and_write_without_runtime() {
 }
 
 #[test]
+fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
+    let input = serde_json::json!({
+        "runtime": "omp",
+        "session_id": "omp-parent",
+        "parent_session_id": serde_json::Value::Null,
+        "omp_agent_id": "main",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "yolo": false,
+        "commit_id": "abc123",
+        "tool_name": "write",
+        "tool_input": { "path": "docs/a.md", "content": "hello" }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        Some(&runtime),
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp pre-tool should parse");
+
+    assert_eq!(outcome, OmpHookOutcome::Allow);
+    let request = rx.recv().expect("authorize request should arrive");
+    let body = request_json_body(&request);
+    assert_eq!(body["source"]["kind"], "hook");
+    assert_eq!(body["source"]["event"], "omp_pre_tool_use");
+    assert_eq!(body["session"]["session_id"], "omp-parent");
+    assert_eq!(body["payload"]["action"], "write_file");
+    assert_eq!(body["payload"]["path"], "docs/a.md");
+    assert!(body["payload"].get("commit_id").is_none());
+    assert_eq!(body["metadata"]["runtime"], "omp");
+    assert_eq!(body["metadata"]["commit_id"], "abc123");
+}
+
+#[test]
+fn run_hook_omp_pre_tool_use_prints_extension_decision() {
+    let temp_root =
+        std::env::temp_dir().join(format!("stateful-hook-omp-runtime-{}", std::process::id()));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": repo_root,
+        "yolo": false,
+        "tool_name": "write",
+        "tool_input": { "path": "docs/a.md", "content": "hello" }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
+    assert_eq!(stdout["decision"], "allow");
+    let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
+    assert_eq!(body["session"]["session_id"], "omp-parent");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn omp_edit_extracts_hashline_file_targets() {
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "edit",
+        "tool_input": { "input": "[docs/a.md#ABCD]\nSWAP 1.=1:\n+new\n" }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        Some(&runtime),
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp edit should authorize");
+
+    assert_eq!(outcome, OmpHookOutcome::Allow);
+    let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
+    assert_eq!(body["payload"]["action"], "write_file");
+    assert_eq!(body["payload"]["path"], "docs/a.md");
+}
+
+#[test]
+fn omp_bash_with_explicit_write_target_authorizes_target() {
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs write-targets --write-target docs/a.md --command 'printf ok > docs/a.md'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        Some(&runtime),
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp bash should authorize explicit target");
+
+    assert_eq!(outcome, OmpHookOutcome::Allow);
+    let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
+    assert_eq!(body["payload"]["action"], "write_file");
+    assert_eq!(body["payload"]["path"], "docs/a.md");
+}
+
+#[test]
+fn omp_bash_with_explicit_write_dir_authorizes_directory_target() {
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs write-targets --write-dir reports --command 'python gen.py'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        Some(&runtime),
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp bash should authorize explicit directory target");
+
+    assert_eq!(outcome, OmpHookOutcome::Allow);
+    let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
+    assert_eq!(body["payload"]["action"], "write_directory");
+    assert_eq!(body["payload"]["path"], "reports");
+}
+
+#[test]
+fn omp_repo_internal_raw_bash_rejects_shell_writes_and_unsafe_find_actions() {
+    for command in ["ls > docs/a.md", "find . -delete"] {
+        let input = serde_json::json!({
+            "session_id": "omp-parent",
+            "cwd": "/repo",
+            "yolo": false,
+            "tool_name": "bash",
+            "tool_input": { "command": command }
+        })
+        .to_string();
+        assert!(matches!(
+            handle_omp_pre_tool_use_with_runtime(
+                &input,
+                None,
+                Some(Path::new("/repo")),
+                Some(Path::new("/repo"))
+            )
+            .unwrap(),
+            OmpHookOutcome::Block { .. }
+        ));
+    }
+}
+
+#[test]
+fn omp_repo_internal_raw_bash_allows_read_like_and_blocks_other_targetless_commands() {
+    let read_input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "bash",
+        "tool_input": { "command": "pwd" }
+    })
+    .to_string();
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &read_input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Allow
+    );
+
+    let write_like_input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "bash",
+        "tool_input": { "command": "python scripts/gen.py" }
+    })
+    .to_string();
+    assert!(matches!(
+        handle_omp_pre_tool_use_with_runtime(
+            &write_like_input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Block { .. }
+    ));
+}
+
+#[test]
+fn omp_repo_external_raw_bash_warns_for_omp_approval_handoff() {
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/tmp/outside",
+        "yolo": false,
+        "tool_name": "bash",
+        "tool_input": { "command": "python /tmp/tool.py" }
+    })
+    .to_string();
+
+    assert!(matches!(
+        handle_omp_pre_tool_use_with_runtime(
+            &input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/tmp/outside"))
+        )
+        .unwrap(),
+        OmpHookOutcome::WarnAllow { .. }
+    ));
+}
+
+#[test]
+fn omp_yolo_downgrades_server_denial_to_warn_allow() {
+    let (runtime, _rx) =
+        spawn_fake_stateful_server(r#"{"decision":"deny","message":"missing lease"}"#);
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "yolo": true,
+        "tool_name": "write",
+        "tool_input": { "path": "docs/a.md", "content": "hello" }
+    })
+    .to_string();
+
+    assert!(matches!(
+        handle_omp_pre_tool_use_with_runtime(
+            &input,
+            Some(&runtime),
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::WarnAllow { .. }
+    ));
+}
+
+#[test]
+fn omp_session_start_posts_parent_session_register() {
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "omp_agent_id": "main",
+        "commit_id": "abc123"
+    })
+    .to_string();
+
+    handle_omp_session_start_with_runtime(&input, &runtime)
+        .expect("omp session start should post register");
+
+    let body = request_json_body(&rx.recv().expect("session register request should arrive"));
+    assert_eq!(body["session"]["session_id"], "omp-parent");
+    assert_eq!(body["metadata"]["runtime"], "omp");
+    assert_eq!(body["metadata"]["omp_agent_id"], "main");
+    assert_eq!(body["metadata"]["commit_id"], "abc123");
+}
+
+#[test]
+fn omp_subagent_post_tool_uses_child_session_and_parent_metadata() {
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    let input = serde_json::json!({
+        "session_id": "omp-child",
+        "parent_session_id": "omp-parent",
+        "omp_agent_id": "WorkerA",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "tool_name": "write",
+        "tool_input": { "path": "docs/a.md", "content": "hello" }
+    })
+    .to_string();
+
+    handle_omp_post_tool_use_with_runtime(&input, &runtime)
+        .expect("omp post tool should post heartbeat");
+
+    let body = request_json_body(&rx.recv().expect("heartbeat request should arrive"));
+    assert_eq!(body["session"]["session_id"], "omp-child");
+    assert_eq!(body["metadata"]["parent_session_id"], "omp-parent");
+    assert_eq!(body["metadata"]["omp_agent_id"], "WorkerA");
+}
+
+#[test]
 fn pre_tool_use_edit_posts_authorize_and_denies_when_server_denies() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-edit-deny-test-{}",
@@ -2324,7 +2688,12 @@ fn pre_tool_use_edit_posts_authorize_and_denies_when_server_denies() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
 
     assert!(
         output.status.success(),
@@ -2382,7 +2751,12 @@ fn pre_tool_use_edit_denies_when_authorize_connection_drops() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
 
     assert!(
         output.status.success(),
@@ -2433,7 +2807,12 @@ fn pre_tool_use_edit_posts_authorize_and_renders_live_context_when_server_allows
     })
     .to_string();
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
 
     assert!(
         output.status.success(),
@@ -2491,7 +2870,12 @@ fn pre_tool_use_edit_relative_path_is_resolved_from_payload_cwd() {
     })
     .to_string();
 
-    let output = run_hook_subprocess_from(&temp_root, &paths, &["hook", "pre-tool-use"], &input);
+    let output = run_hook_subprocess_from(
+        &temp_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
 
     assert!(
         output.status.success(),
@@ -2536,7 +2920,8 @@ fn run_hook_uses_payload_cwd_for_repo_gate() {
     })
     .to_string();
 
-    let output = run_hook_subprocess_from(&outside, &paths, &["hook", "pre-tool-use"], &input);
+    let output =
+        run_hook_subprocess_from(&outside, &paths, &["hook", "codex", "pre-tool-use"], &input);
 
     assert!(
         output.status.success(),
@@ -2583,7 +2968,12 @@ fn pre_tool_use_apply_patch_omits_queue_without_matching_current_intent_purpose(
       }
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -2640,7 +3030,12 @@ fn pre_tool_use_apply_patch_uses_current_intent_purpose_for_queue_even_when_targ
       }
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -2686,7 +3081,12 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
       }
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -2775,7 +3175,12 @@ fn pre_tool_use_apply_patch_injects_warn_context_when_server_allows() {
       }
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -2828,7 +3233,12 @@ fn pre_tool_use_apply_patch_injects_block_context_when_server_allows() {
       }
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -2881,7 +3291,12 @@ fn pre_tool_use_apply_patch_denial_keeps_info_context() {
       }
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -2937,7 +3352,12 @@ fn pre_tool_use_apply_patch_sends_base_observation_for_existing_file() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
 
     assert!(
         output.status.success(),
@@ -2990,7 +3410,12 @@ fn pre_tool_use_apply_patch_patch_field_authorizes_every_file_target() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
 
     assert!(
         output.status.success(),
@@ -3045,7 +3470,12 @@ fn pre_tool_use_apply_patch_move_authorizes_source_and_destination() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
 
     assert!(
         output.status.success(),
@@ -3099,7 +3529,12 @@ fn pre_tool_use_apply_patch_raw_string_payload_posts_authorize() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
 
     assert!(
         output.status.success(),
@@ -3147,7 +3582,12 @@ fn pre_tool_use_file_change_posts_authorize_for_changed_paths() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
 
     assert!(
         output.status.success(),
@@ -3193,7 +3633,7 @@ fn hook_pre_tool_use_discovers_global_runtime_file() {
     }"#;
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_stateful"))
-        .args(["hook", "pre-tool-use"])
+        .args(["hook", "codex", "pre-tool-use"])
         .current_dir(&repo_root)
         .env_clear()
         .env("STATEFUL_HOME", &paths.home)
@@ -3249,7 +3689,12 @@ fn pre_tool_use_apply_patch_denies_when_server_denies() {
       }
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -3306,7 +3751,12 @@ dependencies = ["langchain-core>=0.3"]
     })
     .to_string();
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], &input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
 
     assert!(
         output.status.success(),
@@ -3362,7 +3812,12 @@ fn pre_tool_use_apply_patch_denial_includes_wait_id_guidance() {
       }
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -3412,7 +3867,12 @@ fn pre_tool_use_apply_patch_delete_posts_delete_file_action() {
       }
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "pre-tool-use"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -3445,7 +3905,12 @@ fn session_start_posts_session_register() {
       "hook_event_name": "SessionStart"
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "session-start"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "session-start"],
+        input,
+    );
     assert!(
         output.status.success(),
         "stateful hook failed: {}",
@@ -3481,7 +3946,12 @@ fn post_tool_use_posts_session_heartbeat() {
       "tool_input": {"command": "rg auth src"}
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "post-tool-use"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "post-tool-use"],
+        input,
+    );
     assert!(
         output.status.success(),
         "stateful hook failed: {}",
@@ -3528,7 +3998,12 @@ fn post_tool_use_edit_refreshes_file_lease_observation() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "post-tool-use"], &input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "post-tool-use"],
+        &input,
+    );
     assert!(
         output.status.success(),
         "stateful hook failed: {}",
@@ -3592,7 +4067,12 @@ fn post_tool_use_edit_releases_file_lease_after_refresh() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "post-tool-use"], &input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "post-tool-use"],
+        &input,
+    );
     assert!(
         output.status.success(),
         "stateful hook failed: {}",
@@ -3693,7 +4173,7 @@ fn post_tool_use_outbox_fallback_records_current_created_at() {
     let output = run_hook_subprocess_with_extra_env(
         &repo_root,
         &paths,
-        &["hook", "post-tool-use"],
+        &["hook", "codex", "post-tool-use"],
         input,
         &[
             ("STATEFUL_SERVER_URL", runtime.base_url.as_str()),
@@ -3751,7 +4231,12 @@ fn user_prompt_submit_posts_context_render() {
       "prompt": "work on auth"
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "user-prompt-submit"], input);
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "user-prompt-submit"],
+        input,
+    );
 
     assert!(
         output.status.success(),
@@ -3779,8 +4264,12 @@ fn user_prompt_submit_posts_context_render() {
     assert!(request.contains("\"worktree_id\""));
     assert!(request.contains("\"root\""));
 
-    let second_output =
-        run_hook_subprocess(&repo_root, &paths, &["hook", "user-prompt-submit"], input);
+    let second_output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "user-prompt-submit"],
+        input,
+    );
     assert!(
         second_output.status.success(),
         "stateful hook failed: {}",
@@ -3818,7 +4307,7 @@ fn stop_posts_activity_finalize() {
       "hook_event_name": "Stop"
     }"#;
 
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "stop"], input);
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "codex", "stop"], input);
     assert!(
         output.status.success(),
         "stateful hook failed: {}",
