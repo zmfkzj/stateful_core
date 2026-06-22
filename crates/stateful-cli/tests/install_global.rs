@@ -358,7 +358,7 @@ fn install_omp_yes_merges_approval_mode_into_existing_tools_config() {
 }
 
 #[test]
-fn install_codex_yes_creates_sandbox_external_prompt_rule() {
+fn install_codex_yes_creates_external_run_prompt_rule() {
     let fixture = TestFixture::new("codex-rules");
 
     apply_codex_install(fixture.codex_options(true)).expect("install should apply");
@@ -366,14 +366,17 @@ fn install_codex_yes_creates_sandbox_external_prompt_rule() {
     let rules = fs::read_to_string(fixture.codex_rules_path()).expect("rules should read");
     assert!(rules.contains("prefix_rule("));
     assert!(rules.contains(
-        "pattern = [\"/opt/stateful/bin/stateful\", \"sandbox\", \"run\", \"--fs\", \"external\"]"
+        "pattern = [\"/opt/stateful/bin/stateful\", \"external-run\", \"request\"]"
+    ));
+    assert!(!rules.contains(
+        "pattern = [\"/opt/stateful/bin/stateful\", \"sandbox\", \"run\"]"
     ));
     assert!(rules.contains("decision = \"prompt\""));
-    assert!(rules.contains("stateful sandbox run --fs external"));
+    assert!(rules.contains("stateful external-run request"));
     assert!(rules.contains(
-        "/opt/stateful/bin/stateful sandbox run --fs external --purpose 'install rebuilt binaries'"
+        "/opt/stateful/bin/stateful external-run request --purpose 'install rebuilt binaries'"
     ));
-    assert!(!rules.contains("external-run"));
+    assert!(!rules.contains("sandbox run --fs external"));
 
     apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");
 
