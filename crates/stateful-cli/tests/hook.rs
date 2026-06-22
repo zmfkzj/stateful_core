@@ -2626,7 +2626,8 @@ fn omp_session_start_posts_parent_session_register() {
         .expect("omp session start should post register");
 
     let body = request_json_body(&rx.recv().expect("session register request should arrive"));
-    assert_eq!(body["session"]["session_id"], "omp-parent");
+    assert_eq!(body["session_id"], "omp-parent");
+    assert_eq!(body["workspace_id"], runtime.workspace_id);
     assert_eq!(body["metadata"]["runtime"], "omp");
     assert_eq!(body["metadata"]["omp_agent_id"], "main");
     assert_eq!(body["metadata"]["commit_id"], "abc123");
@@ -2650,7 +2651,8 @@ fn omp_subagent_post_tool_uses_child_session_and_parent_metadata() {
         .expect("omp post tool should post heartbeat");
 
     let body = request_json_body(&rx.recv().expect("heartbeat request should arrive"));
-    assert_eq!(body["session"]["session_id"], "omp-child");
+    assert_eq!(body["session_id"], "omp-child");
+    assert_eq!(body["workspace_id"], runtime.workspace_id);
     assert_eq!(body["metadata"]["parent_session_id"], "omp-parent");
     assert_eq!(body["metadata"]["omp_agent_id"], "WorkerA");
 }
@@ -4204,6 +4206,289 @@ fn post_tool_use_outbox_fallback_records_current_created_at() {
         .expect("created_at should be an RFC3339 timestamp");
     assert!(created_at >= before_hook);
     assert!(created_at <= after_hook);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn codex_stateful_lifecycle_posts_expected_server_requests() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-codex-lifecycle-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    fs::write(repo_root.join("src/auth.ts"), b"old contents\n")
+        .expect("observed file should be writable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"status":"ok"}"#,
+        r#"{"status":"ok","prompt_text":"Lifecycle Prompt\n- none"}"#,
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        r#"{"status":"ok","items":[],"prompt_text":"Lifecycle Pre\n- none"}"#,
+        r#"{"status":"ok"}"#,
+        r#"{"status":"ok"}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let session_start = serde_json::json!({
+        "session_id": "codex-session",
+        "thread_id": "codex-session",
+        "transcript_path": "/tmp/transcript.jsonl",
+        "cwd": repo_root,
+        "hook_event_name": "SessionStart"
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "session-start"],
+        &session_start,
+    );
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let register = rx.recv().expect("session register request should arrive");
+    assert!(register.contains("POST /v1/session/register HTTP/1.1"));
+    let register_body = request_json_body(&register);
+    assert_eq!(register_body["session_id"], "codex-session");
+    assert_eq!(register_body["workspace_id"], "w1");
+
+    let user_prompt = serde_json::json!({
+        "session_id": "codex-session",
+        "cwd": repo_root,
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "work on auth"
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "user-prompt-submit"],
+        &user_prompt,
+    );
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rendered_prompt = String::from_utf8(output.stdout).expect("prompt output should be utf8");
+    assert!(rendered_prompt.contains("Lifecycle Prompt"));
+    let prompt_context = rx.recv().expect("context render request should arrive");
+    assert!(prompt_context.contains("POST /v1/context/render HTTP/1.1"));
+    let prompt_body = request_json_body(&prompt_context);
+    assert_eq!(prompt_body["session_id"], "codex-session");
+    assert_eq!(prompt_body["mode"], "brief");
+
+    let pre_tool = serde_json::json!({
+        "session_id": "codex-session",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": "src/auth.ts",
+            "old_string": "old",
+            "new_string": "new"
+        }
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &pre_tool,
+    );
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let authorize = rx.recv().expect("authorize request should arrive");
+    assert!(authorize.contains("POST /v1/authorize HTTP/1.1"));
+    let authorize_body = request_json_body(&authorize);
+    assert_eq!(authorize_body["session"]["session_id"], "codex-session");
+    assert_eq!(authorize_body["payload"]["action"], "write_file");
+    assert_eq!(authorize_body["payload"]["path"], "src/auth.ts");
+    let pre_context = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("pre-tool context render request should arrive");
+    assert!(pre_context.contains("POST /v1/context/render HTTP/1.1"));
+
+    let post_tool = serde_json::json!({
+        "session_id": "codex-session",
+        "cwd": repo_root,
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "rg auth src"}
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "post-tool-use"],
+        &post_tool,
+    );
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let heartbeat = rx.recv().expect("heartbeat request should arrive");
+    assert!(heartbeat.contains("POST /v1/session/heartbeat HTTP/1.1"));
+    assert_eq!(request_json_body(&heartbeat)["session_id"], "codex-session");
+
+    let stop = serde_json::json!({
+        "session_id": "codex-session",
+        "cwd": repo_root,
+        "hook_event_name": "Stop"
+    })
+    .to_string();
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "codex", "stop"], &stop);
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let finalize = rx.recv().expect("finalize request should arrive");
+    assert!(finalize.contains("POST /v1/activity/finalize HTTP/1.1"));
+    assert_eq!(request_json_body(&finalize)["session_id"], "codex-session");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn omp_stateful_lifecycle_posts_expected_server_requests() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-omp-lifecycle-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"status":"ok"}"#,
+        r#"{"decision":"allow","message":"ok"}"#,
+        r#"{"status":"ok"}"#,
+        r#"{"status":"ok"}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let session_start = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": repo_root,
+        "omp_agent_id": "main",
+        "commit_id": "abc123"
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "session-start"],
+        &session_start,
+    );
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let register = rx.recv().expect("session register request should arrive");
+    assert!(register.contains("POST /v1/session/register HTTP/1.1"));
+    let register_body = request_json_body(&register);
+    assert_eq!(register_body["session_id"], "omp-parent");
+    assert_eq!(register_body["source"]["event"], "omp_session_start");
+    assert_eq!(register_body["metadata"]["runtime"], "omp");
+    assert_eq!(register_body["metadata"]["omp_agent_id"], "main");
+
+    let pre_tool = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": repo_root,
+        "yolo": false,
+        "omp_agent_id": "main",
+        "commit_id": "abc123",
+        "tool_name": "write",
+        "tool_input": { "path": "docs/a.md", "content": "hello" }
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "pre-tool-use"],
+        &pre_tool,
+    );
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let decision: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("OMP pre-tool output should be JSON");
+    assert_eq!(decision["decision"], "allow");
+    let authorize = rx.recv().expect("authorize request should arrive");
+    assert!(authorize.contains("POST /v1/authorize HTTP/1.1"));
+    let authorize_body = request_json_body(&authorize);
+    assert_eq!(authorize_body["session"]["session_id"], "omp-parent");
+    assert_eq!(authorize_body["source"]["event"], "omp_pre_tool_use");
+    assert_eq!(authorize_body["payload"]["action"], "write_file");
+    assert_eq!(authorize_body["payload"]["path"], "docs/a.md");
+
+    let post_tool = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": repo_root,
+        "omp_agent_id": "main",
+        "commit_id": "abc123",
+        "tool_name": "write",
+        "tool_input": { "path": "docs/a.md", "content": "hello" }
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "post-tool-use"],
+        &post_tool,
+    );
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let heartbeat = rx.recv().expect("heartbeat request should arrive");
+    assert!(heartbeat.contains("POST /v1/session/heartbeat HTTP/1.1"));
+    let heartbeat_body = request_json_body(&heartbeat);
+    assert_eq!(heartbeat_body["session_id"], "omp-parent");
+    assert_eq!(heartbeat_body["source"]["event"], "omp_post_tool_use");
+
+    let stop = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": repo_root,
+        "omp_agent_id": "main",
+        "commit_id": "abc123"
+    })
+    .to_string();
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "stop"], &stop);
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let finalize = rx.recv().expect("finalize request should arrive");
+    assert!(finalize.contains("POST /v1/activity/finalize HTTP/1.1"));
+    let finalize_body = request_json_body(&finalize);
+    assert_eq!(finalize_body["session_id"], "omp-parent");
+    assert_eq!(finalize_body["source"]["event"], "omp_stop");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

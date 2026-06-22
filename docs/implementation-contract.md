@@ -19,11 +19,14 @@ Watcher-driven human observation and richer store-backed prompt rendering remain
 design targets unless a section below says they are implemented.
 
 The prototype supports user-level installation with repo allowlist gating.
-`stateful install --yes` configures global Codex hooks and MCP. `stateful enable`
-opts the current repo into enforcement. Repo-local hooks remain available through
-`stateful enable --repo-local-codex` as a compatibility fallback.
+`stateful install --yes` installs stateful global files only. `stateful install
+--agent codex --yes` configures global Codex hooks and MCP. `stateful install
+--agent omp --yes` configures the isolated OMP `stateful` profile with stateful
+hooks and MCP. `stateful enable` opts the current repo into enforcement.
+Repo-local hooks remain available through `stateful enable --repo-local-codex`
+as a compatibility fallback.
 
-Codex hooks should invoke the compiled `stateful` binary instead of embedding
+Hook adapters should invoke the compiled `stateful` binary instead of embedding
 policy or adapter logic in separate scripts. Hook configuration may reference
 the binary directly by absolute path or by PATH lookup.
 
@@ -507,12 +510,18 @@ stateful commit -m <message> -- <paths...>
 stateful push [remote branch]
 ```
 
-`stateful install --yes` configures global Codex hooks, MCP, MCP tool approval
-policy, and external-run approval rules. Stateful MCP tools default to automatic
-approval; `stateful external-run request` is gated by a Codex execpolicy prompt
-before it validates the external write scope and runs the command. `stateful enable`
-opts a repo into enforcement and can install repo-local Codex hooks with
-`--repo-local-codex` as a compatibility fallback. `stateful server start`
+`stateful install --agent codex --yes` configures global Codex hooks, MCP, MCP
+tool approval policy, and external-run approval rules. Codex installs wire
+`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`.
+Stateful MCP tools default to automatic approval; `stateful external-run
+request` is gated by a Codex execpolicy prompt before it validates the external
+write scope and runs the command. `stateful install --agent omp --yes` wires the
+OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
+extension events to `stateful hook omp session-start`, `pre-tool-use`,
+`post-tool-use`, and `stop`; OMP does not expose a stateful
+`user-prompt-submit` hook. `stateful enable` opts a repo into enforcement and
+can install repo-local Codex hooks with `--repo-local-codex` as a compatibility
+fallback. `stateful server start`
 without `--foreground` uses the detached lazy lifecycle. Bare legacy
 `stateful server` and `stateful server start --foreground` run in the
 foreground and write runtime discovery. `stateful doctor` checks current Codex
@@ -614,14 +623,15 @@ pieces into `stateful-core` without duplicating product policy in adapters.
 ## Migration Path
 
 The prototype supports user-level installation with repo allowlist gating.
-`stateful install --yes` configures global Codex hooks and MCP.
-`stateful install --agent omp --yes` installs the OMP extension entry point,
-MCP config, and `tools.approvalMode: yolo` under `$STATEFUL_HOME/.omp/agent`
-(default `~/.stateful_core/.omp/agent`) so plain `omp` launches carry the
-stateful approval context. `stateful enable` opts the
-current repo into enforcement. Repo-local
-packaging and managed hooks must reuse the same hook adapter library and HTTP
-protocol.
+`stateful install --yes` installs stateful global files only. `stateful install
+--agent codex --yes` configures global Codex hooks and MCP. `stateful install
+--agent omp --yes` installs the OMP extension entry point, MCP config, and
+`tools.approvalMode: write` under the isolated OMP `stateful` profile agent
+directory (`$STATEFUL_HOME/.omp/profiles/stateful/agent`, default
+`~/.stateful_core/.omp/profiles/stateful/agent`) so that profile carries the
+stateful approval context. `stateful enable` opts the current repo into
+enforcement. Repo-local packaging and managed hooks must reuse the same hook
+adapter library and HTTP protocol.
 
 The migration order is:
 

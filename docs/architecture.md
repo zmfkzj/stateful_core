@@ -8,12 +8,12 @@ current-state server.
 The first implementation target is:
 
 ```text
-Codex lifecycle hooks
+Codex lifecycle hooks and OMP extension hooks
 + MCP tools
 + state server
 ```
 
-Codex hooks observe and gate important agent actions. MCP tools give agents a
+Codex and OMP hooks observe and gate important agent actions. MCP tools give agents a
 structured way to read and update coordination state. The state server owns
 policy, persistence, TTLs, and conflict checks.
 
@@ -24,16 +24,16 @@ reconciliation acknowledgements through
 `state.reconcile.ack`. Automatic human-write observation and reconciliation
 blocks remain target behavior.
 
-V1 is local-only. It coordinates Codex sessions and agents inside one
+V1 is local-only. It coordinates Codex and OMP sessions and agents inside one
 machine/workspace boundary. Subagent-specific lifecycle attribution, local human
 activity signals, and IDE integrations are future observer or adapter work.
 Team-shared, cross-machine, or hosted synchronization is a later v1.5/v2
 concern.
 
 The product direction is agent-runtime portability, but the shipped prototype is
-Codex-first. The state server and policy API should not add new Codex-only
-assumptions beyond adapter metadata, and non-Codex runtimes remain future
-integration work.
+Codex-first with OMP extension support. The state server and policy API should
+not add new Codex-only assumptions beyond adapter metadata, and broader
+non-Codex runtimes remain future integration work.
 
 Implementation defaults for API shape, SQLite tables, hook adapter behavior,
 runtime files, CLI commands, and tests are fixed in
@@ -44,7 +44,7 @@ evolve only when they preserve those policies.
 ## Layers
 
 ```text
-Codex hooks and external observers
+Agent hooks and external observers
 -> state server API
 -> append-only coordination event log
 -> active current-state materializer
@@ -113,12 +113,15 @@ other POST routes still use flat request bodies.
 ## Hook Packaging
 
 The prototype supports user-level installation with repo allowlist gating.
-`stateful install --yes` configures global Codex hooks and MCP. For OMP, it
-writes OMP config containing the stateful extension under the isolated
-`~/.omp/profiles/stateful/agent` profile and sets `tools.approvalMode: write`;
-the OMP global/default profile is not modified. `stateful enable` opts the
-current repo into enforcement. Repo-local hooks remain available through
-`stateful enable --repo-local-codex` as a compatibility fallback.
+`stateful install --agent codex --yes` configures global Codex hooks and MCP.
+For OMP, `stateful install --agent omp --yes` writes OMP config containing the
+stateful extension under the isolated profile agent directory
+(`$STATEFUL_HOME/.omp/profiles/stateful/agent`, default
+`~/.stateful_core/.omp/profiles/stateful/agent`) and sets
+`tools.approvalMode: write`; the OMP global/default profile is not modified.
+`stateful enable` opts the current repo into enforcement. Repo-local
+hooks remain available through `stateful enable --repo-local-codex` as a
+compatibility fallback.
 
 ```text
 global Codex hooks and MCP config
@@ -129,11 +132,11 @@ optional <repo>/.codex/hooks.json compatibility fallback
 stateful binary available by absolute path or PATH lookup
 ```
 
-The runtime event model stays the same across global Codex hooks, isolated OMP
-profile hooks, repo-local compatibility hooks, and later managed hooks. The
-later managed version should
-move the same thin hook adapters to administrator-controlled paths and configure
-them from `requirements.toml`.
+Codex global hooks, repo-local compatibility hooks, and managed Codex hooks
+share the Codex lifecycle model. The isolated OMP `stateful` profile uses OMP
+extension entry points and does not expose `UserPromptSubmit`. Later managed
+Codex hooks should move the same thin hook adapters to
+administrator-controlled paths and configure them from `requirements.toml`.
 
 Plugin packaging is a team-beta distribution layer, not the prototype
 enforcement path. A plugin can bundle hooks, MCP config, skills, and docs, but
@@ -143,7 +146,7 @@ long-term path for organization-level enforcement.
 Repo-local hook scripts must stay thin at the integration boundary:
 
 ```text
-parse Codex hook input
+parse runtime hook input
 classify tool call and extract action/targets when supported
 call local HTTP state server for store-backed coordination policy
 deny unclassified write/execute-capable tools in enabled repos
@@ -173,6 +176,10 @@ Currently implemented trigger sources:
 - Codex `PreToolUse`
 - Codex `PostToolUse`
 - Codex `Stop`
+- OMP `SessionStart`
+- OMP `PreToolUse`
+- OMP `PostToolUse`
+- OMP `Stop`
 - MCP calls from the agent
 - CLI and state server calls
 
@@ -193,6 +200,10 @@ still record activity and leases with their own `actor_id` so attribution stays
 precise.
 
 ## Hook Responsibilities
+
+These responsibilities apply to Codex hooks unless noted. OMP supports
+`SessionStart`, `PreToolUse`, `PostToolUse`, and `Stop`; it does not expose a
+`UserPromptSubmit` hook.
 
 `SessionStart`:
 
@@ -226,9 +237,10 @@ precise.
 
 `Stop`:
 
-- require a final state for active work
-- continue the turn when the agent has not finalized
-- release or shorten leases for completed work
+- post activity finalization for the session
+- release the session's leases through finalization
+- leave explicit `state.activity.finalize` available for manual final status
+  updates before shutdown
 
 ## MCP Surface
 

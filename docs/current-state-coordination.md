@@ -229,28 +229,32 @@ before session stops    -> require final status
 
 For the first implementation, supported write actions are blocked unless the
 session has active intent. Conflict enforcement is advisory but blocking where
-the Codex runtime exposes a hookable action. Hard global locks are a later
-policy decision.
+supported runtime adapters expose a hookable action. Hard global locks are a
+later policy decision.
 
-## Codex CLI MVP
+## Agent Runtime MVP
 
 The chosen MVP direction is:
 
 ```text
-Codex lifecycle hooks
+Codex lifecycle hooks and OMP extension hooks
 + MCP tools
 + state server
 ```
 
-This gives useful control without forking Codex immediately.
+This gives useful control without forking Codex or changing the default OMP
+profile.
 
 The prototype supports user-level installation with repo allowlist gating.
-`stateful install --yes` configures global Codex hooks and MCP. For OMP, it
-writes OMP config containing the stateful extension under the isolated
-`~/.omp/profiles/stateful/agent` profile and sets `tools.approvalMode: write`;
-the OMP global/default profile is not modified. `stateful enable` opts the
-current repo into enforcement. Repo-local hooks remain available through
-`stateful enable --repo-local-codex` as a compatibility fallback.
+`stateful install --agent codex --yes` configures global Codex hooks and MCP.
+For OMP, `stateful install --agent omp --yes` writes OMP config containing the
+stateful extension under the isolated profile agent directory
+(`$STATEFUL_HOME/.omp/profiles/stateful/agent`, default
+`~/.stateful_core/.omp/profiles/stateful/agent`) and sets
+`tools.approvalMode: write`; the OMP global/default profile is not modified.
+`stateful enable` opts the current repo into enforcement. Repo-local
+hooks remain available through `stateful enable --repo-local-codex` as a
+compatibility fallback.
 
 ```text
 global Codex hooks and MCP config
@@ -261,14 +265,15 @@ optional <repo>/.codex/hooks.json compatibility fallback
 stateful binary available by absolute path or PATH lookup
 ```
 
-The hook event model stays the same across global Codex hooks, isolated OMP
-profile hooks, repo-local compatibility hooks, and managed hooks; only the
-configuration and script
-location change. Plugin packaging is deferred to team beta for distribution and
-update UX, while managed hooks remain the long-term organization-enforcement
-path.
+Codex global hooks, repo-local compatibility hooks, and managed Codex hooks
+share the Codex lifecycle model: `SessionStart`, `UserPromptSubmit`,
+`PreToolUse`, `PostToolUse`, and `Stop`. The isolated OMP `stateful` profile
+uses OMP extension entry points for `SessionStart`, `PreToolUse`,
+`PostToolUse`, and `Stop`; OMP does not expose `UserPromptSubmit`. Plugin
+packaging is deferred to team beta for distribution and update UX, while
+managed hooks remain the long-term organization-enforcement path.
 
-Hook scripts are thin integration adapters. They parse Codex hook input,
+Hook scripts are thin integration adapters. They parse runtime hook input,
 classify runtime-specific tool calls, extract action and targets when
 supported, call the local HTTP state server for store-backed coordination
 policy, and translate the decision back into runtime hook output. Adapter-local
@@ -284,6 +289,10 @@ stateful denial or unavailable state maps to block even when OMP yolo metadata i
 present.
 
 ### Hook Responsibilities
+
+These responsibilities apply to Codex hooks unless noted. OMP supports
+`SessionStart`, `PreToolUse`, `PostToolUse`, and `Stop`; it does not expose a
+`UserPromptSubmit` hook.
 
 `SessionStart`:
 
@@ -315,10 +324,10 @@ present.
 
 `Stop`:
 
-- check whether the turn has a final state
-- continue the turn if the agent has not reported `done`, `failed`, or
-  `blocked`
-- release or shorten leases when work is complete
+- post activity finalization for the session
+- release the session's leases through finalization
+- leave explicit `state.activity.finalize` available for manual final status
+  updates before shutdown
 
 Subagents:
 
@@ -378,17 +387,17 @@ It should:
 - expose current-state views for prompt rendering
 - retain historical activity as evidence after expiration
 
-The Codex integration should stay thin. Store-backed coordination policy belongs
-in the state server; hook-side policy is limited to tool classification,
-fail-closed unknown-tool handling, and trusted wrapper validation.
+Runtime hook integrations should stay thin. Store-backed coordination policy
+belongs to the server, not to hook scripts. Hook logic should only handle
+runtime parsing, fail-closed unknown-tool handling, and trusted wrapper validation.
 
 V1 persistence is SQLite with append-only event tables and materialized
 current-state views. JSONL may be used for debugging exports, but not as the
 primary store.
 
-V1 transport is local HTTP. Codex hooks, MCP tools, filesystem watchers, and the
-future IDE extension should call the same local HTTP API. MCP remains an adapter,
-not a separate policy implementation.
+V1 transport is local HTTP. Codex hooks, OMP hooks, MCP tools, filesystem
+watchers, and the future IDE extension should call the same local HTTP API. MCP
+remains an adapter, not a separate policy implementation.
 
 Policy evaluation should use one entry point:
 
@@ -541,8 +550,8 @@ match should be rendered as unknown-confidence context.
 
 ## Human Activity
 
-Human activity cannot be captured only through Codex hooks. The system should
-also support external observation:
+Human activity cannot be captured only through agent runtime hooks. The system
+should also support external observation:
 
 - git working tree diff
 - filesystem watcher
@@ -666,8 +675,8 @@ not enough to continue writing while the state server is down.
 
 ## Known Limits
 
-Codex hooks are a practical guardrail, not a complete enforcement boundary.
-They can intercept important supported paths such as shell commands,
+Agent runtime hooks are a practical guardrail, not a complete enforcement
+boundary. They can intercept important supported paths such as shell commands,
 `apply_patch`, and MCP calls, but they do not make the state protocol a full
 security boundary. Post-action hooks also cannot undo side effects that already
 happened.
@@ -703,20 +712,20 @@ authorization orchestration in `stateful-server::policy_service` and uses
 
 ## Initial Decision
 
-Build the first version with Codex lifecycle hooks, MCP tools, and a
-`stateful_core` state server.
+Build the first version with Codex lifecycle hooks, OMP extension hooks, MCP
+tools, and a `stateful_core` state server.
 
-The v1 MVP includes Codex hooks, MCP tools, the state server, sandboxed test
-execution, and explicit reconciliation acknowledgements. Automatic
+The v1 MVP includes Codex and OMP hooks, MCP tools, the state server, sandboxed
+test execution, and explicit reconciliation acknowledgements. Automatic
 human-write observation and reconciliation blocks remain target behavior.
 
 V1 is local-only. It coordinates one machine/workspace boundary. Team-shared,
 cross-machine, or hosted state sync is deferred to v1.5/v2.
 
-The project should keep the policy model portable across agent runtimes, while
-the shipped implementation remains Codex-first. Codex-specific behavior belongs
-in adapters, and adding a non-Codex runtime is future integration work rather
-than current shipped behavior.
+The project should keep the policy model portable across agent runtimes. The
+shipped implementation remains Codex-first, with OMP extension support for the
+runtime lifecycle events OMP exposes. Runtime-specific behavior belongs in
+adapters, and broader non-Codex runtime support remains future work.
 
 V1 defaults to strict enforcement. Supported writes and reconciliation fail
 closed when state cannot be trusted. Usability comes from

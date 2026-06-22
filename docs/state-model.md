@@ -490,8 +490,8 @@ finalized_at
 source_ref
 ```
 
-The `Stop` hook should require finalization when a session has active work that
-has not been closed.
+The shipped `Stop` hook posts finalization for the session, which closes active
+work and releases the session's leases.
 
 ## Reconciliation Record
 

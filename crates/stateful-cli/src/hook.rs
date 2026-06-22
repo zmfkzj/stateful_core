@@ -516,19 +516,17 @@ fn post_omp_session_event(
         .workspace_id
         .clone()
         .unwrap_or_else(|| runtime.workspace_id.clone());
-    let mut body = protocol_envelope(ProtocolEnvelopeArgs {
-        runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
-        session_id: input.session_id.clone(),
-        workspace_id,
-        identity: None,
-        source_kind: "hook",
-        event,
-        source_ref: "hook:omp_session",
-        source_tool_name: input.tool_name.as_deref(),
-        payload: json!({}),
+    let body = json!({
+        "session_id": &input.session_id,
+        "workspace_id": workspace_id,
+        "source": {
+            "kind": "hook",
+            "event": event,
+            "ref": "hook:omp_session",
+            "tool_name": &input.tool_name,
+        },
+        "metadata": input.audit_metadata(),
     });
-    body["metadata"] = input.audit_metadata();
 
     let response = post_json(runtime, path, &body)?;
     if !(200..300).contains(&response.status_code) {

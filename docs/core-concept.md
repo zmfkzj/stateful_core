@@ -75,8 +75,9 @@ Examples:
 Current state must be compact enough to render into an agent prompt and precise
 enough to drive conflict checks before important tool calls.
 
-The shipped v1 prototype observes Codex sessions, supported tool effects, MCP
-calls, exact file lease freshness, and explicit reconciliation acknowledgements.
+The shipped v1 prototype observes Codex and OMP sessions, supported tool
+effects, MCP calls, exact file lease freshness, and explicit reconciliation
+acknowledgements.
 It does not automatically watch human editor buffers or filesystem saves.
 
 ## Freshness
@@ -128,14 +129,15 @@ before turn stops       -> require final status
 
 For v1, supported write actions are blocked unless the session has active intent
 with matching file or directory scope. Abstract task, test, port, or migration
-intent can provide context but does not permit writes. Codex lifecycle hooks
-provide the enforcement surface. This is a coordination guardrail, not a
-complete sandbox or security boundary.
+intent can provide context but does not permit writes. Codex lifecycle hooks and
+the OMP extension provide the enforcement surface. This is a coordination
+guardrail, not a complete sandbox or security boundary.
 
 V1 only authorizes writes through tool paths with reliable target extraction.
-Repo file edits use native Codex edit tools such as `apply_patch`, `Edit`, and
-`Write` after exact intent and a successful same-session file lease. Bash command text alone
-is never an authorization source; raw Bash is denied by stateful hooks. Command-shaped
+Repo file edits use hook-visible native edit tools such as Codex `apply_patch`,
+`Edit`, and `Write`, or OMP `edit` and `write`, after exact intent and a
+successful same-session file lease. Bash command text alone is never an
+authorization source; raw Bash is denied by stateful hooks. Command-shaped
 read-only inspection must use the trusted absolute `stateful` wrapper:
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
 --command <cmd>`. Command-shaped writes must use the wrapper with

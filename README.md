@@ -30,8 +30,8 @@ environments. The first milestone is the narrower 1-human, multi-agent workflow.
 This repository is an early Rust implementation and local-first, macOS-first
 prototype. The current implementation is Codex-first and includes a CLI,
 global user-level installation with repo allowlist gating, a local HTTP state
-server, MCP adapter, Codex hook adapter, SQLite-backed state store, sandboxed
-test execution, sandboxed git operations, outbox sync, and benchmark
+server, MCP adapter, Codex and OMP hook adapters, SQLite-backed state store,
+sandboxed test execution, sandboxed git operations, outbox sync, and benchmark
 tooling. It does not ship a filesystem watcher or IDE save gate for automatic
 human edit observation.
 
@@ -139,10 +139,13 @@ Resume signals are available through:
   sync, and server lifecycle management.
 - A local HTTP state server with token-protected non-health endpoints.
 - A SQLite event store and materialized current-state summary.
-- Codex lifecycle hook integration for observing and gating important actions.
+- Codex and OMP lifecycle hook integration for observing and gating important
+  actions.
 - An MCP adapter exposing the current-state protocol to compatible tools.
 - A Codex integration path, including lifecycle hooks, MCP, and an optional
   wrapper that starts Codex without forcing a session sandbox by default.
+- An OMP integration path, including lifecycle hooks and MCP in an isolated
+  `stateful` profile.
 - Sandboxed test and check execution through explicit artifact write
   directories.
 - Benchmark tooling for SWE-bench pair runs, reports, comparisons, and
@@ -321,8 +324,10 @@ installation health.
   installs global stateful files, installs the global
   `stateful-command-policy` skill, and merges Codex config.
 - `stateful install --agent omp [--yes]` installs the stateful OMP extension
-  into `~/.omp/profiles/stateful/agent` with `tools.approvalMode: write`,
-  leaving the default/global OMP profile untouched.
+  into the isolated profile agent directory
+  (`$STATEFUL_HOME/.omp/profiles/stateful/agent`, default
+  `~/.stateful_core/.omp/profiles/stateful/agent`) with
+  `tools.approvalMode: write`, leaving the default/global OMP profile untouched.
 - `stateful enable [--repo <path>]`, `stateful disable`, and
   `stateful repos list` manage the repo allowlist used by global hooks.
 - `stateful server start` starts the HTTP state server detached by default and
@@ -400,11 +405,13 @@ installation health.
 - `stateful sync-outbox` replays pending local outbox records to the server.
 - `stateful hook codex <event>` runs Codex hook integration entry points:
   `session-start`, `user-prompt-submit`, `pre-tool-use`, `post-tool-use`, and
-  `stop`. `stateful hook omp <event>` exposes OMP extension entry points.
+  `stop`. `stateful hook omp <event>` exposes OMP extension entry points:
+  `session-start`, `pre-tool-use`, `post-tool-use`, and `stop`; OMP does not
+  expose `user-prompt-submit`.
 
 Run `stateful <command> --help` for command-specific options.
 
-## Codex Hooks and Sessions
+## Codex and OMP Hooks and Sessions
 
 Codex installation merges stateful MCP, MCP tool approval policy, external-run
 approval rules, and hook configuration into the Codex config. Stateful MCP tools
@@ -413,13 +420,15 @@ execpolicy prompt for `stateful external-run request`; after that approval, the
 request validates the normalized external write scope and runs immediately.
 `stateful enable` opts a repo into enforcement, while disabled repos are no-ops
 for hooks and MCP. `stateful install --agent omp --yes` installs the OMP
-extension and MCP config into the isolated `stateful` OMP profile at
-`~/.omp/profiles/stateful/agent`, sets `tools.approvalMode: write`, and leaves
-the global/default OMP profile untouched. Stateful hook allows become OMP
+extension and MCP config into the isolated `stateful` OMP profile agent
+directory (`$STATEFUL_HOME/.omp/profiles/stateful/agent`, default
+`~/.stateful_core/.omp/profiles/stateful/agent`), sets
+`tools.approvalMode: write`, and leaves the global/default OMP profile
+untouched. Stateful hook allows become OMP
 allows; denials or unavailable authorization remain hard OMP blocks even if OMP
 yolo metadata is present.
 
-The generated hook configuration covers:
+The generated Codex hook configuration covers:
 
 - `SessionStart` for `startup`, `resume`, `clear`, and `compact`
 - `UserPromptSubmit`
@@ -429,14 +438,17 @@ The generated hook configuration covers:
   and `mcp__filesystem__.*`
 - `Stop`
 
+The OMP extension covers `SessionStart`, `PreToolUse`, `PostToolUse`, and
+`Stop`. OMP does not provide a `UserPromptSubmit` lifecycle hook.
+
 `SessionStart` registers the active session and writes the current-session file
-used by CLI and MCP calls. `UserPromptSubmit` renders brief current-state
-context. `PreToolUse` authorizes supported tool actions; server-side
+used by CLI and MCP calls. In Codex, `UserPromptSubmit` renders brief
+current-state context. `PreToolUse` authorizes supported tool actions; server-side
 authorization records an implicit session heartbeat for the checked session.
 `PostToolUse` records activity or heartbeats and refreshes same-session exact
-file lease observations after supported file tools complete. `Stop` records
-turn-end activity without finalizing or releasing leases; explicit
-`state.activity.finalize` finalizes activity and releases the session's leases.
+file lease observations after supported file tools complete. `Stop` posts
+`state.activity.finalize`, finalizing activity and releasing the session's
+leases.
 
 Hooks use the runtime payload `session_id` as the Stateful session id. They
 write `.stateful_core/runtime/sessions/<session_id>.json` plus the current

@@ -1036,7 +1036,7 @@ statusMessage = "Recording stateful activity"
 [[hooks.Stop.hooks]]
 type = "command"
 command = {}
-statusMessage = "Recording stateful activity"
+statusMessage = "Finalizing stateful activity"
 {GLOBAL_CODEX_BLOCK_END}
 "#,
         toml_string(binary_path),
@@ -1175,7 +1175,7 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
 fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Result<()> {
     let binary_json = serde_json::to_string(binary_path)?;
     let contents = format!(
-        r#"const {{ spawnSync }} = require("node:child_process");
+        r#"import {{ spawnSync }} from "node:child_process";
 
 const STATEFUL = {binary_json};
 
@@ -1209,7 +1209,7 @@ function sessionId(event, ctx) {{
   return process.env.STATEFUL_SESSION_ID || event?.sessionId || ctx?.sessionManager?.session?.id || "omp-session";
 }}
 
-module.exports = function statefulOmpExtension(pi) {{
+export default function statefulOmpExtension(pi) {{
   pi.setLabel("Stateful");
   pi.on("session_start", async (event, ctx) => {{
     runStatefulHook("session-start", {{
