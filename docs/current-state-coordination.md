@@ -250,8 +250,9 @@ The prototype supports user-level installation with repo allowlist gating.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`, and allows
-the Bash/Python OMP approval gate so stateful sandbox wrappers can decide; the
-OMP global/default profile is not modified.
+the Bash/Python OMP approval gate so stateful sandbox wrappers can decide. The
+generated extension asks for OMP UI confirmation before trusted `--fs external`
+tool calls proceed. The OMP global/default profile is not modified.
 `stateful enable` opts the current repo into enforcement. Repo-local
 hooks remain available through `stateful enable --repo-local-codex` as a
 compatibility fallback.
@@ -293,9 +294,9 @@ paths. OMP `SessionStart`, `PostToolUse`, and `Stop` lifecycle posts use flat
 session-event bodies with `metadata` and `source`, while OMP `PreToolUse`
 authorization still uses the v1 envelope.
 
-OMP adapters preserve stateful hard blocks: stateful allow maps to allow, while
-stateful denial or unavailable state maps to block even when OMP yolo metadata is
-present.
+OMP adapters preserve stateful hard blocks: stateful external-sandbox prompts
+map to OMP UI confirmation, stateful allow maps to allow, and stateful denial or
+unavailable state maps to block even when OMP yolo metadata is present.
 
 ### Hook Responsibilities
 
@@ -320,7 +321,8 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 - deny supported write calls when the session has no active intent
 - deny Codex raw Bash with sandbox guidance. For OMP, block raw Bash and native
   Python execution unless they use the trusted sandbox-run wrapper; repo-external
-  shell or Python work must use `sandbox run --fs external --purpose ...`.
+  shell or Python work must use `sandbox run --fs external --purpose ...`, which
+  prompts for OMP UI confirmation before sandbox validation.
 - check whether requested files or resources conflict with active leases
 - deny, warn, or add context based on policy
 

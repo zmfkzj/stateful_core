@@ -39,6 +39,7 @@ pub enum HookOutcome {
 pub enum OmpHookOutcome {
     Allow,
     Block { reason: String },
+    Prompt { title: String, message: String },
 }
 
 impl OmpHookOutcome {
@@ -48,6 +49,11 @@ impl OmpHookOutcome {
             Self::Block { reason } => json!({
                 "decision": "block",
                 "reason": reason,
+            }),
+            Self::Prompt { title, message } => json!({
+                "decision": "prompt",
+                "title": title,
+                "message": message,
             }),
         }
     }
@@ -258,6 +264,9 @@ fn handle_omp_pre_tool_use_with_identity(
     match omp_pre_tool_action(&input, repo_root, cwd, global_paths.as_ref())? {
         OmpPreToolAction::Allow => Ok(OmpHookOutcome::Allow),
         OmpPreToolAction::Block { reason } => Ok(OmpHookOutcome::Block { reason }),
+        OmpPreToolAction::Prompt { title, message } => {
+            Ok(OmpHookOutcome::Prompt { title, message })
+        }
         OmpPreToolAction::Targets(targets) => {
             authorize_omp_targets(&input, runtime, repo_root, cwd, identity, targets)
         }
@@ -266,6 +275,7 @@ fn handle_omp_pre_tool_use_with_identity(
 
 enum OmpPreToolAction {
     Targets(Vec<PatchTarget>),
+    Prompt { title: String, message: String },
     Allow,
     Block { reason: String },
 }
@@ -394,6 +404,14 @@ fn omp_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {
             )
             .collect();
         return Some(OmpPreToolAction::Targets(targets));
+    }
+    if invocation.request.fs == SandboxFsProfile::External {
+        return Some(OmpPreToolAction::Prompt {
+            title: "Approve external sandbox command".to_string(),
+            message: format!(
+                "Stateful is requesting a repo-external sandbox operation.\n\nCommand:\n{command}\n\nThe external sandbox profile will still validate the declared absolute external scope before execution."
+            ),
+        });
     }
     Some(OmpPreToolAction::Allow)
 }

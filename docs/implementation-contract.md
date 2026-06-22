@@ -228,8 +228,9 @@ rule. Repo-external OMP Bash or Python execution is also blocked unless it uses
 the trusted wrapper:
 `<absolute-stateful-binary> sandbox run --fs external --purpose ...`; the
 external sandbox profile validates absolute external write scopes, rejects
-repo-internal targets, runs through the sandbox, and does not require repo intent
-or lease. Git operations use `--fs git` for one `git ...`
+repo-internal targets, runs through the sandbox after Codex approval or OMP UI
+confirmation, and does not require repo intent or lease.
+Git operations use `--fs git` for one `git ...`
 command. GitHub pull request list/view/status/create commands use
 `<absolute-stateful-binary> sandbox run --fs github-pr --network enabled
 --command 'gh pr <list|view|status|create> ...'`; use the GitHub connector
@@ -543,7 +544,8 @@ tool approval policy, and external sandbox approval rules. Codex installs wire
 Stateful MCP tools default to automatic approval; `stateful sandbox run --fs
 external --purpose ...` is gated by a Codex execpolicy prompt before it validates
 the external write scope and runs the command through the sandbox. `stateful
-install --agent omp --yes` wires the
+install --agent omp --yes` wires an OMP UI confirmation prompt for the same
+external profile before sandbox validation.
 OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
 extension events to `stateful hook omp session-start`, `pre-tool-use`,
 `post-tool-use`, and `stop`; OMP does not expose a stateful
@@ -656,9 +658,9 @@ The prototype supports user-level installation with repo allowlist gating.
 --agent omp --yes` installs the OMP extension entry point, MCP config, and
 `tools.approvalMode: write` under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) so that profile carries the stateful approval
-context. `stateful enable` opts the current repo into enforcement. Repo-local
-packaging and managed hooks must reuse the same hook adapter library and HTTP
-protocol.
+context and can prompt for trusted external sandbox requests. `stateful enable`
+opts the current repo into enforcement. Repo-local packaging and managed hooks
+must reuse the same hook adapter library and HTTP protocol.
 
 The migration order is:
 

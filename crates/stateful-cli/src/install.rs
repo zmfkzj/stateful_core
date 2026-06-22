@@ -1304,6 +1304,21 @@ export default function statefulOmpExtension(pi) {{
       tool_name: event.toolName,
       tool_input: event.input || {{}},
     }});
+    if (decision.decision === "prompt") {{
+      if (typeof ctx?.ui?.confirm !== "function") {{
+        return {{
+          block: true,
+          reason: "Stateful requested approval, but OMP UI confirmation is unavailable.",
+        }};
+      }}
+      const approved = await ctx.ui.confirm(
+        decision.title || "Approve stateful action",
+        decision.message || decision.reason || "Approve this stateful action?"
+      );
+      if (!approved) {{
+        return {{ block: true, reason: decision.reason || "Blocked by user" }};
+      }}
+    }}
     if (decision.decision === "block") {{
       return {{ block: true, reason: decision.reason }};
     }}

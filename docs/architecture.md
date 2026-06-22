@@ -117,8 +117,9 @@ The prototype supports user-level installation with repo allowlist gating.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`, and allows
-the Bash/Python OMP approval gate so stateful sandbox wrappers can decide; the
-OMP global/default profile is not modified.
+the Bash/Python OMP approval gate so stateful sandbox wrappers can decide. The
+generated extension asks for OMP UI confirmation before trusted `--fs external`
+tool calls proceed. The OMP global/default profile is not modified.
 `stateful enable` opts the current repo into enforcement. Repo-local
 hooks remain available through `stateful enable --repo-local-codex` as a
 compatibility fallback.
@@ -163,8 +164,9 @@ tool classification plus Bash sandbox-wrapper validation. If the state server
 is unavailable, the hook follows the availability policy: agent writes and
 reconciliation fail closed; read/search/diff remains allowed.
 
-For OMP, a stateful allow translates to OMP allow; stateful deny or unavailable
-server translates to a hard block, even when OMP yolo metadata is present.
+For OMP, a stateful external-sandbox prompt maps to OMP UI confirmation; other
+stateful allows translate to OMP allow. Stateful deny or unavailable server
+translates to a hard block, even when OMP yolo metadata is present.
 
 Hook scripts should resolve paths from the git root. Envelope-enforced routes
 include `protocol_version`; a major protocol mismatch fails closed on those
@@ -232,7 +234,7 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   disabled`; the hook rejects `--fs read-only --network enabled`. Command-shaped
   repo writes use `--fs write-targets` with explicit write/create targets and
   repo intent plus same-session leases. Repo-external writes use `--fs external`
-  with absolute external targets and Codex approval.
+  with absolute external targets and Codex approval or OMP UI confirmation.
 - check leases and planned edits for likely conflicts
 - return allow, warning context, or deny based on policy
 
@@ -310,7 +312,7 @@ classification, so `functions.bash` is Bash, `functions.python` is Python, and
   enable network. Command-shaped repo writes use `--fs write-targets` with
   explicit `--write-target` / `--create-target` values and target authorization.
   Repo-external writes use `--fs external` with absolute external targets, no
-  repo intent or lease, and Codex approval.
+  repo intent or lease, and Codex approval or OMP UI confirmation.
 - Test execution: run only through sandboxed test actions such as
   `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`.
   Build artifacts live under `/tmp/stateful/<session>/<purpose>/`.

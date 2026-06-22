@@ -3096,7 +3096,7 @@ fn omp_repo_external_raw_bash_blocks_without_external_sandbox_profile() {
 }
 
 #[test]
-fn omp_allows_sandbox_external_profile_without_repo_authorization() {
+fn omp_prompts_for_sandbox_external_profile_without_repo_authorization() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "omp-parent",
@@ -3109,16 +3109,19 @@ fn omp_allows_sandbox_external_profile_without_repo_authorization() {
     })
     .to_string();
 
-    assert_eq!(
-        handle_omp_pre_tool_use_with_runtime(
-            &input,
-            None,
-            Some(Path::new("/repo")),
-            Some(Path::new("/repo"))
-        )
-        .unwrap(),
-        OmpHookOutcome::Allow
-    );
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        None,
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .unwrap();
+    let OmpHookOutcome::Prompt { title, message } = outcome else {
+        panic!("OMP external sandbox profile should request user approval");
+    };
+    assert_eq!(title, "Approve external sandbox command");
+    assert!(message.contains("repo-external sandbox operation"));
+    assert!(message.contains("sandbox run --fs external"));
 }
 
 #[test]

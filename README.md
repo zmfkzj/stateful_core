@@ -201,10 +201,11 @@ stateful command-policy skill:
 stateful install --agent codex --yes
 ```
 
-Install the OMP integration when you want stateful OMP hooks and MCP in the
-isolated `stateful` profile. This leaves the default/global OMP profile alone,
-uses `tools.approvalMode: write`, and explicitly allows OMP's Bash/Python
-approval gate so stateful sandbox wrappers can make the policy decision:
+Install the OMP integration when you want stateful OMP hooks, MCP, and
+repo-external sandbox approval prompts in the isolated `stateful` profile. This
+leaves the default/global OMP profile alone, uses `tools.approvalMode: write`,
+and explicitly allows OMP's Bash/Python approval gate so stateful sandbox
+wrappers can make the policy decision:
 
 ```bash
 stateful install --agent omp --yes
@@ -386,7 +387,7 @@ installation health.
   runs command-shaped repo directory writes after exact directory intent and a
   successful same-session directory lease for that directory.
 - `stateful sandbox run --fs external --purpose <purpose> --write-target <absolute-external-path> --command <cmd>`
-  runs command-shaped repo-external writes after Codex approval through the
+  runs command-shaped repo-external writes after Codex approval or OMP UI confirmation through the
   external sandbox profile. External targets must be absolute, must resolve
   outside the repo, and do not require repo intent or a same-session lease.
 - `stateful sandbox run --fs git --network enabled --command 'git <args>'`
@@ -438,9 +439,11 @@ sandbox.
 for hooks and MCP. `stateful install --agent omp --yes` installs the OMP
 extension and MCP config into the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`, and leaves
-the global/default OMP profile untouched. Stateful hook allows become OMP
-allows; denials or unavailable authorization remain hard OMP blocks even if OMP
-yolo metadata is present.
+the global/default OMP profile untouched. For trusted `stateful sandbox run --fs
+external ...` requests, the generated OMP extension asks for UI confirmation
+before allowing the tool call to continue to external sandbox validation. Other
+stateful hook allows become OMP allows; denials or unavailable authorization
+remain hard OMP blocks even if OMP yolo metadata is present.
 OMP built-ins that do not write repo files, including `ask`, `ast_grep`, `job`,
 `irc`, `todo`, `report_tool_issue`, `generate_image`, and native read/search
 tools, are allowed by default. Other unclassified OMP-origin tools are recorded
@@ -449,7 +452,8 @@ in `stateful tools list` and can be explicitly permitted with
 bypass hard-denied write or execution classifications.
 OMP raw Bash and native Python execution are blocked unless the tool input is a
 trusted `stateful sandbox run ... --command ...` wrapper; repo-external execution
-must use the external sandbox profile with `--purpose`.
+must use the external sandbox profile with `--purpose`, which prompts in OMP
+before sandbox validation.
 
 The generated Codex hook configuration covers:
 
@@ -581,11 +585,10 @@ External sandbox targets must be absolute paths that resolve outside the repo.
 They may be listed with `--write-target`, `--create-target`, or `--write-dir`;
 the profile also supports `--connect-socket`, `--allow-signal`, and `--network`
 for approved external operations. Repo-external writes do not require repo intent
-or a same-session lease, but Codex prompts on
-`stateful sandbox run --fs external --purpose ...` before execution. After
-approval, the command runs through the sandbox and prints the sandbox command
-result as JSON. In OMP, repo-external shell or Python work must use the external
-sandbox profile for writes outside the repo.
+or a same-session lease. Codex prompts on
+`stateful sandbox run --fs external --purpose ...` before execution; OMP asks for
+UI confirmation for the same external profile. After approval, the command runs
+through the sandbox and prints the sandbox command result as JSON.
 
 ## HTTP And MCP Surface
 

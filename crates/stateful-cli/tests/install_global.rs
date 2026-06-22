@@ -211,6 +211,8 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("process.env.STATEFUL_SESSION_ID = id"));
     assert!(extension.contains("pre-tool-use"));
     assert!(extension.contains("decision: \"block\""));
+    assert!(extension.contains("decision.decision === \"prompt\""));
+    assert!(extension.contains("ctx?.ui?.confirm"));
     let command_policy_skill = fs::read_to_string(&omp_skill).expect("omp skill should read");
     let source_command_policy_skill = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/stateful-command-policy/SKILL.md"),
