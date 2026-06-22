@@ -289,6 +289,10 @@ fn denovo_run_command_parses_omp_cli_agent_options() {
         "/opt/homebrew/bin/omp",
         "--stateful-binary",
         "/Users/arthur/.cargo/bin/stateful",
+        "--agent-docker-image",
+        "ghcr.io/stateful/omp-agent:latest",
+        "--agent-docker-stateful-binary",
+        "/usr/local/bin/stateful",
         "--benchmark-model",
         "deepseek-v4-flash",
     ])
@@ -302,6 +306,8 @@ fn denovo_run_command_parses_omp_cli_agent_options() {
                 ref run_id,
                 ref condition,
                 ref omp_bin,
+                ref agent_docker_image,
+                ref agent_docker_stateful_binary,
                 ref benchmark_model,
                 ..
             }
@@ -311,6 +317,8 @@ fn denovo_run_command_parses_omp_cli_agent_options() {
                 "stateful:on,subagent:on".to_string(),
             ]
             && omp_bin == "/opt/homebrew/bin/omp"
+            && agent_docker_image.as_deref() == Some("ghcr.io/stateful/omp-agent:latest")
+            && agent_docker_stateful_binary == "/usr/local/bin/stateful"
             && benchmark_model.as_deref() == Some("deepseek-v4-flash")
     ));
 }
@@ -413,6 +421,8 @@ with results.open("w", encoding="utf-8") as handle:
         codex_bin: "codex".to_string(),
         omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -517,6 +527,8 @@ with results.open("w", encoding="utf-8") as handle:
         codex_bin: "codex".to_string(),
         omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -1587,6 +1599,122 @@ print(json.dumps({{"command": command, "command_prompt_arg": command_prompt_arg,
 }
 
 #[test]
+fn denovo_codex_agent_builds_dockerized_omp_command_with_minimal_mounts() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-omp-docker-command");
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_omp_agent_docker_command_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+root = Path({temp_dir})
+workspace = root / "workspace"
+prompt = root / "instance" / "prompt.txt"
+home = root / "home"
+workspace.mkdir(parents=True)
+prompt.parent.mkdir(parents=True)
+prompt.write_text("prompt")
+home.mkdir(parents=True)
+
+command = module.docker_omp_command_for_profile(
+    workspace=workspace,
+    prompt_path=prompt,
+    home=home,
+    omp_bin="omp",
+    benchmark_model="deepseek-v4-flash",
+    docker_image="ghcr.io/stateful/omp-agent:latest",
+    base_env={{
+        "HOME": "/host/home",
+        "OPENAI_API_KEY": "sk-test",
+        "STATEFUL_SERVER_TOKEN": "token-123",
+        "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
+    }},
+)
+print(json.dumps({{
+    "command": command,
+    "env": [command[index + 1] for index, value in enumerate(command) if value == "--env"],
+    "mounts": [command[index + 1] for index, value in enumerate(command) if value == "--mount"],
+}}, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        temp_dir = serde_json::to_string(&temp_dir.to_string_lossy())
+            .expect("temp dir should encode as json"),
+    );
+    let output = run_python_json(&script);
+    let command = output["command"]
+        .as_array()
+        .expect("command should be an array");
+    let env = output["env"].as_array().expect("env should be an array");
+    let mounts = output["mounts"]
+        .as_array()
+        .expect("mounts should be an array");
+
+    assert_eq!(command[0], "docker");
+    assert!(command_contains(command, "run"));
+    assert!(command_contains(command, "--rm"));
+    assert_eq!(command_arg_after(command, "--network"), Some("bridge"));
+    assert_eq!(command_arg_after(command, "--workdir"), Some("/workspace"));
+    assert!(command_contains(
+        command,
+        "ghcr.io/stateful/omp-agent:latest"
+    ));
+    let image_index = command
+        .iter()
+        .position(|value| value.as_str() == Some("ghcr.io/stateful/omp-agent:latest"))
+        .expect("docker image should be present");
+    assert_eq!(command[image_index + 1].as_str(), Some("omp"));
+    assert!(command_contains(command, "--cwd"));
+    assert!(command_contains(command, "/workspace"));
+    assert!(command_contains(command, "@/prompt.txt"));
+    assert!(command_contains(command, "--approval-mode"));
+    assert!(command_contains(command, "yolo"));
+
+    assert!(
+        env.iter()
+            .any(|value| value.as_str() == Some("HOME=/home/stateful"))
+    );
+    assert!(
+        env.iter()
+            .any(|value| value.as_str() == Some("OPENAI_API_KEY=sk-test"))
+    );
+    assert!(env.iter().any(|value| {
+        value.as_str() == Some("STATEFUL_SERVER_URL=http://host.docker.internal:43873")
+    }));
+    assert!(
+        env.iter()
+            .any(|value| value.as_str() == Some("STATEFUL_SERVER_TOKEN=token-123"))
+    );
+    assert!(
+        !env.iter()
+            .any(|value| value.as_str() == Some("HOME=/host/home"))
+    );
+    assert!(mounts.iter().any(|value| {
+        value
+            .as_str()
+            .expect("mount should be text")
+            .contains("target=/workspace")
+    }));
+    assert!(mounts.iter().any(|value| {
+        let mount = value.as_str().expect("mount should be text");
+        mount.contains("target=/prompt.txt") && mount.contains("readonly")
+    }));
+    assert!(mounts.iter().any(|value| {
+        value
+            .as_str()
+            .expect("mount should be text")
+            .contains("target=/home/stateful")
+    }));
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
 fn denovo_codex_agent_prepares_local_isolated_profiles_without_nested_root() {
     let temp_dir = target_temp_dir("stateful-bench-denovo-codex-local-profiles");
     let script = format!(
@@ -1787,7 +1915,7 @@ module.prepare_omp_environment(no_state_env, enable_stateful=False, stateful_bin
 no_state_agent = Path(no_state_env["PI_CODING_AGENT_DIR"])
 
 stateful_env = module.denovo_omp_environment(output, "issue/stateful", task_path, workspace, source_env)
-module.prepare_omp_environment(stateful_env, enable_stateful=True, stateful_binary="/tmp/stateful", runner=fake_runner)
+module.prepare_omp_environment(stateful_env, enable_stateful=True, stateful_binary="/tmp/stateful", runner=fake_runner, runtime_stateful_binary="/container/stateful")
 stateful_agent = Path(stateful_env["PI_CODING_AGENT_DIR"])
 explicit_stateful_env = module.denovo_omp_environment(
     output,
@@ -1909,6 +2037,8 @@ print(json.dumps({{
     assert!(command_contains(install_command, "--agent"));
     assert!(command_contains(install_command, "omp"));
     assert!(command_contains(install_command, "--yes"));
+    assert!(command_contains(install_command, "--binary"));
+    assert!(command_contains(install_command, "/container/stateful"));
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }

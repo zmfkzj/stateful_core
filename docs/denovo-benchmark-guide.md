@@ -78,6 +78,9 @@ debug run:
   runs, unless the experiment explicitly compares agent CLIs or models.
 - Isolated OMP homes must have the benchmark model's API key seeded, or the
   equivalent provider API key must be present in the launch environment.
+- For Docker-isolated OMP agent runs, add `--agent-docker-image <image>`;
+  `--agent-docker-stateful-binary <path>` only needs to be set when the image's
+  `stateful` binary is not at `/usr/local/bin/stateful`.
 
 Historical runs may use `--prompt-version v1`; do not mix v1 and v2 results in
 the same comparison table.

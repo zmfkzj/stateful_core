@@ -44,6 +44,26 @@ RESUME_POLICY_CONTEXT_OR_TOKEN_ONLY = "context_or_token_failure_only"
 DEFAULT_SUBAGENT_MIN_COUNT = 3
 DEFAULT_MIN_FREE_DISK_GB = 20.0
 BYTES_PER_GIB = 1024**3
+DEFAULT_OMP_AGENT_DOCKER_STATEFUL_BINARY = "/usr/local/bin/stateful"
+OMP_AGENT_DOCKER_WORKSPACE = "/workspace"
+OMP_AGENT_DOCKER_PROMPT = "/prompt.txt"
+OMP_AGENT_DOCKER_HOME = "/home/stateful"
+OMP_AGENT_DOCKER_ENV_ALLOWLIST = {
+    "ANTHROPIC_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENROUTER_API_KEY",
+    "SSL_CERT_FILE",
+    "STATEFUL_SERVER_TOKEN",
+    "STATEFUL_SERVER_URL",
+}
+OMP_AGENT_DOCKER_ENV_PREFIXES = ("OMP_",)
 DIFF_EXCLUDED_PATHS = (
     ".codex",
     ".codex/**",
@@ -132,6 +152,7 @@ Native Codex subagent requirements:
 - Do not leave any native subagent as analysis-only; each one must inspect, edit, and verify the workspace.
 - Wait for each spawned subagent and incorporate its work or findings into the final workspace.
 """.rstrip()
+
 
 
 
@@ -695,6 +716,69 @@ def omp_command_for_profile(
         f"@{prompt_path.resolve()}",
     ]
 
+def docker_host_url(value: str) -> str:
+    parsed = urllib.parse.urlparse(value)
+    if parsed.hostname not in {"127.0.0.1", "localhost"}:
+        return value
+    netloc = "host.docker.internal"
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urllib.parse.urlunparse(parsed._replace(netloc=netloc))
+
+
+def omp_agent_docker_env(base_env: dict[str, str]) -> dict[str, str]:
+    env: dict[str, str] = {
+        "HOME": OMP_AGENT_DOCKER_HOME,
+        "PI_CODING_AGENT_DIR": f"{OMP_AGENT_DOCKER_HOME}/.omp/profiles/stateful/agent",
+        "STATEFUL_HOME": OMP_AGENT_DOCKER_HOME,
+        "XDG_CACHE_HOME": f"{OMP_AGENT_DOCKER_HOME}/.cache",
+        "XDG_CONFIG_HOME": f"{OMP_AGENT_DOCKER_HOME}/.config",
+    }
+    for key, value in base_env.items():
+        if key in OMP_AGENT_DOCKER_ENV_ALLOWLIST or key.startswith(OMP_AGENT_DOCKER_ENV_PREFIXES):
+            env[key] = docker_host_url(value) if key == "STATEFUL_SERVER_URL" else value
+    return env
+
+
+def docker_omp_command_for_profile(
+    workspace: Path,
+    prompt_path: Path,
+    home: Path,
+    omp_bin: str,
+    benchmark_model: str,
+    docker_image: str,
+    base_env: dict[str, str],
+    docker_bin: str = "docker",
+) -> list[str]:
+    docker_env = omp_agent_docker_env(base_env)
+    command = [
+        docker_bin,
+        "run",
+        "--rm",
+        "--network",
+        "bridge",
+        "--workdir",
+        OMP_AGENT_DOCKER_WORKSPACE,
+        "--mount",
+        f"type=bind,source={workspace.resolve()},target={OMP_AGENT_DOCKER_WORKSPACE}",
+        "--mount",
+        f"type=bind,source={prompt_path.resolve()},target={OMP_AGENT_DOCKER_PROMPT},readonly",
+        "--mount",
+        f"type=bind,source={home.resolve()},target={OMP_AGENT_DOCKER_HOME}",
+    ]
+    for key in sorted(docker_env):
+        command.extend(["--env", f"{key}={docker_env[key]}"])
+    command.append(docker_image)
+    command.extend(
+        omp_command_for_profile(
+            workspace=Path(OMP_AGENT_DOCKER_WORKSPACE),
+            prompt_path=Path(OMP_AGENT_DOCKER_PROMPT),
+            omp_bin=omp_bin,
+            benchmark_model=benchmark_model,
+        )
+    )
+    return command
+
 
 def denovo_codex_environment(
     output: Path,
@@ -767,12 +851,16 @@ def prepare_omp_environment(
     enable_stateful: bool,
     stateful_binary: str,
     runner: Any = subprocess.run,
+    runtime_stateful_binary: str | None = None,
 ) -> None:
     Path(env["PI_CODING_AGENT_DIR"]).mkdir(parents=True, exist_ok=True)
     if not enable_stateful:
         return
+    command = [stateful_binary, "install", "--agent", "omp", "--yes"]
+    if runtime_stateful_binary and runtime_stateful_binary != stateful_binary:
+        command.extend(["--binary", runtime_stateful_binary])
     completed = runner(
-        [stateful_binary, "install", "--agent", "omp", "--yes"],
+        command,
         text=True,
         check=False,
         env=env,
@@ -939,6 +1027,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--codex-bin", required=True)
     parser.add_argument("--omp-bin", default="omp")
     parser.add_argument("--stateful-binary", required=True)
+    parser.add_argument("--agent-docker-image")
+    parser.add_argument(
+        "--agent-docker-stateful-binary",
+        default=DEFAULT_OMP_AGENT_DOCKER_STATEFUL_BINARY,
+    )
     parser.add_argument("--benchmark-model", required=True)
     parser.add_argument("--benchmark-reasoning-effort", required=True)
     parser.add_argument("--benchmark-model-context-window", type=int, required=True)
@@ -1501,12 +1594,6 @@ async def run_one_instance_async(
             )
 
         if args.cli_runtime == "omp":
-            command = omp_command_for_profile(
-                workspace=workspace,
-                prompt_path=prompt_path,
-                omp_bin=args.omp_bin,
-                benchmark_model=args.benchmark_model,
-            )
             env = denovo_omp_environment(
                 output=output,
                 instance_id=inst.id,
@@ -1573,7 +1660,27 @@ async def run_one_instance_async(
                 env,
                 enable_stateful=args.agent_mode == "stateful",
                 stateful_binary=args.stateful_binary,
+                runtime_stateful_binary=(
+                    args.agent_docker_stateful_binary if args.agent_docker_image else None
+                ),
             )
+            if args.agent_docker_image:
+                command = docker_omp_command_for_profile(
+                    workspace=workspace,
+                    prompt_path=prompt_path,
+                    home=Path(env["HOME"]),
+                    omp_bin=args.omp_bin,
+                    benchmark_model=args.benchmark_model,
+                    docker_image=args.agent_docker_image,
+                    base_env=env,
+                )
+            else:
+                command = omp_command_for_profile(
+                    workspace=workspace,
+                    prompt_path=prompt_path,
+                    omp_bin=args.omp_bin,
+                    benchmark_model=args.benchmark_model,
+                )
         else:
             seeded_auth = prepare_codex_environment(
                 env,
@@ -1850,6 +1957,10 @@ async def run_real_instances_async(args: argparse.Namespace) -> int:
             "benchmark_max_turns": args.benchmark_max_turns,
             "max_resumes": args.max_resumes,
             "eval_iters": args.eval_iters,
+            "agent_docker_image": args.agent_docker_image,
+            "agent_docker_stateful_binary": (
+                args.agent_docker_stateful_binary if args.agent_docker_image else None
+            ),
         },
     )
     return adapter_exit_code_after_results(results)
