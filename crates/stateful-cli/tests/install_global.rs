@@ -365,12 +365,10 @@ fn install_codex_yes_creates_external_run_prompt_rule() {
 
     let rules = fs::read_to_string(fixture.codex_rules_path()).expect("rules should read");
     assert!(rules.contains("prefix_rule("));
-    assert!(rules.contains(
-        "pattern = [\"/opt/stateful/bin/stateful\", \"external-run\", \"request\"]"
-    ));
-    assert!(!rules.contains(
-        "pattern = [\"/opt/stateful/bin/stateful\", \"sandbox\", \"run\"]"
-    ));
+    assert!(
+        rules.contains("pattern = [\"/opt/stateful/bin/stateful\", \"external-run\", \"request\"]")
+    );
+    assert!(!rules.contains("pattern = [\"/opt/stateful/bin/stateful\", \"sandbox\", \"run\"]"));
     assert!(rules.contains("decision = \"prompt\""));
     assert!(rules.contains("stateful external-run request"));
     assert!(rules.contains(
