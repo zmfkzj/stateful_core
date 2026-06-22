@@ -313,8 +313,8 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 - intercept supported tool calls before execution
 - deny supported write calls when the session has no active intent
 - deny Codex raw Bash with sandbox guidance. For OMP, block raw Bash unless it
-  uses the trusted sandbox-run wrapper; targetless repo-external OMP Bash returns
-  a warning directing agents to `sandbox run --fs external --purpose ...`.
+  uses the trusted sandbox-run wrapper; repo-external shell work must use
+  `sandbox run --fs external --purpose ...`.
 - check whether requested files or resources conflict with active leases
 - deny, warn, or add context based on policy
 
@@ -439,7 +439,7 @@ Bash command-shaped repo writes -> require the trusted wrapper with
 test execution -> run through sandbox run --fs build with
   --write-dir <scratch-purpose>; scratch lives under /tmp/stateful/<session>/
 Codex raw Bash or non-wrapper Bash -> deny
-targetless repo-external OMP Bash -> warn with external sandbox guidance
+repo-external shell work -> require external sandbox profile
 ```
 
 Bash denial should tell the agent to use native read/search/diff tools for
@@ -489,8 +489,8 @@ Initial policy should prefer advisory leases:
 - supported write outside matching exact file scope or exact directory
   `write_directory` scope: deny
 - Codex raw Bash or Bash that is not a strict trusted
-  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper: deny
-- targetless repo-external OMP Bash: warn with external sandbox guidance
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper: deny,
+  including repo-external shell work
 - directory intent and directory lease authorize only `write_directory` for the
   exact directory resource; they do not authorize `write_file`, delete, rename,
   or move actions on child paths
@@ -661,9 +661,9 @@ non-Bash read/search/diff path: allow
 ```
 
 At the OMP adapter boundary, a stateful hook deny or unavailable result is
-returned as block, not warning, regardless of OMP yolo metadata. The targetless
-repo-external Bash warning points to the external sandbox profile, not a yolo
-override of a deny.
+returned as block, not warning, regardless of OMP yolo metadata. Repo-external
+shell work must use the external sandbox profile; yolo metadata does not override
+that block.
 
 When the state server is unavailable:
 
@@ -764,7 +764,7 @@ supported write action + no active intent -> deny
 supported write action + expired intent -> deny as missing active intent
 supported write action + intent without file/directory scope -> deny
 supported write action + target outside intent scope -> deny
-Codex raw Bash or repo-internal non-wrapper Bash -> deny; targetless repo-external OMP Bash -> warn
+Codex raw Bash or non-wrapper Bash -> deny, including repo-external shell work
 delete action + non-exact file scope -> deny
 rename/move action + non-exact source or destination scope -> deny
 active write lease in hard conflict domain -> deny

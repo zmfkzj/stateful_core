@@ -209,9 +209,8 @@ command-shaped inspection uses `<absolute-stateful-binary> sandbox run --fs
 read-only --network disabled --command <cmd>`; the read-only profile rejects
 `--network enabled`. Command-shaped repo writes use `--fs write-targets` with
 explicit `--write-target` / `--create-target` values and target authorization.
-OMP raw Bash follows the same block-unless-wrapper rule. When an OMP Bash call
-is targetless and classified as repo-external rather than repo-internal, the
-hook returns a warning directing the request through
+OMP raw Bash follows the same block-unless-wrapper rule. Repo-external OMP Bash
+is also blocked unless it uses the trusted wrapper:
 `<absolute-stateful-binary> sandbox run --fs external --purpose ...`; the
 external sandbox profile validates absolute external write scopes, rejects
 repo-internal targets, runs through the sandbox, and does not require repo intent

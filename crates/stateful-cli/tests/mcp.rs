@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc,
     thread,
@@ -341,7 +341,7 @@ fn mcp_stale_file_write_call_returns_removed_guidance() {
                 .as_str()
                 .unwrap_or_default()
                 .contains(
-                    "state_file_write was removed; use native Codex edit tools such as apply_patch or Edit after exact intent declaration and a successful same-session file lease"
+                    "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after exact intent declaration and a successful same-session file lease"
                 ),
             "{tool_name}"
         );
@@ -1084,6 +1084,217 @@ fn sandbox_run_read_only_does_not_require_reachable_runtime() {
 }
 
 #[test]
+fn sandbox_run_external_profile_writes_absolute_external_targets_without_runtime() {
+    if macos_stateful_sandbox_is_active() {
+        return;
+    }
+
+    let temp_root = external_temp_root("stateful-sandbox-run-external-no-runtime");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    let external_dir = temp_root.join("external-output");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    fs::create_dir_all(&external_dir).expect("external output dir should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let output_path = external_dir.join("artifact.txt");
+    let existing_path = external_dir.join("existing.txt");
+    fs::write(&existing_path, "old").expect("existing external file should seed");
+    let output_arg = output_path.to_string_lossy().into_owned();
+    let existing_arg = existing_path.to_string_lossy().into_owned();
+    let write_dir_arg = external_dir.to_string_lossy().into_owned();
+    let command = format!(
+        "printf external > {} && printf updated > {}",
+        shell_quote_path(&output_path),
+        shell_quote_path(&existing_path)
+    );
+
+    let output = run_stateful_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[
+            ("STATEFUL_SERVER_URL", "http://127.0.0.1:9"),
+            ("STATEFUL_SERVER_TOKEN", "unreachable-token"),
+        ],
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "external",
+            "--network",
+            "enabled",
+            "--purpose",
+            "write external artifact",
+            "--create-target",
+            output_arg.as_str(),
+            "--write-target",
+            existing_arg.as_str(),
+            "--write-dir",
+            write_dir_arg.as_str(),
+            "--allow-signal",
+            "--timeout-seconds",
+            "10",
+            "--command",
+            command.as_str(),
+        ],
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout.contains("Connection refused") && !stderr.contains("Connection refused"),
+        "external sandbox must not contact runtime: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        output.status.success(),
+        "external sandbox run failed: stdout={stdout} stderr={stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(&output_path).expect("external artifact should read"),
+        "external"
+    );
+    assert_eq!(
+        fs::read_to_string(&existing_path).expect("existing external file should read"),
+        "updated"
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[cfg(unix)]
+#[test]
+fn sandbox_run_external_profile_accepts_connect_socket_scope_without_runtime() {
+    if macos_stateful_sandbox_is_active() {
+        return;
+    }
+
+    let temp_root = external_temp_root("stateful-sandbox-run-external-socket");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    let external_dir = temp_root.join("external-control");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    fs::create_dir_all(&external_dir).expect("external control dir should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let socket_path = external_dir.join("control.sock");
+    let _listener =
+        std::os::unix::net::UnixListener::bind(&socket_path).expect("socket should bind");
+    let socket_arg = socket_path.to_string_lossy().into_owned();
+
+    let output = run_stateful_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[
+            ("STATEFUL_SERVER_URL", "http://127.0.0.1:9"),
+            ("STATEFUL_SERVER_TOKEN", "unreachable-token"),
+        ],
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "external",
+            "--purpose",
+            "connect external control socket",
+            "--connect-socket",
+            socket_arg.as_str(),
+            "--command",
+            "true",
+        ],
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout.contains("Connection refused") && !stderr.contains("Connection refused"),
+        "external socket sandbox must not contact runtime: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        output.status.success(),
+        "external socket sandbox run failed: stdout={stdout} stderr={stderr}"
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn sandbox_run_external_profile_requires_purpose() {
+    let temp_root = temp_root("stateful-sandbox-run-external-purpose");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    let external_dir = temp_root.join("external-output");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    fs::create_dir_all(&external_dir).expect("external output dir should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let write_dir_arg = external_dir.to_string_lossy().into_owned();
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "external",
+            "--write-dir",
+            write_dir_arg.as_str(),
+            "--command",
+            "true",
+        ],
+    );
+
+    assert!(
+        !output.status.success(),
+        "external profile should require purpose"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--purpose"), "stderr was {stderr}");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn sandbox_run_external_profile_rejects_repo_internal_targets() {
+    let temp_root = temp_root("stateful-sandbox-run-external-internal-target");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let internal_path = repo_root.join("generated.txt");
+    let internal_arg = internal_path.to_string_lossy().into_owned();
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "external",
+            "--purpose",
+            "try to mutate repo through external sandbox",
+            "--create-target",
+            internal_arg.as_str(),
+            "--command",
+            "true",
+        ],
+    );
+
+    assert!(
+        !output.status.success(),
+        "external profile should reject repo-internal targets"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("outside the repo") || stderr.contains("inside the repo"),
+        "stderr was {stderr}"
+    );
+    assert!(
+        !internal_path.exists(),
+        "repo-internal target must not be created by external profile"
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn mcp_tools_list_returns_stateful_tool_descriptors() {
     let temp_root = temp_root("stateful-mcp-tools-list");
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
@@ -1112,6 +1323,10 @@ fn mcp_tools_list_returns_stateful_tool_descriptors() {
         .iter()
         .find(|tool| tool["name"] == "state_intent_declare")
         .expect("intent tool should be listed");
+    assert_eq!(
+        intent_tool["description"],
+        "Declare repo-internal file or directory intent before repo write actions."
+    );
     assert_eq!(
         intent_tool["inputSchema"]["required"],
         serde_json::json!(["purpose", "files_planned"])
@@ -1184,7 +1399,7 @@ fn mcp_stale_bash_write_call_returns_removed_guidance() {
                 .as_str()
                 .unwrap_or_default()
                 .contains(
-                    "state_bash_write was removed; use stateful sandbox run ... --command ..."
+                    "state_bash_write was removed; use stateful sandbox run --fs write-targets --write-target <repo-path> ... --command <cmd> after repo intent/lease, or stateful sandbox run --fs external --purpose <purpose> --write-target <absolute-path> [--create-target <absolute-path>] [--write-dir <absolute-dir>] [--connect-socket <absolute-socket>] [--allow-signal] [--network disabled|enabled] --command <cmd> for repo-external writes."
                 ),
             "{tool_name}"
         );
@@ -2384,8 +2599,37 @@ fn mcp_stdio_accepts_newline_delimited_jsonrpc() {
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
+fn shell_quote_path(path: &std::path::Path) -> String {
+    let value = path.to_string_lossy();
+    let mut quoted = String::from("'");
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
 fn temp_root(name: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("old temp root should be removable");
+    }
+    root
+}
+
+fn external_temp_root(name: &str) -> PathBuf {
+    let base = if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir())
+    };
+    let root = base.join(format!("{name}-{}", std::process::id()));
     if root.exists() {
         fs::remove_dir_all(&root).expect("old temp root should be removable");
     }

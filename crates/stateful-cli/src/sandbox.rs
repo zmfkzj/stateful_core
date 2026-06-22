@@ -41,6 +41,7 @@ const SIGKILL: i32 = 9;
 pub enum SandboxFsProfile {
     ReadOnly,
     WriteTargets,
+    External,
     Build,
     Git,
     GithubPr,
@@ -56,9 +57,12 @@ pub enum SandboxNetworkPolicy {
 pub struct SandboxRunRequest {
     pub fs: SandboxFsProfile,
     pub network: SandboxNetworkPolicy,
+    pub purpose: Option<String>,
     pub write_targets: Vec<String>,
     pub create_targets: Vec<String>,
     pub write_dirs: Vec<String>,
+    pub connect_sockets: Vec<String>,
+    pub allow_signal: bool,
     pub command: String,
     pub timeout_seconds: Option<u64>,
 }
@@ -95,6 +99,7 @@ pub(crate) struct ValidatedSandboxRunShape {
     pub(crate) write_targets: Vec<String>,
     pub(crate) create_targets: Vec<String>,
     pub(crate) write_dirs: Vec<String>,
+    pub(crate) connect_sockets: Vec<String>,
     pub(crate) direct_command: Option<ValidatedSandboxDirectCommand>,
 }
 
@@ -168,6 +173,21 @@ pub(crate) struct SandboxWritablePath {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedExternalSandboxScope {
+    writable_paths: Vec<SandboxWritablePath>,
+    connect_sockets: Vec<PathBuf>,
+    allowed_write_targets: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalSandboxTargetKind {
+    ExistingFile,
+    CreatableFile,
+    ExistingDirectory,
+    ExistingUnixSocket,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GitProfileIdentity {
     name: String,
     email: String,
@@ -215,16 +235,28 @@ pub fn run_sandbox_in_repo(
     paths: &GlobalPaths,
     request: SandboxRunRequest,
 ) -> anyhow::Result<SandboxRunOutput> {
-    let repo_root = match repo_gate(paths, repo_root)? {
-        RepoGate::Enabled { repo_root } => repo_root,
-        RepoGate::Disabled => anyhow::bail!("stateful sandbox run requires an enabled repo"),
-        RepoGate::OutsideGitRepo => anyhow::bail!("stateful sandbox run requires a Git repo"),
+    let repo_root = if request.fs == SandboxFsProfile::External {
+        let repo_root = repo_root.canonicalize().map_err(|error| {
+            anyhow::anyhow!("stateful sandbox external repo root must exist: {error}")
+        })?;
+        if !repo_root.is_dir() {
+            anyhow::bail!("stateful sandbox external repo root must be a directory");
+        }
+        repo_root
+    } else {
+        match repo_gate(paths, repo_root)? {
+            RepoGate::Enabled { repo_root } => repo_root,
+            RepoGate::Disabled => anyhow::bail!("stateful sandbox run requires an enabled repo"),
+            RepoGate::OutsideGitRepo => anyhow::bail!("stateful sandbox run requires a Git repo"),
+        }
     };
     let shape = validate_sandbox_run_request_shape(&request)?;
     let write_targets = shape.write_targets;
     let create_targets = shape.create_targets;
     let write_dirs = shape.write_dirs;
+    let connect_socket_targets = shape.connect_sockets;
     let direct_command = shape.direct_command;
+    let mut connect_sockets = Vec::new();
     if request.fs == SandboxFsProfile::Build {
         shadow_guard::audit_dependency_shadowing(&repo_root)?;
     } else if request.fs == SandboxFsProfile::WriteTargets {
@@ -247,6 +279,18 @@ pub fn run_sandbox_in_repo(
     let mut release_after_run: Option<SandboxLeaseReleaseContext> = None;
     let writable_paths = match request.fs {
         SandboxFsProfile::ReadOnly => Vec::new(),
+        SandboxFsProfile::External => {
+            let external_scope = prepare_external_sandbox_scope(
+                &repo_root,
+                &write_targets,
+                &create_targets,
+                &write_dirs,
+                &connect_socket_targets,
+            )?;
+            allowed_write_targets.extend(external_scope.allowed_write_targets);
+            connect_sockets = external_scope.connect_sockets;
+            external_scope.writable_paths
+        }
         SandboxFsProfile::WriteTargets => {
             let runtime = runtime
                 .as_ref()
@@ -397,8 +441,8 @@ pub fn run_sandbox_in_repo(
                 &request.command,
                 &cwd,
                 &writable_paths,
-                &[],
-                false,
+                &connect_sockets,
+                request.fs == SandboxFsProfile::External && request.allow_signal,
                 request.network,
                 timeout,
             ),
@@ -441,9 +485,12 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
 
     let mut fs = SandboxFsProfile::ReadOnly;
     let mut network = SandboxNetworkPolicy::Disabled;
+    let mut purpose = None;
     let mut write_targets = Vec::new();
     let mut create_targets = Vec::new();
     let mut write_dirs = Vec::new();
+    let mut connect_sockets = Vec::new();
+    let mut allow_signal = false;
     let mut inner_command = None;
     let mut timeout_seconds = None;
     let mut index = 3;
@@ -462,6 +509,13 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
                 index += 1;
                 let value = parse_sandbox_run_arg_value(&words, index, "--network")?;
                 network = parse_sandbox_network_policy(&value)?;
+            }
+            "--purpose" => {
+                if purpose.is_some() {
+                    return Err("stateful sandbox run accepts at most one --purpose".to_string());
+                }
+                index += 1;
+                purpose = Some(parse_sandbox_run_arg_value(&words, index, "--purpose")?);
             }
             "--write-target" => {
                 index += 1;
@@ -482,6 +536,17 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
             "--write-dir" => {
                 index += 1;
                 write_dirs.push(parse_sandbox_run_arg_value(&words, index, "--write-dir")?);
+            }
+            "--connect-socket" => {
+                index += 1;
+                connect_sockets.push(parse_sandbox_run_arg_value(
+                    &words,
+                    index,
+                    "--connect-socket",
+                )?);
+            }
+            "--allow-signal" => {
+                allow_signal = true;
             }
             "--command" => {
                 if inner_command.is_some() {
@@ -513,9 +578,12 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
         request: SandboxRunRequest {
             fs,
             network,
+            purpose,
             write_targets,
             create_targets,
             write_dirs,
+            connect_sockets,
+            allow_signal,
             command,
             timeout_seconds,
         },
@@ -606,11 +674,33 @@ pub(crate) fn validate_sandbox_run_request_shape(
         anyhow::bail!("stateful sandbox run requires a non-empty --command");
     }
 
-    let write_targets = normalize_sandbox_target_paths("write_targets", &request.write_targets)?;
-    let create_targets = normalize_sandbox_target_paths("create_targets", &request.create_targets)?;
-    let write_dirs = normalize_sandbox_target_paths("write_dirs", &request.write_dirs)?;
+    let (write_targets, create_targets, write_dirs, connect_sockets) = if request.fs
+        == SandboxFsProfile::External
+    {
+        (
+            normalize_external_sandbox_target_paths("write_targets", &request.write_targets)?,
+            normalize_external_sandbox_target_paths("create_targets", &request.create_targets)?,
+            normalize_external_sandbox_target_paths("write_dirs", &request.write_dirs)?,
+            normalize_external_sandbox_target_paths("connect_sockets", &request.connect_sockets)?,
+        )
+    } else {
+        (
+            normalize_sandbox_target_paths("write_targets", &request.write_targets)?,
+            normalize_sandbox_target_paths("create_targets", &request.create_targets)?,
+            normalize_sandbox_target_paths("write_dirs", &request.write_dirs)?,
+            normalize_external_optionless_paths("connect-socket", &request.connect_sockets)?,
+        )
+    };
+    validate_profile_purpose(request.fs, request.purpose.as_deref())?;
     validate_profile_network_policy(request.fs, request.network)?;
-    validate_profile_targets(request.fs, &write_targets, &create_targets, &write_dirs)?;
+    validate_profile_targets(
+        request.fs,
+        &write_targets,
+        &create_targets,
+        &write_dirs,
+        &connect_sockets,
+        request.allow_signal,
+    )?;
     validate_sandbox_run_process_inspection(&request.command)?;
     let direct_command = match request.fs {
         SandboxFsProfile::Git => Some(ValidatedSandboxDirectCommand::Git(
@@ -619,15 +709,17 @@ pub(crate) fn validate_sandbox_run_request_shape(
         SandboxFsProfile::GithubPr => Some(ValidatedSandboxDirectCommand::GithubPr(
             validate_github_pr_profile_command(&request.command)?,
         )),
-        SandboxFsProfile::ReadOnly | SandboxFsProfile::WriteTargets | SandboxFsProfile::Build => {
-            None
-        }
+        SandboxFsProfile::ReadOnly
+        | SandboxFsProfile::WriteTargets
+        | SandboxFsProfile::External
+        | SandboxFsProfile::Build => None,
     };
 
     Ok(ValidatedSandboxRunShape {
         write_targets,
         create_targets,
         write_dirs,
+        connect_sockets,
         direct_command,
     })
 }
@@ -696,11 +788,12 @@ fn parse_sandbox_fs_profile(value: &str) -> Result<SandboxFsProfile, String> {
     match value {
         "read-only" => Ok(SandboxFsProfile::ReadOnly),
         "write-targets" => Ok(SandboxFsProfile::WriteTargets),
+        "external" => Ok(SandboxFsProfile::External),
         "build" => Ok(SandboxFsProfile::Build),
         "git" => Ok(SandboxFsProfile::Git),
         "github-pr" => Ok(SandboxFsProfile::GithubPr),
         _ => Err(
-            "stateful sandbox run supports only read-only, write-targets, build, git, and github-pr profiles"
+            "stateful sandbox run supports only read-only, write-targets, external, build, git, and github-pr profiles"
                 .to_string(),
         ),
     }
@@ -735,42 +828,6 @@ fn parse_sandbox_network_policy(value: &str) -> Result<SandboxNetworkPolicy, Str
         "enabled" => Ok(SandboxNetworkPolicy::Enabled),
         _ => Err("stateful sandbox run network must be disabled or enabled".to_string()),
     }
-}
-
-pub fn run_external_sandboxed_command(
-    command: &str,
-    cwd: &Path,
-    write_targets: &[PathBuf],
-    create_targets: &[PathBuf],
-    write_dirs: &[PathBuf],
-    connect_sockets: &[PathBuf],
-    allow_signal: bool,
-    network: SandboxNetworkPolicy,
-    timeout: Duration,
-) -> anyhow::Result<SandboxCommandResult> {
-    if command.trim().is_empty() {
-        anyhow::bail!("external-run command is required");
-    }
-
-    let writable_paths =
-        prepare_external_writable_paths(write_targets, create_targets, write_dirs)?;
-    let connect_sockets = prepare_external_connect_sockets(connect_sockets)?;
-    let cwd = cwd
-        .canonicalize()
-        .map_err(|error| anyhow::anyhow!("external-run cwd must exist: {error}"))?;
-    if !cwd.is_dir() {
-        anyhow::bail!("external-run cwd must be a directory");
-    }
-
-    run_sandboxed_command(
-        command,
-        &cwd,
-        &writable_paths,
-        &connect_sockets,
-        allow_signal,
-        network,
-        timeout,
-    )
 }
 
 fn run_sandboxed_command(
@@ -965,6 +1022,130 @@ fn direct_github_pr_command(words: &[String], cwd: &Path) -> Command {
     direct
 }
 
+fn prepare_external_sandbox_scope(
+    repo_root: &Path,
+    write_targets: &[String],
+    create_targets: &[String],
+    write_dirs: &[String],
+    connect_sockets: &[String],
+) -> anyhow::Result<PreparedExternalSandboxScope> {
+    let canonical_repo = repo_root.canonicalize().map_err(|error| {
+        anyhow::anyhow!("stateful sandbox external repo root must exist: {error}")
+    })?;
+    let write_target_paths = paths_from_strings(write_targets);
+    let create_target_paths = paths_from_strings(create_targets);
+    let write_dir_paths = paths_from_strings(write_dirs);
+    let connect_socket_paths = paths_from_strings(connect_sockets);
+
+    ensure_external_targets_outside_repo(
+        &canonical_repo,
+        "write target",
+        &write_target_paths,
+        ExternalSandboxTargetKind::ExistingFile,
+    )?;
+    ensure_external_targets_outside_repo(
+        &canonical_repo,
+        "create target",
+        &create_target_paths,
+        ExternalSandboxTargetKind::CreatableFile,
+    )?;
+    ensure_external_targets_outside_repo(
+        &canonical_repo,
+        "write dir",
+        &write_dir_paths,
+        ExternalSandboxTargetKind::ExistingDirectory,
+    )?;
+    ensure_external_targets_outside_repo(
+        &canonical_repo,
+        "connect socket",
+        &connect_socket_paths,
+        ExternalSandboxTargetKind::ExistingUnixSocket,
+    )?;
+
+    let writable_paths = prepare_external_writable_paths(
+        &write_target_paths,
+        &create_target_paths,
+        &write_dir_paths,
+    )?;
+    let connect_sockets = prepare_external_connect_sockets(&connect_socket_paths)?;
+    let allowed_write_targets = write_targets
+        .iter()
+        .chain(create_targets.iter())
+        .cloned()
+        .chain(
+            write_dirs
+                .iter()
+                .map(|path| sandbox_write_dir_display_path(path)),
+        )
+        .collect();
+
+    Ok(PreparedExternalSandboxScope {
+        writable_paths,
+        connect_sockets,
+        allowed_write_targets,
+    })
+}
+
+fn ensure_external_targets_outside_repo(
+    repo_root: &Path,
+    label: &str,
+    paths: &[PathBuf],
+    kind: ExternalSandboxTargetKind,
+) -> anyhow::Result<()> {
+    for path in paths {
+        let normalized = external_target_resolved_path(label, path, kind)?;
+        if normalized.starts_with(repo_root) {
+            anyhow::bail!(
+                "stateful sandbox external {label} `{}` resolves inside the repo; targets must be outside the repo",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn external_target_resolved_path(
+    label: &str,
+    path: &Path,
+    kind: ExternalSandboxTargetKind,
+) -> anyhow::Result<PathBuf> {
+    match kind {
+        ExternalSandboxTargetKind::ExistingFile
+        | ExternalSandboxTargetKind::ExistingDirectory
+        | ExternalSandboxTargetKind::ExistingUnixSocket => path.canonicalize().map_err(|error| {
+            anyhow::anyhow!(
+                "stateful sandbox external {label} `{}` must exist: {error}",
+                path.display()
+            )
+        }),
+        ExternalSandboxTargetKind::CreatableFile => {
+            let Some(file_name) = path.file_name() else {
+                anyhow::bail!(
+                    "stateful sandbox external {label} `{}` must name a file",
+                    path.display()
+                );
+            };
+            let Some(parent) = path.parent() else {
+                anyhow::bail!(
+                    "stateful sandbox external {label} `{}` has no parent directory",
+                    path.display()
+                );
+            };
+            let canonical_parent = parent.canonicalize().map_err(|error| {
+                anyhow::anyhow!(
+                    "stateful sandbox external {label} `{}` parent must exist: {error}",
+                    path.display()
+                )
+            })?;
+            Ok(canonical_parent.join(file_name))
+        }
+    }
+}
+
+fn paths_from_strings(paths: &[String]) -> Vec<PathBuf> {
+    paths.iter().map(PathBuf::from).collect()
+}
+
 fn prepare_external_writable_paths(
     write_targets: &[PathBuf],
     create_targets: &[PathBuf],
@@ -975,7 +1156,7 @@ fn prepare_external_writable_paths(
     for path in create_targets {
         ensure_external_file_target(path, true).map_err(|error| {
             anyhow::anyhow!(
-                "stateful external-run create target `{}` is unsafe: {error}",
+                "stateful sandbox external create target `{}` is unsafe: {error}",
                 path.display()
             )
         })?;
@@ -984,13 +1165,13 @@ fn prepare_external_writable_paths(
     for path in write_targets {
         ensure_external_file_target(path, false).map_err(|error| {
             anyhow::anyhow!(
-                "stateful external-run write target `{}` is unsafe: {error}",
+                "stateful sandbox external write target `{}` is unsafe: {error}",
                 path.display()
             )
         })?;
         if !path.exists() && !create_set.contains(path) {
             anyhow::bail!(
-                "stateful external-run write target `{}` must already exist or be listed in create targets",
+                "stateful sandbox external write target `{}` must already exist or be listed in create targets",
                 path.display()
             );
         }
@@ -999,7 +1180,7 @@ fn prepare_external_writable_paths(
     for path in write_dirs {
         ensure_external_dir_target(path).map_err(|error| {
             anyhow::anyhow!(
-                "stateful external-run write dir `{}` is unsafe: {error}",
+                "stateful sandbox external write dir `{}` is unsafe: {error}",
                 path.display()
             )
         })?;
@@ -1008,13 +1189,13 @@ fn prepare_external_writable_paths(
     for path in create_targets {
         let Some(parent) = path.parent() else {
             anyhow::bail!(
-                "stateful external-run create target `{}` has no parent directory",
+                "stateful sandbox external create target `{}` has no parent directory",
                 path.display()
             );
         };
         if !parent.is_dir() {
             anyhow::bail!(
-                "stateful external-run create target parent `{}` is not a directory",
+                "stateful sandbox external create target parent `{}` is not a directory",
                 parent.display()
             );
         }
@@ -1050,7 +1231,7 @@ fn prepare_external_connect_sockets(connect_sockets: &[PathBuf]) -> anyhow::Resu
     for socket_path in connect_sockets {
         ensure_external_socket_target(socket_path).map_err(|error| {
             anyhow::anyhow!(
-                "stateful external-run connect socket `{}` is unsafe: {error}",
+                "stateful sandbox external connect socket `{}` is unsafe: {error}",
                 socket_path.display()
             )
         })?;
@@ -1065,23 +1246,25 @@ fn prepare_external_connect_sockets(connect_sockets: &[PathBuf]) -> anyhow::Resu
 
 fn ensure_external_socket_target(path: &Path) -> anyhow::Result<()> {
     if !path.is_absolute() {
-        anyhow::bail!("external-run connect socket targets must be normalized absolute paths");
+        anyhow::bail!(
+            "stateful sandbox external connect socket targets must be normalized absolute paths"
+        );
     }
     ensure_no_symlinked_existing_components(path)?;
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
-        anyhow::bail!("external-run refuses symlink socket targets");
+        anyhow::bail!("stateful sandbox external refuses symlink socket targets");
     }
     #[cfg(unix)]
     {
         if !metadata.file_type().is_socket() {
-            anyhow::bail!("external-run connect socket target must be a Unix socket");
+            anyhow::bail!("stateful sandbox external connect socket target must be a Unix socket");
         }
     }
     #[cfg(not(unix))]
     {
         let _ = metadata;
-        anyhow::bail!("external-run connect socket is only supported on Unix");
+        anyhow::bail!("stateful sandbox external connect socket is only supported on Unix");
     }
 
     Ok(())
@@ -1098,6 +1281,47 @@ fn normalize_sandbox_target_paths(field: &str, paths: &[String]) -> anyhow::Resu
     }
 
     Ok(normalized)
+}
+
+fn normalize_external_optionless_paths(
+    field: &str,
+    paths: &[String],
+) -> anyhow::Result<Vec<String>> {
+    if !paths.is_empty() {
+        anyhow::bail!("stateful sandbox run --{field} is supported only with --fs external");
+    }
+    Ok(Vec::new())
+}
+
+fn normalize_external_sandbox_target_paths(
+    field: &str,
+    paths: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for path in paths {
+        let path = normalize_external_sandbox_target_path(field, path)?;
+        if seen.insert(path.clone()) {
+            normalized.push(path);
+        }
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_external_sandbox_target_path(field: &str, path: &str) -> anyhow::Result<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("stateful sandbox external {field} entries must not be empty");
+    }
+    if trimmed.chars().any(char::is_control) {
+        anyhow::bail!("stateful sandbox external paths must not contain control characters");
+    }
+    if !Path::new(trimmed).is_absolute() {
+        anyhow::bail!("stateful sandbox external {field} entries must be absolute paths");
+    }
+
+    Ok(trimmed.to_string())
 }
 
 pub(crate) fn normalize_sandbox_target_path(field: &str, path: &str) -> anyhow::Result<String> {
@@ -1214,23 +1438,23 @@ pub(crate) fn ensure_repo_dir_target(repo_root: &Path, relative_path: &str) -> a
 
 fn ensure_external_file_target(path: &Path, allow_missing_file: bool) -> anyhow::Result<()> {
     if !path.is_absolute() {
-        anyhow::bail!("external-run targets must be normalized absolute paths");
+        anyhow::bail!("stateful sandbox external targets must be normalized absolute paths");
     }
     ensure_no_symlinked_existing_components(path)?;
     let Some(parent) = path.parent() else {
-        anyhow::bail!("external-run target has no parent directory");
+        anyhow::bail!("stateful sandbox external target has no parent directory");
     };
     if !parent.is_dir() {
-        anyhow::bail!("external-run target parent is not a directory");
+        anyhow::bail!("stateful sandbox external target parent is not a directory");
     }
 
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() {
-                anyhow::bail!("external-run refuses symlink file targets");
+                anyhow::bail!("stateful sandbox external refuses symlink file targets");
             }
             if metadata.is_dir() {
-                anyhow::bail!("external-run file target is a directory");
+                anyhow::bail!("stateful sandbox external file target is a directory");
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && allow_missing_file => {}
@@ -1242,15 +1466,15 @@ fn ensure_external_file_target(path: &Path, allow_missing_file: bool) -> anyhow:
 
 fn ensure_external_dir_target(path: &Path) -> anyhow::Result<()> {
     if !path.is_absolute() {
-        anyhow::bail!("external-run targets must be normalized absolute paths");
+        anyhow::bail!("stateful sandbox external targets must be normalized absolute paths");
     }
     ensure_no_symlinked_existing_components(path)?;
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
-        anyhow::bail!("external-run refuses symlink directory targets");
+        anyhow::bail!("stateful sandbox external refuses symlink directory targets");
     }
     if !metadata.is_dir() {
-        anyhow::bail!("external-run directory target is not a directory");
+        anyhow::bail!("stateful sandbox external directory target is not a directory");
     }
 
     Ok(())
@@ -1262,7 +1486,7 @@ fn ensure_no_symlinked_existing_components(path: &Path) -> anyhow::Result<()> {
         cursor.push(component.as_os_str());
         match fs::symlink_metadata(&cursor) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                anyhow::bail!("external-run refuses symlinked target components");
+                anyhow::bail!("stateful sandbox external refuses symlinked target components");
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
@@ -1448,30 +1672,70 @@ fn ensure_build_scratch_components_are_not_symlinks(
     Ok(())
 }
 
+fn validate_profile_purpose(fs: SandboxFsProfile, purpose: Option<&str>) -> anyhow::Result<()> {
+    let purpose = purpose.map(str::trim);
+    match (fs, purpose) {
+        (SandboxFsProfile::External, Some(value)) if !value.is_empty() => Ok(()),
+        (SandboxFsProfile::External, _) => {
+            anyhow::bail!("external sandbox profile requires --purpose")
+        }
+        (_, Some(_)) => anyhow::bail!("--purpose is supported only with --fs external"),
+        (_, None) => Ok(()),
+    }
+}
+
 fn validate_profile_targets(
     fs: SandboxFsProfile,
     write_targets: &[String],
     create_targets: &[String],
     write_dirs: &[String],
+    connect_sockets: &[String],
+    allow_signal: bool,
 ) -> anyhow::Result<()> {
     match fs {
         SandboxFsProfile::ReadOnly => {
-            if !write_targets.is_empty() || !create_targets.is_empty() || !write_dirs.is_empty() {
+            if !write_targets.is_empty()
+                || !create_targets.is_empty()
+                || !write_dirs.is_empty()
+                || !connect_sockets.is_empty()
+                || allow_signal
+            {
                 anyhow::bail!(
-                    "read-only profile rejects write targets, create targets, and write dirs"
+                    "read-only profile rejects write targets, create targets, write dirs, connect sockets, and signal scope"
                 );
             }
         }
         SandboxFsProfile::WriteTargets => {
+            if !connect_sockets.is_empty() || allow_signal {
+                anyhow::bail!("write-targets profile rejects connect sockets and signal scope");
+            }
             if write_targets.is_empty() && create_targets.is_empty() && write_dirs.is_empty() {
                 anyhow::bail!(
                     "write-targets profile requires at least one write target, create target, or write dir"
                 );
             }
         }
+        SandboxFsProfile::External => {
+            if write_targets.is_empty()
+                && create_targets.is_empty()
+                && write_dirs.is_empty()
+                && connect_sockets.is_empty()
+                && !allow_signal
+            {
+                anyhow::bail!(
+                    "external sandbox profile requires at least one write target, create target, write dir, connect socket, or signal scope"
+                );
+            }
+        }
         SandboxFsProfile::Build => {
-            if !write_targets.is_empty() || !create_targets.is_empty() {
-                anyhow::bail!("build profile rejects explicit write targets and create targets");
+            if !write_targets.is_empty()
+                || !create_targets.is_empty()
+                || !connect_sockets.is_empty()
+                || allow_signal
+            {
+                anyhow::bail!(
+                    "build profile rejects explicit write targets, create targets, connect sockets, and signal scope"
+                );
             }
             if write_dirs.len() != 1 {
                 anyhow::bail!(
@@ -1481,16 +1745,26 @@ fn validate_profile_targets(
             ensure_build_scratch_purpose_target(&write_dirs[0])?;
         }
         SandboxFsProfile::Git => {
-            if !write_targets.is_empty() || !create_targets.is_empty() || !write_dirs.is_empty() {
+            if !write_targets.is_empty()
+                || !create_targets.is_empty()
+                || !write_dirs.is_empty()
+                || !connect_sockets.is_empty()
+                || allow_signal
+            {
                 anyhow::bail!(
-                    "git profile manages repo writes automatically and rejects explicit write targets, create targets, and write dirs"
+                    "git profile manages repo writes automatically and rejects explicit write targets, create targets, write dirs, connect sockets, and signal scope"
                 );
             }
         }
         SandboxFsProfile::GithubPr => {
-            if !write_targets.is_empty() || !create_targets.is_empty() || !write_dirs.is_empty() {
+            if !write_targets.is_empty()
+                || !create_targets.is_empty()
+                || !write_dirs.is_empty()
+                || !connect_sockets.is_empty()
+                || allow_signal
+            {
                 anyhow::bail!(
-                    "github-pr profile manages transient PR state automatically and rejects explicit write targets, create targets, and write dirs"
+                    "github-pr profile manages transient PR state automatically and rejects explicit write targets, create targets, write dirs, connect sockets, and signal scope"
                 );
             }
         }
@@ -2099,6 +2373,7 @@ fn sandbox_fs_profile_name(fs: SandboxFsProfile) -> &'static str {
     match fs {
         SandboxFsProfile::ReadOnly => "read-only",
         SandboxFsProfile::WriteTargets => "write-targets",
+        SandboxFsProfile::External => "external",
         SandboxFsProfile::Build => "build",
         SandboxFsProfile::Git => "git",
         SandboxFsProfile::GithubPr => "github-pr",
@@ -2106,7 +2381,7 @@ fn sandbox_fs_profile_name(fs: SandboxFsProfile) -> &'static str {
 }
 
 fn sandbox_profile_requires_runtime(fs: SandboxFsProfile) -> bool {
-    !matches!(fs, SandboxFsProfile::ReadOnly)
+    !matches!(fs, SandboxFsProfile::ReadOnly | SandboxFsProfile::External)
 }
 
 fn git_profile_writable_paths(repo_root: &Path) -> Vec<SandboxWritablePath> {
@@ -3638,9 +3913,12 @@ mod tests {
         let request = SandboxRunRequest {
             fs: SandboxFsProfile::ReadOnly,
             network: SandboxNetworkPolicy::Disabled,
+            purpose: None,
             write_targets: Vec::new(),
             create_targets: Vec::new(),
             write_dirs: Vec::new(),
+            connect_sockets: Vec::new(),
+            allow_signal: false,
             command: "ps -o pid,comm -p 1".to_string(),
             timeout_seconds: None,
         };
@@ -3661,9 +3939,12 @@ mod tests {
         let request = SandboxRunRequest {
             fs: SandboxFsProfile::ReadOnly,
             network: SandboxNetworkPolicy::Disabled,
+            purpose: None,
             write_targets: Vec::new(),
             create_targets: Vec::new(),
             write_dirs: Vec::new(),
+            connect_sockets: Vec::new(),
+            allow_signal: false,
             command: "pgrep -f denovo_codex_agent".to_string(),
             timeout_seconds: None,
         };
@@ -3698,9 +3979,12 @@ mod tests {
             let request = SandboxRunRequest {
                 fs: SandboxFsProfile::ReadOnly,
                 network: SandboxNetworkPolicy::Disabled,
+                purpose: None,
                 write_targets: Vec::new(),
                 create_targets: Vec::new(),
                 write_dirs: Vec::new(),
+                connect_sockets: Vec::new(),
+                allow_signal: false,
                 command: command.to_string(),
                 timeout_seconds: None,
             };
@@ -3723,9 +4007,12 @@ mod tests {
         let request = SandboxRunRequest {
             fs: SandboxFsProfile::ReadOnly,
             network: SandboxNetworkPolicy::Disabled,
+            purpose: None,
             write_targets: Vec::new(),
             create_targets: Vec::new(),
             write_dirs: Vec::new(),
+            connect_sockets: Vec::new(),
+            allow_signal: false,
             command: "rg ps crates".to_string(),
             timeout_seconds: None,
         };
@@ -4438,15 +4725,99 @@ mod tests {
     }
 
     #[test]
+    fn external_profile_requires_purpose_scope_and_absolute_targets() {
+        let mut request = SandboxRunRequest {
+            fs: SandboxFsProfile::External,
+            network: SandboxNetworkPolicy::Enabled,
+            purpose: None,
+            write_targets: vec!["/tmp/stateful-outside.txt".to_string()],
+            create_targets: Vec::new(),
+            write_dirs: Vec::new(),
+            connect_sockets: Vec::new(),
+            allow_signal: false,
+            command: "true".to_string(),
+            timeout_seconds: None,
+        };
+
+        let error = validate_sandbox_run_request_shape(&request)
+            .expect_err("external profile should require purpose");
+        assert!(
+            error.to_string().contains("requires --purpose"),
+            "unexpected error: {error}"
+        );
+
+        request.purpose = Some("write external artifact".to_string());
+        request.write_targets.clear();
+        let error = validate_sandbox_run_request_shape(&request)
+            .expect_err("external profile should require a scope");
+        assert!(
+            error
+                .to_string()
+                .contains("requires at least one write target"),
+            "unexpected error: {error}"
+        );
+
+        request.allow_signal = true;
+        validate_sandbox_run_request_shape(&request)
+            .expect("external profile should accept signal-only scope");
+
+        request.allow_signal = false;
+        request.write_targets = vec!["relative/path".to_string()];
+        let error = validate_sandbox_run_request_shape(&request)
+            .expect_err("external profile should reject relative paths");
+        assert!(
+            error.to_string().contains("absolute paths"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn external_profile_rejects_repo_internal_targets_after_normalization() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "stateful-sandbox-external-internal-target-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&repo_root);
+        fs::create_dir_all(&repo_root).expect("repo root should be created");
+        let internal_target = repo_root.join("README.md");
+        fs::write(&internal_target, "docs").expect("repo file should be created");
+
+        let error = prepare_external_sandbox_scope(
+            &repo_root,
+            &[internal_target.to_string_lossy().into_owned()],
+            &[],
+            &[],
+            &[],
+        )
+        .expect_err("external profile should reject repo-internal targets");
+
+        assert!(
+            error.to_string().contains("resolves inside the repo"),
+            "unexpected error: {error}"
+        );
+
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
     fn build_profile_rejects_explicit_write_targets() {
-        validate_profile_targets(SandboxFsProfile::Build, &[], &[], &["build".to_string()])
-            .expect("build profile should accept one scratch purpose");
+        validate_profile_targets(
+            SandboxFsProfile::Build,
+            &[],
+            &[],
+            &["build".to_string()],
+            &[],
+            false,
+        )
+        .expect("build profile should accept one scratch purpose");
 
         let repo_tmp_write_dir = validate_profile_targets(
             SandboxFsProfile::Build,
             &[],
             &[],
             &["tmp/build".to_string()],
+            &[],
+            false,
         )
         .expect_err("build profile should reject repo tmp write dirs");
         assert!(
@@ -4467,6 +4838,8 @@ mod tests {
                 &[],
                 &[],
                 &[unsafe_purpose.into()],
+                &[],
+                false,
             )
             .expect_err("build profile should reject path-shaped scratch purposes");
             assert!(
@@ -4475,8 +4848,9 @@ mod tests {
             );
         }
 
-        let missing_write_dir = validate_profile_targets(SandboxFsProfile::Build, &[], &[], &[])
-            .expect_err("build profile should require a scratch purpose");
+        let missing_write_dir =
+            validate_profile_targets(SandboxFsProfile::Build, &[], &[], &[], &[], false)
+                .expect_err("build profile should require a scratch purpose");
         assert!(
             missing_write_dir
                 .to_string()
@@ -4488,6 +4862,8 @@ mod tests {
             &["README.md".to_string()],
             &[],
             &[],
+            &[],
+            false,
         )
         .expect_err("build profile should reject explicit write targets");
 
@@ -4500,12 +4876,18 @@ mod tests {
 
     #[test]
     fn git_profile_rejects_explicit_write_targets() {
-        validate_profile_targets(SandboxFsProfile::Git, &[], &[], &[])
+        validate_profile_targets(SandboxFsProfile::Git, &[], &[], &[], &[], false)
             .expect("git profile should manage write scope automatically");
 
-        let error =
-            validate_profile_targets(SandboxFsProfile::Git, &["README.md".to_string()], &[], &[])
-                .expect_err("git profile should reject explicit write targets");
+        let error = validate_profile_targets(
+            SandboxFsProfile::Git,
+            &["README.md".to_string()],
+            &[],
+            &[],
+            &[],
+            false,
+        )
+        .expect_err("git profile should reject explicit write targets");
 
         assert!(
             error
@@ -4537,6 +4919,8 @@ mod tests {
             &["README.md".to_string()],
             &[],
             &[],
+            &[],
+            false,
         )
         .expect_err("github-pr profile should reject explicit targets");
 

@@ -626,8 +626,8 @@ write authorization and fail open for human saves.
 - Supported writes are denied.
 - Codex raw Bash and Bash calls that are not a strict
   `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper are
-  denied. Targetless repo-external OMP Bash is a warning path that directs
-  agents to `sandbox run --fs external --purpose ...`. Command-shaped repo
+  denied, including repo-external shell work. Repo-external command-shaped writes
+  must use `sandbox run --fs external --purpose ...`. Command-shaped repo
   writes through `--fs write-targets` fail closed when target authorization
   cannot be proven.
 - write-target sandbox authorization fails closed and does not execute the

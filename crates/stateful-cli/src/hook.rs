@@ -38,7 +38,6 @@ pub enum HookOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OmpHookOutcome {
     Allow,
-    WarnAllow { reason: String },
     Block { reason: String },
 }
 
@@ -46,10 +45,6 @@ impl OmpHookOutcome {
     fn to_stdout_json(&self) -> serde_json::Value {
         match self {
             Self::Allow => json!({ "decision": "allow" }),
-            Self::WarnAllow { reason } => json!({
-                "decision": "warn",
-                "reason": reason,
-            }),
             Self::Block { reason } => json!({
                 "decision": "block",
                 "reason": reason,
@@ -233,7 +228,6 @@ pub fn handle_omp_pre_tool_use_with_runtime(
     let input: OmpPreToolUseInput = serde_json::from_str(input)?;
     match omp_pre_tool_action(&input, repo_root, cwd)? {
         OmpPreToolAction::Allow => Ok(OmpHookOutcome::Allow),
-        OmpPreToolAction::WarnAllow { reason } => Ok(OmpHookOutcome::WarnAllow { reason }),
         OmpPreToolAction::Block { reason } => Ok(OmpHookOutcome::Block { reason }),
         OmpPreToolAction::Targets(targets) => {
             authorize_omp_targets(&input, runtime, repo_root, cwd, targets)
@@ -244,7 +238,6 @@ pub fn handle_omp_pre_tool_use_with_runtime(
 enum OmpPreToolAction {
     Targets(Vec<PatchTarget>),
     Allow,
-    WarnAllow { reason: String },
     Block { reason: String },
 }
 
@@ -280,22 +273,18 @@ fn omp_pre_tool_action(
         }
         "bash" => {
             let command = input.command().unwrap_or_default();
-            let targets = extract_omp_bash_explicit_targets(command);
-            if !targets.is_empty() {
-                return Ok(OmpPreToolAction::Targets(targets));
-            }
-            if let Some(action) = omp_targetless_sandbox_run_action(command) {
+            if let Some(action) = omp_sandbox_run_action(command) {
                 return Ok(action);
             }
             if !cwd_is_inside_repo(repo_root, cwd) {
-                return Ok(OmpPreToolAction::WarnAllow {
-                    reason: "targetless repo-external bash requires OMP approval handoff"
-                        .to_string(),
+                return Ok(OmpPreToolAction::Block {
+                    reason:
+                        "repo-external bash requires stateful sandbox run --fs external --purpose"
+                            .to_string(),
                 });
             }
             Ok(OmpPreToolAction::Block {
-                reason: "targetless repo-internal bash requires stateful sandbox run with explicit write targets or read-only sandbox profile"
-                    .to_string(),
+                reason: "targetless bash requires stateful sandbox run".to_string(),
             })
         }
         "read" | "find" | "grep" | "search" | "web_search" | "browser" | "search_tool_bm25" => {
@@ -311,7 +300,7 @@ fn omp_pre_tool_action(
     }
 }
 
-fn omp_targetless_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {
+fn omp_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {
     let invocation = parse_sandbox_run_bash_invocation(command).ok()?;
     if !is_trusted_stateful_executable(&invocation.executable) {
         return Some(OmpPreToolAction::Block {
@@ -324,16 +313,24 @@ fn omp_targetless_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> 
             reason: error.to_string(),
         });
     }
-    if invocation.request.fs == SandboxFsProfile::ReadOnly
-        && invocation.request.network == SandboxNetworkPolicy::Disabled
-    {
-        return Some(OmpPreToolAction::Allow);
+    if invocation.request.fs == SandboxFsProfile::WriteTargets {
+        let targets = invocation
+            .request
+            .write_targets
+            .iter()
+            .chain(invocation.request.create_targets.iter())
+            .map(|path| PatchTarget::write(path))
+            .chain(
+                invocation
+                    .request
+                    .write_dirs
+                    .iter()
+                    .map(|path| PatchTarget::write_directory(path)),
+            )
+            .collect();
+        return Some(OmpPreToolAction::Targets(targets));
     }
-    Some(OmpPreToolAction::Block {
-        reason:
-            "targetless OMP bash requires read-only sandbox run or explicit stateful write targets"
-                .to_string(),
-    })
+    Some(OmpPreToolAction::Allow)
 }
 
 fn authorize_omp_targets(
@@ -430,42 +427,6 @@ fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {
             (!path.is_empty()).then(|| PatchTarget::write(path))
         })
         .collect()
-}
-
-fn extract_omp_bash_explicit_targets(command: &str) -> Vec<PatchTarget> {
-    let Ok(words) = split_simple_command_words(command) else {
-        return Vec::new();
-    };
-    let Some(executable) = words.first() else {
-        return Vec::new();
-    };
-    if !is_trusted_stateful_executable(executable) {
-        return Vec::new();
-    }
-    if !words.iter().any(|word| word == "sandbox") || !words.iter().any(|word| word == "run") {
-        return Vec::new();
-    }
-
-    let mut targets = Vec::new();
-    let mut index = 0;
-    while index < words.len() {
-        match words[index].as_str() {
-            "--write-target" | "--create-target" => {
-                if let Some(path) = words.get(index + 1) {
-                    targets.push(PatchTarget::write(path));
-                }
-                index += 2;
-            }
-            "--write-dir" => {
-                if let Some(path) = words.get(index + 1) {
-                    targets.push(PatchTarget::write_directory(path));
-                }
-                index += 2;
-            }
-            _ => index += 1,
-        }
-    }
-    targets
 }
 
 fn cwd_is_inside_repo(repo_root: Option<&Path>, cwd: Option<&Path>) -> bool {
@@ -779,7 +740,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 fn stateful_command_policy_reminder() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- First inspect current state with canonical Stateful MCP tool names such as `state_current_read` or `state_context_render` so you know who is active, what you already hold, and what may conflict.\n- Before using Bash, use the `stateful-command-policy` skill.\n- Use canonical Stateful MCP tool names (`state_intent_declare`, `state_lease_acquire`) for coordination. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied for Codex; OMP repo-internal raw Bash is blocked unless it uses the trusted sandbox-run read-only profile or explicit write targets, while targetless repo-external OMP Bash warns with the sandbox external approval handoff.\n- For file search and inspection, use native read/search tools first when available; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` only as the read-only shell fallback.\n- For process checks, use `{binary} sandbox process find --contains <literal>`.\n- For build or test commands, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose-dir> --command '<cmd>'` unless the command writes exact repo outputs; for exact repo writes, declare intent and acquire same-session leases, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`.\n- For repo-external writes, use `{binary} sandbox run --fs external --purpose '<purpose>' --write-target /absolute/path --command '<cmd>'` for the approval handoff.\n- For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; for GitHub PR operations, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <args>'`.",
+        "Stateful command policy reminder:\n- First inspect current state with canonical Stateful MCP tool names such as `state_current_read` or `state_context_render` so you know who is active, what you already hold, and what may conflict.\n- Before using Bash, use the `stateful-command-policy` skill.\n- Use canonical Stateful MCP tool names (`state_intent_declare`, `state_lease_acquire`) for coordination. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied for Codex; OMP raw Bash is blocked unless it uses the trusted sandbox-run wrapper.\n- For file search and inspection, use native read/search tools first when available; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` only as the read-only shell fallback.\n- For process checks, use `{binary} sandbox process find --contains <literal>`.\n- For build or test commands, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose-dir> --command '<cmd>'` unless the command writes exact repo outputs; for exact repo writes, declare intent and acquire same-session leases, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`.\n- For repo-external writes, use `{binary} sandbox run --fs external --purpose '<purpose>' --write-target /absolute/path --command '<cmd>'`.\n- For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; for GitHub PR operations, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <args>'`.",
     )
 }
 
@@ -1259,11 +1220,30 @@ fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
             "stateful sandbox run requires the trusted absolute stateful binary",
         );
     }
+    if invocation.request.fs == SandboxFsProfile::External
+        && !sandbox_external_profile_has_prompt_prefix(command)
+    {
+        return bash_policy_deny(
+            "stateful sandbox external profile requires canonical prompt-matched prefix: `stateful sandbox run --fs external`",
+        );
+    }
     if let Err(error) = validate_sandbox_run_request_shape(&invocation.request) {
         return bash_policy_deny(error.to_string());
     }
 
     HookOutcome::Allow
+}
+
+fn sandbox_external_profile_has_prompt_prefix(command: &str) -> bool {
+    split_simple_command_words(command)
+        .ok()
+        .is_some_and(|words| {
+            words.len() >= 5
+                && words[1] == "sandbox"
+                && words[2] == "run"
+                && words[3] == "--fs"
+                && words[4] == "external"
+        })
 }
 
 fn authorize_sandbox_process_find_bash(command: &str) -> HookOutcome {
@@ -1363,7 +1343,7 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 fn bash_policy_guidance() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Inspect current state first with `state_current_read` or `state_context_render`, then use the `stateful-command-policy` skill before Bash. Raw Bash is denied for Codex; OMP repo-internal raw Bash is blocked unless it uses the trusted sandbox-run read-only profile or explicit write targets, while targetless repo-external OMP Bash warns with the external sandbox approval handoff. Use canonical Stateful MCP tool names (`state_intent_declare`, `state_lease_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first when available; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` only as the read-only shell fallback. For process checks use `{binary} sandbox process find --contains <literal>`; for build or test commands use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose-dir> --command '<cmd>'`; for exact repo writes use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'` after declaring exact intent and acquiring the same-session lease; for repo-external writes use `{binary} sandbox run --fs external --purpose '<purpose>' --write-target /absolute/path --command '<cmd>'` for the approval handoff; for local git use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; for GitHub PR operations use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <args>'`.",
+        "Inspect current state first with `state_current_read` or `state_context_render`, then use the `stateful-command-policy` skill before Bash. Raw Bash is denied for Codex; OMP raw Bash is blocked unless it uses the trusted sandbox-run wrapper. Use canonical Stateful MCP tool names (`state_intent_declare`, `state_lease_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first when available; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` only as the read-only shell fallback. For process checks use `{binary} sandbox process find --contains <literal>`; for build or test commands use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose-dir> --command '<cmd>'`; for exact repo writes use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'` after declaring exact intent and acquiring the same-session lease; for repo-external writes use `{binary} sandbox run --fs external --purpose '<purpose>' --write-target /absolute/path --command '<cmd>'`; for local git use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; for GitHub PR operations use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <args>'`.",
     )
 }
 

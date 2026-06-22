@@ -7,7 +7,6 @@ use std::{
 mod codex_benchmark;
 mod codex_wrapper;
 mod commit;
-mod external_run;
 mod global_paths;
 mod hook;
 mod install;
@@ -26,7 +25,6 @@ pub use codex_wrapper::{
     CodexInvocation, CodexSandboxMode, CodexWrapperOptions, build_codex_invocation, run_codex,
 };
 pub use commit::{CommitRequest, CommitResult, run_structured_commit};
-pub use external_run::{ExternalRunRequest, request_external_run};
 pub use global_paths::GlobalPaths;
 pub use hook::{
     HookOutcome, OmpHookOutcome, handle_omp_post_tool_use_with_runtime,
@@ -121,8 +119,6 @@ pub enum Command {
         args: Vec<String>,
     },
     #[command(subcommand)]
-    ExternalRun(ExternalRunCommand),
-    #[command(subcommand)]
     Sandbox(SandboxCommand),
     Enable {
         #[arg(long)]
@@ -168,30 +164,6 @@ pub enum HookRuntime {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ExternalRunCommand {
-    Request {
-        #[arg(long)]
-        purpose: String,
-        #[arg(long = "write-target")]
-        write_targets: Vec<String>,
-        #[arg(long = "create-target")]
-        create_targets: Vec<String>,
-        #[arg(long = "write-dir")]
-        write_dirs: Vec<String>,
-        #[arg(long = "connect-socket")]
-        connect_sockets: Vec<String>,
-        #[arg(long)]
-        allow_signal: bool,
-        #[arg(long, value_enum, default_value = "disabled")]
-        network: SandboxNetworkPolicy,
-        #[arg(long)]
-        timeout_seconds: Option<u64>,
-        #[arg(long)]
-        command: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 pub enum ServerCommand {
     Start {
         #[arg(long)]
@@ -232,12 +204,18 @@ pub enum SandboxCommand {
         fs: SandboxFsProfile,
         #[arg(long, value_enum, default_value = "disabled")]
         network: SandboxNetworkPolicy,
+        #[arg(long)]
+        purpose: Option<String>,
         #[arg(long = "write-target")]
         write_targets: Vec<String>,
         #[arg(long = "create-target")]
         create_targets: Vec<String>,
         #[arg(long = "write-dir")]
         write_dirs: Vec<String>,
+        #[arg(long = "connect-socket")]
+        connect_sockets: Vec<String>,
+        #[arg(long)]
+        allow_signal: bool,
         #[arg(long)]
         command: String,
         #[arg(long)]
@@ -577,40 +555,15 @@ pub fn run() -> anyhow::Result<()> {
             })?;
             std::process::exit(code);
         }
-        Command::ExternalRun(ExternalRunCommand::Request {
+        Command::Sandbox(SandboxCommand::Run {
+            fs,
+            network,
             purpose,
             write_targets,
             create_targets,
             write_dirs,
             connect_sockets,
             allow_signal,
-            network,
-            timeout_seconds,
-            command,
-        }) => {
-            let output = request_external_run(ExternalRunRequest {
-                repo_root: current_repo_root_or_current_dir()?,
-                purpose,
-                command,
-                write_targets,
-                create_targets,
-                write_dirs,
-                connect_sockets,
-                allow_signal,
-                network,
-                timeout_seconds,
-            })?;
-            println!("{}", serde_json::to_string(&output)?);
-            if output.status != "exited" || output.exit_code != Some(0) {
-                std::process::exit(output.exit_code.unwrap_or(1));
-            }
-        }
-        Command::Sandbox(SandboxCommand::Run {
-            fs,
-            network,
-            write_targets,
-            create_targets,
-            write_dirs,
             command,
             timeout_seconds,
         }) => {
@@ -622,9 +575,12 @@ pub fn run() -> anyhow::Result<()> {
                 sandbox::SandboxRunRequest {
                     fs,
                     network,
+                    purpose,
                     write_targets,
                     create_targets,
                     write_dirs,
+                    connect_sockets,
+                    allow_signal,
                     command,
                     timeout_seconds,
                 },

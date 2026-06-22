@@ -136,8 +136,9 @@ pub fn plan_codex_install(options: &CodexInstallOptions) -> anyhow::Result<Insta
     plan.files.push(options.codex_config_path.clone());
     plan.files
         .push(global_command_policy_skill_path(&options.codex_config_path));
-    plan.files
-        .push(global_external_run_rules_path(&options.codex_config_path));
+    plan.files.push(global_external_sandbox_rules_path(
+        &options.codex_config_path,
+    ));
     Ok(plan)
 }
 
@@ -154,7 +155,7 @@ pub fn apply_codex_install(options: CodexInstallOptions) -> anyhow::Result<Insta
     })?;
     write_codex_config_update(&options.codex_config_path, codex_update)?;
     write_global_command_policy_skill(&options.codex_config_path)?;
-    write_global_external_run_rules(&options.codex_config_path, &options.binary_path)?;
+    write_global_external_sandbox_rules(&options.codex_config_path, &options.binary_path)?;
     plan.summary = format!(
         "apply: installed stateful global files under {} and merged Codex config {}",
         options.paths.home.display(),
@@ -364,11 +365,11 @@ fn omp_command_policy_skill_path(paths: &GlobalPaths) -> PathBuf {
         .join("SKILL.md")
 }
 
-fn write_global_external_run_rules(
+fn write_global_external_sandbox_rules(
     codex_config_path: &Path,
     binary_path: &str,
 ) -> anyhow::Result<()> {
-    let path = global_external_run_rules_path(codex_config_path);
+    let path = global_external_sandbox_rules_path(codex_config_path);
     let parent = containing_dir(&path);
     fs::create_dir_all(parent).with_context(|| {
         format!(
@@ -376,11 +377,11 @@ fn write_global_external_run_rules(
             parent.display()
         )
     })?;
-    fs::write(&path, external_run_prompt_rules(binary_path)?)
+    fs::write(&path, sandbox_external_prompt_rules(binary_path)?)
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
-fn global_external_run_rules_path(codex_config_path: &Path) -> PathBuf {
+fn global_external_sandbox_rules_path(codex_config_path: &Path) -> PathBuf {
     containing_dir(codex_config_path)
         .join("rules")
         .join("stateful.rules")
@@ -1048,18 +1049,18 @@ statusMessage = "Finalizing stateful activity"
     ))
 }
 
-fn external_run_prompt_rules(binary_path: &str) -> anyhow::Result<String> {
+fn sandbox_external_prompt_rules(binary_path: &str) -> anyhow::Result<String> {
     validate_no_control_chars(binary_path)?;
     let binary = toml_string(binary_path);
     let request_match = toml_string(&format!(
-        "{binary_path} external-run request --purpose 'install rebuilt binaries' --write-dir /Users/me/.cargo/bin --command 'install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful'"
+        "{binary_path} sandbox run --fs external --purpose 'install rebuilt binaries' --write-dir /Users/me/.cargo/bin --command 'install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful'"
     ));
     Ok(format!(
         r#"{GLOBAL_CODEX_BLOCK_START}
 prefix_rule(
-    pattern = [{binary}, "external-run", "request"],
+    pattern = [{binary}, "sandbox", "run", "--fs", "external"],
     decision = "prompt",
-    justification = "Require explicit approval before running a stateful external-run request.",
+    justification = "Require explicit approval before running stateful sandbox run --fs external.",
     match = [
         {request_match},
     ],
@@ -1178,6 +1179,7 @@ fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Resu
         r#"import {{ spawnSync }} from "node:child_process";
 
 const STATEFUL = {binary_json};
+
 
 function runStatefulHook(event, payload) {{
   const result = spawnSync(STATEFUL, ["hook", "omp", event], {{

@@ -220,9 +220,8 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 - deny supported write calls when the session has no active intent
 - deny Codex raw Bash with sandbox guidance. For OMP, block raw Bash unless it
-  uses the trusted `stateful sandbox run` wrapper; targetless repo-external OMP
-  Bash returns a warning that directs the agent to
-  `stateful sandbox run --fs external --purpose ...`. Hook-mediated shell
+  uses the trusted `stateful sandbox run` wrapper; repo-external shell work must
+  use `stateful sandbox run --fs external --purpose ...`. Hook-mediated shell
   execution must be a single strict invocation of the trusted absolute
   `stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
   <cmd>`. Read-only command-shaped inspection uses `--fs read-only --network
@@ -295,10 +294,10 @@ V1 enforcement is strict about write target extraction:
   intent declaration and a successful same-session file lease. The completed
   write transaction releases the lease that authorized it.
 - Bash commands: Codex raw Bash is denied with sandbox guidance. OMP raw Bash is
-  blocked unless it is the trusted sandbox wrapper; targetless repo-external OMP
-  Bash warns and directs the agent to `stateful sandbox run --fs external
-  --purpose ...`. Ordinary read work should use native read/search/diff tools
-  when available. Read-only command-shaped inspection that genuinely needs a
+  blocked unless it is the trusted sandbox wrapper; repo-external shell work must
+  use `stateful sandbox run --fs external --purpose ...`. Ordinary read work
+  should use native read/search/diff tools when available. Read-only
+  command-shaped inspection that genuinely needs a
   shell uses `--fs read-only --network disabled`; the read-only profile cannot
   enable network. Command-shaped repo writes use `--fs write-targets` with
   explicit `--write-target` / `--create-target` values and target authorization.
@@ -597,8 +596,8 @@ The system should prefer explicit uncertainty:
 - interrupted session -> keep last state until TTL expires
 - hook failure -> warn and fail closed only for high-risk writes
 - OMP stateful hook deny or unavailable result -> block, never warn because of
-  yolo metadata; the targetless repo-external Bash warning directs agents to the
-  external sandbox profile, not to raw Bash
+  yolo metadata; repo-external shell work must still use the external sandbox
+  profile, not raw Bash
 - state server unavailable -> deny supported writes that cannot prove active
   intent
 - state server unavailable -> deny Codex raw Bash and repo-internal Bash that is

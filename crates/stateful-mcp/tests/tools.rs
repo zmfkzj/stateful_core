@@ -62,6 +62,18 @@ fn bash_write_tool_is_removed_from_mcp_surface() {
 }
 
 #[test]
+fn sandbox_run_tool_is_not_exposed_on_mcp_surface() {
+    assert!(protocol_tool_name("state_sandbox_run").is_err());
+    assert!(protocol_tool_name("state.sandbox.run").is_err());
+
+    let names = tool_descriptors()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(!names.contains(&"state_sandbox_run"));
+}
+
+#[test]
 fn all_v1_mcp_tools_map_to_http_endpoints() {
     let cases = [
         ("state.session.register", "POST", "/v1/session/register"),
@@ -129,9 +141,27 @@ fn tool_descriptors_expose_codex_friendly_names() {
     assert!(names.contains(&"state_events_read"));
     assert!(!names.contains(&"state_file_write"));
     assert!(!names.contains(&"state_bash_write"));
+    assert!(!names.contains(&"state_sandbox_run"));
     assert!(!names.contains(&"state_validation_run"));
     assert!(names.contains(&"state_notifications_poll"));
     assert!(names.contains(&"state_resume_next"));
+}
+
+#[test]
+fn coordination_write_descriptors_scope_repo_internal_work() {
+    for name in [
+        "state_intent_declare",
+        "state_intent_request",
+        "state_lease_acquire",
+        "state_lease_release",
+        "state_conflicts_check",
+    ] {
+        let tool = descriptor(name);
+        assert!(
+            tool.description.contains("repo"),
+            "{name} description should scope coordination to repo work"
+        );
+    }
 }
 
 #[test]
@@ -157,7 +187,7 @@ fn file_write_tool_is_removed_from_mcp_surface() {
         .collect::<Vec<_>>();
     assert!(
         !names.contains(&"state_file_write"),
-        "state_file_write should be replaced by native Codex edit tools"
+        "state_file_write should be replaced by native edit tools with hook-visible targets"
     );
 
     let tool = ToolCall::new(

@@ -48,13 +48,12 @@ authorize writes.
 The original V1 hardening target denied Bash command text as an authorization
 source and explored a constrained read-only hook path. The current
 implementation supersedes that target: Codex raw Bash is denied with sandbox
-guidance, and OMP repo-internal raw Bash is blocked unless it uses the trusted
-wrapper in read-only mode with network disabled or explicit write targets.
-Targetless repo-external OMP Bash warns with an external-run approval handoff.
-Repo file edit authorization starts with native edit tools such as Codex
-`apply_patch` or Edit after exact intent and a successful same-session file
-lease, where target paths can be checked before writing, or with `--fs
-write-targets` wrapper calls that declare explicit targets. Raw Bash test
+guidance, and OMP raw Bash is blocked unless it uses the trusted wrapper.
+Repo-external shell work must use `stateful sandbox run --fs external --purpose ...`.
+Repo file edit authorization starts with native edit tools such as Codex `apply_patch` or Edit after exact
+intent and a successful same-session file lease, where target paths can be
+checked before writing, or with `--fs write-targets` wrapper calls that declare
+explicit repo-relative targets after intent and same-session lease. Raw Bash test
 commands are not allowlisted;
 use
 `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`

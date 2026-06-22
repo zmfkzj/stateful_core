@@ -30,13 +30,13 @@ pub fn call_mcp_tool_in_repo(
     if matches!(tool_name.as_str(), "state_bash_write" | "state.bash.write") {
         return Ok(error_response(
             410,
-            "state_bash_write was removed; use stateful sandbox run ... --command ...",
+            "state_bash_write was removed; use stateful sandbox run --fs write-targets --write-target <repo-path> ... --command <cmd> after repo intent/lease, or stateful sandbox run --fs external --purpose <purpose> --write-target <absolute-path> [--create-target <absolute-path>] [--write-dir <absolute-dir>] [--connect-socket <absolute-socket>] [--allow-signal] [--network disabled|enabled] --command <cmd> for repo-external writes.",
         ));
     }
     if matches!(tool_name.as_str(), "state_file_write" | "state.file.write") {
         return Ok(error_response(
             410,
-            "state_file_write was removed; use native Codex edit tools such as apply_patch or Edit after exact intent declaration and a successful same-session file lease.",
+            "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after exact intent declaration and a successful same-session file lease.",
         ));
     }
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;

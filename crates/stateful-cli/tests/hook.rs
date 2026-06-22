@@ -344,7 +344,7 @@ fn pre_tool_use_requires_read_only_sandbox_for_shell_read_fallback() {
 }
 
 #[test]
-fn pre_tool_use_denies_sandbox_external_for_repo_external_write_approval_path() {
+fn pre_tool_use_allows_sandbox_external_for_repo_external_write_approval_path() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "s1",
@@ -359,14 +359,11 @@ fn pre_tool_use_denies_sandbox_external_for_repo_external_write_approval_path() 
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(
-        outcome,
-        "supports only read-only, write-targets, build, git, and github-pr profiles",
-    );
+    assert_eq!(outcome, HookOutcome::Allow);
 }
 
 #[test]
-fn pre_tool_use_denies_sandbox_external_with_supported_scopes() {
+fn pre_tool_use_allows_sandbox_external_with_supported_scopes() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "s1",
@@ -381,10 +378,26 @@ fn pre_tool_use_denies_sandbox_external_with_supported_scopes() {
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(
-        outcome,
-        "supports only read-only, write-targets, build, git, and github-pr profiles",
-    );
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_external_without_prompt_matched_prefix() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --purpose 'write external artifact' --fs external --write-target /tmp/stateful-outside.txt --command 'printf ok > /tmp/stateful-outside.txt'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(outcome, "canonical prompt-matched prefix");
 }
 
 #[test]
@@ -403,10 +416,7 @@ fn pre_tool_use_denies_sandbox_external_without_purpose() {
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(
-        outcome,
-        "supports only read-only, write-targets, build, git, and github-pr profiles",
-    );
+    assert_bash_denial_mentions(outcome, "external sandbox profile requires --purpose");
 }
 
 #[test]
@@ -1324,7 +1334,7 @@ fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
         (
             "invalid fs",
             format!("{stateful} sandbox run --fs read-write --command 'rg auth src'"),
-            "supports only read-only, write-targets, build, git, and github-pr profiles",
+            "supports only read-only, write-targets, external, build, git, and github-pr profiles",
         ),
         (
             "invalid network",
@@ -2766,7 +2776,7 @@ fn omp_allows_classified_read_only_and_stateful_activation_tools() {
 }
 
 #[test]
-fn omp_repo_external_raw_bash_warns_for_omp_approval_handoff() {
+fn omp_repo_external_raw_bash_blocks_without_external_sandbox_profile() {
     let input = serde_json::json!({
         "session_id": "omp-parent",
         "cwd": "/tmp/outside",
@@ -2783,10 +2793,36 @@ fn omp_repo_external_raw_bash_warns_for_omp_approval_handoff() {
         Some(Path::new("/tmp/outside")),
     )
     .unwrap();
-    let OmpHookOutcome::WarnAllow { reason } = outcome else {
-        panic!("repo-external targetless bash should warn and hand off to OMP approval");
+    let OmpHookOutcome::Block { reason } = outcome else {
+        panic!("repo-external targetless bash should block unless it uses sandbox external");
     };
-    assert!(reason.contains("approval handoff"));
+    assert!(reason.contains("sandbox run --fs external --purpose"));
+}
+
+#[test]
+fn omp_allows_sandbox_external_profile_without_repo_authorization() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs external --purpose 'write external artifact' --write-target /tmp/stateful-outside.txt --command 'printf ok > /tmp/stateful-outside.txt'")
+        }
+    })
+    .to_string();
+
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Allow
+    );
 }
 
 #[test]

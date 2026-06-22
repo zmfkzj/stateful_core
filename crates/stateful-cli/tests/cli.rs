@@ -1,7 +1,7 @@
 use clap::Parser;
 use stateful_cli::{
-    Cli, CodexSandboxMode, Command, ExternalRunCommand, GlobalPaths, HookCommand, HookRuntime,
-    InstallAgent, McpCommand, NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand,
+    Cli, CodexSandboxMode, Command, GlobalPaths, HookCommand, HookRuntime, InstallAgent,
+    McpCommand, NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand,
     SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, ToolsCommand, allow_tool_for_repo,
     doctor_report_with_global, enable_repo, record_unclassified_tool_for_repo,
 };
@@ -16,17 +16,23 @@ fn parses_sandbox_run_read_only_defaults() {
         Command::Sandbox(SandboxCommand::Run {
             fs,
             network,
+            purpose,
             write_targets,
             create_targets,
             write_dirs,
+            connect_sockets,
+            allow_signal,
             command,
             timeout_seconds,
         }) => {
             assert_eq!(fs, SandboxFsProfile::ReadOnly);
             assert_eq!(network, SandboxNetworkPolicy::Disabled);
+            assert_eq!(purpose, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
+            assert!(connect_sockets.is_empty());
+            assert!(!allow_signal);
             assert_eq!(command, "rg auth src");
             assert_eq!(timeout_seconds, None);
         }
@@ -95,17 +101,23 @@ fn parses_sandbox_run_write_targets_network_enabled() {
         Command::Sandbox(SandboxCommand::Run {
             fs,
             network,
+            purpose,
             write_targets,
             create_targets,
             write_dirs,
+            connect_sockets,
+            allow_signal,
             command,
             timeout_seconds,
         }) => {
             assert_eq!(fs, SandboxFsProfile::WriteTargets);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
+            assert_eq!(purpose, None);
             assert_eq!(write_targets, vec!["README.md"]);
             assert_eq!(create_targets, vec!["docs/new.md"]);
             assert_eq!(write_dirs, vec!["tmp"]);
+            assert!(connect_sockets.is_empty());
+            assert!(!allow_signal);
             assert_eq!(command, "printf x > README.md");
             assert_eq!(timeout_seconds, Some(12));
         }
@@ -134,17 +146,23 @@ fn parses_sandbox_run_git_profile() {
         Command::Sandbox(SandboxCommand::Run {
             fs,
             network,
+            purpose,
             write_targets,
             create_targets,
             write_dirs,
+            connect_sockets,
+            allow_signal,
             command,
             timeout_seconds,
         }) => {
             assert_eq!(fs, SandboxFsProfile::Git);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
+            assert_eq!(purpose, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
+            assert!(connect_sockets.is_empty());
+            assert!(!allow_signal);
             assert_eq!(command, "git fetch --all");
             assert_eq!(timeout_seconds, Some(30));
         }
@@ -173,17 +191,23 @@ fn parses_sandbox_run_github_pr_profile() {
         Command::Sandbox(SandboxCommand::Run {
             fs,
             network,
+            purpose,
             write_targets,
             create_targets,
             write_dirs,
+            connect_sockets,
+            allow_signal,
             command,
             timeout_seconds,
         }) => {
             assert_eq!(fs, SandboxFsProfile::GithubPr);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
+            assert_eq!(purpose, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
+            assert!(connect_sockets.is_empty());
+            assert!(!allow_signal);
             assert_eq!(command, "gh pr status");
             assert_eq!(timeout_seconds, Some(30));
         }
@@ -212,17 +236,23 @@ fn parses_sandbox_run_build_profile() {
         Command::Sandbox(SandboxCommand::Run {
             fs,
             network,
+            purpose,
             write_targets,
             create_targets,
             write_dirs,
+            connect_sockets,
+            allow_signal,
             command,
             timeout_seconds,
         }) => {
             assert_eq!(fs, SandboxFsProfile::Build);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
+            assert_eq!(purpose, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
+            assert!(connect_sockets.is_empty());
+            assert!(!allow_signal);
             assert_eq!(command, "npm test");
             assert_eq!(timeout_seconds, Some(60));
         }
@@ -349,11 +379,13 @@ fn nested_codex_benchmark_sandbox_requires_purpose_home_root_and_command() {
 }
 
 #[test]
-fn parses_external_run_request_command() {
+fn parses_sandbox_run_external_profile() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "external-run",
-        "request",
+        "sandbox",
+        "run",
+        "--fs",
+        "external",
         "--purpose",
         "install rebuilt binaries",
         "--write-target",
@@ -366,46 +398,59 @@ fn parses_external_run_request_command() {
         "/private/tmp/tmux-501/default",
         "--allow-signal",
         "--network",
-        "disabled",
+        "enabled",
         "--timeout-seconds",
         "10",
         "--command",
         "install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful",
     ])
-    .expect("external-run request should parse");
+    .expect("sandbox external run should parse");
 
     match cli.command {
-        Command::ExternalRun(ExternalRunCommand::Request {
+        Command::Sandbox(SandboxCommand::Run {
+            fs,
+            network,
             purpose,
             write_targets,
             create_targets,
             write_dirs,
             connect_sockets,
             allow_signal,
-            network,
             timeout_seconds,
             command,
         }) => {
-            assert_eq!(purpose, "install rebuilt binaries");
+            assert_eq!(fs, SandboxFsProfile::External);
+            assert_eq!(purpose, Some("install rebuilt binaries".to_string()));
             assert_eq!(write_targets, vec!["/Users/me/.cargo/bin/stateful"]);
             assert_eq!(create_targets, vec!["/Users/me/.cargo/bin/stateful-bench"]);
             assert_eq!(write_dirs, vec!["/Users/me/.cargo/bin"]);
             assert_eq!(connect_sockets, vec!["/private/tmp/tmux-501/default"]);
             assert!(allow_signal);
-            assert_eq!(network, SandboxNetworkPolicy::Disabled);
+            assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(timeout_seconds, Some(10));
             assert_eq!(
                 command,
                 "install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful"
             );
         }
-        other => panic!("expected external-run request command, got {other:?}"),
+        other => panic!("expected sandbox external run command, got {other:?}"),
     }
 }
 
 #[test]
-fn rejects_external_run_approve_and_run_commands() {
+fn rejects_external_run_command() {
     for args in [
+        vec![
+            "stateful",
+            "external-run",
+            "request",
+            "--purpose",
+            "install rebuilt binaries",
+            "--write-dir",
+            "/Users/me/.cargo/bin",
+            "--command",
+            "true",
+        ],
         vec![
             "stateful",
             "external-run",
