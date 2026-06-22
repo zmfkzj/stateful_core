@@ -1237,7 +1237,7 @@ fn pre_tool_use_denies_invalid_nested_codex_benchmark_sandbox_wrappers() {
             format!(
                 "{stateful} sandbox run --fs build --network enabled --write-target README.md --command 'npm test'"
             ),
-            "build profile rejects explicit write targets and create targets",
+            "build profile rejects explicit write targets, create targets, connect sockets, and signal scope",
         ),
         (
             "git profile with non-git command",
