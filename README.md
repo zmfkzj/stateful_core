@@ -397,11 +397,12 @@ installation health.
   terminal. In Codex sessions, call the MCP tools directly instead of routing
   through Bash. Most tools map to the local HTTP server. Stale
   `state_file_write` / `state.file.write` and `state_bash_write` /
-  `state.bash.write` calls are removed; use native Codex edit tools such as
-  `apply_patch` or Edit for file edits after exact intent declaration and a
-  successful same-session file lease, and use
+  `state.bash.write` calls are removed; use native edit tools with hook-visible
+  targets, such as Codex `apply_patch` or Edit, for file edits after exact
+  intent declaration and a successful same-session file lease, and use
   `stateful sandbox run --fs write-targets ... --command ...` for
-  command-shaped writes.
+  command-shaped writes. Native edit and `write-targets` hooks release the
+  authorizing lease after the completed write transaction.
 - `stateful sync-outbox` replays pending local outbox records to the server.
 - `stateful hook codex <event>` runs Codex hook integration entry points:
   `session-start`, `user-prompt-submit`, `pre-tool-use`, `post-tool-use`, and
@@ -481,23 +482,26 @@ reserved session must reread the target. Manual MCP/CLI flows claim with
 hooks and sandbox `write-targets` authorization can lazy-claim during the
 retried write.
 
-Repo file edits should use native Codex edit tools such as `apply_patch`, Edit,
-or `Write` after exact intent declaration and a successful same-session file lease. Hooks
-extract the native tool target, call `/v1/authorize` with the
-operation-specific action such as `write_file`, `delete_file`, or `move_file`
-with source `path` / `old_path` and destination `new_path`, and allow the edit
-only after an allow decision.
+Repo file edits should use native edit tools with hook-visible targets, such as
+Codex `apply_patch`, Edit, or `Write`, after exact intent declaration and a
+successful same-session file lease. Hooks extract the native tool target, call
+`/v1/authorize` with the operation-specific action such as `write_file`,
+`delete_file`, or `move_file` with source `path` / `old_path` and destination
+`new_path`, allow the edit only after an allow decision, and release the
+authorizing lease after the completed write transaction.
 
-Raw Bash commands are denied by stateful hooks. Bash tool calls are authorized
-only when the outer command is a single strict invocation of the trusted
-absolute `stateful` binary running
-`<absolute-stateful-binary> sandbox run ... --command <cmd>` or
-`<absolute-stateful-binary> external-run ...`. Use agent-native read, search,
-and diff tools for ordinary read work when they are available. When read-only
-inspection genuinely needs a shell through a Bash hook, use
+Codex raw Bash commands are denied by stateful hooks with sandbox guidance. For
+OMP, repo-internal raw Bash is blocked unless it uses the trusted sandbox-run
+read-only profile or explicit write targets; targetless repo-external OMP Bash
+warns with an external-run approval handoff. Bash tool calls for repo-internal
+shell work are authorized only when the outer command is a single strict
+invocation of the trusted absolute `stateful` binary running
+`<absolute-stateful-binary> sandbox run ... --command <cmd>`. Use agent-native
+read, search, and diff tools for ordinary read work when they are available.
+When read-only inspection genuinely needs a shell through a Bash hook, use
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
 --command <cmd>`. Use `--fs write-targets` with explicit targets for Bash-hook
-command-shaped writes. Git operations use `--fs git`, which accepts a single
+command-shaped repo writes. Git operations use `--fs git`, which accepts a single
 `git ...` command, rejects explicit write targets, and opens the repo worktree
 and Git internals as the writable sandbox scope while filtering
 shell-dispatching options, branch upstream/tracking persistence, `git init`,
@@ -589,13 +593,15 @@ names:
 
 Most MCP tools map directly to HTTP routes. `state_file_write` /
 `state.file.write` and `state_bash_write` / `state.bash.write` were removed.
-Use native Codex edit tools for file edits after exact intent declaration and a
-successful same-session file lease, and use
+Use native edit tools with hook-visible targets for file edits after exact
+intent declaration and a successful same-session file lease, and use
 `stateful sandbox run --fs write-targets ... --command ...` for command-shaped
-writes. Use `stateful sandbox run --fs git ... --command 'git <args>'` for git
-operations; config-mutating `git remote` commands such as `remote add` and
-`remote set-url`, `git init`, branch upstream/tracking setters, and `push -u`
-are rejected by the git profile. Use
+writes. Native edit and `write-targets` hooks release the authorizing lease
+after the completed write transaction. Use
+`stateful sandbox run --fs git ... --command 'git <args>'` for git operations;
+config-mutating `git remote` commands such as `remote add` and `remote set-url`,
+`git init`, branch upstream/tracking setters, and `push -u` are rejected by the
+git profile. Use
 `stateful sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`
 for GitHub pull request listing, viewing, PR status (`gh pr status`), and
 creation, or the GitHub connector when it is explicitly allowlisted for the
@@ -622,8 +628,9 @@ run` wrapper with a scratch purpose before commands that write build output:
 
 Use `--network enabled` when tests bind or connect loopback sockets. The build
 profile writes only under `/tmp/stateful/<session>/<purpose>/`; source file
-edits should use native Codex edit tools such as `apply_patch` or Edit after
-exact intent and a successful same-session file lease.
+edits should use native edit tools with hook-visible targets after exact intent
+and a successful same-session file lease; the authorizing lease is released
+after the completed write transaction.
 
 ## Core Loop
 

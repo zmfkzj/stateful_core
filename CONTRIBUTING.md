@@ -9,7 +9,7 @@ This project is pre-release. Keep changes scoped, documented, and verified again
 - Run tests with `cargo test --workspace`.
 - Run formatting and lint checks with `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`.
 
-In a repository with stateful hooks enabled, raw Bash is denied. Use native read/search tools for ordinary read work, `stateful sandbox run --fs read-only --network disabled` for shell-based read-only inspection, `stateful sandbox run --fs write-targets` with exact targets for command-shaped repo writes, and native Codex edit tools for repo file edits after matching intent and same-session lease.
+In a repository with stateful hooks enabled, Codex raw Bash is denied and OMP repo-internal raw Bash is blocked unless it uses the stateful sandbox wrapper. Use native read/search tools for ordinary read work, `stateful sandbox run --fs read-only --network disabled` for shell-based read-only inspection, `stateful sandbox run --fs write-targets` with exact targets for command-shaped repo writes, external-run approval handoff for repo-external writes, and native edit tools for repo file edits after matching intent and same-session lease.
 
 ## Documentation
 
