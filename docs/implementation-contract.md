@@ -654,12 +654,11 @@ The prototype supports user-level installation with repo allowlist gating.
 `stateful install --yes` installs stateful global files only. `stateful install
 --agent codex --yes` configures global Codex hooks and MCP. `stateful install
 --agent omp --yes` installs the OMP extension entry point, MCP config, and
-`tools.approvalMode: write` under the isolated OMP `stateful` profile agent
-directory (`$STATEFUL_HOME/.omp/profiles/stateful/agent`, default
-`~/.stateful_core/.omp/profiles/stateful/agent`) so that profile carries the
-stateful approval context. `stateful enable` opts the current repo into
-enforcement. Repo-local packaging and managed hooks must reuse the same hook
-adapter library and HTTP protocol.
+`tools.approvalMode: write` under the OMP `stateful` profile agent directory
+(`~/.omp/profiles/stateful/agent`) so that profile carries the stateful approval
+context. `stateful enable` opts the current repo into enforcement. Repo-local
+packaging and managed hooks must reuse the same hook adapter library and HTTP
+protocol.
 
 The migration order is:
 

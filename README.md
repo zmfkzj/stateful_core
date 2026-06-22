@@ -327,10 +327,9 @@ installation health.
   installs global stateful files, installs the global
   `stateful-command-policy` skill, and merges Codex config.
 - `stateful install --agent omp [--yes]` installs the stateful OMP extension
-  into the isolated profile agent directory
-  (`$STATEFUL_HOME/.omp/profiles/stateful/agent`, default
-  `~/.stateful_core/.omp/profiles/stateful/agent`) with
-  `tools.approvalMode: write`, leaving the default/global OMP profile untouched.
+  into the OMP `stateful` profile agent directory
+  (`~/.omp/profiles/stateful/agent`) with `tools.approvalMode: write`, leaving
+  the default/global OMP profile untouched.
 - `stateful enable [--repo <path>]`, `stateful disable`, and
   `stateful repos list` manage the repo allowlist used by global hooks.
 - `stateful server start` starts the HTTP state server detached by default and
@@ -430,11 +429,9 @@ external write scope, rejects repo-internal targets, and runs the command in the
 sandbox.
 `stateful enable` opts a repo into enforcement, while disabled repos are no-ops
 for hooks and MCP. `stateful install --agent omp --yes` installs the OMP
-extension and MCP config into the isolated `stateful` OMP profile agent
-directory (`$STATEFUL_HOME/.omp/profiles/stateful/agent`, default
-`~/.stateful_core/.omp/profiles/stateful/agent`), sets
-`tools.approvalMode: write`, and leaves the global/default OMP profile
-untouched. Stateful hook allows become OMP
+extension and MCP config into the OMP `stateful` profile agent directory
+(`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`, and leaves
+the global/default OMP profile untouched. Stateful hook allows become OMP
 allows; denials or unavailable authorization remain hard OMP blocks even if OMP
 yolo metadata is present.
 OMP raw Bash and native Python execution are blocked unless the tool input is a
@@ -949,4 +946,3 @@ are ignored by default.
 Why AGPL? `stateful_core` is intended to remain open even when it is used
 behind local or network services. The license is part of keeping improvements to
 the coordination layer available to the people who depend on it.
-

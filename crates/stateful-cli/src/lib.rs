@@ -405,6 +405,7 @@ pub fn run() -> anyhow::Result<()> {
                     paths,
                     binary_path: binary_path.expect("agent install should resolve binary"),
                     project_config_path: None,
+                    omp_agent_dir: None,
                 })?
             } else {
                 anyhow::bail!("no supported install agents selected");

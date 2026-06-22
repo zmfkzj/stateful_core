@@ -53,22 +53,12 @@ fn install_codex_dry_run_plans_codex_config_without_writing() {
 #[test]
 fn install_omp_dry_run_plans_command_policy_skill_without_writing() {
     let fixture = TestFixture::new("omp-dry-run-skill");
-    let options = OmpInstallOptions {
-        yes: false,
-        paths: fixture.paths.clone(),
-        binary_path: "/opt/stateful/bin/stateful".to_string(),
-        project_config_path: None,
-    };
+    let options = fixture.omp_options(false);
 
     let plan = plan_omp_install(&options).expect("omp install should plan");
     let applied = apply_omp_install(options).expect("dry-run omp install should succeed");
     let skill_path = fixture
-        .paths
-        .home
-        .join(".omp")
-        .join("profiles")
-        .join("stateful")
-        .join("agent")
+        .omp_agent_dir()
         .join("skills")
         .join("stateful-command-policy")
         .join("SKILL.md");
@@ -182,21 +172,9 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
 fn install_omp_yes_creates_extension_and_mcp_config() {
     let fixture = TestFixture::new("omp-install");
 
-    let plan = apply_omp_install(OmpInstallOptions {
-        yes: true,
-        paths: fixture.paths.clone(),
-        binary_path: "/opt/stateful/bin/stateful".to_string(),
-        project_config_path: None,
-    })
-    .expect("omp install should apply");
+    let plan = apply_omp_install(fixture.omp_options(true)).expect("omp install should apply");
 
-    let omp_agent_dir = fixture
-        .paths
-        .home
-        .join(".omp")
-        .join("profiles")
-        .join("stateful")
-        .join("agent");
+    let omp_agent_dir = fixture.omp_agent_dir();
     let omp_config = omp_agent_dir.join("config.yml");
     let omp_mcp = omp_agent_dir.join("mcp.json");
     let omp_extension = omp_agent_dir
@@ -245,25 +223,53 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
 }
 
 #[test]
-fn install_omp_yes_can_run_twice_without_existing_file_errors() {
-    let fixture = TestFixture::new("omp-install-idempotent");
-    let options = || OmpInstallOptions {
-        yes: true,
-        paths: fixture.paths.clone(),
-        binary_path: "/opt/stateful/bin/stateful".to_string(),
-        project_config_path: None,
-    };
-
-    apply_omp_install(options()).expect("first omp install should apply");
-    apply_omp_install(options()).expect("second omp install should be idempotent");
-
-    let omp_agent_dir = fixture
-        .paths
-        .home
+fn install_omp_yes_can_target_user_omp_profile_separate_from_stateful_home() {
+    let fixture = TestFixture::new("omp-install-default-home");
+    let user_home = fixture.root.join("home");
+    let stateful_home = user_home.join(".stateful_core");
+    let paths = GlobalPaths::new(&stateful_home);
+    let omp_agent_dir = user_home
         .join(".omp")
         .join("profiles")
         .join("stateful")
         .join("agent");
+
+    let plan = apply_omp_install(OmpInstallOptions {
+        yes: true,
+        paths,
+        binary_path: "/opt/stateful/bin/stateful".to_string(),
+        project_config_path: None,
+        omp_agent_dir: Some(omp_agent_dir.clone()),
+    })
+    .expect("omp install should apply");
+
+    let misplaced_agent_dir = stateful_home
+        .join(".omp")
+        .join("profiles")
+        .join("stateful")
+        .join("agent");
+
+    assert!(omp_agent_dir.join("config.yml").is_file());
+    assert!(omp_agent_dir.join("mcp.json").is_file());
+    assert!(
+        omp_agent_dir
+            .join("extensions")
+            .join("stateful-omp-extension.js")
+            .is_file()
+    );
+    assert!(plan.files.contains(&omp_agent_dir.join("config.yml")));
+    assert!(!misplaced_agent_dir.exists());
+}
+
+#[test]
+fn install_omp_yes_can_run_twice_without_existing_file_errors() {
+    let fixture = TestFixture::new("omp-install-idempotent");
+    let options = || fixture.omp_options(true);
+
+    apply_omp_install(options()).expect("first omp install should apply");
+    apply_omp_install(options()).expect("second omp install should be idempotent");
+
+    let omp_agent_dir = fixture.omp_agent_dir();
     let omp_config = omp_agent_dir.join("config.yml");
     let omp_mcp = omp_agent_dir.join("mcp.json");
     let omp_extension = omp_agent_dir
@@ -288,13 +294,7 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
 #[test]
 fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
     let fixture = TestFixture::new("omp-install-existing");
-    let omp_agent_dir = fixture
-        .paths
-        .home
-        .join(".omp")
-        .join("profiles")
-        .join("stateful")
-        .join("agent");
+    let omp_agent_dir = fixture.omp_agent_dir();
     fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
     let omp_config = omp_agent_dir.join("config.yml");
     fs::write(
@@ -303,13 +303,7 @@ fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
     )
     .expect("existing config should write");
 
-    apply_omp_install(OmpInstallOptions {
-        yes: true,
-        paths: fixture.paths.clone(),
-        binary_path: "/opt/stateful/bin/stateful".to_string(),
-        project_config_path: None,
-    })
-    .expect("omp install should apply");
+    apply_omp_install(fixture.omp_options(true)).expect("omp install should apply");
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("model: gpt-5.5"));
@@ -329,13 +323,7 @@ fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
 #[test]
 fn install_omp_yes_merges_approval_mode_into_existing_tools_config() {
     let fixture = TestFixture::new("omp-install-tools");
-    let omp_agent_dir = fixture
-        .paths
-        .home
-        .join(".omp")
-        .join("profiles")
-        .join("stateful")
-        .join("agent");
+    let omp_agent_dir = fixture.omp_agent_dir();
     fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
     let omp_config = omp_agent_dir.join("config.yml");
     fs::write(
@@ -344,13 +332,7 @@ fn install_omp_yes_merges_approval_mode_into_existing_tools_config() {
     )
     .expect("existing config should write");
 
-    apply_omp_install(OmpInstallOptions {
-        yes: true,
-        paths: fixture.paths.clone(),
-        binary_path: "/opt/stateful/bin/stateful".to_string(),
-        project_config_path: None,
-    })
-    .expect("omp install should apply");
+    apply_omp_install(fixture.omp_options(true)).expect("omp install should apply");
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n"));
@@ -757,6 +739,25 @@ impl TestFixture {
             paths: self.paths.clone(),
             codex_config_path: self.codex_config.clone(),
             binary_path: "/opt/stateful/bin/stateful".to_string(),
+        }
+    }
+
+    fn omp_agent_dir(&self) -> PathBuf {
+        self.paths
+            .home
+            .join(".omp")
+            .join("profiles")
+            .join("stateful")
+            .join("agent")
+    }
+
+    fn omp_options(&self, yes: bool) -> OmpInstallOptions {
+        OmpInstallOptions {
+            yes,
+            paths: self.paths.clone(),
+            binary_path: "/opt/stateful/bin/stateful".to_string(),
+            project_config_path: None,
+            omp_agent_dir: Some(self.omp_agent_dir()),
         }
     }
 

@@ -115,10 +115,9 @@ other POST routes still use flat request bodies.
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --agent codex --yes` configures global Codex hooks and MCP.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
-stateful extension under the isolated profile agent directory
-(`$STATEFUL_HOME/.omp/profiles/stateful/agent`, default
-`~/.stateful_core/.omp/profiles/stateful/agent`) and sets
-`tools.approvalMode: write`; the OMP global/default profile is not modified.
+stateful extension under the OMP `stateful` profile agent directory
+(`~/.omp/profiles/stateful/agent`) and sets `tools.approvalMode: write`; the OMP
+global/default profile is not modified.
 `stateful enable` opts the current repo into enforcement. Repo-local
 hooks remain available through `stateful enable --repo-local-codex` as a
 compatibility fallback.

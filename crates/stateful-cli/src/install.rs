@@ -40,6 +40,7 @@ pub struct OmpInstallOptions {
     pub paths: GlobalPaths,
     pub binary_path: String,
     pub project_config_path: Option<PathBuf>,
+    pub omp_agent_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,7 +172,7 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
         yes: options.yes,
         paths: options.paths.clone(),
     })?;
-    let agent_dir = default_omp_agent_dir(&options.paths);
+    let agent_dir = omp_agent_dir(options)?;
     let config_path = options
         .project_config_path
         .clone()
@@ -180,10 +181,11 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
         .join("extensions")
         .join("stateful-omp-extension.js");
     let mcp_path = agent_dir.join("mcp.json");
-    let skill_path = omp_command_policy_skill_path(&options.paths);
+    let skill_path = omp_command_policy_skill_path(&agent_dir);
     plan.summary = format!(
-        "{mode}: install stateful files under {} and configure the OMP stateful profile",
-        options.paths.home.display()
+        "{mode}: install stateful files under {} and configure the OMP stateful profile under {}",
+        options.paths.home.display(),
+        agent_dir.display()
     );
     plan.files.push(config_path);
     plan.files.push(extension_path);
@@ -203,7 +205,7 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
         yes: true,
         paths: options.paths.clone(),
     })?;
-    let agent_dir = default_omp_agent_dir(&options.paths);
+    let agent_dir = omp_agent_dir(&options)?;
     let config_path = options
         .project_config_path
         .clone()
@@ -226,10 +228,11 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
     write_omp_config(&config_path, &extension_path)?;
     write_omp_extension(&extension_path, &options.binary_path)?;
     write_omp_mcp_config(&mcp_path, &options.binary_path)?;
-    write_omp_command_policy_skill(&options.paths)?;
+    write_omp_command_policy_skill(&agent_dir)?;
     plan.summary = format!(
-        "apply: installed stateful files under {} and configured the OMP stateful profile",
-        options.paths.home.display()
+        "apply: installed stateful files under {} and configured the OMP stateful profile under {}",
+        options.paths.home.display(),
+        agent_dir.display()
     );
     Ok(plan)
 }
@@ -349,8 +352,8 @@ fn global_command_policy_skill_path(codex_config_path: &Path) -> PathBuf {
         .join("SKILL.md")
 }
 
-fn write_omp_command_policy_skill(paths: &GlobalPaths) -> anyhow::Result<()> {
-    let path = omp_command_policy_skill_path(paths);
+fn write_omp_command_policy_skill(agent_dir: &Path) -> anyhow::Result<()> {
+    let path = omp_command_policy_skill_path(agent_dir);
     let parent = containing_dir(&path);
     fs::create_dir_all(parent)
         .with_context(|| format!("failed to create OMP skills directory {}", parent.display()))?;
@@ -358,8 +361,8 @@ fn write_omp_command_policy_skill(paths: &GlobalPaths) -> anyhow::Result<()> {
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
-fn omp_command_policy_skill_path(paths: &GlobalPaths) -> PathBuf {
-    default_omp_agent_dir(paths)
+fn omp_command_policy_skill_path(agent_dir: &Path) -> PathBuf {
+    agent_dir
         .join("skills")
         .join("stateful-command-policy")
         .join("SKILL.md")
@@ -1070,9 +1073,26 @@ prefix_rule(
     ))
 }
 
-fn default_omp_agent_dir(paths: &GlobalPaths) -> PathBuf {
-    paths
-        .home
+fn omp_agent_dir(options: &OmpInstallOptions) -> anyhow::Result<PathBuf> {
+    if let Some(agent_dir) = &options.omp_agent_dir {
+        return Ok(agent_dir.clone());
+    }
+
+    default_omp_agent_dir()
+}
+
+fn default_omp_agent_dir() -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set; pass an OMP agent directory"))?;
+    if home.is_empty() {
+        anyhow::bail!("HOME is set but empty; pass an OMP agent directory");
+    }
+
+    Ok(default_omp_agent_dir_from_home(PathBuf::from(home)))
+}
+
+fn default_omp_agent_dir_from_home(home: impl AsRef<Path>) -> PathBuf {
+    home.as_ref()
         .join(".omp")
         .join("profiles")
         .join("stateful")
@@ -1317,4 +1337,17 @@ fn toml_string(value: &str) -> String {
     }
     escaped.push('"');
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_omp_agent_dir_uses_user_omp_profile() {
+        assert_eq!(
+            default_omp_agent_dir_from_home("/tmp/home"),
+            PathBuf::from("/tmp/home/.omp/profiles/stateful/agent")
+        );
+    }
 }
