@@ -15,9 +15,11 @@ Benchmark prompts must not be injected through this skill except for instruction
 
 ## Default Write Flow
 
-- First inspect current state with `state_context_render` / `state.context.render` or `state_current_read` / `state.current.read`. Confirm who is active, what this session already holds, pending reservations, and likely conflicts before choosing files, commands, or subagent work.
-- In Codex sessions with Stateful MCP exposed under the `mcp__stateful__` namespace, use the exact qualified tools shown in the active tool list: `mcp__stateful__state_context_render`, `mcp__stateful__state_current_read`, `mcp__stateful__state_session_register`, `mcp__stateful__state_intent_declare`, `mcp__stateful__state_lease_acquire`, `mcp__stateful__state_intent_request`, `mcp__stateful__state_notifications_poll`, `mcp__stateful__state_resume_next`, and `mcp__stateful__state_intent_claim`. Do not emit namespace-less short-name function calls such as `state_lease_acquire`; transcript logs may display `name: state_lease_acquire` with `namespace: mcp__stateful`, but the callable tool is the qualified MCP tool. Do not run `stateful intent declare` or `stateful mcp call` through Bash.
-- Declare exact file intent first using `mcp__stateful__state_intent_declare` when qualified Stateful MCP tools are present.
+- First inspect current state with canonical Stateful MCP tool names: `state_context_render` / `state.context.render` or `state_current_read` / `state.current.read`. Confirm who is active, what this session already holds, pending reservations, and likely conflicts before choosing files, commands, or subagent work.
+- Use canonical Stateful MCP tool names in guidance and reasoning: `state_context_render`, `state_current_read`, `state_session_register`, `state_intent_declare`, `state_lease_acquire`, `state_intent_request`, `state_notifications_poll`, `state_resume_next`, and `state_intent_claim`.
+- If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent: Codex may expose `mcp__stateful__state_current_read`-style names and OMP may expose `mcp__stateful_state_current_read`-style names. Treat those wrappers as host-specific aliases for the canonical `state_*` tools, not as the canonical API.
+- In OMP, if Stateful MCP tools are not in the active tool list yet, use `search_tool_bm25` once with a query such as `stateful state current read` to activate the installed stateful MCP tools, then call the activated runtime-specific tool names. Do not fall back to Bash for stateful coordination.
+- Declare exact file intent first using `state_intent_declare`, then acquire the same-session file lease with `state_lease_acquire`. Do not run `stateful intent declare` or `stateful mcp call` through Bash.
 - Installed Codex config auto-approves Stateful MCP tools, but prompts for `stateful external-run request` through Codex execpolicy rules. Treat that prompt as the approval boundary for validating the external write scope and running the external command.
 - OMP installs the stateful integration into the isolated profile agent directory (`$STATEFUL_HOME/.omp/profiles/stateful/agent`, default `~/.stateful_core/.omp/profiles/stateful/agent`) with the stateful extension and `tools.approvalMode: write`. OMP supports stateful `session-start`, `pre-tool-use`, `post-tool-use`, and `stop` hook lifecycles, but not `user-prompt-submit`. Stateful hook authorization is a hard authorization block in OMP: hook allow -> OMP allow; hook deny/unavailable -> OMP block. OMP yolo metadata does not bypass `missing_intent`, `missing_lease`, lease conflicts, or any stateful denial, and must not downgrade them to warnings or allow decisions.
 - In OMP, repo-internal raw Bash still needs explicit stateful targets. Use `sandbox run --fs write-targets` with exact `--write-target`, `--create-target`, or narrow `--write-dir` after matching intent and a same-session lease; do not rely on OMP yolo/write approval for shell redirects, `cp`, `rm`, generators, or raw git/test commands.
@@ -37,7 +39,7 @@ Benchmark prompts must not be injected through this skill except for instruction
 - Re-read a file immediately before native edits, so preserve unrelated user changes.
 - `apply_patch`, `Edit`, `Write`, and `file_change` are hook-authorized only when targets are visible to stateful policy. If denied, declare the missing exact scope and acquire the exact same-session file lease before retrying; use sandbox-run write targets only for command-shaped writes.
 - Native edit hooks and `sandbox run --fs write-targets` release their authorized same-session leases after the write transaction completes. If you need another edit after that boundary, reread the target and reacquire or let a claimable reservation lazy-claim at the next write boundary.
-- In native Codex subagents, the active tool session is the session authority. Do not repair session identity with hook commands, shell environment overrides, or hook-state archaeology. If a native edit or write-target command is denied for missing intent or same-session lease, use the same subagent session's qualified Stateful MCP tools: `mcp__stateful__state_session_register` if needed, then `mcp__stateful__state_intent_declare` and `mcp__stateful__state_lease_acquire` for the exact path. If those qualified names are absent, use only the actual tool names shown in that subagent's active tool list.
+- In native Codex subagents, the active tool session is the session authority. Do not repair session identity with hook commands, shell environment overrides, or hook-state archaeology. If a native edit or write-target command is denied for missing intent or same-session lease, use the same subagent session's Stateful MCP tools: `state_session_register` if needed, then `state_intent_declare` and `state_lease_acquire` for the exact path. If the active tool list exposes only runtime-specific names, call the exact shown equivalent such as `mcp__stateful__state_intent_declare`.
 - If a hook denies an action, read the denial and choose the documented alternative instead of retrying variants.
 
 ## Subagent Write Recovery
@@ -46,7 +48,7 @@ When a native Codex subagent hits `apply_patch writes require ... same-session f
 
 1. Stop retrying command variants; denials are the API.
 2. Re-read the exact target if it exists.
-3. Use MCP in this subagent session with qualified names when present: `mcp__stateful__state_session_register` if needed, `mcp__stateful__state_intent_declare(purpose=<task purpose>, files_planned=[...])`, then `mcp__stateful__state_lease_acquire(path=...)` for the exact file path. For new files, declare and lease the exact new file path, not only the parent directory. If the first recovery call returns `unsupported call`, stop and report the exact call name, active tool list if visible, and denial instead of retrying short-name variants.
+3. Use MCP in this subagent session: `state_session_register` if needed, `state_intent_declare(purpose=<task purpose>, files_planned=[...])`, then `state_lease_acquire(path=...)` for the exact file path. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as `mcp__stateful__state_intent_declare` or `mcp__stateful_state_intent_declare`. For new files, declare and lease the exact new file path, not only the parent directory. If the first recovery call returns `unsupported call`, stop and report the exact call name, active tool list if visible, and denial instead of retrying guessed variants.
 4. Edit with native tools such as `apply_patch`, or use `sandbox run --fs write-targets` with the matching `--write-target` or `--create-target` for command-shaped writes.
 5. If another session owns the lease, do not retry or steal it. Follow the wait queue when available; otherwise report the path, blocking session, and wait or reservation id to the parent agent.
 
@@ -69,14 +71,14 @@ Choose the narrowest existing entry point before writing the command:
 
 | Need | Use | Do not use |
 |------|-----|------------|
-| Inspect files with shell tools | `sandbox run --fs read-only --network disabled` | raw Bash, networked read-only |
+| Inspect files after native read/search tools are unavailable or insufficient | `sandbox run --fs read-only --network disabled` | raw Bash, networked read-only |
 | Inspect processes | `sandbox process find ...` | `ps`, `pgrep`, or process checks inside `sandbox run --command` |
 | Run any `git ...` command, including PR preparation | `sandbox run --fs git --network disabled --command 'git <args>'` for local git, `--network enabled` only for remote git such as `fetch`, `pull`, or `push` | raw git, `write-targets`, `build`, or explicit write targets |
 | List, view, status-check, or create GitHub pull requests | `sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` for a single non-interactive `gh pr` command; use the GitHub connector instead when explicitly allowlisted for the repo | raw `gh`, browser/editor PR flows, PR mutation subcommands outside creation, or explicit write targets |
 | Run builds, tests, package managers, or generators whose outputs are disposable | `sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`; scratch is created under `/tmp/stateful/<session>/<scratch-purpose>/` | raw test/build commands, repo `tmp` as build scratch, retained artifacts under `tmp/` |
-| Run a non-git command-shaped repo write | `sandbox run --fs write-targets` with exact `--write-target`, `--create-target`, or narrow `--write-dir <repo-dir>` after matching intent and lease | native edits without a file lease, broad write dirs, git commands |
+| Run a non-git command-shaped repo write | `sandbox run --fs write-targets` with exact `--write-target`, `--create-target`, or narrow `--write-dir <repo-dir>` after matching intent and same-session lease | native edits without a file lease, broad write dirs, git commands |
 | Run nested Codex benchmark agents | `sandbox run-nested-codex-benchmark ...` | generic relaxed profiles or wrapping it inside another sandbox |
-| Request command-shaped writes outside the repo | `external-run request ...` | `sandbox run` |
+| Request command-shaped writes outside the repo | `external-run request ...` for the approval handoff | `sandbox run` |
 
 PR workflows still use the git profile for git work: `status`, `diff`, `log`, `branch`, `switch`/`checkout`, `add`, `commit`, `merge`, `rebase`, `tag`, and `push`. Do not use `--fs write-targets` just because git mutates the worktree or `.git`; the git profile owns that scope. GitHub pull request inspection and creation use the `github-pr` profile for `gh pr list`, `gh pr view`, `gh pr status`, and `gh pr create`; use the GitHub connector instead when that connector is explicitly allowlisted for the repo. If no listed profile matches the needed command, stop and report the exact unsupported command instead of trying raw Bash or a near-miss profile.
 
@@ -96,7 +98,7 @@ After changing sandbox command behavior in this repo, the user must bootstrap th
 cp target/debug/stateful <absolute-stateful-binary>
 ```
 
-Read-only inspection:
+Read-only shell inspection fallback when native read/search tools are unavailable or insufficient:
 
 ```bash
 <absolute-stateful-binary> sandbox run --fs read-only --network disabled --command 'rg auth crates'
@@ -148,14 +150,14 @@ Request a repo-external write. Codex prompts on `external-run request`; after ap
 ## Prefer
 
 - MCP or native read tools for search and inspection when available.
-- `<absolute-stateful-binary> sandbox run --fs read-only --network disabled --command <cmd>` for Bash-tool command-shaped read-only inspection that needs a real shell.
+- `<absolute-stateful-binary> sandbox run --fs read-only --network disabled --command <cmd>` only as the fallback for Bash-tool command-shaped read-only inspection when native read/search tools are unavailable or insufficient.
 - `<absolute-stateful-binary> sandbox process find --contains <literal>` or `--name <comm>` with optional `--pid`, `--parent-pid`, or `--process-group` selectors for process checks.
-- `<absolute-stateful-binary> sandbox run --fs write-targets ... --command ...` for Bash-tool command-shaped writes that need a real shell and can be limited to exact file targets, create targets, or a narrow leased repo directory.
+- `<absolute-stateful-binary> sandbox run --fs write-targets ... --command ...` for Bash-tool command-shaped writes that need a real shell, can be limited to exact file targets, create targets, or a narrow leased repo directory, and have matching intent plus a same-session lease.
 - `<absolute-stateful-binary> sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command 'cargo test --workspace'` for build or test commands that write disposable build artifacts under `/tmp/stateful/<session>/<scratch-purpose>/`.
 - `<absolute-stateful-binary> sandbox run --fs git --network disabled --command 'git <args>'` for local git operations such as status, add, commit, checkout, restore, reset, merge, rebase, and clean; use `--network enabled` for fetch, pull, push, and other remote git operations. Remote metadata mutation such as `git remote add` and `git remote set-url` is rejected.
 - `<absolute-stateful-binary> sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` for non-interactive GitHub pull request listing, viewing, status checks, and creation; use the GitHub connector instead when explicitly allowlisted for the repo.
 - `<absolute-stateful-binary> sandbox run-nested-codex-benchmark --purpose ... --write-dir target --codex-home-root target/... --command ...` for nested Codex benchmark runs that need network and isolated per-agent Codex homes under `target/`.
-- `<absolute-stateful-binary> external-run request --purpose ... --write-dir <external-dir> --command ...` for approved writes outside the repo; Codex prompts before running the request.
+- `<absolute-stateful-binary> external-run request --purpose ... --write-dir <external-dir> --command ...` for approval-handoff writes outside the repo; Codex prompts before running the request.
 - Stateful diagnostics through MCP tools, native tools, or sandbox-run wrappers through the trusted absolute `stateful` binary.
 
 ## Avoid In Bash
@@ -182,9 +184,9 @@ Request a repo-external write. Codex prompts on `external-run request`; after ap
 - If the denial asks for scope, declare the missing exact file scope, acquire the exact same-session file lease, then use native Codex edit tools for repo changes.
 - If lease acquisition reports `lease_conflict`, do not retry the lease call. To wait for the path, call `state.intent.request` with a stable `request_id`, the denied `action`, `path`, and `purpose`; then poll `state.notifications.poll` or `state.resume.next` for the reservation. When reserved, reread the target. Native edit hooks and `sandbox run --fs write-targets` can lazy-claim the reservation at the next write attempt; manual MCP/CLI flows should call `state.intent.claim` with the `wait_id` before retrying.
 - If a denial includes `wait_id`, `queue_position`, or reservation guidance, follow that wait queue protocol: poll `state.notifications.poll` / `state.resume.next`, reread the target after reservation, then either retry the native/sandbox write so the write boundary lazy-claims it, or call `state.intent.claim` first for manual MCP/CLI flows.
-- If raw Bash is blocked, choose MCP/native inspection, native Codex edit tools after exact file intent declaration and a successful same-session file lease for repo edits, `<absolute-stateful-binary> sandbox run --fs read-only --network disabled`, `<absolute-stateful-binary> sandbox run --fs write-targets` for command-shaped writes, or `<absolute-stateful-binary> sandbox run --fs git` for git operations.
+- If raw Bash is blocked, choose MCP/native inspection first, native Codex edit tools after exact file intent declaration and a successful same-session file lease for repo edits, `<absolute-stateful-binary> sandbox run --fs read-only --network disabled` only as the read-only shell fallback, `<absolute-stateful-binary> sandbox run --fs write-targets` for command-shaped writes after matching intent and same-session lease, or `<absolute-stateful-binary> sandbox run --fs git` for git operations.
 - If an artifact needs to be retained and `tmp/` is the only authorized directory, stop and declare/lease a purpose-named path instead; add `.gitignore` intent and lease when that retained artifact should remain untracked.
-- If a repo-external write is needed, use `<absolute-stateful-binary> external-run request ...`; do not try to bypass it with raw `cp`, `install`, `cargo install`, or shell redirection.
+- If a repo-external write is needed, use `<absolute-stateful-binary> external-run request ...` for the approval handoff; do not try to bypass it with raw `cp`, `install`, `cargo install`, or shell redirection.
 - If a denial mentions a stateful MCP coordination tool, prefer that MCP tool in Codex sessions.
 - If a denial says the running server does not support sandbox write directories, restart the stateful server with a binary that supports sandbox write-directory authorization, then retry after rereading and reacquiring the needed lease.
 - If `run-nested-codex-benchmark` is denied for missing feature support, install or rebuild the trusted binary with the `codex-benchmark` feature before retrying.

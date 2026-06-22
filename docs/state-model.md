@@ -469,10 +469,14 @@ The build profile sets standard temp variables under
 the scratch `target` child. Other tool-specific build directories should be
 configured under the same external scratch root.
 
-Source-tree edits should use native Codex edit tools such as `apply_patch` or
-Edit after exact intent declaration and a successful same-session file lease.
-Command-shaped source writes must use exact `--write-target` or `--create-target`
-entries, not the `tmp/` artifact directory scope.
+Source-tree edits should use native edit tools with hook-visible targets, such
+as Codex `apply_patch` or Edit, after exact intent declaration and a successful
+same-session file lease. Native edit hooks and `sandbox run --fs write-targets`
+release their authorized same-session leases after the write transaction
+completes; subsequent writes must reread and reacquire a lease or claim an
+eligible reservation. Command-shaped source writes must use exact
+`--write-target` or `--create-target` entries, not the `tmp/` artifact directory
+scope.
 
 ## Finalization Record
 
@@ -620,10 +624,11 @@ When the state server is unavailable, coordination must fail closed for agent
 write authorization and fail open for human saves.
 
 - Supported writes are denied.
-- Raw Bash and Bash calls that are not a strict
+- Codex raw Bash and repo-internal Bash calls that are not a strict
   `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper are
-  denied. Command-shaped writes through `--fs write-targets` fail closed when
-  target authorization cannot be proven.
+  denied. Targetless repo-external OMP Bash is a warning path that directs the
+  external-run approval handoff. Command-shaped repo writes through
+  `--fs write-targets` fail closed when target authorization cannot be proven.
 - write-target sandbox authorization fails closed and does not execute the
   command.
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block.

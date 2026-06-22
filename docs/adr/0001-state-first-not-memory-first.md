@@ -47,13 +47,15 @@ authorize writes.
 
 The original V1 hardening target denied Bash command text as an authorization
 source and explored a constrained read-only hook path. The current
-implementation supersedes that target: raw Bash is denied by stateful hooks.
-Hook-mediated Bash must be a single strict invocation of the trusted absolute
-`stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
-<cmd>`. Repo file edit authorization starts with native Codex edit tools such as
-`apply_patch` or Edit after exact intent and a successful same-session file lease, where
-target paths can be checked before writing, or with `--fs write-targets` wrapper
-calls that declare explicit targets. Raw Bash test commands are not allowlisted;
+implementation supersedes that target: Codex raw Bash is denied with sandbox
+guidance, and OMP repo-internal raw Bash is blocked unless it uses the trusted
+wrapper in read-only mode with network disabled or explicit write targets.
+Targetless repo-external OMP Bash warns with an external-run approval handoff.
+Repo file edit authorization starts with native edit tools such as Codex
+`apply_patch` or Edit after exact intent and a successful same-session file
+lease, where target paths can be checked before writing, or with `--fs
+write-targets` wrapper calls that declare explicit targets. Raw Bash test
+commands are not allowlisted;
 use
 `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`
 so disposable artifacts stay under `/tmp/stateful/<session>/<purpose>/`.

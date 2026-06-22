@@ -312,9 +312,10 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 - intercept supported tool calls before execution
 - deny supported write calls when the session has no active intent
-- deny raw Bash and allow Bash only when the outer command is a single strict
-  invocation of the trusted absolute `stateful` binary running
-  `<absolute-stateful-binary> sandbox run ... --command <cmd>`
+- deny Codex raw Bash with sandbox guidance. For OMP, block repo-internal raw
+  Bash unless it uses the trusted sandbox-run read-only profile or explicit
+  write targets; targetless repo-external OMP Bash returns a warning directing
+  the external-run approval handoff.
 - check whether requested files or resources conflict with active leases
 - deny, warn, or add context based on policy
 
@@ -322,8 +323,10 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 - observe supported tool results
 - update files touched, phase, test results, and last result
-- refresh heartbeat timestamps and lease timestamps only for leases still
-  covered by active intent
+- release same-session repo-write leases after completed native edit and
+  `write-targets` transactions
+- refresh heartbeat timestamps and lease timestamps only for remaining active
+  leases still covered by active intent
 
 `Stop`:
 
@@ -374,8 +377,9 @@ normalized-empty request paths are rejected with `missing_scope`.
 queue. `state.intent.claim` is the explicit reservation claim path.
 
 Hooks should call the same state server API as MCP tools so policy remains
-centralized. Native Codex edit tools are the repo file edit path after intent
-and lease; sandbox-run remains the Bash wrapper for command-shaped shell writes.
+centralized. Native edit tools with hook-visible targets are the repo file edit
+path after intent and lease; sandbox-run remains the Bash wrapper for
+command-shaped shell writes.
 
 ### State Server Responsibilities
 
@@ -422,23 +426,28 @@ V1 write enforcement is limited to tool paths where targets can be determined
 reliably:
 
 ```text
-native Codex edit tools -> enforce by inspecting hook-exposed targets after
-  intent and lease
-Bash read-only inspection -> require a strict trusted wrapper:
+native read/search/diff tools -> preferred path for ordinary read work
+native edit tools with hook-visible targets -> enforce by inspecting targets
+  after exact intent and a same-session lease; release the lease after the
+  completed write transaction
+Bash read-only inspection that genuinely needs a shell -> require a strict
+  trusted wrapper:
   <absolute-stateful-binary> sandbox run --fs read-only --network disabled
   --command <cmd>
-Bash command-shaped writes -> require the trusted wrapper with
+Bash command-shaped repo writes -> require the trusted wrapper with
   --fs write-targets plus explicit --write-target/--create-target values
 test execution -> run through sandbox run --fs build with
   --write-dir <scratch-purpose>; scratch lives under /tmp/stateful/<session>/
-raw Bash or non-wrapper Bash -> deny
+Codex raw Bash or repo-internal non-wrapper Bash -> deny
+targetless repo-external OMP Bash -> warn with external-run approval handoff
 ```
 
-Bash denial should tell the agent to use
+Bash denial should tell the agent to use native read/search/diff tools for
+ordinary read work,
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
---command <cmd>` for read-only inspection,
+--command <cmd>` for shell-based read-only inspection,
 `<absolute-stateful-binary> sandbox run --fs write-targets ... --command <cmd>`
-for command-shaped writes, native Codex edit tools for repo file edits, and
+for command-shaped repo writes, native edit tools for repo file edits, and
 `sandbox run --fs build --write-dir <scratch-purpose>` wrappers for tests.
 
 The read-only sandbox profile is a write-confinement profile. It does not
@@ -449,8 +458,9 @@ There is no command-text authorization path. Command text alone does not
 authorize `rg`, `git diff`, test runners, stateful operational commands, or any
 other Bash command. Test commands should run through the trusted
 `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
---command <cmd>` wrapper. Source-tree writes remain denied unless a later policy
-explicitly permits them.
+--command <cmd>` wrapper. Repo writes require exact intent plus a matching
+same-session lease and must use native edit tools or `--fs write-targets` with
+explicit targets.
 
 Minimum sandboxed test shape:
 
@@ -473,11 +483,14 @@ Initial policy should prefer advisory leases:
 - supported write with expired intent: deny
 - supported write while phase is `blocked`: deny
 - supported write after session finalization: deny
-- supported write outside matching file or directory scope: deny
-- raw Bash or a Bash call that is not a strict trusted
+- supported write outside matching exact file scope or exact directory
+  `write_directory` scope: deny
+- Codex raw Bash or repo-internal Bash that is not a strict trusted
   `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper: deny
-- directory scope permits `write_file` targets only up to depth 2 below that
-  directory
+- targetless repo-external OMP Bash: warn with external-run approval handoff
+- directory intent and directory lease authorize only `write_directory` for the
+  exact directory resource; they do not authorize `write_file`, delete, rename,
+  or move actions on child paths
 - `write_directory` requires exact directory scope, and the matching directory
   lease blocks the whole subtree because command-shaped `--write-dir` execution
   receives writable access to that subtree
@@ -645,13 +658,15 @@ non-Bash read/search/diff path: allow
 ```
 
 At the OMP adapter boundary, a stateful hook deny or unavailable result is
-returned as block, not warning, regardless of OMP yolo metadata.
+returned as block, not warning, regardless of OMP yolo metadata. The targetless
+repo-external Bash approval handoff is a classified warning path, not a yolo
+override of a deny.
 
 When the state server is unavailable:
 
 - supported writes are denied because active intent, lease conflict, and
   reconciliation state cannot be proven
-- raw Bash and Bash calls that are not strict trusted
+- Codex raw Bash and repo-internal Bash calls that are not strict trusted
   `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrappers remain
   denied
 - sandbox-run wrappers that need authorization fail closed and do not run the
@@ -746,7 +761,7 @@ supported write action + no active intent -> deny
 supported write action + expired intent -> deny as missing active intent
 supported write action + intent without file/directory scope -> deny
 supported write action + target outside intent scope -> deny
-raw Bash or non-wrapper Bash -> deny
+Codex raw Bash or repo-internal non-wrapper Bash -> deny; targetless repo-external OMP Bash -> warn
 delete action + non-exact file scope -> deny
 rename/move action + non-exact source or destination scope -> deny
 active write lease in hard conflict domain -> deny

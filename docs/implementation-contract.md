@@ -133,11 +133,12 @@ for the reservation owner. `/v1/authorize` may lazy-claim an active reservation
 for hook and sandbox authorization sources after the client rereads and retries
 the write boundary; read-only conflict checks must not claim reservations.
 `/v1/lease/acquire` records the target existence and content hash when `root` is
-supplied; hook-originated native file writes compare that
-observation before each authorization. `/v1/lease/refresh-observation` refreshes
-the same-session exact file lease observation after a supported file tool has
-completed, so later same-session writes are compared against the session's own
-latest completed write rather than the original lease snapshot. `/v1/intent/request`
+supplied; hook-originated native file writes compare that observation before
+authorization. `/v1/lease/refresh-observation` refreshes the same-session exact
+file lease observation while a lease remains active. Completed native edit and
+`write-targets` hook flows release their authorizing lease instead of carrying
+it forward, so later writes must reread and acquire a fresh lease or claim an
+eligible reservation. `/v1/intent/request`
 creates or returns an idempotent queued or reserved request by `request_id`;
 `/v1/intent/cancel` cancels queued or reserved requests owned by the caller.
 `/v1/runtime/identity` is an authenticated server identity endpoint used by
@@ -181,28 +182,39 @@ The shipped `/v1/intent/request` scheduling API accepts only `write_file` and
 from `/v1/authorize` does not queue `rename_file` or `move_file`, because those
 actions affect multiple paths and need the target all-or-nothing scheduler.
 
-Native Codex edit tools such as `apply_patch`, `Edit`, and `Write` expose
-targets to hooks. After exact intent and a successful same-session file lease,
-hooks call `/v1/authorize` with the operation-specific action before allowing
-the edit, including `write_file`, `delete_file`, and `move_file` with source
-`path` / `old_path` and destination `new_path`. PreToolUse authorization sends
-current `base_observations` for each affected target when the hook can read the
-workspace file state. PostToolUse refreshes the active same-session exact file
-lease observation for completed supported file tools. For Bash, command text
-alone never authorizes tool use.
+Native edit tools with hook-visible targets, such as Codex `apply_patch`,
+`Edit`, and `Write` or OMP `edit` and `write`, expose targets to hooks. After
+exact intent and a successful same-session file lease, hooks call
+`/v1/authorize` with the operation-specific action before allowing the edit,
+including `write_file`, `delete_file`, and `move_file` with source `path` /
+`old_path` and destination `new_path`. PreToolUse authorization sends current
+`base_observations` for each affected target when the hook can read the
+workspace file state. PostToolUse observes completed native edits and sandbox
+`write-targets` transactions, records the result, and releases the same-session
+leases that authorized the completed write boundary. Released leases leave the
+live context render and do not authorize a later write; the session must reread
+and reacquire a lease, or lazy-claim an eligible reservation, before retrying.
+For Bash, command text alone never authorizes tool use.
 `/v1/authorize` accepts optional `base_observations` for OCC-style freshness
 checks. When supplied, each observation is compared against the current
 workspace file state under `workspace.root`; existence or `content_hash` changes
 for an affected target return `deny` with `reason_code:
 stale_target_observation` and require the caller to reread before retrying.
-Raw Bash is denied by stateful hooks. Bash hook calls are allowed only when the
-outer command is a single strict invocation of the trusted absolute `stateful`
-binary running `<absolute-stateful-binary> sandbox run ... --command <cmd>`.
-Read-only command-shaped inspection uses `<absolute-stateful-binary> sandbox run
---fs read-only --network disabled --command <cmd>`; the read-only profile rejects
-`--network enabled`. Command-shaped writes use
-`--fs write-targets` with explicit `--write-target` / `--create-target` values
-and target authorization. Git operations use `--fs git` for one `git ...`
+Codex raw Bash is denied by stateful hooks with sandbox guidance. Bash hook
+calls for repo-internal shell work are allowed only when the outer command is a
+single strict invocation of the trusted absolute `stateful` binary running
+`<absolute-stateful-binary> sandbox run ... --command <cmd>`. Ordinary read work
+should use agent-native read/search/diff tools when available. Read-only
+command-shaped inspection uses `<absolute-stateful-binary> sandbox run --fs
+read-only --network disabled --command <cmd>`; the read-only profile rejects
+`--network enabled`. Command-shaped repo writes use `--fs write-targets` with
+explicit `--write-target` / `--create-target` values and target authorization.
+OMP repo-internal raw Bash follows the same block-unless-wrapper rule. When an
+OMP Bash call is targetless and classified as repo-external rather than
+repo-internal, the hook returns a warning directing the approval handoff through
+`<absolute-stateful-binary> external-run request`; external-run validates the
+normalized external write scope, rejects repo-internal targets, and does not
+require repo intent or lease. Git operations use `--fs git` for one `git ...`
 command. GitHub pull request list/view/status/create commands use
 `<absolute-stateful-binary> sandbox run --fs github-pr --network enabled
 --command 'gh pr <list|view|status|create> ...'`; use the GitHub connector
@@ -266,9 +278,9 @@ reservation and claim before writing.
 Full scheduling APIs return immediately with request state. Blocking waits can
 be implemented as a future client convenience by polling notifications or resume
 endpoints. Queued and reserved request cancellation is explicit through
-`intent/cancel`; session or activity finalization cancellation remains future
-cleanup work. Explicit user overrides do not reorder the wait queue or transfer
-reservations.
+`intent/cancel`; shipped session or activity finalization also cancels that
+session's queued and reserved requests. Explicit user overrides do not reorder
+the wait queue or transfer reservations.
 
 ## SQLite Storage
 

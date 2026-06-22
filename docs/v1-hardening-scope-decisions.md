@@ -154,11 +154,12 @@ Filesystem watcher inference remains out of scope for this pass.
 ## Repo File Edits
 
 MCP file-write tools are not the current repo edit path. Repo file edits should
-use native Codex edit tools such as `apply_patch` or Edit after exact intent
-declaration and a successful same-session file lease. Hooks normalize hook-exposed targets,
-call the same policy service as MCP and CLI, fail closed on missing state,
-protocol mismatch, or denied authorization, and record activity after successful
-edits.
+use native edit tools with hook-visible targets, such as Codex `apply_patch` or
+Edit, after exact intent declaration and a successful same-session file lease.
+Hooks normalize hook-exposed targets, call the same policy service as MCP and
+CLI, fail closed on missing state, protocol mismatch, or denied authorization,
+record activity after successful edits, and release the authorizing lease after
+the completed write transaction.
 
 Command-shaped writes remain outside MCP and must use
 `stateful sandbox run --fs write-targets` with exact `--write-target` or

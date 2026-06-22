@@ -12,8 +12,9 @@ use stateful_core::normalize_relative_path;
 use crate::outbox::queue_session_heartbeat_outbox;
 use crate::runtime::write_current_session_file_for_explicit_session;
 use crate::sandbox::{
-    parse_sandbox_process_find_bash_invocation, parse_sandbox_run_bash_invocation,
-    validate_process_find_request, validate_sandbox_run_request_shape,
+    SandboxFsProfile, SandboxNetworkPolicy, parse_sandbox_process_find_bash_invocation,
+    parse_sandbox_run_bash_invocation, validate_process_find_request,
+    validate_sandbox_run_request_shape,
 };
 use crate::shadow_guard;
 use crate::shell_command::{
@@ -289,8 +290,8 @@ fn omp_pre_tool_action(
             if !targets.is_empty() {
                 return Ok(OmpPreToolAction::Targets(targets));
             }
-            if is_omp_read_like_bash(command) {
-                return Ok(OmpPreToolAction::Allow);
+            if let Some(action) = omp_targetless_sandbox_run_action(command) {
+                return Ok(action);
             }
             if !cwd_is_inside_repo(repo_root, cwd) {
                 return Ok(OmpPreToolAction::WarnAllow {
@@ -299,7 +300,7 @@ fn omp_pre_tool_action(
                 });
             }
             Ok(OmpPreToolAction::Block {
-                reason: "targetless repo-internal bash requires explicit stateful write targets"
+                reason: "targetless repo-internal bash requires stateful sandbox run with explicit write targets or read-only sandbox profile"
                     .to_string(),
             })
         }
@@ -311,6 +312,31 @@ fn omp_pre_tool_action(
             ),
         }),
     }
+}
+
+fn omp_targetless_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {
+    let invocation = parse_sandbox_run_bash_invocation(command).ok()?;
+    if !is_trusted_stateful_executable(&invocation.executable) {
+        return Some(OmpPreToolAction::Block {
+            reason: "stateful sandbox run requires the trusted absolute stateful binary"
+                .to_string(),
+        });
+    }
+    if let Err(error) = validate_sandbox_run_request_shape(&invocation.request) {
+        return Some(OmpPreToolAction::Block {
+            reason: error.to_string(),
+        });
+    }
+    if invocation.request.fs == SandboxFsProfile::ReadOnly
+        && invocation.request.network == SandboxNetworkPolicy::Disabled
+    {
+        return Some(OmpPreToolAction::Allow);
+    }
+    Some(OmpPreToolAction::Block {
+        reason:
+            "targetless OMP bash requires read-only sandbox run or explicit stateful write targets"
+                .to_string(),
+    })
 }
 
 fn authorize_omp_targets(
@@ -443,33 +469,6 @@ fn extract_omp_bash_explicit_targets(command: &str) -> Vec<PatchTarget> {
         }
     }
     targets
-}
-
-fn is_omp_read_like_bash(command: &str) -> bool {
-    if reject_outer_shell_syntax(
-        command,
-        "OMP bash read-like commands must be single commands",
-    )
-    .is_err()
-    {
-        return false;
-    }
-    let Ok(words) = split_simple_command_words(command) else {
-        return false;
-    };
-    if words.iter().any(|word| {
-        matches!(
-            word.as_str(),
-            "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint" | "-fprint0"
-        ) || word.starts_with("-fprintf")
-            || word.starts_with("-fls")
-    }) {
-        return false;
-    }
-    matches!(
-        words.first().map(String::as_str),
-        Some("pwd" | "ls" | "find" | "stat" | "wc")
-    )
 }
 
 fn cwd_is_inside_repo(repo_root: Option<&Path>, cwd: Option<&Path>) -> bool {
@@ -783,7 +782,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 fn stateful_command_policy_reminder() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- First inspect current state with `state_context_render` or `state.current.read` so you know who is active, what you already hold, and what may conflict.\n- Before using Bash, use the `stateful-command-policy` skill.\n- For Stateful MCP coordination in Codex, use the qualified tools shown in the active tool list, including `mcp__stateful__state_intent_declare` and `mcp__stateful__state_lease_acquire`; do not call namespace-less short names such as `state_lease_acquire`. Do not run `stateful intent declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` for shell inspection.\n- For process checks, use `{binary} sandbox process find --contains <literal>` or `--name <comm>` with selectors.\n- For build or test commands, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command '<cmd>'`; the build profile prepares scratch under `/tmp/stateful/<session>/<scratch-purpose>/`.\n- For local git operations, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; use `--network enabled` only for networked git operations.\n- For GitHub pull request list/view/status/create, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`.\n- For file edits, declare exact intent, acquire the same-session file lease successfully, then use native Codex edit tools such as `apply_patch` or Edit.\n- For command-shaped writes, declare exact intent, acquire the matching file or directory lease successfully, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`, `{binary} sandbox run --fs write-targets --create-target <file> --command '<cmd>'`, or `{binary} sandbox run --fs write-targets --write-dir <repo-dir> --command '<cmd>'`; repo `tmp` is a normal repo path and still needs a matching lease."
+        "Stateful command policy reminder:\n- First inspect current state with canonical Stateful MCP tool names such as `state_current_read` or `state.context.render` so you know who is active, what you already hold, and what may conflict.\n- Before using Bash, use the `stateful-command-policy` skill.\n- Use canonical Stateful MCP tool names (`state_intent_declare`, `state_lease_acquire`) for coordination. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied; use native read/search tools first when available, then `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` only as the read-only shell fallback.\n- For process checks, use `{binary} sandbox process find --contains <literal>`.\n- For build or test commands, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose-dir> --command '<cmd>'` unless the command writes exact repo outputs; for exact repo writes, declare intent and acquire same-session leases, then use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`.\n- For repo-external writes, use `{binary} external-run request ...` for the approval handoff.\n- For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; for GitHub PR operations, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <args>'`.",
     )
 }
 
@@ -1064,6 +1063,48 @@ fn is_builtin_safe_tool(tool_name: &str) -> bool {
 
 fn is_stateful_control_plane_tool(tool_name: &str) -> bool {
     tool_name.starts_with("mcp__stateful__")
+        || tool_name.starts_with("mcp__stateful_")
+        || is_canonical_stateful_mcp_tool(tool_name)
+}
+
+fn is_canonical_stateful_mcp_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "state_session_register"
+            | "state.session.register"
+            | "state_session_heartbeat"
+            | "state.session.heartbeat"
+            | "state_intent_declare"
+            | "state.intent.declare"
+            | "state_intent_request"
+            | "state.intent.request"
+            | "state_intent_claim"
+            | "state.intent.claim"
+            | "state_intent_cancel"
+            | "state.intent.cancel"
+            | "state_lease_acquire"
+            | "state.lease.acquire"
+            | "state_lease_release"
+            | "state.lease.release"
+            | "state_activity_observe"
+            | "state.activity.observe"
+            | "state_activity_finalize"
+            | "state.activity.finalize"
+            | "state_conflicts_check"
+            | "state.conflicts.check"
+            | "state_current_read"
+            | "state.current.read"
+            | "state_events_read"
+            | "state.events.read"
+            | "state_context_render"
+            | "state.context.render"
+            | "state_reconcile_ack"
+            | "state.reconcile.ack"
+            | "state_notifications_poll"
+            | "state.notifications.poll"
+            | "state_resume_next"
+            | "state.resume.next"
+    )
 }
 
 fn is_github_metadata_tool(tool_name: &str) -> bool {
@@ -1161,6 +1202,9 @@ fn command_mentions_stateful_coordination(command: &str) -> bool {
 }
 
 fn is_stateful_coordination_mcp_tool(tool_name: &str) -> bool {
+    if is_stateful_control_plane_tool(tool_name) {
+        return true;
+    }
     matches!(
         tool_name,
         "state_intent_declare"
@@ -1183,7 +1227,7 @@ fn is_stateful_coordination_mcp_tool(tool_name: &str) -> bool {
 }
 
 fn stateful_coordination_mcp_guidance() -> &'static str {
-    "Stateful coordination commands must use Stateful MCP tools in Codex, such as `mcp__stateful__state_intent_declare` when qualified names are exposed. Do not run `stateful intent declare` or `stateful mcp call` through Bash."
+    "Use canonical Stateful MCP tool names such as `state_intent_declare` and `state_lease_acquire`. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash."
 }
 
 fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
@@ -1346,8 +1390,7 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 fn bash_policy_guidance() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Inspect current state first with `state_context_render` or `state.current.read`, then use the `stateful-command-policy` skill before Bash. Raw Bash is denied. For Stateful MCP coordination in Codex, use qualified tools shown in the active tool list, including `mcp__stateful__state_intent_declare` and `mcp__stateful__state_lease_acquire`; do not call namespace-less short names such as `state_lease_acquire`. Do not run `stateful intent declare` or `stateful mcp call` through Bash. For read-only shell inspection use `{} sandbox run --fs read-only --network disabled --command '<cmd>'`; for process checks use `{} sandbox process find --contains <literal>`; for build or test commands use `{} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command '<cmd>'`, which writes scratch under `/tmp/stateful/<session>/<scratch-purpose>/`; for local git operations use `{} sandbox run --fs git --network disabled --command 'git <args>'` and use network enabled only for networked git operations; for GitHub pull request list/view/status/create use `{} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`; for command-shaped repo writes use `{} sandbox run --fs write-targets --write-target <file> --command '<cmd>'`; for approved repo-external writes use `{} external-run request --purpose '<purpose>' --write-dir <dir> --command '<cmd>'`.",
-        binary, binary, binary, binary, binary, binary, binary
+        "Inspect current state first with `state_current_read` or `state.current.read`, then use the `stateful-command-policy` skill before Bash. Raw Bash is denied. Use canonical Stateful MCP tool names (`state_intent_declare`, `state_lease_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first when available; use `{binary} sandbox run --fs read-only --network disabled --command '<cmd>'` only as the read-only shell fallback. For process checks use `{binary} sandbox process find --contains <literal>`; for build or test commands use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose-dir> --command '<cmd>'`; for exact repo writes use `{binary} sandbox run --fs write-targets --write-target <file> --command '<cmd>'` after declaring exact intent and acquiring the same-session lease; for repo-external writes use `{binary} external-run request ...` for the approval handoff; for local git use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; for GitHub PR operations use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <args>'`.",
     )
 }
 

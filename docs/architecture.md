@@ -219,11 +219,15 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 `PreToolUse`:
 
 - deny supported write calls when the session has no active intent
-- deny raw Bash and allow Bash only when the outer command is a single strict
-  invocation of the trusted absolute `stateful` binary running
+- deny Codex raw Bash with sandbox guidance. For OMP, block repo-internal raw
+  Bash unless it uses the trusted `stateful sandbox run` read-only profile or
+  explicit write targets; targetless repo-external OMP Bash returns a warning
+  that directs the agent to the external-run approval handoff. Hook-mediated
+  repo-internal shell execution must be a single strict invocation of the
+  trusted absolute `stateful` binary running
   `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
   command-shaped inspection uses `--fs read-only --network disabled`; the hook
-  rejects `--fs read-only --network enabled`. Command-shaped writes use
+  rejects `--fs read-only --network enabled`. Command-shaped repo writes use
   `--fs write-targets` with explicit write/create targets.
 - check leases and planned edits for likely conflicts
 - return allow, warning context, or deny based on policy
@@ -231,8 +235,10 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 `PostToolUse`:
 
 - observe files, commands, and results from supported tool calls
-- refresh heartbeat timestamps and lease TTLs only for leases still covered by
-  active intent
+- release same-session repo-write leases after completed native edit and
+  `write-targets` transactions
+- refresh heartbeat timestamps and lease TTLs only for remaining active leases
+  still covered by active intent
 - update phase, touched resources, and last result
 
 `Stop`:
@@ -267,10 +273,10 @@ state.resume.next
 ```
 
 Hooks and MCP tools should call the same state server API. Policy must live in
-the state server, not in duplicated hook scripts. Native Codex edit tools are
-the repo file edit path after exact intent declaration and a successful file
-lease; command-shaped shell writes remain outside MCP and go through the
-sandbox-run wrapper.
+the state server, not in duplicated hook scripts. Native edit tools with
+hook-visible targets are the repo file edit path after exact intent declaration
+and a successful file lease; command-shaped shell writes remain outside MCP and
+go through the sandbox-run wrapper.
 
 Intent declare and request payloads require a non-empty `purpose`; clients infer
 it from the user or agent instruction and send it explicitly. Intent declare
@@ -282,25 +288,29 @@ paths fail with `missing_scope`. Intent request also requires a non-empty
 
 V1 enforcement is strict about write target extraction:
 
-- Native Codex edit tools such as `apply_patch`, `Edit`, and `Write`: enforce
-  by inspecting hook-exposed targets after exact intent declaration and a
-  successful same-session file lease.
-- Bash commands: deny raw Bash. Hook-mediated Bash is allowed only when the
-  outer command is a single strict invocation of the trusted absolute `stateful`
-  binary running `<absolute-stateful-binary> sandbox run ... --command <cmd>`.
-  Read-only command-shaped inspection uses `--fs read-only --network disabled`;
-  the read-only profile cannot enable network. Command-shaped writes use
-  `--fs write-targets` with explicit
-  `--write-target` / `--create-target` values and target authorization.
+- Native edit tools such as Codex `apply_patch`, `Edit`, and `Write` or OMP
+  `edit` and `write`: enforce by inspecting hook-exposed targets after exact
+  intent declaration and a successful same-session file lease. The completed
+  write transaction releases the lease that authorized it.
+- Bash commands: Codex raw Bash is denied with sandbox guidance. OMP
+  repo-internal raw Bash is blocked unless it is the trusted wrapper in
+  `read-only` mode with network disabled or `write-targets` mode with explicit
+  targets; targetless repo-external OMP Bash warns and directs the agent to the
+  external-run approval handoff. Ordinary read work should use native
+  read/search/diff tools when available. Read-only command-shaped inspection
+  that genuinely needs a shell uses `--fs read-only --network disabled`; the
+  read-only profile cannot enable network. Command-shaped repo writes use
+  `--fs write-targets` with explicit `--write-target` / `--create-target` values
+  and target authorization.
 - Test execution: run only through sandboxed test actions such as
   `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`.
   Build artifacts live under `/tmp/stateful/<session>/<purpose>/`.
-- Bash command text alone never authorizes tool use, even when it appears
-  read-only.
+- Bash command text alone never authorizes repo-internal tool use, even when it
+  appears read-only.
 
-Denied Bash should direct the agent to native Codex edit tools for repo file
-edits, the wrapper for command-shaped shell execution, and sandbox-run wrappers
-for tests.
+Denied Bash should direct the agent to native read/search tools for ordinary
+read work, native edit tools for repo file edits, the wrapper for command-shaped
+shell execution, and sandbox-run wrappers for tests.
 
 MCP does not perform local command-shaped file writes. Hook-mediated shell
 execution uses `<absolute-stateful-binary> sandbox run ... --command <cmd>`;
@@ -461,8 +471,9 @@ Initial policy:
   active intent
 - blocked phase or finalized session before supported write action: target
   phase-aware deny behavior
-- directory intent scope only permits targets up to depth 2 below that directory
-  for `write_file` authorization
+- directory intent and directory lease authorize only `write_directory` for the
+  exact directory resource; they do not authorize `write_file`, delete, rename,
+  or move actions on child paths
 - `write_directory` requires exact directory intent, and a matching directory
   lease fences the whole subtree because command-shaped `--write-dir` execution
   can write anywhere below that directory
@@ -531,6 +542,9 @@ must include concrete next actions when a block or warning is present.
 The current server route renders store-backed live context from active intents,
 active leases, and queued or reserved wait records. The response includes
 summary counts, structured `items`, and prompt-ready `prompt_text`.
+Released leases are absent from this live render. A later same-session write
+must acquire a fresh lease or claim an eligible reservation before authorization
+can succeed.
 
 The shipped `/v1/context/render` route returns structured data and prompt-ready
 markdown:
@@ -581,13 +595,14 @@ The system should prefer explicit uncertainty:
 - interrupted session -> keep last state until TTL expires
 - hook failure -> warn and fail closed only for high-risk writes
 - OMP stateful hook deny or unavailable result -> block, never warn because of
-  yolo metadata
+  yolo metadata; the targetless repo-external Bash approval handoff is a
+  classified warning path, not a yolo override of a deny
 - state server unavailable -> deny supported writes that cannot prove active
   intent
-- state server unavailable -> deny raw Bash and any Bash call that is not a
-  strict `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper;
-  command-shaped writes through `--fs write-targets` fail closed when target
-  authorization cannot be proven
+- state server unavailable -> deny Codex raw Bash and repo-internal Bash that is
+  not a strict `<absolute-stateful-binary> sandbox run ... --command <cmd>`
+  wrapper; command-shaped writes through `--fs write-targets` fail closed when
+  target authorization cannot be proven
 - state server unavailable -> write-target sandbox authorization fails closed
   and does not run the command
 - state server unavailable -> fail closed for `state.reconcile.ack`, intent

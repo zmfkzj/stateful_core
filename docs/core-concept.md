@@ -136,11 +136,16 @@ guardrail, not a complete sandbox or security boundary.
 V1 only authorizes writes through tool paths with reliable target extraction.
 Repo file edits use hook-visible native edit tools such as Codex `apply_patch`,
 `Edit`, and `Write`, or OMP `edit` and `write`, after exact intent and a
-successful same-session file lease. Bash command text alone is never an
-authorization source; raw Bash is denied by stateful hooks. Command-shaped
-read-only inspection must use the trusted absolute `stateful` wrapper:
+successful same-session file lease; the lease is released after the completed
+write transaction. Bash command text alone is never a repo-internal
+authorization source. Codex raw Bash is denied with sandbox guidance, and OMP
+repo-internal raw Bash is blocked unless it uses the trusted sandbox-run
+read-only profile or explicit write targets. Targetless repo-external OMP Bash
+warns with an external-run approval handoff. Ordinary read work should use
+agent-native read, search, or diff tools when available. Read-only inspection
+that genuinely needs a shell must use the trusted absolute `stateful` wrapper:
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
---command <cmd>`. Command-shaped writes must use the wrapper with
+--command <cmd>`. Command-shaped repo writes must use the wrapper with
 `--fs write-targets` and explicit target flags. Raw Bash test commands are not
 allowlisted; use `stateful sandbox run --fs build --network enabled
 --write-dir <scratch-purpose> --command <cmd>` so build artifacts go under

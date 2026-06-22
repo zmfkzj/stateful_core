@@ -3918,6 +3918,161 @@ async fn active_lease_by_same_session_allows_matching_authorize() {
 }
 
 #[tokio::test]
+async fn repo_write_authorization_requires_lease_and_updates_rendered_state_until_release() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "Update auth implementation.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let before_lease = app
+        .clone()
+        .oneshot(native_hook_authorize_request(
+            "s1",
+            "w1",
+            "src/auth.ts",
+            "Edit",
+        ))
+        .await
+        .expect("authorize before lease should complete");
+    assert_eq!(before_lease.status(), StatusCode::OK);
+    let json = response_json(before_lease, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_lease");
+    assert!(
+        json.get("wait").is_none() && json.get("reservation").is_none(),
+        "same-session missing lease should deny automatically without approval queue state: {json}"
+    );
+
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let with_lease = app
+        .clone()
+        .oneshot(native_hook_authorize_request(
+            "s1",
+            "w1",
+            "src/auth.ts",
+            "Edit",
+        ))
+        .await
+        .expect("authorize with lease should complete");
+    assert_eq!(with_lease.status(), StatusCode::OK);
+    let json = response_json(with_lease, 2048).await;
+    assert_eq!(json["decision"], "allow");
+    assert_eq!(json["reason_code"], "authorized");
+
+    let rendered_with_lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "w1",
+                "session_id": "s1"
+            }),
+        ))
+        .await
+        .expect("context render with lease should complete");
+    assert_eq!(rendered_with_lease.status(), StatusCode::OK);
+    let json = response_json(rendered_with_lease, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(
+        items.iter().any(|item| {
+            item["kind"] == "lease"
+                && item["resource"] == "src/auth.ts"
+                && item["session_id"] == "s1"
+                && item["source_refs"]
+                    .as_array()
+                    .is_some_and(|refs| refs.iter().any(|value| value == "CurrentSessionScope"))
+        }),
+        "render should show same-session lease before write completes: {items:?}"
+    );
+
+    let release = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/release",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    let rendered_after_release = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "w1",
+                "session_id": "s1"
+            }),
+        ))
+        .await
+        .expect("context render after release should complete");
+    assert_eq!(rendered_after_release.status(), StatusCode::OK);
+    let json = response_json(rendered_after_release, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(
+        !items.iter().any(|item| {
+            item["kind"] == "lease"
+                && item["resource"] == "src/auth.ts"
+                && item["session_id"] == "s1"
+        }),
+        "render should remove same-session lease after release: {items:?}"
+    );
+    assert!(
+        items.iter().any(|item| {
+            item["kind"] == "intent"
+                && item["resource"] == "src/auth.ts"
+                && item["session_id"] == "s1"
+        }),
+        "render should keep declared intent visible after lease release: {items:?}"
+    );
+
+    let after_release = app
+        .oneshot(native_hook_authorize_request(
+            "s1",
+            "w1",
+            "src/auth.ts",
+            "Edit",
+        ))
+        .await
+        .expect("authorize after release should complete");
+    assert_eq!(after_release.status(), StatusCode::OK);
+    let json = response_json(after_release, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_lease");
+}
+
+#[tokio::test]
 async fn rename_file_denies_when_other_session_leases_destination() {
     let store = Store::open_in_memory().expect("store should open");
     store

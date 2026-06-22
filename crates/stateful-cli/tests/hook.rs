@@ -310,11 +310,80 @@ fn pre_tool_use_raw_bash_denial_mentions_command_policy_skill_and_example() {
     };
 
     assert!(reason.contains("stateful-command-policy"));
-    assert!(reason.contains("state_context_render") || reason.contains("state.current.read"));
+    assert!(reason.contains("state_current_read"));
+    assert!(reason.contains("state_intent_declare"));
+    assert!(reason.contains("state_lease_acquire"));
     assert!(reason.contains("--fs read-only --network disabled"));
     assert!(reason.contains("--fs build --network enabled"));
     assert!(reason.contains("--fs write-targets --write-target <file>"));
     assert!(reason.contains("--command"));
+}
+
+#[test]
+fn pre_tool_use_requires_read_only_sandbox_for_shell_read_fallback() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "cat README.md"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert_bash_denial_mentions_all(
+        outcome,
+        &[
+            "Raw Bash is denied",
+            "stateful-command-policy",
+            "--fs read-only --network disabled",
+        ],
+    );
+}
+
+#[test]
+fn pre_tool_use_allows_external_run_request_for_repo_external_write_approval_path() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} external-run request --purpose 'write external artifact' --write-target /tmp/stateful-outside.txt --command 'printf ok > /tmp/stateful-outside.txt'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_denies_raw_repo_external_write_without_approval_wrapper() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "printf ok > /tmp/stateful-outside.txt"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert_bash_denial_mentions_all(
+        outcome,
+        &[
+            "Raw Bash is denied",
+            "stateful sandbox run",
+            "stateful-command-policy",
+        ],
+    );
 }
 
 #[test]
@@ -1646,9 +1715,9 @@ fn pre_tool_use_denies_raw_stateful_intent_declare_with_mcp_guidance() {
     assert_bash_denial_mentions_all(
         outcome,
         &[
+            "Use canonical Stateful MCP tool names",
             "state_intent_declare",
-            "MCP",
-            "mcp__stateful__state_intent_declare",
+            "state_lease_acquire",
             "Do not run `stateful intent declare`",
         ],
     );
@@ -1671,9 +1740,9 @@ fn pre_tool_use_denies_stateful_mcp_call_intent_declare_with_mcp_guidance() {
     assert_bash_denial_mentions_all(
         outcome,
         &[
+            "Use canonical Stateful MCP tool names",
             "state_intent_declare",
-            "MCP",
-            "mcp__stateful__state_intent_declare",
+            "state_lease_acquire",
             "`stateful mcp call` through Bash",
         ],
     );
@@ -2014,8 +2083,16 @@ fn pre_tool_use_allows_known_non_repo_write_tools_without_runtime() {
         "multi_agent_v1close_agent",
         "resume_agent",
         "multi_agent_v1resume_agent",
+        "state_intent_declare",
+        "state_lease_acquire",
+        "state_current_read",
+        "state_context_render",
         "mcp__stateful__state_intent_declare",
         "mcp__stateful__state_lease_acquire",
+        "mcp__stateful_state_intent_declare",
+        "mcp__stateful_state_lease_acquire",
+        "mcp__stateful_state_current_read",
+        "mcp__stateful_state_context_render",
         "mcp__stateful__state_current_read",
         "mcp__stateful__state_context_render",
         "mcp__codex_apps__github__update_pull_request",
@@ -2521,8 +2598,8 @@ fn omp_repo_internal_raw_bash_rejects_shell_writes_and_unsafe_find_actions() {
 }
 
 #[test]
-fn omp_repo_internal_raw_bash_allows_read_like_and_blocks_other_targetless_commands() {
-    let read_input = serde_json::json!({
+fn omp_repo_internal_bash_requires_sandbox_run_for_reads_and_write_targets() {
+    let raw_read_input = serde_json::json!({
         "session_id": "omp-parent",
         "cwd": "/repo",
         "yolo": false,
@@ -2530,9 +2607,31 @@ fn omp_repo_internal_raw_bash_allows_read_like_and_blocks_other_targetless_comma
         "tool_input": { "command": "pwd" }
     })
     .to_string();
+    assert!(matches!(
+        handle_omp_pre_tool_use_with_runtime(
+            &raw_read_input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Block { .. }
+    ));
+
+    let stateful = trusted_stateful_path();
+    let sandboxed_read_input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs read-only --network disabled --command 'pwd'")
+        }
+    })
+    .to_string();
     assert_eq!(
         handle_omp_pre_tool_use_with_runtime(
-            &read_input,
+            &sandboxed_read_input,
             None,
             Some(Path::new("/repo")),
             Some(Path::new("/repo"))
@@ -2597,16 +2696,17 @@ fn omp_repo_external_raw_bash_warns_for_omp_approval_handoff() {
     })
     .to_string();
 
-    assert!(matches!(
-        handle_omp_pre_tool_use_with_runtime(
-            &input,
-            None,
-            Some(Path::new("/repo")),
-            Some(Path::new("/tmp/outside"))
-        )
-        .unwrap(),
-        OmpHookOutcome::WarnAllow { .. }
-    ));
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        None,
+        Some(Path::new("/repo")),
+        Some(Path::new("/tmp/outside")),
+    )
+    .unwrap();
+    let OmpHookOutcome::WarnAllow { reason } = outcome else {
+        panic!("repo-external targetless bash should warn and hand off to OMP approval");
+    };
+    assert!(reason.contains("approval handoff"));
 }
 
 #[test]
@@ -4557,9 +4657,10 @@ fn user_prompt_submit_posts_context_render() {
     assert!(rendered.contains("Nearby Activity"));
     assert!(rendered.contains("Before using Bash"));
     assert!(rendered.contains("stateful-command-policy"));
-    assert!(rendered.contains("mcp__stateful__state_intent_declare"));
-    assert!(rendered.contains("mcp__stateful__state_lease_acquire"));
-    assert!(!rendered.contains("Use MCP tools `state_intent_declare` and `state_lease_acquire`"));
+    assert!(rendered.contains("Use canonical Stateful MCP tool names"));
+    assert!(rendered.contains("state_intent_declare"));
+    assert!(rendered.contains("state_lease_acquire"));
+    assert!(rendered.contains("runtime-specific tool names"));
     assert!(rendered.contains("Do not run `stateful intent declare`"));
     assert!(rendered.contains("--fs read-only --network disabled"));
     assert!(rendered.contains("--fs build --network enabled"));

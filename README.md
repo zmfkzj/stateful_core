@@ -492,10 +492,11 @@ Raw Bash commands are denied by stateful hooks. Bash tool calls are authorized
 only when the outer command is a single strict invocation of the trusted
 absolute `stateful` binary running
 `<absolute-stateful-binary> sandbox run ... --command <cmd>` or
-`<absolute-stateful-binary> external-run ...`. Use
+`<absolute-stateful-binary> external-run ...`. Use agent-native read, search,
+and diff tools for ordinary read work when they are available. When read-only
+inspection genuinely needs a shell through a Bash hook, use
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
---command <cmd>` for Bash-hook command-shaped read-only inspection that needs a
-shell, and use `--fs write-targets` with explicit targets for Bash-hook
+--command <cmd>`. Use `--fs write-targets` with explicit targets for Bash-hook
 command-shaped writes. Git operations use `--fs git`, which accepts a single
 `git ...` command, rejects explicit write targets, and opens the repo worktree
 and Git internals as the writable sandbox scope while filtering
@@ -543,7 +544,7 @@ Repo-external command-shaped writes use `stateful external-run`, not
 `sandbox run`. `external-run` classifies targets by normalized path: targets
 that resolve inside the repo are rejected, while targets outside the repo can
 be listed with `--write-target`, `--create-target`, or `--write-dir`. These
-requests do not require intent or lease; Codex prompts on the external-run
+requests do not require repo intent or lease. Codex prompts on the external-run
 request before execution:
 
 ```bash
@@ -554,7 +555,8 @@ stateful external-run request \
 ```
 
 After approval, the command runs immediately and prints the external sandbox
-command result as JSON.
+command result as JSON. In OMP, repo-external targetless Bash is reported as an
+approval-handoff case; use the external-run flow for writes outside the repo.
 
 ## HTTP And MCP Surface
 
