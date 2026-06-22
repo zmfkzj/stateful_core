@@ -254,7 +254,8 @@ fn handle_omp_pre_tool_use_with_identity(
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<OmpHookOutcome> {
     let input: OmpPreToolUseInput = serde_json::from_str(input)?;
-    match omp_pre_tool_action(&input, repo_root, cwd)? {
+    let global_paths = GlobalPaths::from_env().ok();
+    match omp_pre_tool_action(&input, repo_root, cwd, global_paths.as_ref())? {
         OmpPreToolAction::Allow => Ok(OmpHookOutcome::Allow),
         OmpPreToolAction::Block { reason } => Ok(OmpHookOutcome::Block { reason }),
         OmpPreToolAction::Targets(targets) => {
@@ -273,6 +274,7 @@ fn omp_pre_tool_action(
     input: &OmpPreToolUseInput,
     repo_root: Option<&Path>,
     cwd: Option<&Path>,
+    global_paths: Option<&GlobalPaths>,
 ) -> anyhow::Result<OmpPreToolAction> {
     let tool_name = runtime_tool_name_leaf(&input.tool_name);
     match tool_name {
@@ -335,12 +337,18 @@ fn omp_pre_tool_action(
             Ok(OmpPreToolAction::Allow)
         }
         _ if is_stateful_control_plane_tool(&input.tool_name) => Ok(OmpPreToolAction::Allow),
-        _ => Ok(OmpPreToolAction::Block {
-            reason: format!(
-                "unclassified OMP tool {} may write or execute and requires explicit stateful classification",
-                input.tool_name
-            ),
-        }),
+        _ if is_user_allowed_tool(global_paths, repo_root, &input.tool_name) => {
+            Ok(OmpPreToolAction::Allow)
+        }
+        _ => {
+            record_unclassified_tool(global_paths, repo_root, &input.tool_name);
+            Ok(OmpPreToolAction::Block {
+                reason: format!(
+                    "unclassified OMP tool {} may write or execute and requires explicit stateful classification",
+                    input.tool_name
+                ),
+            })
+        }
     }
 }
 

@@ -2561,6 +2561,63 @@ fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
 }
 
 #[test]
+fn omp_unclassified_tools_are_manageable_with_stateful_tools_allowlist() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-omp-tool-allowlist-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": repo_root,
+        "yolo": false,
+        "tool_name": "todo",
+        "tool_input": { "ops": [] }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
+    assert_eq!(stdout["decision"], "block");
+    assert!(
+        stdout["reason"]
+            .as_str()
+            .expect("reason should be a string")
+            .contains("unclassified OMP tool todo")
+    );
+    let list = tool_list_for_repo(&paths, &repo_root).expect("tool list should load");
+    assert_eq!(list.unclassified_tools, vec!["todo"]);
+
+    allow_tool_for_repo(&paths, &repo_root, "todo").expect("OMP tool should be user-allowed");
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
+    assert_eq!(stdout["decision"], "allow");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn run_hook_omp_pre_tool_use_prints_extension_decision() {
     let temp_root =
         std::env::temp_dir().join(format!("stateful-hook-omp-runtime-{}", std::process::id()));
