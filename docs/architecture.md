@@ -134,8 +134,11 @@ stateful binary available by absolute path or PATH lookup
 
 Codex global hooks, repo-local compatibility hooks, and managed Codex hooks
 share the Codex lifecycle model. The isolated OMP `stateful` profile uses OMP
-extension entry points and does not expose `UserPromptSubmit`. Later managed
-Codex hooks should move the same thin hook adapters to
+extension entry points and does not expose `UserPromptSubmit`. Its
+`session-start` hook prefers `event.sessionId` or
+`ctx.sessionManager.session.id`, stores that id in `STATEFUL_SESSION_ID`, and
+persists current-session files so session-aware MCP tools resolve the same OMP
+session. Later managed Codex hooks should move the same thin hook adapters to
 administrator-controlled paths and configure them from `requirements.toml`.
 
 Plugin packaging is a team-beta distribution layer, not the prototype
@@ -185,7 +188,7 @@ Currently implemented trigger sources:
 
 Target and future trigger sources:
 
-- Codex subagent start/stop and tool activity with separate attribution
+- Native Codex/OMP subagent start/stop and tool activity with separate attribution
 - git working tree or filesystem observation for conservative human activity
   detection
 - IDE extension events for human file open, dirty, save-attempt, and save

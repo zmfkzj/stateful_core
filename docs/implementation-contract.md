@@ -23,6 +23,11 @@ The prototype supports user-level installation with repo allowlist gating.
 --agent codex --yes` configures global Codex hooks and MCP. `stateful install
 --agent omp --yes` configures the isolated OMP `stateful` profile with stateful
 hooks and MCP. `stateful enable` opts the current repo into enforcement.
+For OMP, the extension prefers the actual OMP runtime session id from
+`event.sessionId` or `ctx.sessionManager.session.id`, stores it in
+`process.env.STATEFUL_SESSION_ID`, and `stateful hook omp session-start`
+persists current-session files so session-aware MCP tools resolve the same
+session.
 Repo-local hooks remain available through `stateful enable --repo-local-codex`
 as a compatibility fallback.
 
@@ -146,8 +151,13 @@ creates or returns an idempotent queued or reserved request by `request_id`;
 the same stateful server.
 
 MCP tools map directly onto these endpoints. MCP handlers do not implement
-policy branches; they validate tool arguments, call the HTTP API, and return the
-server result.
+policy branches; they validate tool arguments, resolve the current session from
+explicit arguments, `STATEFUL_SESSION_ID`, or hook-persisted current-session
+files as appropriate, call the HTTP API, and return the server result. The OMP
+current-session path supports `state_session_register` ->
+`state_intent_declare` -> `state_lease_acquire` without a caller-supplied env
+override after `stateful hook omp session-start` has persisted the active
+session.
 
 Current envelope enforcement is limited to `/v1/authorize` and
 `/v1/intent/declare`, `/v1/intent/request`, `/v1/intent/claim`, and

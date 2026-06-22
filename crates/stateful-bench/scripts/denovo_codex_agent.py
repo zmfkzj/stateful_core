@@ -145,12 +145,14 @@ def native_subagent_prompt_instruction(subagent: str, subagent_min_count: int) -
         return ""
     return f"""
 
-Native Codex subagent requirements:
-- MUST use native Codex subagents for this benchmark condition.
+Native Codex/OMP subagent requirements:
+- MUST use native subagents for this benchmark condition before making the final answer.
 - Spawn at least {subagent_min_count} native subagents before finishing.
-- Use all {subagent_min_count} native subagents for repository editing.
-- Do not leave any native subagent as analysis-only; each one must inspect, edit, and verify the workspace.
+- In OMP, use the available multi-agent/subagent tools such as `multi_agent_v1spawn_agent` and wait for them with the matching wait/resume tool when those tools are present.
+- Use all {subagent_min_count} native subagents for repository editing; each subagent must inspect, edit, and verify a distinct implementation slice.
+- Do not leave any native subagent as analysis-only, documentation-only, or idle.
 - Wait for each spawned subagent and incorporate its work or findings into the final workspace.
+- If the runtime does not expose subagent tools, explicitly report that blocker instead of silently completing as if subagents were used.
 """.rstrip()
 
 

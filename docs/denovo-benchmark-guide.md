@@ -130,8 +130,13 @@ differences only after three independent trials. For partial or interrupted
 runs, compare only the common completed instance set and clearly mark the result
 as exploratory.
 
-OMP retains the `subagent` axis for matrix compatibility, but it does not use
-Codex native subagent enforcement or Codex subagent usage counters.
+For `subagent:on`, the generated DeNovo prompt explicitly requires native
+Codex/OMP subagents, tells OMP to use available multi-agent tools such as
+`multi_agent_v1spawn_agent`, requires every counted subagent to inspect, edit,
+and verify a distinct implementation slice, and requires explicit blocker
+reporting if the runtime does not expose subagent tools. Treat that injected
+instruction as a declared behavior-test condition axis; do not reuse it as
+normal scored comparison policy or as general patch-quality guidance.
 
 ## Docker OMP Stateful Lifecycle
 

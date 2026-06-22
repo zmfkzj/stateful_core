@@ -1207,8 +1207,14 @@ function isYolo(event, ctx) {{
   return values.some((value) => value === true || value === "yolo" || value === "auto-approve");
 }}
 
+function detectSessionId(event, ctx) {{
+  return event?.sessionId || ctx?.sessionManager?.session?.id || process.env.STATEFUL_SESSION_ID || "omp-session";
+}}
+
 function sessionId(event, ctx) {{
-  return process.env.STATEFUL_SESSION_ID || event?.sessionId || ctx?.sessionManager?.session?.id || "omp-session";
+  const id = detectSessionId(event, ctx);
+  process.env.STATEFUL_SESSION_ID = id;
+  return id;
 }}
 
 export default function statefulOmpExtension(pi) {{

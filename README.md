@@ -284,11 +284,14 @@ stateful intent declare --purpose "Update README content requested by the user."
 stateful current
 ```
 
-Inside an active Codex session, do not run `stateful intent declare` or
+Inside an active Codex or OMP session, do not run `stateful intent declare` or
 `stateful mcp call` through the Bash tool. Use the Stateful MCP tools directly,
 such as `state_intent_declare` and `state_lease_acquire`; lifecycle hooks bind
-the current Codex thread id as the Stateful session id by default. Outside
-hooks, pass session and workspace IDs explicitly when using CLI commands.
+the active runtime session as the Stateful session id. Codex MCP resolution
+prefers the current `CODEX_THREAD_ID`; OMP uses `event.sessionId` /
+`ctx.sessionManager.session.id` and sets `STATEFUL_SESSION_ID` so MCP tools
+resolve the same session. Outside hooks, pass session and workspace IDs
+explicitly when using CLI commands.
 
 ```bash
 stateful intent declare --session-id demo --workspace-id <workspace> --purpose "Update README content requested by the user." README.md
@@ -398,8 +401,8 @@ installation health.
   `--no-stateful` disables Codex lifecycle hooks for that run.
 - `stateful mcp serve` exposes the MCP adapter over stdio.
 - `stateful mcp call <tool> [arguments_json]` calls an MCP tool from a plain
-  terminal. In Codex sessions, call the MCP tools directly instead of routing
-  through Bash. Most tools map to the local HTTP server. Stale
+  terminal. In active Codex or OMP sessions, call the MCP tools directly instead
+  of routing through Bash. Most tools map to the local HTTP server. Stale
   `state_file_write` / `state.file.write` and `state_bash_write` /
   `state.bash.write` calls are removed; use native edit tools with hook-visible
   targets, such as Codex `apply_patch` or Edit, for file edits after exact
@@ -452,24 +455,30 @@ The OMP extension covers `SessionStart`, `PreToolUse`, `PostToolUse`, and
 `Stop`. OMP does not provide a `UserPromptSubmit` lifecycle hook.
 
 `SessionStart` registers the active session and writes the current-session file
-used by CLI and MCP calls. In Codex, `UserPromptSubmit` renders brief
-current-state context. `PreToolUse` authorizes supported tool actions; server-side
-authorization records an implicit session heartbeat for the checked session.
-Codex `PostToolUse` records activity or heartbeats and releases same-session
-repo-write leases after completed native edit and `write-targets` transactions; OMP `PostToolUse` records heartbeat/activity for supported tool results.
-`Stop` posts `state_activity_finalize`, finalizing activity and releasing the session's
-leases.
+used by CLI and MCP calls. In OMP, `stateful hook omp session-start` prefers the
+actual OMP session id from `event.sessionId` or `ctx.sessionManager.session.id`,
+stores that id in `process.env.STATEFUL_SESSION_ID`, and persists current-session
+files before session-aware MCP tools run. In Codex, `UserPromptSubmit` renders
+current-state context. `PreToolUse` authorizes supported tool actions;
+server-side authorization records an implicit session heartbeat for the checked
+session. Codex `PostToolUse` records activity or heartbeats and releases
+same-session repo-write leases after completed native edit and `write-targets`
+transactions; OMP `PostToolUse` records heartbeat/activity for supported tool
+results. `Stop` posts `state_activity_finalize`, finalizing activity and
+releasing the session's leases.
 
-Hooks use the runtime payload `session_id` as the Stateful session id. They
-write `.stateful_core/runtime/sessions/<session_id>.json` plus the current
-session alias `.stateful_core/runtime/session.json`. Session-bound callers use
-`STATEFUL_SESSION_ID` to select the matching session-bound file. If that
-variable is not present, they fall back to `.stateful_core/runtime/session.json`
-only after verifying that its `session_id` has a matching session-bound file
-with identical contents. The fallback is rejected when the legacy alias does not
+Codex hooks use the current thread id as the Stateful session id. OMP hooks use
+the OMP session id described above. Hooks write
+`.stateful_core/runtime/sessions/<session_id>.json` plus the current session
+alias `.stateful_core/runtime/session.json`. Session-bound callers use
+`STATEFUL_SESSION_ID` to select the matching session-bound file, except Codex MCP
+callers prefer `CODEX_THREAD_ID` when it is present. If no session environment
+variable is present, callers fall back to `.stateful_core/runtime/session.json`
+only after verifying that its `session_id` has a matching session-bound file with
+identical contents. The fallback is rejected when the legacy alias does not
 match the session-bound file, or when multiple session-bound files exist because
-the alias is ambiguous across concurrent sessions; set `STATEFUL_SESSION_ID` to
-the active session id in that case.
+the alias is ambiguous across concurrent sessions; set the active session env var
+in that case.
 
 ## Write Authorization
 
@@ -576,7 +585,7 @@ heartbeats, intent declaration, intent request, intent claim, intent cancel,
 leases, activity observation/finalization, authorization, conflict checks,
 context rendering, reconciliation ack, notifications, resume, and outbox sync.
 
-The MCP adapter exposes Codex-friendly tool names mapped to dotted protocol
+The MCP adapter exposes agent-friendly tool names mapped to dotted protocol
 names:
 
 - `state_session_register` / `state.session.register`
@@ -690,7 +699,9 @@ bundled.
   capabilities, including sandbox write-directory authorization.
 - `STATEFUL_SESSION_ID` selects the session-bound current-session file at
   `.stateful_core/runtime/sessions/<session_id>.json` for MCP tools and other
-  session-bound callers. Codex-specific session env aliases are ignored.
+  session-bound callers. The OMP extension sets it from `event.sessionId` /
+  `ctx.sessionManager.session.id`; Codex MCP resolution prefers
+  `CODEX_THREAD_ID` when present.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
   authorize Bash. Bash authorization goes through a trusted
   `<absolute-stateful-binary> sandbox run` wrapper command.
@@ -836,6 +847,13 @@ stateful-on Docker run emits `SessionRegistered`, repeated `SessionHeartbeat`,
 and `ActivityFinalized`
 events; the verified smoke run
 `r110-denovo-one-omp-docker-stateful-onoff-subagent-on` produced that sequence.
+
+For DeNovo `subagent:on`, the generated benchmark prompt explicitly requires
+native Codex/OMP subagents, names OMP's `multi_agent_v1spawn_agent` tool when
+available, requires every counted subagent to edit an implementation slice, and
+requires blocker reporting when subagent tools are unavailable. That injected
+instruction is a declared behavior-test condition axis; do not add other prompt
+hints to normal scored comparisons.
 
 Generate reports:
 

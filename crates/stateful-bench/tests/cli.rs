@@ -3538,13 +3538,15 @@ print(json.dumps({{"off": off, "on": on}}, sort_keys=True))
 
     let off = output["off"].as_str().expect("off prompt");
     let on = output["on"].as_str().expect("on prompt");
-    assert!(!off.contains("Native Codex subagent requirements"));
-    assert!(on.contains("Native Codex subagent requirements"));
-    assert!(on.contains("MUST use native Codex subagents"));
+    assert!(!off.contains("Native Codex/OMP subagent requirements"));
+    assert!(on.contains("Native Codex/OMP subagent requirements"));
+    assert!(on.contains("MUST use native subagents"));
     assert!(on.contains("Spawn at least 3 native subagents"));
+    assert!(on.contains("multi_agent_v1spawn_agent"));
     assert!(on.contains("Use all 3 native subagents for repository editing"));
     assert!(on.contains("Do not leave any native subagent as analysis-only"));
     assert!(on.contains("Wait for each spawned subagent"));
+    assert!(on.contains("explicitly report that blocker"));
     assert_ne!(off, on);
 }
 

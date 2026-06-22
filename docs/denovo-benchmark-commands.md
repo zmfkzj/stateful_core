@@ -90,12 +90,14 @@ debugging and failure analysis, but should be labeled non-comparable.
 ## Prompt Policy
 
 Benchmark runs must not inject extra prompt instructions except when the run is
-explicitly testing concurrent-work behavior. For normal score or patch-quality
-runs, keep the prompt limited to the benchmark task and declared condition axes;
-do not add ad hoc orchestration instructions, role assignments, implementation
-hints, or strategy nudges. If a concurrency-behavior test needs injected
-instructions, label the run as such and keep the injection limited to the
-concurrent-work behavior being measured.
+explicitly labeled as a debug or behavior test for concurrent-work or subagent
+mechanics. For normal score, patch-quality, or stateful/no-state comparison
+runs, keep the prompt limited to the benchmark task, official prompt-version
+behavior, and declared condition axes; do not add ad hoc orchestration
+instructions, role assignments, implementation hints, or strategy nudges. If a
+behavior test needs injected instructions, label the run as such, keep the
+injection limited to the behavior being measured, and do not treat the result as
+a normal scored comparison.
 
 ## Command Variables
 
@@ -236,8 +238,13 @@ stateful-off/stateful-on with `subagent:on` and emitted that sequence. Treat a
 missing registration, absent heartbeat, or missing finalization as a lifecycle
 failure rather than a model-quality result.
 
-The `subagent` axis is retained for matrix shape, but OMP does not use Codex
-native subagent enforcement or Codex subagent usage counters.
+For `subagent:on`, the generated DeNovo prompt requires native Codex/OMP
+subagents, tells OMP to use available multi-agent tools such as
+`multi_agent_v1spawn_agent`, requires every counted subagent to inspect, edit,
+and verify a distinct implementation slice, and requires explicit blocker
+reporting if the runtime does not expose subagent tools. This prompt addition is
+a declared behavior-test condition axis, not a general prompt policy for normal
+scored comparisons.
 
 Shard launch scripts are expected at:
 

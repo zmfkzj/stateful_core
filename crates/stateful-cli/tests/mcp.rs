@@ -1755,6 +1755,113 @@ fn mcp_intent_declare_defaults_to_current_hook_session() {
 }
 
 #[test]
+fn mcp_session_intent_lease_sequence_uses_omp_current_session_without_env() {
+    let temp_root = temp_root("stateful-mcp-omp-session-sequence");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"status":"ok"}"#,
+        r#"{"status":"ok"}"#,
+        r#"{"status":"ok"}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    let runtime_env = [
+        ("STATEFUL_SERVER_URL", runtime.base_url.as_str()),
+        ("STATEFUL_SERVER_TOKEN", runtime.token.as_str()),
+    ];
+    let current_session = CurrentSession::new("omp-actual-session", "w1");
+    write_current_session_file_for_session(&repo_root, "omp-actual-session", &current_session)
+        .expect("session-bound current session should write");
+    write_legacy_current_session_for_test(&repo_root, &current_session);
+
+    let register_response = run_mcp_jsonrpc_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &runtime_env,
+        r#"{
+          "jsonrpc":"2.0",
+          "id":40,
+          "method":"tools/call",
+          "params":{
+            "name":"state_session_register",
+            "arguments":{}
+          }
+        }"#,
+    );
+    let register = rx.recv().expect("session register request should arrive");
+    assert!(register.contains("POST /v1/session/register HTTP/1.1"));
+    let register_body = request_json_body(&register);
+    assert_eq!(register_body["session_id"], "omp-actual-session");
+    assert_eq!(register_body["workspace_id"], "w1");
+    let json: serde_json::Value =
+        serde_json::from_str(&register_response).expect("register response should be json");
+    assert_eq!(json["result"]["isError"], false);
+
+    let intent_response = run_mcp_jsonrpc_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &runtime_env,
+        r#"{
+          "jsonrpc":"2.0",
+          "id":41,
+          "method":"tools/call",
+          "params":{
+            "name":"state_intent_declare",
+            "arguments":{
+              "purpose":"Implement benchmark package files.",
+              "files_planned":["src/auth.ts"]
+            }
+          }
+        }"#,
+    );
+    let intent = rx.recv().expect("intent declare request should arrive");
+    assert!(intent.contains("POST /v1/intent/declare HTTP/1.1"));
+    let intent_body = request_json_body(&intent);
+    assert_eq!(intent_body["session"]["session_id"], "omp-actual-session");
+    assert_eq!(intent_body["workspace"]["workspace_id"], "w1");
+    assert_eq!(
+        intent_body["payload"],
+        serde_json::json!({
+            "purpose": "Implement benchmark package files.",
+            "files_planned": ["src/auth.ts"]
+        })
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&intent_response).expect("intent response should be json");
+    assert_eq!(json["result"]["isError"], false);
+
+    let lease_response = run_mcp_jsonrpc_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &runtime_env,
+        r#"{
+          "jsonrpc":"2.0",
+          "id":42,
+          "method":"tools/call",
+          "params":{
+            "name":"state_lease_acquire",
+            "arguments":{
+              "path":"src/auth.ts"
+            }
+          }
+        }"#,
+    );
+    let lease = rx.recv().expect("lease acquire request should arrive");
+    assert!(lease.contains("POST /v1/lease/acquire HTTP/1.1"));
+    let lease_body = request_json_body(&lease);
+    assert_eq!(lease_body["session_id"], "omp-actual-session");
+    assert_eq!(lease_body["workspace_id"], "w1");
+    assert_eq!(lease_body["path"], "src/auth.ts");
+    let json: serde_json::Value =
+        serde_json::from_str(&lease_response).expect("lease response should be json");
+    assert_eq!(json["result"]["isError"], false);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn mcp_intent_declare_bootstraps_missing_session_bound_file_from_env() {
     let temp_root = temp_root("stateful-mcp-intent-bootstrap-session");
     let paths = GlobalPaths::new(temp_root.join("home"));

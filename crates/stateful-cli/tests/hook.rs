@@ -4852,8 +4852,14 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
         r#"{"decision":"allow","message":"ok"}"#,
         r#"{"status":"ok"}"#,
         r#"{"status":"ok"}"#,
+        r#"{"status":"ok"}"#,
+        r#"{"status":"ok"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    let runtime_env = [
+        ("STATEFUL_SERVER_URL", runtime.base_url.as_str()),
+        ("STATEFUL_SERVER_TOKEN", runtime.token.as_str()),
+    ];
 
     let session_start = serde_json::json!({
         "session_id": "omp-parent",
@@ -4863,11 +4869,12 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
         "commit_id": "abc123"
     })
     .to_string();
-    let output = run_hook_subprocess(
+    let output = run_hook_subprocess_with_extra_env(
         &repo_root,
         &paths,
         &["hook", "omp", "session-start"],
         &session_start,
+        &runtime_env,
     );
     assert!(
         output.status.success(),
@@ -4909,11 +4916,12 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
         "tool_input": { "path": "docs/a.md", "content": "hello" }
     })
     .to_string();
-    let output = run_hook_subprocess(
+    let output = run_hook_subprocess_with_extra_env(
         &repo_root,
         &paths,
         &["hook", "omp", "pre-tool-use"],
         &pre_tool,
+        &runtime_env,
     );
     assert!(
         output.status.success(),
@@ -4941,11 +4949,12 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
         "tool_input": { "path": "docs/a.md", "content": "hello" }
     })
     .to_string();
-    let output = run_hook_subprocess(
+    let output = run_hook_subprocess_with_extra_env(
         &repo_root,
         &paths,
         &["hook", "omp", "post-tool-use"],
         &post_tool,
+        &runtime_env,
     );
     assert!(
         output.status.success(),
@@ -4957,6 +4966,16 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
     let heartbeat_body = request_json_body(&heartbeat);
     assert_eq!(heartbeat_body["session_id"], "omp-parent");
     assert_eq!(heartbeat_body["source"]["event"], "omp_post_tool_use");
+    let refresh = rx.recv().expect("lease refresh request should arrive");
+    assert!(refresh.contains("POST /v1/lease/refresh-observation HTTP/1.1"));
+    let refresh_body = request_json_body(&refresh);
+    assert_eq!(refresh_body["session_id"], "omp-parent");
+    assert_eq!(refresh_body["path"], "docs/a.md");
+    let release = rx.recv().expect("lease release request should arrive");
+    assert!(release.contains("POST /v1/lease/release HTTP/1.1"));
+    let release_body = request_json_body(&release);
+    assert_eq!(release_body["session_id"], "omp-parent");
+    assert_eq!(release_body["path"], "docs/a.md");
 
     let stop = serde_json::json!({
         "session_id": "omp-parent",
@@ -4966,7 +4985,13 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
         "commit_id": "abc123"
     })
     .to_string();
-    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "stop"], &stop);
+    let output = run_hook_subprocess_with_extra_env(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "stop"],
+        &stop,
+        &runtime_env,
+    );
     assert!(
         output.status.success(),
         "stateful hook failed: {}",

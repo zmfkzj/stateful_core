@@ -229,7 +229,8 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     let extension = fs::read_to_string(&omp_extension).expect("omp extension should read");
     assert!(extension.contains("export default function statefulOmpExtension"));
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
-    assert!(extension.contains("process.env.STATEFUL_SESSION_ID ||"));
+    assert!(extension.contains("event?.sessionId || ctx?.sessionManager?.session?.id"));
+    assert!(extension.contains("process.env.STATEFUL_SESSION_ID = id"));
     assert!(extension.contains("pre-tool-use"));
     assert!(extension.contains("decision: \"block\""));
     let command_policy_skill = fs::read_to_string(&omp_skill).expect("omp skill should read");

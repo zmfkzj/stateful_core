@@ -269,17 +269,23 @@ Codex global hooks, repo-local compatibility hooks, and managed Codex hooks
 share the Codex lifecycle model: `SessionStart`, `UserPromptSubmit`,
 `PreToolUse`, `PostToolUse`, and `Stop`. The isolated OMP `stateful` profile
 uses OMP extension entry points for `SessionStart`, `PreToolUse`,
-`PostToolUse`, and `Stop`; OMP does not expose `UserPromptSubmit`. Plugin
-packaging is deferred to team beta for distribution and update UX, while
-managed hooks remain the long-term organization-enforcement path.
+`PostToolUse`, and `Stop`; OMP does not expose `UserPromptSubmit`. OMP
+`session-start` prefers the actual runtime id from `event.sessionId` or
+`ctx.sessionManager.session.id`, stores it in `process.env.STATEFUL_SESSION_ID`,
+and persists the same current-session files used by session-aware CLI and MCP
+callers. With that state in place, `state_session_register` ->
+`state_intent_declare` -> `state_lease_acquire` resolves the active OMP session
+without a caller-supplied environment override. Plugin packaging is deferred to
+team beta for distribution and update UX, while managed hooks remain the
+long-term organization-enforcement path.
 
 Hook scripts are thin integration adapters. They parse runtime hook input,
-classify runtime-specific tool calls, extract action and targets when
-supported, call the local HTTP state server for store-backed coordination
-policy, and translate the decision back into runtime hook output. Adapter-local
-policy is limited to fail-closed classification and trusted wrapper validation
-for command-shaped execution. V1 implementation is Rust-only, so hooks invoke
-the compiled `stateful` binary.
+classify runtime-specific tool calls, extract action and targets when supported,
+call the local HTTP state server for store-backed coordination policy, and
+translate the decision back into runtime hook output. Adapter-local policy is
+limited to fail-closed classification and trusted wrapper validation for
+command-shaped execution. V1 implementation is Rust-only, so hooks invoke the
+compiled `stateful` binary.
 
 Envelope-enforced write authorization, intent, and reconciliation requests
 include `protocol_version`; a major protocol mismatch fails closed on those
