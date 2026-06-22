@@ -139,8 +139,9 @@ Repo file edits use hook-visible native edit tools such as Codex `apply_patch`,
 successful same-session file lease; the lease is released after the completed
 write transaction. Bash command text alone is never a repo-internal
 authorization source. Codex raw Bash is denied with sandbox guidance, and OMP
-raw Bash is blocked unless it uses the trusted sandbox-run wrapper; repo-external
-shell work must use `stateful sandbox run --fs external --purpose ...`. Ordinary
+raw Bash and native Python execution are blocked unless they use the trusted
+sandbox-run wrapper; repo-external shell or Python work must use
+`stateful sandbox run --fs external --purpose ...`. Ordinary
 read work should use agent-native read,
 search, or diff tools when available. Read-only inspection that genuinely needs
 a shell must use the trusted absolute `stateful` wrapper:

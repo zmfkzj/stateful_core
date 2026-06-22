@@ -219,9 +219,10 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 `PreToolUse`:
 
 - deny supported write calls when the session has no active intent
-- deny Codex raw Bash with sandbox guidance. For OMP, block raw Bash unless it
-  uses the trusted `stateful sandbox run` wrapper; repo-external shell work must
-  use `stateful sandbox run --fs external --purpose ...`. Hook-mediated shell
+- deny Codex raw Bash with sandbox guidance. For OMP, block raw Bash and native
+  Python execution unless they use the trusted `stateful sandbox run` wrapper;
+  repo-external shell or Python work must use
+  `stateful sandbox run --fs external --purpose ...`. Hook-mediated command
   execution must be a single strict invocation of the trusted absolute
   `stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
   <cmd>`. Read-only command-shaped inspection uses `--fs read-only --network
@@ -293,9 +294,10 @@ V1 enforcement is strict about write target extraction:
   `edit` and `write`: enforce by inspecting hook-exposed targets after exact
   intent declaration and a successful same-session file lease. The completed
   write transaction releases the lease that authorized it.
-- Bash commands: Codex raw Bash is denied with sandbox guidance. OMP raw Bash is
-  blocked unless it is the trusted sandbox wrapper; repo-external shell work must
-  use `stateful sandbox run --fs external --purpose ...`. Ordinary read work
+- Command execution: Codex raw Bash is denied with sandbox guidance. OMP raw Bash
+  and native Python execution are blocked unless they use the trusted sandbox
+  wrapper; repo-external shell or Python work must use
+  `stateful sandbox run --fs external --purpose ...`. Ordinary read work
   should use native read/search/diff tools when available. Read-only
   command-shaped inspection that genuinely needs a
   shell uses `--fs read-only --network disabled`; the read-only profile cannot
@@ -324,8 +326,8 @@ other Bash command.
 
 ## Sandboxed Tests
 
-Agents cannot run raw Bash test commands through hooks. They call the trusted
-wrapper with a scratch purpose:
+Agents cannot run raw Bash or native Python test commands through hooks. They
+call the trusted wrapper with a scratch purpose:
 
 ```text
 stateful sandbox run --fs build --network enabled --write-dir test-run --command <cmd>
@@ -596,13 +598,14 @@ The system should prefer explicit uncertainty:
 - interrupted session -> keep last state until TTL expires
 - hook failure -> warn and fail closed only for high-risk writes
 - OMP stateful hook deny or unavailable result -> block, never warn because of
-  yolo metadata; repo-external shell work must still use the external sandbox
-  profile, not raw Bash
+  yolo metadata; repo-external shell or Python work must still use the external
+  sandbox profile, not raw Bash or raw Python
 - state server unavailable -> deny supported writes that cannot prove active
   intent
-- state server unavailable -> deny Codex raw Bash and repo-internal Bash that is
-  not a strict `<absolute-stateful-binary> sandbox run ... --command <cmd>`
-  wrapper; command-shaped writes through `--fs write-targets` fail closed when
+- state server unavailable -> deny Codex raw Bash, repo-internal Bash, and OMP
+  native Python execution that is not a strict
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper;
+  command-shaped writes through `--fs write-targets` fail closed when
   target authorization cannot be proven
 - state server unavailable -> write-target sandbox authorization fails closed
   and does not run the command

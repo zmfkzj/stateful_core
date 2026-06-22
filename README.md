@@ -434,6 +434,9 @@ directory (`$STATEFUL_HOME/.omp/profiles/stateful/agent`, default
 untouched. Stateful hook allows become OMP
 allows; denials or unavailable authorization remain hard OMP blocks even if OMP
 yolo metadata is present.
+OMP raw Bash and native Python execution are blocked unless the tool input is a
+trusted `stateful sandbox run ... --command ...` wrapper; repo-external execution
+must use the external sandbox profile with `--purpose`.
 
 The generated Codex hook configuration covers:
 
@@ -497,11 +500,12 @@ successful same-session file lease. Hooks extract the native tool target, call
 authorizing lease after the completed write transaction.
 
 Codex raw Bash commands are denied by stateful hooks with sandbox guidance. For
-OMP, raw Bash is blocked unless it uses the trusted sandbox-run wrapper,
-including repo-external shell work, which must use `stateful sandbox run --fs
-external --purpose ...`. Bash hook calls are authorized only when the outer
-command is a single strict invocation of the trusted absolute `stateful` binary
-running `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Use
+OMP, raw Bash and native Python execution are blocked unless they use the
+trusted sandbox-run wrapper, including repo-external shell or Python work, which
+must use `stateful sandbox run --fs external --purpose ...`. Hook-mediated
+command execution is authorized only when the outer command is a single strict
+invocation of the trusted absolute `stateful` binary running
+`<absolute-stateful-binary> sandbox run ... --command <cmd>`. Use
 agent-native read, search, and diff tools for ordinary read work when they are
 available.
 When read-only inspection genuinely needs a shell through a Bash hook, use
@@ -559,8 +563,8 @@ for approved external operations. Repo-external writes do not require repo inten
 or a same-session lease, but Codex prompts on
 `stateful sandbox run --fs external --purpose ...` before execution. After
 approval, the command runs through the sandbox and prints the sandbox command
-result as JSON. In OMP, repo-external shell work must use the external sandbox
-profile for writes outside the repo.
+result as JSON. In OMP, repo-external shell or Python work must use the external
+sandbox profile for writes outside the repo.
 
 ## HTTP And MCP Surface
 

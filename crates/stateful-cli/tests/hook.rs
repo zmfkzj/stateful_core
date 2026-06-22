@@ -2739,6 +2739,69 @@ fn omp_repo_internal_bash_requires_sandbox_run_for_reads_and_write_targets() {
 }
 
 #[test]
+fn omp_python_execution_uses_bash_sandbox_policy() {
+    let raw_python_input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "python",
+        "tool_input": { "code": "print('hello')" }
+    })
+    .to_string();
+    let OmpHookOutcome::Block { reason } = handle_omp_pre_tool_use_with_runtime(
+        &raw_python_input,
+        None,
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .unwrap() else {
+        panic!("raw OMP python should block unless it uses sandbox run");
+    };
+    assert!(reason.contains("targetless python requires stateful sandbox run"));
+
+    let stateful = trusted_stateful_path();
+    let sandboxed_python_input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "python",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs read-only --network disabled --command 'python -c \"print(1)\"'")
+        }
+    })
+    .to_string();
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &sandboxed_python_input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Allow
+    );
+
+    let repo_external_python_input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/tmp/outside",
+        "yolo": false,
+        "tool_name": "python",
+        "tool_input": { "code": "print('outside')" }
+    })
+    .to_string();
+    let OmpHookOutcome::Block { reason } = handle_omp_pre_tool_use_with_runtime(
+        &repo_external_python_input,
+        None,
+        Some(Path::new("/repo")),
+        Some(Path::new("/tmp/outside")),
+    )
+    .unwrap() else {
+        panic!("repo-external OMP python should block unless it uses sandbox external");
+    };
+    assert!(reason.contains("sandbox run --fs external --purpose"));
+}
+
+#[test]
 fn omp_allows_classified_read_only_and_stateful_activation_tools() {
     for tool_name in [
         "read",

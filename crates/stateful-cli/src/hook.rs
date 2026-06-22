@@ -271,20 +271,24 @@ fn omp_pre_tool_action(
             }
             Ok(OmpPreToolAction::Targets(targets))
         }
-        "bash" => {
+        "bash" | "python" => {
             let command = input.command().unwrap_or_default();
             if let Some(action) = omp_sandbox_run_action(command) {
                 return Ok(action);
             }
             if !cwd_is_inside_repo(repo_root, cwd) {
                 return Ok(OmpPreToolAction::Block {
-                    reason:
-                        "repo-external bash requires stateful sandbox run --fs external --purpose"
-                            .to_string(),
+                    reason: format!(
+                        "repo-external {} requires stateful sandbox run --fs external --purpose",
+                        input.tool_name
+                    ),
                 });
             }
             Ok(OmpPreToolAction::Block {
-                reason: "targetless bash requires stateful sandbox run".to_string(),
+                reason: format!(
+                    "targetless {} requires stateful sandbox run",
+                    input.tool_name
+                ),
             })
         }
         "read" | "find" | "grep" | "search" | "web_search" | "browser" | "search_tool_bm25" => {
