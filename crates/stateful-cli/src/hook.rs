@@ -133,9 +133,12 @@ fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
             println!("{}", outcome.to_stdout_json());
         }
         HookCommand::SessionStart => {
-            if let Err(error) =
-                handle_omp_session_start_with_identity(&input, &runtime, identity.as_ref())
-            {
+            if let Err(error) = handle_omp_session_start_with_identity(
+                &input,
+                &runtime,
+                &repo_root,
+                identity.as_ref(),
+            ) {
                 eprintln!("stateful omp session-start warning: {error}");
             }
         }
@@ -271,8 +274,9 @@ fn omp_pre_tool_action(
     repo_root: Option<&Path>,
     cwd: Option<&Path>,
 ) -> anyhow::Result<OmpPreToolAction> {
-    match input.tool_name.as_str() {
-        "write" => {
+    let tool_name = runtime_tool_name_leaf(&input.tool_name);
+    match tool_name {
+        tool_name if tool_name.eq_ignore_ascii_case("write") => {
             let Some(path) = input
                 .tool_input
                 .get("path")
@@ -286,7 +290,7 @@ fn omp_pre_tool_action(
             };
             Ok(OmpPreToolAction::Targets(vec![PatchTarget::write(path)]))
         }
-        "edit" => {
+        tool_name if tool_name.eq_ignore_ascii_case("edit") => {
             let targets = extract_omp_edit_targets(&input.tool_input);
             if targets.is_empty() {
                 return Ok(OmpPreToolAction::Block {
@@ -296,7 +300,10 @@ fn omp_pre_tool_action(
             }
             Ok(OmpPreToolAction::Targets(targets))
         }
-        "bash" | "python" => {
+        tool_name
+            if tool_name.eq_ignore_ascii_case("bash")
+                || tool_name.eq_ignore_ascii_case("python") =>
+        {
             let command = input.command().unwrap_or_default();
             if let Some(action) = omp_sandbox_run_action(command) {
                 return Ok(action);
@@ -316,10 +323,18 @@ fn omp_pre_tool_action(
                 ),
             })
         }
-        "read" | "find" | "grep" | "search" | "web_search" | "browser" | "search_tool_bm25" => {
+        tool_name
+            if tool_name.eq_ignore_ascii_case("read")
+                || tool_name.eq_ignore_ascii_case("find")
+                || tool_name.eq_ignore_ascii_case("grep")
+                || tool_name.eq_ignore_ascii_case("search")
+                || tool_name.eq_ignore_ascii_case("web_search")
+                || tool_name.eq_ignore_ascii_case("browser")
+                || tool_name.eq_ignore_ascii_case("search_tool_bm25") =>
+        {
             Ok(OmpPreToolAction::Allow)
         }
-        tool_name if is_stateful_control_plane_tool(tool_name) => Ok(OmpPreToolAction::Allow),
+        _ if is_stateful_control_plane_tool(&input.tool_name) => Ok(OmpPreToolAction::Allow),
         _ => Ok(OmpPreToolAction::Block {
             reason: format!(
                 "unclassified OMP tool {} may write or execute and requires explicit stateful classification",
@@ -490,9 +505,18 @@ pub fn handle_omp_session_start_with_runtime(
 fn handle_omp_session_start_with_identity(
     input: &str,
     runtime: &ServerRuntime,
+    repo_root: &Path,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
     let input: OmpSessionEventInput = serde_json::from_str(input)?;
+    let workspace_id = input
+        .workspace_id
+        .clone()
+        .unwrap_or_else(|| effective_workspace_id(runtime, identity));
+    write_current_session_file_for_explicit_session(
+        repo_root,
+        &CurrentSession::new(input.session_id.clone(), workspace_id),
+    )?;
     post_omp_session_event(
         runtime,
         "/v1/session/register",
@@ -628,8 +652,9 @@ fn omp_post_tool_refresh_targets(
     repo_root: &Path,
 ) -> anyhow::Result<Vec<PatchTarget>> {
     let cwd = input.cwd.as_deref();
-    let targets = match input.tool_name.as_deref() {
-        Some("write") => {
+    let tool_name = input.tool_name.as_deref().map(runtime_tool_name_leaf);
+    let targets = match tool_name {
+        Some(tool_name) if tool_name.eq_ignore_ascii_case("write") => {
             let Some(path) = input
                 .tool_input
                 .get("path")
@@ -641,14 +666,21 @@ fn omp_post_tool_refresh_targets(
             };
             vec![PatchTarget::write(path)]
         }
-        Some("edit") => extract_omp_edit_targets(&input.tool_input),
-        Some("bash") | Some("python") => match input
-            .command()
-            .and_then(|command| omp_sandbox_run_action(command))
+        Some(tool_name) if tool_name.eq_ignore_ascii_case("edit") => {
+            extract_omp_edit_targets(&input.tool_input)
+        }
+        Some(tool_name)
+            if tool_name.eq_ignore_ascii_case("bash")
+                || tool_name.eq_ignore_ascii_case("python") =>
         {
-            Some(OmpPreToolAction::Targets(targets)) => targets,
-            _ => Vec::new(),
-        },
+            match input
+                .command()
+                .and_then(|command| omp_sandbox_run_action(command))
+            {
+                Some(OmpPreToolAction::Targets(targets)) => targets,
+                _ => Vec::new(),
+            }
+        }
         _ => Vec::new(),
     };
 
@@ -1108,8 +1140,9 @@ fn handle_pre_tool_use_with_runtime(
             .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok())
     });
 
-    match input.tool_name.as_str() {
-        "Bash" => {
+    let tool_name = runtime_tool_name_leaf(&input.tool_name);
+    match tool_name {
+        tool_name if tool_name.eq_ignore_ascii_case("bash") => {
             let outcome = authorize_bash(&input)?;
             Ok(with_file_tool_live_context(
                 outcome,
@@ -1118,11 +1151,13 @@ fn handle_pre_tool_use_with_runtime(
                 identity.as_ref(),
             ))
         }
-        "apply_patch" => authorize_apply_patch(&input, runtime, repo_root, cwd, identity.as_ref()),
-        "file_change" => {
+        tool_name if tool_name.eq_ignore_ascii_case("apply_patch") => {
+            authorize_apply_patch(&input, runtime, repo_root, cwd, identity.as_ref())
+        }
+        tool_name if tool_name.eq_ignore_ascii_case("file_change") => {
             authorize_file_change_tool(&input, runtime, repo_root, cwd, identity.as_ref())
         }
-        "Edit" | "Write" => {
+        tool_name if tool_name.eq_ignore_ascii_case("edit") || tool_name.eq_ignore_ascii_case("write") => {
             authorize_file_write_tool(&input, runtime, repo_root, cwd, identity.as_ref())
         }
         tool_name if tool_name.starts_with("mcp__filesystem__") => Ok(HookOutcome::Deny {
@@ -1134,18 +1169,27 @@ fn handle_pre_tool_use_with_runtime(
             ),
         }),
         tool_name if is_safe_without_repo_write_authorization(tool_name) => Ok(HookOutcome::Allow),
-        tool_name if is_user_allowed_tool(global_paths.as_ref(), repo_root, tool_name) => {
+        _ if is_user_allowed_tool(global_paths.as_ref(), repo_root, &input.tool_name) => {
             Ok(HookOutcome::Allow)
         }
-        tool_name => {
-            record_unclassified_tool(global_paths.as_ref(), repo_root, tool_name);
+        _ => {
+            record_unclassified_tool(global_paths.as_ref(), repo_root, &input.tool_name);
             Ok(HookOutcome::Deny {
                 reason: format!(
-                    "unclassified tool {tool_name} may write or execute and requires explicit stateful classification before it can run in an enabled repository"
+                    "unclassified tool {} may write or execute and requires explicit stateful classification before it can run in an enabled repository",
+                    input.tool_name
                 ),
             })
         }
     }
+}
+
+fn runtime_tool_name_leaf(tool_name: &str) -> &str {
+    tool_name
+        .rsplit(|character| matches!(character, '.' | '/'))
+        .next()
+        .unwrap_or(tool_name)
+        .trim_start_matches('_')
 }
 
 fn is_user_allowed_tool(
@@ -1180,36 +1224,37 @@ fn is_safe_without_repo_write_authorization(tool_name: &str) -> bool {
 }
 
 fn is_builtin_safe_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "Read"
-            | "Grep"
-            | "Glob"
-            | "LS"
-            | "NotebookRead"
-            | "WebFetch"
-            | "WebSearch"
-            | "TodoWrite"
-            | "update_plan"
-            | "tool_search"
-            | "tool_search_tool"
-            | "search_tool_bm25"
-            | "get_goal"
-            | "create_goal"
-            | "update_goal"
-            | "request_user_input"
-            | "view_image"
-            | "spawn_agent"
-            | "multi_agent_v1spawn_agent"
-            | "wait_agent"
-            | "multi_agent_v1wait_agent"
-            | "send_input"
-            | "multi_agent_v1send_input"
-            | "close_agent"
-            | "multi_agent_v1close_agent"
-            | "resume_agent"
-            | "multi_agent_v1resume_agent"
-    )
+    [
+        "Read",
+        "Grep",
+        "Glob",
+        "LS",
+        "NotebookRead",
+        "WebFetch",
+        "WebSearch",
+        "TodoWrite",
+        "update_plan",
+        "tool_search",
+        "tool_search_tool",
+        "search_tool_bm25",
+        "get_goal",
+        "create_goal",
+        "update_goal",
+        "request_user_input",
+        "view_image",
+        "spawn_agent",
+        "multi_agent_v1spawn_agent",
+        "wait_agent",
+        "multi_agent_v1wait_agent",
+        "send_input",
+        "multi_agent_v1send_input",
+        "close_agent",
+        "multi_agent_v1close_agent",
+        "resume_agent",
+        "multi_agent_v1resume_agent",
+    ]
+    .iter()
+    .any(|safe_tool| tool_name.eq_ignore_ascii_case(safe_tool))
 }
 
 fn is_stateful_control_plane_tool(tool_name: &str) -> bool {

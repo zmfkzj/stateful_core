@@ -289,6 +289,9 @@ paths fail with `missing_scope`. Intent request also requires a non-empty
 ## Tool Classification
 
 V1 enforcement is strict about write target extraction:
+Runtime adapters normalize namespaced tool names to their leaf before
+classification, so `functions.bash` is Bash, `functions.python` is Python, and
+`functions.read` / `functions.search` remain native read/search tools.
 
 - Native edit tools such as Codex `apply_patch`, `Edit`, and `Write` or OMP
   `edit` and `write`: enforce by inspecting hook-exposed targets after exact

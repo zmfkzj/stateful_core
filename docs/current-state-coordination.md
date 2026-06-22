@@ -426,6 +426,9 @@ V1 write enforcement is limited to tool paths where targets can be determined
 reliably:
 
 ```text
+namespaced runtime tool names -> classify by leaf
+  (functions.bash as Bash, functions.python as Python,
+  functions.read / functions.search as native read/search)
 native read/search/diff tools -> preferred path for ordinary read work
 native edit tools with hook-visible targets -> enforce by inspecting targets
   after exact intent and a same-session lease; release the lease after the

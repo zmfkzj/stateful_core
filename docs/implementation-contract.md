@@ -200,6 +200,10 @@ checks. When supplied, each observation is compared against the current
 workspace file state under `workspace.root`; existence or `content_hash` changes
 for an affected target return `deny` with `reason_code:
 stale_target_observation` and require the caller to reread before retrying.
+Hook adapters normalize namespaced runtime tool names to their leaf before
+policy classification: `functions.bash` follows Bash rules, `functions.python`
+follows Python rules, and `functions.read` / `functions.search` follow native
+read/search rules.
 Codex raw Bash is denied by stateful hooks with sandbox guidance. Bash hook
 calls for repo-internal shell work are allowed only when the outer command is a
 single strict invocation of the trusted absolute `stateful` binary running

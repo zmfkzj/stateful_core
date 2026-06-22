@@ -499,12 +499,14 @@ successful same-session file lease. Hooks extract the native tool target, call
 `new_path`, allow the edit only after an allow decision, and release the
 authorizing lease after the completed write transaction.
 
-Codex raw Bash commands are denied by stateful hooks with sandbox guidance. For
-OMP, raw Bash and native Python execution are blocked unless they use the
-trusted sandbox-run wrapper, including repo-external shell or Python work, which
-must use `stateful sandbox run --fs external --purpose ...`. Hook-mediated
-command execution is authorized only when the outer command is a single strict
-invocation of the trusted absolute `stateful` binary running
+Codex raw Bash commands are denied by stateful hooks with sandbox guidance. Hook
+policy classifies namespaced runtime tool names by their leaf, so
+`functions.bash` follows Bash handling and `functions.python` follows Python
+handling. For OMP, raw Bash and native Python execution are blocked unless they
+use the trusted sandbox-run wrapper, including repo-external shell or Python
+work, which must use `stateful sandbox run --fs external --purpose ...`.
+Hook-mediated command execution is authorized only when the outer command is a
+single strict invocation of the trusted absolute `stateful` binary running
 `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Use
 agent-native read, search, and diff tools for ordinary read work when they are
 available.

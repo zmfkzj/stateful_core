@@ -294,6 +294,40 @@ fn pre_tool_use_denies_raw_read_only_bash_after_sandbox_runner_migration() {
 }
 
 #[test]
+fn pre_tool_use_denies_namespaced_raw_bash_tool() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "functions.bash",
+      "tool_input": {
+        "command": "pwd"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(outcome, "stateful sandbox run");
+}
+
+#[test]
+fn pre_tool_use_allows_namespaced_safe_read_tool() {
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "functions.read",
+      "tool_input": {
+        "path": "README.md"
+      }
+    }"#;
+
+    let outcome = handle_pre_tool_use(input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
 fn pre_tool_use_raw_bash_denial_mentions_command_policy_skill_and_example() {
     let input = r#"{
       "session_id": "s1",
@@ -2829,6 +2863,50 @@ fn omp_repo_internal_bash_requires_sandbox_run_for_reads_and_write_targets() {
 }
 
 #[test]
+fn omp_namespaced_bash_requires_sandbox_run() {
+    let raw_read_input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "functions.bash",
+        "tool_input": { "command": "pwd" }
+    })
+    .to_string();
+    assert!(matches!(
+        handle_omp_pre_tool_use_with_runtime(
+            &raw_read_input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Block { .. }
+    ));
+
+    let stateful = trusted_stateful_path();
+    let sandboxed_read_input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "functions.bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs read-only --network disabled --command 'pwd'")
+        }
+    })
+    .to_string();
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &sandboxed_read_input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Allow
+    );
+}
+
+#[test]
 fn omp_python_execution_uses_bash_sandbox_policy() {
     let raw_python_input = serde_json::json!({
         "session_id": "omp-parent",
@@ -4803,6 +4881,22 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
     assert_eq!(register_body["source"]["event"], "omp_session_start");
     assert_eq!(register_body["metadata"]["runtime"], "omp");
     assert_eq!(register_body["metadata"]["omp_agent_id"], "main");
+    let current_session = read_current_session_file_for_session(&repo_root, "omp-parent")
+        .expect("OMP session start should persist current session for MCP tools");
+    assert_eq!(current_session.session_id, "omp-parent");
+    assert_eq!(current_session.workspace_id, runtime.workspace_id);
+    let legacy_session: CurrentSession = serde_json::from_str(
+        &fs::read_to_string(
+            repo_root
+                .join(".stateful_core")
+                .join("runtime")
+                .join("session.json"),
+        )
+        .expect("legacy current session should read"),
+    )
+    .expect("legacy current session should parse");
+    assert_eq!(legacy_session.session_id, "omp-parent");
+    assert_eq!(legacy_session.workspace_id, runtime.workspace_id);
 
     let pre_tool = serde_json::json!({
         "session_id": "omp-parent",

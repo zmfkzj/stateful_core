@@ -138,7 +138,10 @@ Repo file edits use hook-visible native edit tools such as Codex `apply_patch`,
 `Edit`, and `Write`, or OMP `edit` and `write`, after exact intent and a
 successful same-session file lease; the lease is released after the completed
 write transaction. Bash command text alone is never a repo-internal
-authorization source. Codex raw Bash is denied with sandbox guidance, and OMP
+authorization source. Runtime tool names are classified by their leaf segment,
+so `functions.bash` follows Bash rules, `functions.python` follows Python
+rules, and `functions.read` / `functions.search` remain native read/search
+tools. Codex raw Bash is denied with sandbox guidance, and OMP
 raw Bash and native Python execution are blocked unless they use the trusted
 sandbox-run wrapper; repo-external shell or Python work must use
 `stateful sandbox run --fs external --purpose ...`. Ordinary
