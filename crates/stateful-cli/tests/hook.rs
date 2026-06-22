@@ -363,6 +363,44 @@ fn pre_tool_use_allows_sandbox_external_for_repo_external_write_approval_path() 
 }
 
 #[test]
+fn pre_tool_use_allows_sandbox_external_with_supported_scopes() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs external --purpose 'update external artifacts' --network enabled --write-target /tmp/stateful-existing.txt --create-target /tmp/stateful-new.txt --write-dir /tmp/stateful-dir --connect-socket /tmp/stateful.sock --allow-signal --command 'printf ok'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_external_without_purpose() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs external --write-target /tmp/stateful-outside.txt --command 'printf ok > /tmp/stateful-outside.txt'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(outcome, "external sandbox profile requires --purpose");
+}
+
+#[test]
 fn pre_tool_use_denies_external_run_request_for_repo_external_write() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
@@ -1277,7 +1315,7 @@ fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
         (
             "invalid fs",
             format!("{stateful} sandbox run --fs read-write --command 'rg auth src'"),
-            "supports only read-only, write-targets, external, build, git, and github-pr profiles",
+            "supports only read-only, write-targets, build, git, and github-pr profiles",
         ),
         (
             "invalid network",
