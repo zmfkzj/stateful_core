@@ -4,6 +4,12 @@ This file describes the repository maintainer workflow used for local release
 work. External contributors do not need to follow it, and it is not a general
 agent policy for downstream users.
 
+## User Decisions
+
+When a workflow, skill, or "superpower" offers choices, do not pick a default,
+recommendation, approval, or next step on the user's behalf. Ask one question at
+a time and wait for the user's explicit choice before proceeding.
+
 After completing an implementation or behavior change, maintainers should run
 follow-up checks before final handoff.
 
