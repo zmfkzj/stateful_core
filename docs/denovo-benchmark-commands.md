@@ -1,8 +1,8 @@
 # DeNovoSWE Benchmark Commands
 
-Last updated: 2026-06-20.
+Last updated: 2026-06-22.
 
-Use this file to relaunch the 3-way sharded Codex DeNovoSWE benchmark without
+Use this file to relaunch the OMP-backed DeNovoSWE benchmark without
 reconstructing the command line.
 
 For benchmark interpretation rules, reliability requirements, and failure
@@ -43,23 +43,23 @@ file, not the public full JSONL. The aborted r36 attempt duplicated the full
 ## Preconditions
 
 - `target/debug/stateful-bench` must exist.
-- `<absolute-stateful-binary>` must include the `codex-benchmark`
-  feature.
+- `omp`, `<absolute-stateful-binary>`, and the local stateful server must be
+  installed and reachable.
+- For `stateful:on`, export `STATEFUL_SERVER_URL` and `STATEFUL_SERVER_TOKEN`
+  from the local runtime metadata before launching nested benchmark agents.
 - Use the official AweAgent DeNovoSWE recipe/task workflow: extract patches
   once, run the agent in batch mode, evaluate in a fresh container, and score
   by unit-test pass ratio.
-- The no-state nested Codex config must not inherit host `mcp_servers.stateful`
-  or hooks. This is covered by
-  `codex_pair_agent_seeds_and_cleans_nested_auth`.
-- The DeNovo Codex patch harvester excludes Codex/stateful runtime dirs,
+- OMP runs use isolated OMP home/profile state. Seed the required OMP API key
+  into that isolated profile, or provide it through an environment variable;
+  host OMP profile auth is not inherited automatically.
+- The DeNovo CLI patch harvester excludes Codex/stateful runtime dirs,
   `.stateful-tmp/**`, common Python cache/coverage dirs, `target/**`, and root
   `clean.sh`. Repo `tmp/**` changes are harvested like other source-tree
-  changes. This is covered by
-  `denovo_codex_agent_git_diff_excludes_stateful_runtime_artifacts` and
-  `denovo_codex_agent_harvests_repo_tmp_changes`.
+  changes.
 - Use absolute paths for `--aweagent-root`, `--python`, `--data-file`,
-  `--config`, `REPO_ROOT`, `STATEFUL_BIN`, `TMUX`, and `TMUX_SOCKET`.
-- Change run IDs and `--codex-home-root` directories before reusing commands.
+  `--config`, `STATEFUL_BIN`, `OMP_BIN`, `TMUX`, and `TMUX_SOCKET`.
+- Change run IDs and isolated OMP home directories before reusing commands.
 - Use `--prompt-version v2` for new official-style runs. Keep
   `--prompt-version v1` only when continuing or comparing against historical
   v1 runs.
@@ -78,7 +78,7 @@ RUN_ID=$RUN_SERIES-t$TRIAL
 ```
 
 For each trial, launch the same shard files and condition matrix with a fresh
-`RUN_ID` and fresh `--codex-home-root` directories. Aggregate only after all
+`RUN_ID` and fresh isolated OMP home directories. Aggregate only after all
 three trials finish. One-off, interrupted, or partial runs are useful for
 debugging and failure analysis, but should be labeled non-comparable.
 
@@ -101,18 +101,21 @@ REPO_ROOT=/absolute/path/to/stateful_core
 AWEAGENT_ROOT=/absolute/path/to/AweAgent
 PYTHON=/absolute/path/to/python3
 STATEFUL_BIN=/absolute/path/to/stateful
+OMP_BIN=/absolute/path/to/omp
 TMUX=/absolute/path/to/tmux
 TMUX_SOCKET=/absolute/path/to/tmux/socket
+STATEFUL_HOME=${STATEFUL_HOME:-$HOME/.stateful_core}
+STATEFUL_SERVER_URL=$(python3 -c 'import json, os, pathlib; print(json.load(open(pathlib.Path(os.environ["STATEFUL_HOME"]) / "runtime/server.json"))["base_url"])')
+STATEFUL_SERVER_TOKEN=$(python3 -c 'import json, os, pathlib; print(json.load(open(pathlib.Path(os.environ["STATEFUL_HOME"]) / "runtime/server.json"))["token"])')
 RUN_SERIES=rNN-denovo
 TRIAL=1
 RUN_ID=$RUN_SERIES-t$TRIAL
 ```
 
-## OMP CLI Variant
+## OMP CLI Default
 
-Use `--agent omp-cli` to run the same DeNovoSWE condition matrix through OMP.
-For OMP runs, use `deepseek-v4-flash` unless deliberately testing another
-model:
+Use `--agent omp-cli` for DeNovoSWE benchmark runs. Use `deepseek-v4-flash`
+unless deliberately testing another model:
 
 ```bash
 stateful-bench denovo run \
@@ -127,7 +130,34 @@ stateful-bench denovo run \
   --condition stateful:on,subagent:off \
   --condition stateful:off,subagent:on \
   --condition stateful:on,subagent:on \
-  --omp-bin ${OMP_BIN:-omp} \
+  --omp-bin "$OMP_BIN" \
+  --stateful-binary "$STATEFUL_BIN" \
+  --benchmark-model deepseek-v4-flash \
+  --benchmark-reasoning-effort low \
+  --benchmark-model-context-window 256000 \
+  --benchmark-temperature 1 \
+  --benchmark-max-turns 500 \
+  --prompt-version v2 \
+  --eval-iters 1
+```
+
+For a one-instance stateful smoke run, keep the same defaults and narrow the
+matrix:
+
+```bash
+stateful-bench denovo run \
+  --agent omp-cli \
+  --aweagent-root "$AWEAGENT_ROOT" \
+  --python "$PYTHON" \
+  --data-file "$REPO_ROOT/datasets/denovo/shards/denovoswe_public_shard_b.jsonl" \
+  --output-dir "$REPO_ROOT/target/stateful-bench/denovo/runs" \
+  --run-id "$RUN_ID-one-stateful-on-omp" \
+  --config "$REPO_ROOT/target/stateful-bench/denovo/configs/denovoswe-cpu2.yaml" \
+  --mode batch \
+  --condition stateful:on,subagent:on \
+  --max-concurrent 1 \
+  --instance-id aurzenligl_prophy_pr33 \
+  --omp-bin "$OMP_BIN" \
   --stateful-binary "$STATEFUL_BIN" \
   --benchmark-model deepseek-v4-flash \
   --benchmark-reasoning-effort low \
@@ -140,7 +170,7 @@ stateful-bench denovo run \
 
 OMP `stateful:on`/`off` both use isolated OMP home/profile state. Neither
 inherits host Codex config, session, rules, or skills. Only `stateful:on`
-receives stateful OMP install/config; `stateful:off` does not.
+receives stateful OMP install/config.
 
 The `subagent` axis is retained for matrix shape, but OMP does not use Codex
 native subagent enforcement or Codex subagent usage counters.
@@ -155,24 +185,22 @@ $REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-c.sh
 
 ## Start Shards In Existing tmux
 
-These commands do not call `stateful external-run`. They use an existing tmux
-server socket by exposing that Unix socket to the `run-nested-codex-benchmark`
-wrapper. Pass the `STATEFUL_*` runtime variables into the new tmux session with
-`tmux new-session -e`; otherwise the stateful condition will fail its runtime
-preflight instead of silently producing empty patches.
+These commands use an existing tmux server socket. Pass the `STATEFUL_*`
+runtime variables into each tmux session with `tmux new-session -e`; otherwise
+the stateful condition will fail its runtime preflight.
 
 ```bash
-"$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "start $RUN_ID shard a in existing tmux without external-run" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-a" --docker-socket "$TMUX_SOCKET" --timeout-seconds 20 --command "$TMUX -S $TMUX_SOCKET new-session -d -s $RUN_ID-shard-a -e STATEFUL_SERVER_URL=\$STATEFUL_SERVER_URL -e STATEFUL_SERVER_TOKEN=\$STATEFUL_SERVER_TOKEN -e STATEFUL_NESTED_CODEX_HOME_ROOT=\$STATEFUL_NESTED_CODEX_HOME_ROOT /bin/zsh $REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-a.sh"
+"$TMUX" -S "$TMUX_SOCKET" new-session -d -s "$RUN_ID-shard-a-omp" -e STATEFUL_SERVER_URL="$STATEFUL_SERVER_URL" -e STATEFUL_SERVER_TOKEN="$STATEFUL_SERVER_TOKEN" /bin/zsh "$REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-a.sh"
 
-"$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "start $RUN_ID shard b in existing tmux without external-run" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-b" --docker-socket "$TMUX_SOCKET" --timeout-seconds 20 --command "$TMUX -S $TMUX_SOCKET new-session -d -s $RUN_ID-shard-b -e STATEFUL_SERVER_URL=\$STATEFUL_SERVER_URL -e STATEFUL_SERVER_TOKEN=\$STATEFUL_SERVER_TOKEN -e STATEFUL_NESTED_CODEX_HOME_ROOT=\$STATEFUL_NESTED_CODEX_HOME_ROOT /bin/zsh $REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-b.sh"
+"$TMUX" -S "$TMUX_SOCKET" new-session -d -s "$RUN_ID-shard-b-omp" -e STATEFUL_SERVER_URL="$STATEFUL_SERVER_URL" -e STATEFUL_SERVER_TOKEN="$STATEFUL_SERVER_TOKEN" /bin/zsh "$REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-b.sh"
 
-"$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "start $RUN_ID shard c in existing tmux without external-run" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-c" --docker-socket "$TMUX_SOCKET" --timeout-seconds 20 --command "$TMUX -S $TMUX_SOCKET new-session -d -s $RUN_ID-shard-c -e STATEFUL_SERVER_URL=\$STATEFUL_SERVER_URL -e STATEFUL_SERVER_TOKEN=\$STATEFUL_SERVER_TOKEN -e STATEFUL_NESTED_CODEX_HOME_ROOT=\$STATEFUL_NESTED_CODEX_HOME_ROOT /bin/zsh $REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-c.sh"
+"$TMUX" -S "$TMUX_SOCKET" new-session -d -s "$RUN_ID-shard-c-omp" -e STATEFUL_SERVER_URL="$STATEFUL_SERVER_URL" -e STATEFUL_SERVER_TOKEN="$STATEFUL_SERVER_TOKEN" /bin/zsh "$REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-c.sh"
 ```
 
 List sessions:
 
 ```bash
-"$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "list $RUN_ID tmux sessions without external-run" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-list" --docker-socket "$TMUX_SOCKET" --timeout-seconds 10 --command "$TMUX -S $TMUX_SOCKET ls"
+"$TMUX" -S "$TMUX_SOCKET" ls
 ```
 
 Progress report:
@@ -198,15 +226,15 @@ python3 crates/stateful-bench/scripts/denovo_progress_report.py --run-prefix "$R
 For per-instance failure analysis, inspect:
 
 ```text
-target/stateful-bench/denovo/runs/<run-id>/conditions/<condition>/codex-cli/instances/<instance-id>/eval-result.json
+target/stateful-bench/denovo/runs/<run-id>/conditions/<condition>/omp-cli/instances/<instance-id>/eval-result.json
 ```
 
 Stop sessions:
 
 ```bash
-"$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "stop $RUN_ID shard a tmux session" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-stop-a" --docker-socket "$TMUX_SOCKET" --timeout-seconds 20 --command "$TMUX -S $TMUX_SOCKET kill-session -t $RUN_ID-shard-a"
+"$TMUX" -S "$TMUX_SOCKET" kill-session -t "$RUN_ID-shard-a-omp"
 
-"$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "stop $RUN_ID shard b tmux session" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-stop-b" --docker-socket "$TMUX_SOCKET" --timeout-seconds 20 --command "$TMUX -S $TMUX_SOCKET kill-session -t $RUN_ID-shard-b"
+"$TMUX" -S "$TMUX_SOCKET" kill-session -t "$RUN_ID-shard-b-omp"
 
-"$STATEFUL_BIN" sandbox run-nested-codex-benchmark --purpose "stop $RUN_ID shard c tmux session" --write-dir target --codex-home-root "target/nested-codex-homes/$RUN_ID-tmux-stop-c" --docker-socket "$TMUX_SOCKET" --timeout-seconds 20 --command "$TMUX -S $TMUX_SOCKET kill-session -t $RUN_ID-shard-c"
+"$TMUX" -S "$TMUX_SOCKET" kill-session -t "$RUN_ID-shard-c-omp"
 ```

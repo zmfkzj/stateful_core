@@ -1,6 +1,6 @@
 # DeNovoSWE Benchmark Guide
 
-Last updated: 2026-06-20.
+Last updated: 2026-06-22.
 
 This guide records the protocol we use when running DeNovoSWE through
 `stateful-bench`. It follows the official AweAgent DeNovoSWE recipe/task
@@ -74,6 +74,10 @@ debug run:
   evaluator stability.
 - `--max-concurrent 1` when comparing stateful versus no-state behavior unless
   the experiment is explicitly about throughput.
+- `--agent omp-cli` and `--benchmark-model deepseek-v4-flash` for OMP-backed
+  runs, unless the experiment explicitly compares agent CLIs or models.
+- Isolated OMP homes must have the benchmark model's API key seeded, or the
+  equivalent provider API key must be present in the launch environment.
 
 Historical runs may use `--prompt-version v1`; do not mix v1 and v2 results in
 the same comparison table.
@@ -101,6 +105,9 @@ Run both conditions over the same shard and the same instance order. Interpret
 differences only after three independent trials. For partial or interrupted
 runs, compare only the common completed instance set and clearly mark the result
 as exploratory.
+
+OMP retains the `subagent` axis for matrix compatibility, but it does not use
+Codex native subagent enforcement or Codex subagent usage counters.
 
 ## Reporting Rules
 
@@ -140,5 +147,5 @@ When one condition underperforms another, inspect per-instance
 - Do not attribute a condition effect to one failed rollout unless the same
   pattern repeats across independent trials.
 
-Runtime failures such as missing Docker images, usage limits, or `codex exited`
-should be reported separately from model quality metrics.
+Runtime failures such as missing Docker images, usage limits, `omp exited`, or
+agent CLI transport errors should be reported separately from model quality metrics.
