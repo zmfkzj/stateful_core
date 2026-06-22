@@ -325,15 +325,7 @@ fn omp_pre_tool_action(
                 ),
             })
         }
-        tool_name
-            if tool_name.eq_ignore_ascii_case("read")
-                || tool_name.eq_ignore_ascii_case("find")
-                || tool_name.eq_ignore_ascii_case("grep")
-                || tool_name.eq_ignore_ascii_case("search")
-                || tool_name.eq_ignore_ascii_case("web_search")
-                || tool_name.eq_ignore_ascii_case("browser")
-                || tool_name.eq_ignore_ascii_case("search_tool_bm25") =>
-        {
+        tool_name if is_omp_safe_without_repo_write_authorization(tool_name) => {
             Ok(OmpPreToolAction::Allow)
         }
         _ if is_stateful_control_plane_tool(&input.tool_name) => Ok(OmpPreToolAction::Allow),
@@ -350,6 +342,27 @@ fn omp_pre_tool_action(
             })
         }
     }
+}
+
+fn is_omp_safe_without_repo_write_authorization(tool_name: &str) -> bool {
+    [
+        "ask",
+        "ast_grep",
+        "browser",
+        "find",
+        "generate_image",
+        "grep",
+        "irc",
+        "job",
+        "read",
+        "report_tool_issue",
+        "search",
+        "search_tool_bm25",
+        "todo",
+        "web_search",
+    ]
+    .iter()
+    .any(|safe_tool| tool_name.eq_ignore_ascii_case(safe_tool))
 }
 
 fn omp_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {

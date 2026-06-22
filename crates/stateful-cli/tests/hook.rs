@@ -2580,8 +2580,8 @@ fn omp_unclassified_tools_are_manageable_with_stateful_tools_allowlist() {
         "session_id": "omp-parent",
         "cwd": repo_root,
         "yolo": false,
-        "tool_name": "todo",
-        "tool_input": { "ops": [] }
+        "tool_name": "future_omp_widget",
+        "tool_input": {}
     })
     .to_string();
 
@@ -2598,12 +2598,13 @@ fn omp_unclassified_tools_are_manageable_with_stateful_tools_allowlist() {
         stdout["reason"]
             .as_str()
             .expect("reason should be a string")
-            .contains("unclassified OMP tool todo")
+            .contains("unclassified OMP tool future_omp_widget")
     );
     let list = tool_list_for_repo(&paths, &repo_root).expect("tool list should load");
-    assert_eq!(list.unclassified_tools, vec!["todo"]);
+    assert_eq!(list.unclassified_tools, vec!["future_omp_widget"]);
 
-    allow_tool_for_repo(&paths, &repo_root, "todo").expect("OMP tool should be user-allowed");
+    allow_tool_for_repo(&paths, &repo_root, "future_omp_widget")
+        .expect("OMP tool should be user-allowed");
     let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
     assert!(
         output.status.success(),
@@ -3027,15 +3028,22 @@ fn omp_python_execution_uses_bash_sandbox_policy() {
 }
 
 #[test]
-fn omp_allows_classified_read_only_and_stateful_activation_tools() {
+fn omp_allows_classified_read_only_and_non_file_writing_tools() {
     for tool_name in [
-        "read",
-        "find",
-        "grep",
-        "search",
-        "web_search",
+        "ask",
+        "ast_grep",
         "browser",
+        "find",
+        "generate_image",
+        "grep",
+        "irc",
+        "job",
+        "read",
+        "report_tool_issue",
+        "search",
         "search_tool_bm25",
+        "todo",
+        "web_search",
         "mcp__stateful_state_current_read",
         "mcp__stateful_state_intent_declare",
         "state_current_read",

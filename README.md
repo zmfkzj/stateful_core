@@ -441,9 +441,12 @@ extension and MCP config into the OMP `stateful` profile agent directory
 the global/default OMP profile untouched. Stateful hook allows become OMP
 allows; denials or unavailable authorization remain hard OMP blocks even if OMP
 yolo metadata is present.
-Unclassified OMP-origin tools are recorded in `stateful tools list` and can be
-explicitly permitted with `stateful tools allow <tool>` when they are safe for
-that repo; this does not bypass hard-denied write or execution classifications.
+OMP built-ins that do not write repo files, including `ask`, `ast_grep`, `job`,
+`irc`, `todo`, `report_tool_issue`, `generate_image`, and native read/search
+tools, are allowed by default. Other unclassified OMP-origin tools are recorded
+in `stateful tools list` and can be explicitly permitted with
+`stateful tools allow <tool>` when they are safe for that repo; this does not
+bypass hard-denied write or execution classifications.
 OMP raw Bash and native Python execution are blocked unless the tool input is a
 trusted `stateful sandbox run ... --command ...` wrapper; repo-external execution
 must use the external sandbox profile with `--purpose`.
