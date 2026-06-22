@@ -398,7 +398,12 @@ async def export_session_workspace(session: Any, remote_workdir: str, workspace:
 
 
 def copy_exported_workspace(source: Path, workspace: Path) -> None:
-    shutil.copytree(source, workspace, symlinks=True)
+    shutil.copytree(
+        source,
+        workspace,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(".codex", ".stateful", ".stateful_bench", ".stateful_core"),
+    )
 
 
 def runtime_backend(runtime_config: Any) -> str:

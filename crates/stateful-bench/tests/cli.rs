@@ -1397,6 +1397,42 @@ print(json.dumps({{
 }
 
 #[test]
+fn denovo_codex_agent_copy_exported_workspace_skips_local_stateful_artifacts() {
+    let dir = target_temp_dir("denovo-codex-copy-export-skips-stateful-artifacts");
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_copy_ignore_test", {agent_path})
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+root = Path({root})
+source = root / "source"
+workspace = root / "workspace"
+(source / ".stateful_bench" / "agent_synthetic").mkdir(parents=True)
+(source / ".stateful_bench" / "agent_synthetic" / "codex_synthetic_agent.py").write_text("copied")
+(source / "doc.txt").write_text("kept")
+mod.copy_exported_workspace(source, workspace)
+print(json.dumps({{
+    "doc": (workspace / "doc.txt").read_text(),
+    "stateful_bench_exists": (workspace / ".stateful_bench").exists(),
+}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        root = serde_json::to_string(&dir).expect("root should serialize"),
+    );
+    let output = run_python_json(&script);
+    assert_eq!(output["doc"], "kept");
+    assert_eq!(output["stateful_bench_exists"], false);
+    fs::remove_dir_all(&dir).expect("temp copy workspace should clean up");
+}
+
+#[test]
 fn denovo_codex_agent_builds_no_state_and_stateful_commands() {
     let script = format!(
         r#"
