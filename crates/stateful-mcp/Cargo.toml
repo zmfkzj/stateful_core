@@ -1,6 +1,6 @@
 [package]
 name = "stateful-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP tool surface for stateful_core current-state coordination."
 edition.workspace = true
 license.workspace = true

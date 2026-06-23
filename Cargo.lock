@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "stateful-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1069,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "stateful-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "camino",
  "globset",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "stateful-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "stateful-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1108,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "stateful-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rusqlite",
  "serde",
