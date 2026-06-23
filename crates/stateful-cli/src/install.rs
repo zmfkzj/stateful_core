@@ -12,11 +12,13 @@ use std::{
 };
 
 use anyhow::Context;
+use serde_json::json;
 
 use crate::{GlobalPaths, RepoRegistry};
 
 const GLOBAL_CODEX_BLOCK_START: &str = "# stateful-core-global-install";
 const GLOBAL_CODEX_BLOCK_END: &str = "# /stateful-core-global-install";
+const STATEFUL_APPROVAL_POLICY: &str = "approval_policy = { granular = { sandbox_approval = false, rules = true, mcp_elicitations = false, request_permissions = false, skill_approval = false } }";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallOptions {
@@ -30,6 +32,16 @@ pub struct CodexInstallOptions {
     pub paths: GlobalPaths,
     pub codex_config_path: PathBuf,
     pub binary_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OmpInstallOptions {
+    pub yes: bool,
+    pub paths: GlobalPaths,
+    pub binary_path: String,
+    pub project_config_path: Option<PathBuf>,
+    pub omp_agent_dir: Option<PathBuf>,
+    pub update: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +138,9 @@ pub fn plan_codex_install(options: &CodexInstallOptions) -> anyhow::Result<Insta
     plan.files.push(options.codex_config_path.clone());
     plan.files
         .push(global_command_policy_skill_path(&options.codex_config_path));
+    plan.files.push(global_external_sandbox_rules_path(
+        &options.codex_config_path,
+    ));
     Ok(plan)
 }
 
@@ -142,12 +157,87 @@ pub fn apply_codex_install(options: CodexInstallOptions) -> anyhow::Result<Insta
     })?;
     write_codex_config_update(&options.codex_config_path, codex_update)?;
     write_global_command_policy_skill(&options.codex_config_path)?;
+    write_global_external_sandbox_rules(&options.codex_config_path, &options.binary_path)?;
     plan.summary = format!(
         "apply: installed stateful global files under {} and merged Codex config {}",
         options.paths.home.display(),
         options.codex_config_path.display()
     );
 
+    Ok(plan)
+}
+
+pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPlan> {
+    let mode = if options.yes { "apply" } else { "dry-run" };
+    let mut plan = plan_global_install(&InstallOptions {
+        yes: options.yes,
+        paths: options.paths.clone(),
+    })?;
+    let agent_dir = omp_agent_dir(options)?;
+    let config_path = options
+        .project_config_path
+        .clone()
+        .unwrap_or_else(|| agent_dir.join("config.yml"));
+    let extension_path = agent_dir
+        .join("extensions")
+        .join("stateful-omp-extension.js");
+    let mcp_path = agent_dir.join("mcp.json");
+    let skill_path = omp_command_policy_skill_path(&agent_dir);
+    let rule_path = omp_required_rule_path(&agent_dir);
+    plan.summary = format!(
+        "{mode}: install stateful files under {} and configure the OMP stateful profile under {}",
+        options.paths.home.display(),
+        agent_dir.display()
+    );
+    plan.files.push(config_path);
+    plan.files.push(extension_path);
+    plan.files.push(mcp_path);
+    plan.files.push(skill_path);
+    plan.files.push(rule_path);
+    Ok(plan)
+}
+
+pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPlan> {
+    validate_no_control_chars(&options.binary_path)?;
+    let mut plan = plan_omp_install(&options)?;
+    if !options.yes {
+        return Ok(plan);
+    }
+
+    apply_global_install(InstallOptions {
+        yes: true,
+        paths: options.paths.clone(),
+    })?;
+    let agent_dir = omp_agent_dir(&options)?;
+    let config_path = options
+        .project_config_path
+        .clone()
+        .unwrap_or_else(|| agent_dir.join("config.yml"));
+    let extension_path = agent_dir
+        .join("extensions")
+        .join("stateful-omp-extension.js");
+    let mcp_path = agent_dir.join("mcp.json");
+    fs::create_dir_all(
+        extension_path
+            .parent()
+            .expect("extension path should have parent"),
+    )?;
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = mcp_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_omp_config(&config_path, &extension_path, options.update)?;
+    write_omp_extension(&extension_path, &options.binary_path)?;
+    write_omp_mcp_config(&mcp_path, &options.binary_path)?;
+    write_omp_command_policy_skill(&agent_dir)?;
+    write_omp_required_rule(&agent_dir)?;
+    plan.summary = format!(
+        "apply: installed stateful files under {} and configured the OMP stateful profile under {}",
+        options.paths.home.display(),
+        agent_dir.display()
+    );
     Ok(plan)
 }
 
@@ -266,10 +356,62 @@ fn global_command_policy_skill_path(codex_config_path: &Path) -> PathBuf {
         .join("SKILL.md")
 }
 
+fn write_omp_command_policy_skill(agent_dir: &Path) -> anyhow::Result<()> {
+    let path = omp_command_policy_skill_path(agent_dir);
+    let parent = containing_dir(&path);
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create OMP skills directory {}", parent.display()))?;
+    fs::write(&path, stateful_command_policy_skill())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn omp_command_policy_skill_path(agent_dir: &Path) -> PathBuf {
+    agent_dir
+        .join("skills")
+        .join("stateful-command-policy")
+        .join("SKILL.md")
+}
+
+fn write_omp_required_rule(agent_dir: &Path) -> anyhow::Result<()> {
+    let path = omp_required_rule_path(agent_dir);
+    let parent = containing_dir(&path);
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create OMP rules directory {}", parent.display()))?;
+    fs::write(&path, omp_stateful_required_rule())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn omp_required_rule_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("rules").join("stateful-required.md")
+}
+
+fn write_global_external_sandbox_rules(
+    codex_config_path: &Path,
+    binary_path: &str,
+) -> anyhow::Result<()> {
+    let path = global_external_sandbox_rules_path(codex_config_path);
+    let parent = containing_dir(&path);
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create Codex rules directory {}",
+            parent.display()
+        )
+    })?;
+    fs::write(&path, sandbox_external_prompt_rules(binary_path)?)
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn global_external_sandbox_rules_path(codex_config_path: &Path) -> PathBuf {
+    containing_dir(codex_config_path)
+        .join("rules")
+        .join("stateful.rules")
+}
+
 fn merge_codex_config_contents(existing: &str, binary_path: &str) -> anyhow::Result<String> {
     let stripped = strip_stateful_block(existing)?;
     ensure_no_unmarked_stateful_mcp(&stripped)?;
-    let feature_update = ensure_hooks_feature_enabled(&stripped)?;
+    let without_approval_policy = strip_top_level_approval_policy(&stripped)?;
+    let feature_update = ensure_hooks_feature_enabled(&without_approval_policy)?;
     let block = global_codex_config_block(binary_path, feature_update.include_features_section)?;
 
     Ok(append_stateful_block(&feature_update.contents, &block))
@@ -523,13 +665,21 @@ fn unsupported_header_may_affect_stateful(header: &str) -> bool {
         })
         .collect();
 
-    normalized == "features" || normalized == "mcp_servers.stateful"
+    normalized == "features" || is_stateful_mcp_table_name(&normalized)
 }
 
 fn quoted_header_may_affect_stateful(header: &str) -> bool {
     toml_table_key_segments(header)
-        .map(|segments| segments == ["features"] || segments == ["mcp_servers", "stateful"])
+        .map(|segments| segments == ["features"] || is_stateful_mcp_table_segments(&segments))
         .unwrap_or_else(|| unsupported_header_may_affect_stateful(header))
+}
+
+fn is_stateful_mcp_table_name(name: &str) -> bool {
+    name == "mcp_servers.stateful" || name.starts_with("mcp_servers.stateful.")
+}
+
+fn is_stateful_mcp_table_segments(segments: &[String]) -> bool {
+    segments.len() >= 2 && segments[0] == "mcp_servers" && segments[1] == "stateful"
 }
 
 fn toml_table_key_segments(header: &str) -> Option<Vec<String>> {
@@ -665,13 +815,42 @@ fn strip_stateful_block(contents: &str) -> anyhow::Result<String> {
     Ok(stripped)
 }
 
+fn strip_top_level_approval_policy(contents: &str) -> anyhow::Result<String> {
+    let mut lines = Vec::new();
+    let mut section = TomlSection::TopLevel;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if let Some(header) = toml_table_header(trimmed)? {
+            section = if header.simple_name() == Some("features") {
+                TomlSection::Features
+            } else {
+                TomlSection::Other
+            };
+            lines.push(line);
+            continue;
+        }
+        if matches!(section, TomlSection::TopLevel) && toml_key_equals(trimmed, "approval_policy") {
+            continue;
+        }
+        lines.push(line);
+    }
+
+    let mut stripped = lines.join("\n");
+    if contents.ends_with('\n') && !stripped.is_empty() {
+        stripped.push('\n');
+    }
+    Ok(stripped)
+}
+
 fn ensure_no_unmarked_stateful_mcp(contents: &str) -> anyhow::Result<()> {
     for line in contents.lines() {
-        if toml_table_header(line.trim())?.and_then(TomlTableHeader::simple_name)
-            == Some("mcp_servers.stateful")
+        if toml_table_header(line.trim())?
+            .and_then(TomlTableHeader::simple_name)
+            .is_some_and(is_stateful_mcp_table_name)
         {
             anyhow::bail!(
-                "Codex config already contains unmarked [mcp_servers.stateful]; remove it or install into a config without that conflict"
+                "Codex config already contains unmarked [mcp_servers.stateful] configuration; remove it or install into a config without that conflict"
             );
         }
     }
@@ -739,6 +918,49 @@ fn write_text_file_with_mode(path: &Path, contents: &str, _mode: Option<()>) -> 
 }
 
 #[cfg(unix)]
+fn private_file_mode() -> Option<u32> {
+    Some(0o600)
+}
+
+#[cfg(not(unix))]
+fn private_file_mode() -> Option<()> {
+    None
+}
+
+#[cfg(unix)]
+fn write_or_replace_text_file_with_mode(
+    path: &Path,
+    contents: &str,
+    mode: Option<u32>,
+) -> anyhow::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    if let Some(mode) = mode {
+        options.mode(mode);
+    }
+
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    if let Some(mode) = mode {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_or_replace_text_file_with_mode(
+    path: &Path,
+    contents: &str,
+    _mode: Option<()>,
+) -> anyhow::Result<()> {
+    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))
+}
+
+#[cfg(unix)]
 fn file_mode(path: &Path) -> anyhow::Result<Option<u32>> {
     if !path.exists() {
         return Ok(None);
@@ -781,7 +1003,7 @@ fn global_codex_config_block(
     include_features_section: bool,
 ) -> anyhow::Result<String> {
     let quoted_binary = shell_quote_posix(binary_path)?;
-    let hook_prefix = format!("{quoted_binary} hook");
+    let hook_prefix = format!("{quoted_binary} hook codex");
     let features_section = if include_features_section {
         "[features]\nhooks = true\n\n"
     } else {
@@ -790,11 +1012,14 @@ fn global_codex_config_block(
 
     Ok(format!(
         r#"{GLOBAL_CODEX_BLOCK_START}
+{STATEFUL_APPROVAL_POLICY}
+
 {features_section}[mcp_servers.stateful]
 command = {}
 args = ["mcp", "serve"]
-env_vars = ["STATEFUL_SESSION_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
+env_vars = ["CODEX_THREAD_ID", "STATEFUL_CODEX_RUN_ID", "STATEFUL_SESSION_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
 startup_timeout_sec = 20
+default_tools_approval_mode = "approve"
 
 [[hooks.SessionStart]]
 matcher = "startup|resume|clear|compact"
@@ -832,7 +1057,7 @@ statusMessage = "Recording stateful activity"
 [[hooks.Stop.hooks]]
 type = "command"
 command = {}
-statusMessage = "Recording stateful activity"
+statusMessage = "Finalizing stateful activity"
 {GLOBAL_CODEX_BLOCK_END}
 "#,
         toml_string(binary_path),
@@ -842,6 +1067,1024 @@ statusMessage = "Recording stateful activity"
         toml_string(&format!("{hook_prefix} post-tool-use")),
         toml_string(&format!("{hook_prefix} stop"))
     ))
+}
+
+fn sandbox_external_prompt_rules(binary_path: &str) -> anyhow::Result<String> {
+    validate_no_control_chars(binary_path)?;
+    let binary = toml_string(binary_path);
+    let request_match = toml_string(&format!(
+        "{binary_path} sandbox run --fs external --purpose 'install rebuilt binaries' --write-dir /Users/me/.cargo/bin --command 'install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful'"
+    ));
+    Ok(format!(
+        r#"{GLOBAL_CODEX_BLOCK_START}
+prefix_rule(
+    pattern = [{binary}, "sandbox", "run", "--fs", "external"],
+    decision = "prompt",
+    justification = "Require explicit approval before running stateful sandbox run --fs external.",
+    match = [
+        {request_match},
+    ],
+)
+{GLOBAL_CODEX_BLOCK_END}
+"#
+    ))
+}
+
+fn omp_agent_dir(options: &OmpInstallOptions) -> anyhow::Result<PathBuf> {
+    if let Some(agent_dir) = &options.omp_agent_dir {
+        return Ok(agent_dir.clone());
+    }
+
+    default_omp_agent_dir()
+}
+
+fn default_omp_agent_dir() -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set; pass an OMP agent directory"))?;
+    if home.is_empty() {
+        anyhow::bail!("HOME is set but empty; pass an OMP agent directory");
+    }
+
+    Ok(default_omp_agent_dir_from_home(PathBuf::from(home)))
+}
+
+fn default_omp_agent_dir_from_home(home: impl AsRef<Path>) -> PathBuf {
+    home.as_ref()
+        .join(".omp")
+        .join("profiles")
+        .join("stateful")
+        .join("agent")
+}
+
+fn write_or_create_text_file(config_path: &Path, contents: &str) -> anyhow::Result<()> {
+    if config_path.exists() {
+        fs::write(config_path, contents).with_context(|| {
+            format!(
+                "failed to write existing OMP config {}",
+                config_path.display()
+            )
+        })
+    } else {
+        write_text_file_with_mode(config_path, contents, private_file_mode())
+    }
+}
+
+fn write_omp_config(
+    config_path: &Path,
+    extension_path: &Path,
+    update_existing: bool,
+) -> anyhow::Result<()> {
+    let extension = extension_path.to_string_lossy();
+    let entry = format!("  - {extension}");
+    let mut contents = if config_path.exists() {
+        fs::read_to_string(config_path).with_context(|| {
+            format!(
+                "failed to read existing OMP config {}",
+                config_path.display()
+            )
+        })?
+    } else {
+        String::new()
+    };
+
+    validate_omp_config_yml(config_path, &contents)?;
+    contents = ensure_omp_extension(contents, &entry);
+    contents = ensure_omp_required_config(contents, update_existing)?;
+    validate_omp_config_yml(config_path, &contents)?;
+    write_or_create_text_file(config_path, &contents)
+}
+
+fn validate_omp_config_yml(config_path: &Path, contents: &str) -> anyhow::Result<()> {
+    if contents.trim().is_empty() {
+        return Ok(());
+    }
+
+    let value: serde_yaml::Value = serde_yaml::from_str(contents)
+        .with_context(|| format!("invalid OMP config YAML {}", config_path.display()))?;
+    if !matches!(
+        value,
+        serde_yaml::Value::Mapping(_) | serde_yaml::Value::Null
+    ) {
+        anyhow::bail!(
+            "OMP config {} must be a YAML mapping",
+            config_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn ensure_omp_extension(mut contents: String, entry: &str) -> String {
+    if contents.lines().any(|line| line.trim() == entry.trim()) {
+        return contents;
+    }
+
+    if let Some(offset) = contents
+        .lines()
+        .position(|line| line.trim() == "extensions:")
+    {
+        let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
+        lines.insert(offset + 1, entry.to_string());
+        contents = lines.join("\n");
+        contents.push('\n');
+    } else {
+        if !contents.is_empty() && !contents.ends_with('\n') {
+            contents.push('\n');
+        }
+        contents.push_str("extensions:\n");
+        contents.push_str(entry);
+        contents.push('\n');
+    }
+
+    contents
+}
+
+fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow::Result<String> {
+    let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
+
+    ensure_omp_child_scalar(
+        &mut lines,
+        "tools",
+        "approvalMode",
+        "write",
+        update_existing,
+    )?;
+    ensure_omp_nested_child_scalar(
+        &mut lines,
+        "tools",
+        "approval",
+        "task",
+        "allow",
+        update_existing,
+    )?;
+    ensure_omp_nested_child_scalar(
+        &mut lines,
+        "tools",
+        "approval",
+        "sandbox_bash",
+        "allow",
+        update_existing,
+    )?;
+    ensure_omp_nested_child_scalar(
+        &mut lines,
+        "tools",
+        "approval",
+        "ext_ro_bash",
+        "allow",
+        update_existing,
+    )?;
+    ensure_omp_nested_child_scalar(
+        &mut lines,
+        "tools",
+        "approval",
+        "ext_rw_bash",
+        "allow",
+        update_existing,
+    )?;
+    remove_omp_nested_child_scalar(&mut lines, "tools", "approval", "external_bash")?;
+    ensure_omp_child_scalar(&mut lines, "eval", "py", "false", update_existing)?;
+    ensure_omp_child_scalar(&mut lines, "eval", "js", "false", update_existing)?;
+    ensure_omp_child_scalar(&mut lines, "eval", "rb", "false", update_existing)?;
+    ensure_omp_child_scalar(&mut lines, "eval", "jl", "false", update_existing)?;
+    ensure_omp_child_scalar(&mut lines, "bash", "enabled", "false", update_existing)?;
+
+    Ok(finish_omp_yaml_lines(lines))
+}
+
+fn ensure_omp_child_scalar(
+    lines: &mut Vec<String>,
+    section: &str,
+    key: &str,
+    value: &str,
+    update_existing: bool,
+) -> anyhow::Result<()> {
+    let (section_offset, section_end) = ensure_omp_top_level_mapping(lines, section)?;
+    if let Some(offset) = find_omp_yaml_key(lines, section_offset + 1, section_end, 2, key) {
+        if update_existing {
+            lines[offset] = format!("  {key}: {value}");
+        }
+    } else {
+        lines.insert(section_end, format!("  {key}: {value}"));
+    }
+
+    Ok(())
+}
+
+fn ensure_omp_nested_child_scalar(
+    lines: &mut Vec<String>,
+    section: &str,
+    child: &str,
+    key: &str,
+    value: &str,
+    update_existing: bool,
+) -> anyhow::Result<()> {
+    let (child_offset, child_end) = ensure_omp_child_mapping(lines, section, child)?;
+    if let Some(offset) = find_omp_yaml_key(lines, child_offset + 1, child_end, 4, key) {
+        if update_existing {
+            lines[offset] = format!("    {key}: {value}");
+        }
+    } else {
+        lines.insert(child_end, format!("    {key}: {value}"));
+    }
+
+    Ok(())
+}
+
+fn remove_omp_nested_child_scalar(
+    lines: &mut Vec<String>,
+    section: &str,
+    child: &str,
+    key: &str,
+) -> anyhow::Result<()> {
+    let (child_offset, child_end) = ensure_omp_child_mapping(lines, section, child)?;
+    if let Some(offset) = find_omp_yaml_key(lines, child_offset + 1, child_end, 4, key) {
+        lines.remove(offset);
+    }
+
+    Ok(())
+}
+
+fn ensure_omp_top_level_mapping(
+    lines: &mut Vec<String>,
+    section: &str,
+) -> anyhow::Result<(usize, usize)> {
+    if let Some(offset) = find_omp_top_level_mapping(lines, section)? {
+        let end = find_omp_yaml_mapping_end(lines, offset, 0, lines.len());
+        return Ok((offset, end));
+    }
+
+    lines.push(format!("{section}:"));
+    let offset = lines.len() - 1;
+    Ok((offset, lines.len()))
+}
+
+fn ensure_omp_child_mapping(
+    lines: &mut Vec<String>,
+    section: &str,
+    child: &str,
+) -> anyhow::Result<(usize, usize)> {
+    let (section_offset, section_end) = ensure_omp_top_level_mapping(lines, section)?;
+    if let Some(offset) = find_omp_yaml_key(lines, section_offset + 1, section_end, 2, child) {
+        if !omp_yaml_key_is_block_mapping(&lines[offset], 2, child) {
+            anyhow::bail!("OMP config `{section}.{child}` must be a block mapping");
+        }
+        let end = find_omp_yaml_mapping_end(lines, offset, 2, section_end);
+        return Ok((offset, end));
+    }
+
+    lines.insert(section_end, format!("  {child}:"));
+    Ok((section_end, section_end + 1))
+}
+
+fn find_omp_top_level_mapping(lines: &[String], section: &str) -> anyhow::Result<Option<usize>> {
+    for (offset, line) in lines.iter().enumerate() {
+        if omp_yaml_line_is_blank_or_comment(line) || omp_yaml_indent(line) != 0 {
+            continue;
+        }
+        if !omp_yaml_key_matches(line, 0, section) {
+            continue;
+        }
+        if !omp_yaml_key_is_block_mapping(line, 0, section) {
+            anyhow::bail!("OMP config top-level `{section}` must be a block mapping");
+        }
+        return Ok(Some(offset));
+    }
+
+    Ok(None)
+}
+
+fn find_omp_yaml_key(
+    lines: &[String],
+    start: usize,
+    end: usize,
+    indent: usize,
+    key: &str,
+) -> Option<usize> {
+    lines[start..end]
+        .iter()
+        .position(|line| {
+            !omp_yaml_line_is_blank_or_comment(line)
+                && omp_yaml_indent(line) == indent
+                && omp_yaml_key_matches(line, indent, key)
+        })
+        .map(|offset| start + offset)
+}
+
+fn find_omp_yaml_mapping_end(lines: &[String], start: usize, indent: usize, limit: usize) -> usize {
+    lines[start + 1..limit]
+        .iter()
+        .position(|line| {
+            !omp_yaml_line_is_blank_or_comment(line) && omp_yaml_indent(line) <= indent
+        })
+        .map_or(limit, |offset| start + 1 + offset)
+}
+
+fn omp_yaml_key_matches(line: &str, indent: usize, key: &str) -> bool {
+    let prefix = format!("{key}:");
+    line.chars()
+        .take_while(|character| character.is_whitespace())
+        .count()
+        == indent
+        && line.trim_start().starts_with(&prefix)
+}
+
+fn omp_yaml_key_is_block_mapping(line: &str, indent: usize, key: &str) -> bool {
+    let prefix = format!("{key}:");
+    if !omp_yaml_key_matches(line, indent, key) {
+        return false;
+    }
+    let tail = line.trim_start()[prefix.len()..].trim_start();
+    tail.is_empty() || tail.starts_with('#')
+}
+
+fn omp_yaml_indent(line: &str) -> usize {
+    line.chars()
+        .take_while(|character| character.is_whitespace())
+        .count()
+}
+
+fn omp_yaml_line_is_blank_or_comment(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.is_empty() || trimmed.starts_with('#')
+}
+
+fn finish_omp_yaml_lines(lines: Vec<String>) -> String {
+    let mut contents = lines.join("\n");
+    contents.push('\n');
+    contents
+}
+
+fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Result<()> {
+    let binary_json = serde_json::to_string(binary_path)?;
+    let contents = format!(
+        r#"import {{ spawn, spawnSync }} from "node:child_process";
+
+const STATEFUL = {binary_json};
+
+
+function runStatefulHook(event, payload) {{
+  const result = spawnSync(STATEFUL, ["hook", "omp", event], {{
+    input: JSON.stringify(payload),
+    encoding: "utf8",
+  }});
+  if (result.status !== 0) {{
+    return {{ decision: "block", reason: result.stderr || "stateful hook failed" }};
+  }}
+  const text = (result.stdout || "").trim();
+  return text ? JSON.parse(text) : {{ decision: "allow" }};
+}}
+
+function isYolo(event, ctx) {{
+  const values = [
+    event?.yolo,
+    event?.autoApprove,
+    event?.approvalMode,
+    ctx?.yolo,
+    ctx?.autoApprove,
+    ctx?.approvalMode,
+    ctx?.config?.approvalMode,
+    ctx?.config?.tools?.approvalMode,
+  ];
+  return values.some((value) => value === true || value === "yolo" || value === "auto-approve");
+}}
+
+function detectSessionId(event, ctx) {{
+  return event?.sessionId || ctx?.sessionManager?.session?.id || process.env.STATEFUL_SESSION_ID || "omp-session";
+}}
+
+function sessionId(event, ctx) {{
+  const id = detectSessionId(event, ctx);
+  process.env.STATEFUL_SESSION_ID = id;
+  return id;
+}}
+
+let reservationStreamAbort;
+const seenReservationWaitIds = new Set();
+
+function stopReservationStream() {{
+  if (reservationStreamAbort) {{
+    reservationStreamAbort.abort();
+    reservationStreamAbort = undefined;
+  }}
+}}
+
+function sleepWithAbort(ms, signal) {{
+  return new Promise((resolve) => {{
+    const timer = setTimeout(resolve, ms);
+    if (signal) {{
+      signal.addEventListener("abort", () => {{
+        clearTimeout(timer);
+        resolve();
+      }}, {{ once: true }});
+    }}
+  }});
+}}
+
+function reservationStreamUrl(stream) {{
+  const base = String(stream.base_url || "").replace(/\/+$/, "");
+  return base + "/v1/notifications/stream?session_id=" + encodeURIComponent(stream.session_id) + "&workspace_id=" + encodeURIComponent(stream.workspace_id);
+}}
+
+function reservationResumeUrl(stream) {{
+  const base = String(stream.base_url || "").replace(/\/+$/, "");
+  return base + "/v1/resume/next";
+}}
+
+function reservationMessage(notification) {{
+  const payload = notification?.payload || {{}};
+  const target = payload.relative_path || "the reserved target";
+  const waitId = payload.wait_id || "unknown";
+  const action = payload.action || "write";
+  return [
+    "Stateful reservation is ready for " + target + ".",
+    "wait_id: " + waitId,
+    "action: " + action,
+    "Next: reread the target, then call state_intent_claim with this wait_id before retrying the write.",
+  ].join("\n");
+}}
+
+function deliverReservationNotification(pi, notification) {{
+  const payload = notification?.payload || {{}};
+  const waitId = payload.wait_id;
+  if (!waitId || seenReservationWaitIds.has(waitId)) {{
+    return;
+  }}
+  if (typeof pi?.sendMessage !== "function") {{
+    return;
+  }}
+  const text = reservationMessage(notification);
+  try {{
+    pi.sendMessage(
+      {{
+        customType: "stateful_reservation_ready",
+        content: text,
+        display: true,
+        details: notification,
+      }},
+      {{ triggerTurn: true, deliverAs: "nextTurn" }}
+    );
+    seenReservationWaitIds.add(waitId);
+  }} catch (_) {{}}
+}}
+
+async function checkReservationResume(pi, stream, signal) {{
+  if (typeof fetch !== "function" || signal?.aborted) return;
+  try {{
+    const response = await fetch(reservationResumeUrl(stream), {{
+      method: "POST",
+      headers: {{
+        authorization: stream.authorization,
+        "content-type": "application/json",
+      }},
+      body: JSON.stringify({{ session_id: stream.session_id, workspace_id: stream.workspace_id }}),
+      signal,
+    }});
+    if (!response.ok) return;
+    const body = await response.json();
+    if (body?.resume_available && body?.reservation) {{
+      deliverReservationNotification(pi, {{
+        notification_id: "resume:" + body.reservation.wait_id,
+        workspace_id: stream.workspace_id,
+        kind: "reservation_granted",
+        payload: {{
+          wait_id: body.reservation.wait_id,
+          relative_path: body.reservation.relative_path,
+          action: body.reservation.action,
+          reservation_expires_at: body.reservation.reservation_expires_at,
+        }},
+        required_next_action: body.required_next_action,
+      }});
+    }}
+  }} catch (_) {{}}
+}}
+
+function processReservationSseBlock(pi, block) {{
+  let event = "message";
+  const data = [];
+  for (const rawLine of block.split(/\r?\n/)) {{
+    const line = rawLine.trimEnd();
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  }}
+  if (event !== "reservation_granted" || data.length === 0) return;
+  try {{
+    deliverReservationNotification(pi, JSON.parse(data.join("\n")));
+  }} catch (_) {{}}
+}}
+
+function processReservationSseBuffer(pi, buffer) {{
+  buffer = buffer.replace(/\r\n/g, "\n");
+  let cursor = 0;
+  for (;;) {{
+    const next = buffer.indexOf("\n\n", cursor);
+    if (next === -1) break;
+    processReservationSseBlock(pi, buffer.slice(cursor, next));
+    cursor = next + 2;
+  }}
+  return buffer.slice(cursor);
+}}
+
+function startReservationStream(pi, stream) {{
+  if (!stream?.base_url || !stream?.authorization || !stream?.session_id || !stream?.workspace_id) return;
+  if (typeof fetch !== "function" || typeof TextDecoder !== "function") return;
+  stopReservationStream();
+  const controller = new AbortController();
+  reservationStreamAbort = controller;
+  const signal = controller.signal;
+  const run = async () => {{
+    let backoffMs = 1000;
+    await checkReservationResume(pi, stream, signal);
+    while (!signal.aborted) {{
+      try {{
+        const response = await fetch(reservationStreamUrl(stream), {{
+          headers: {{ authorization: stream.authorization, accept: "text/event-stream" }},
+          signal,
+        }});
+        if (!response.ok || !response.body?.getReader) throw new Error("reservation stream unavailable");
+        backoffMs = 1000;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        for (;;) {{
+          const {{ done, value }} = await reader.read();
+          if (done || signal.aborted) break;
+          buffer = processReservationSseBuffer(pi, buffer + decoder.decode(value, {{ stream: true }}));
+        }}
+      }} catch (_) {{
+        if (signal.aborted) return;
+        await checkReservationResume(pi, stream, signal);
+        await sleepWithAbort(backoffMs, signal);
+        backoffMs = Math.min(backoffMs * 2, 30000);
+      }}
+    }}
+  }};
+  run().catch(() => {{}});
+}}
+
+const MAX_SANDBOX_TOOL_OUTPUT_BYTES = 50 * 1024;
+const SANDBOX_BASH_FS_PROFILES = new Set(["read-only", "write-targets", "build", "git", "github-pr"]);
+
+let sandboxJobCounter = 0;
+
+function nextSandboxJobId(label) {{
+  sandboxJobCounter += 1;
+  return label.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() + "-" + Date.now().toString(36) + "-" + sandboxJobCounter.toString(36);
+}}
+
+function stringList(value) {{
+  if (Array.isArray(value)) {{
+    return value.filter((item) => typeof item === "string" && item.trim().length > 0);
+  }}
+  if (typeof value === "string" && value.trim().length > 0) {{
+    return [value];
+  }}
+  return [];
+}}
+
+function truncateSandboxToolText(value, label) {{
+  const text = value || "";
+  if (Buffer.byteLength(text, "utf8") <= MAX_SANDBOX_TOOL_OUTPUT_BYTES) {{
+    return text;
+  }}
+  return Buffer
+    .from(text, "utf8")
+    .subarray(0, MAX_SANDBOX_TOOL_OUTPUT_BYTES)
+    .toString("utf8") + "\n\n[" + label + " output truncated to 51200 bytes]";
+}}
+
+function addCommonSandboxArgs(args, params, toolName) {{
+  for (const target of stringList(params.write_targets)) args.push("--write-target", target);
+  for (const target of stringList(params.create_targets)) args.push("--create-target", target);
+  for (const dir of stringList(params.write_dirs)) args.push("--write-dir", dir);
+  for (const socket of stringList(params.connect_sockets)) args.push("--connect-socket", socket);
+  if (params.allow_signal === true) args.push("--allow-signal");
+  if (params.network !== undefined) {{
+    if (params.network !== "enabled" && params.network !== "disabled") {{
+      throw new Error(toolName + " network must be 'enabled' or 'disabled'");
+    }}
+    args.push("--network", params.network);
+  }}
+  const timeoutSeconds = params.timeout_seconds ?? params.timeoutSeconds;
+  if (timeoutSeconds !== undefined) {{
+    if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1) {{
+      throw new Error(toolName + " timeout_seconds must be a positive integer");
+    }}
+    args.push("--timeout-seconds", String(timeoutSeconds));
+  }}
+}}
+
+function sandboxBashArgs(params) {{
+  if (typeof params?.fs !== "string" || params.fs.trim().length === 0) {{
+    throw new Error("sandbox_bash requires a non-empty fs profile");
+  }}
+  const fs = params.fs.trim();
+  if (fs === "external") {{
+    throw new Error("sandbox_bash does not support --fs external; use ext_ro_bash for read-only external operations or ext_rw_bash for external writes");
+  }}
+  if (!SANDBOX_BASH_FS_PROFILES.has(fs)) {{
+    throw new Error("sandbox_bash fs must be one of: read-only, write-targets, build, git, github-pr");
+  }}
+  if (typeof params?.command !== "string" || params.command.trim().length === 0) {{
+    throw new Error("sandbox_bash requires a non-empty command");
+  }}
+  const args = ["sandbox", "run", "--fs", fs];
+  addCommonSandboxArgs(args, params, "sandbox_bash");
+  args.push("--command", params.command);
+  return args;
+}}
+
+function validateExternalPurposeAndCommand(params, toolName) {{
+  if (typeof params?.purpose !== "string" || params.purpose.trim().length === 0) {{
+    throw new Error(toolName + " requires a non-empty purpose");
+  }}
+  if (typeof params?.command !== "string" || params.command.trim().length === 0) {{
+    throw new Error(toolName + " requires a non-empty command");
+  }}
+}}
+
+function hasExternalWriteScope(params) {{
+  return stringList(params.write_targets).length > 0
+    || stringList(params.create_targets).length > 0
+    || stringList(params.write_dirs).length > 0;
+}}
+
+function externalReadOnlyBashArgs(params) {{
+  validateExternalPurposeAndCommand(params, "ext_ro_bash");
+  if (hasExternalWriteScope(params) || stringList(params.connect_sockets).length > 0 || params.allow_signal === true) {{
+    throw new Error("ext_ro_bash does not accept write, socket, or signal scope; use ext_rw_bash for scoped external operations");
+  }}
+  const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
+  addCommonSandboxArgs(args, params, "ext_ro_bash");
+  args.push("--command", params.command);
+  return args;
+}}
+
+function externalReadWriteBashArgs(params) {{
+  validateExternalPurposeAndCommand(params, "ext_rw_bash");
+  if (!hasExternalWriteScope(params)) {{
+    throw new Error("ext_rw_bash requires at least one write_targets, create_targets, or write_dirs entry");
+  }}
+  const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
+  addCommonSandboxArgs(args, params, "ext_rw_bash");
+  args.push("--command", params.command);
+  return args;
+}}
+
+function externalBashApprovalMessage(params, args) {{
+  const scope = [
+    ...stringList(params.write_targets).map((path) => "write-target: " + path),
+    ...stringList(params.create_targets).map((path) => "create-target: " + path),
+    ...stringList(params.write_dirs).map((path) => "write-dir: " + path),
+    ...stringList(params.connect_sockets).map((path) => "connect-socket: " + path),
+    ...(params.allow_signal === true ? ["allow-signal"] : []),
+  ];
+  return [
+    "Stateful is requesting a read/write repo-external sandbox operation.",
+    "",
+    "Purpose:",
+    params.purpose,
+    "",
+    "Declared external write/socket/signal scope:",
+    scope.length ? scope.join("\n") : "No declared external write/socket/signal scope.",
+    "",
+    "Command:",
+    params.command,
+    "",
+    "Sandbox invocation:",
+    STATEFUL + " " + args.join(" "),
+  ].join("\n");
+}}
+
+function sandboxToolResultText(exitCode, stdout, stderr, error) {{
+  const sections = ["exit_code: " + exitCode];
+  if (stdout) sections.push("stdout:\n" + stdout);
+  if (stderr) sections.push("stderr:\n" + stderr);
+  if (error) sections.push("error:\n" + error);
+  return sections.join("\n\n");
+}}
+
+function sandboxToolError(error) {{
+  return {{
+    isError: true,
+    content: [{{ type: "text", text: error instanceof Error ? error.message : String(error) }}],
+    details: {{ error: error instanceof Error ? error.message : String(error) }},
+  }};
+}}
+
+function emitSandboxToolOutput(onUpdate, stream, chunk) {{
+  if (typeof onUpdate !== "function" || !chunk) {{
+    return;
+  }}
+  const update = {{
+    content: [{{ type: "text", text: chunk }}],
+    details: {{ stream }},
+  }};
+  const emitRawFallback = () => {{
+    try {{
+      const fallback = onUpdate(String(chunk));
+      if (fallback && typeof fallback.catch === "function") {{
+        fallback.catch(() => {{}});
+      }}
+    }} catch (_) {{}}
+  }};
+  try {{
+    const result = onUpdate(update);
+    if (result && typeof result.catch === "function") {{
+      result.catch(emitRawFallback);
+    }}
+  }} catch (_) {{
+    emitRawFallback();
+  }}
+}}
+
+
+function buildSandboxToolResult(params, args, exitCode, stdout, stderr, error) {{
+  const text = sandboxToolResultText(exitCode, stdout, stderr, error);
+  return {{
+    isError: Boolean(error) || exitCode !== 0,
+    content: [{{ type: "text", text }}],
+    details: {{
+      exitCode,
+      stdout,
+      stderr,
+      error,
+      command: params.command,
+      sandboxArgs: args,
+    }},
+  }};
+}}
+
+function buildSandboxBackgroundStartResult(jobId, label) {{
+  return {{
+    content: [{{ type: "text", text: [
+      "Background job " + jobId + " started: " + label,
+      "Result will be delivered automatically when complete.",
+      "Continue with another task while this command runs unless its output is blocking.",
+    ].join("\n") }}],
+    details: {{ async: {{ state: "running", jobId, type: "bash" }} }},
+  }};
+}}
+
+function deliverSandboxBackgroundResult(pi, jobId, label, result) {{
+  if (typeof pi?.sendMessage !== "function") {{
+    return;
+  }}
+  const state = result.isError ? "failed" : "completed";
+  const text = [
+    "Background job " + jobId + " " + state + ": " + label,
+    "",
+    result.content?.find((block) => block?.type === "text")?.text || "(no output)",
+  ].join("\n");
+  try {{
+    pi.sendMessage(
+      {{
+        customType: "stateful_sandbox_bash_result",
+        content: text,
+        display: true,
+        details: {{ ...result.details, async: {{ state, jobId, type: "bash" }} }},
+      }},
+      {{ triggerTurn: true, deliverAs: "nextTurn" }}
+    );
+  }} catch (_) {{}}
+}}
+
+function runSandboxToolProcess(params, args, signal, ctx, label, onUpdate, onComplete) {{
+  let stdout = "";
+  let stderr = "";
+  let processError = "";
+  let settled = false;
+  const finish = (exitCode, error) => {{
+    if (settled) return;
+    settled = true;
+    const result = buildSandboxToolResult(params, args, exitCode, stdout, stderr, error);
+    onComplete(result);
+  }};
+  let child;
+  try {{
+    child = spawn(STATEFUL, args, {{
+      cwd: ctx.cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      ...(signal ? {{ signal }} : {{}}),
+    }});
+  }} catch (error) {{
+    finish(1, error instanceof Error ? error.message : String(error));
+    return;
+  }}
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk) => {{
+    emitSandboxToolOutput(onUpdate, "stdout", chunk);
+    stdout = truncateSandboxToolText(stdout + chunk, label);
+  }});
+  child.stderr?.on("data", (chunk) => {{
+    stderr = truncateSandboxToolText(stderr + chunk, label);
+    emitSandboxToolOutput(onUpdate, "stderr", chunk);
+  }});
+  child.on("error", (error) => {{
+    processError = error instanceof Error ? error.message : String(error);
+  }});
+  child.on("close", (code, signalName) => {{
+    const exitCode = typeof code === "number" ? code : 1;
+    const signalError = signalName ? "terminated by signal " + signalName : "";
+    finish(exitCode, processError || signalError);
+  }});
+}}
+
+function runSandboxTool(params, args, signal, ctx, label, onUpdate) {{
+  return new Promise((resolve) => {{
+    runSandboxToolProcess(params, args, signal, ctx, label, onUpdate, resolve);
+  }});
+}}
+
+function startSandboxBackgroundTool(pi, params, args, ctx, label) {{
+  const jobId = nextSandboxJobId(label);
+  const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
+  runSandboxToolProcess(params, args, undefined, ctx, label, undefined, (result) => {{
+    deliverSandboxBackgroundResult(pi, jobId, commandLabel, result);
+  }});
+  return buildSandboxBackgroundStartResult(jobId, commandLabel);
+}}
+
+export default function statefulOmpExtension(pi) {{
+  pi.setLabel("Stateful");
+  pi.registerTool({{
+    name: "sandbox_bash",
+    label: "Sandbox Bash",
+    description: "Run a command through stateful sandbox run. Supports all sandbox run --fs profiles except external; use ext_ro_bash for read-only external operations or ext_rw_bash for external writes.",
+    parameters: {{
+      type: "object",
+      properties: {{
+        fs: {{ type: "string", description: "Sandbox filesystem profile: read-only, write-targets, build, git, or github-pr. external is not supported here." }},
+        command: {{ type: "string", description: "Shell command to run inside the stateful sandbox." }},
+        write_targets: {{ type: "array", items: {{ type: "string" }}, description: "Existing repo-relative file paths the command may write." }},
+        create_targets: {{ type: "array", items: {{ type: "string" }}, description: "New repo-relative file paths the command may create." }},
+        write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Repo-relative directories or build scratch purpose the command may write under." }},
+        connect_sockets: {{ type: "array", items: {{ type: "string" }}, description: "Unix socket paths the sandbox may connect to when the selected profile supports sockets." }},
+        allow_signal: {{ type: "boolean", description: "Allow the sandboxed command to signal approved processes when the selected profile supports signaling." }},
+        network: {{ type: "string", description: "Network mode: enabled or disabled." }},
+        timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
+        async: {{ type: "boolean", description: "Return immediately and deliver the sandbox command result automatically when complete." }},
+      }},
+      required: ["fs", "command"],
+    }},
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+      let args;
+      try {{
+        args = sandboxBashArgs(params);
+      }} catch (error) {{
+        return sandboxToolError(error);
+      }}
+      if (params.async === true) {{
+        return startSandboxBackgroundTool(pi, params, args, ctx, "sandbox_bash");
+      }}
+      return runSandboxTool(params, args, signal, ctx, "sandbox_bash", _onUpdate);
+    }},
+  }});
+  pi.registerTool({{
+    name: "ext_ro_bash",
+    label: "External Read-only Bash",
+    description: "Run a read-only command through stateful sandbox run --fs external without OMP UI confirmation. Write, socket, and signal scopes are rejected.",
+    parameters: {{
+      type: "object",
+      properties: {{
+        purpose: {{ type: "string", description: "Human-readable purpose for the external read-only operation." }},
+        command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
+        network: {{ type: "string", description: "Network mode: enabled or disabled." }},
+        timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
+        async: {{ type: "boolean", description: "Return immediately and deliver the external sandbox command result automatically when complete." }},
+      }},
+      required: ["purpose", "command"],
+    }},
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+      let args;
+      try {{
+        args = externalReadOnlyBashArgs(params);
+      }} catch (error) {{
+        return sandboxToolError(error);
+      }}
+      if (params.async === true) {{
+        return startSandboxBackgroundTool(pi, params, args, ctx, "ext_ro_bash");
+      }}
+      return runSandboxTool(params, args, signal, ctx, "ext_ro_bash", _onUpdate);
+    }},
+  }});
+  pi.registerTool({{
+    name: "ext_rw_bash",
+    label: "External Read/write Bash",
+    description: "Run a command through stateful sandbox run --fs external after explicit OMP UI approval. At least one write_targets, create_targets, or write_dirs entry is required.",
+    parameters: {{
+      type: "object",
+      properties: {{
+        purpose: {{ type: "string", description: "Human-readable purpose for the external write operation." }},
+        command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
+        write_targets: {{ type: "array", items: {{ type: "string" }}, description: "Existing repo-relative or absolute external file paths the command may write. At least one write/create/directory scope is required." }},
+        create_targets: {{ type: "array", items: {{ type: "string" }}, description: "New repo-relative or absolute external file paths the command may create. At least one write/create/directory scope is required." }},
+        write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Repo-relative directories or absolute external directories the command may write under. At least one write/create/directory scope is required." }},
+        connect_sockets: {{ type: "array", items: {{ type: "string" }}, description: "Optional absolute Unix socket paths the sandbox may connect to." }},
+        allow_signal: {{ type: "boolean", description: "Optionally allow the sandboxed command to signal approved external processes." }},
+        network: {{ type: "string", description: "Network mode: enabled or disabled." }},
+        timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
+        async: {{ type: "boolean", description: "Return immediately and deliver the external sandbox command result automatically when complete." }},
+      }},
+      required: ["purpose", "command"],
+    }},
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+      let args;
+      try {{
+        args = externalReadWriteBashArgs(params);
+      }} catch (error) {{
+        return sandboxToolError(error);
+      }}
+      if (typeof ctx?.ui?.confirm !== "function") {{
+        return {{
+          isError: true,
+          content: [{{ type: "text", text: "ext_rw_bash requires OMP UI confirmation, but ctx.ui.confirm is unavailable." }}],
+          details: {{ error: "confirmation_unavailable" }},
+        }};
+      }}
+      const approved = await ctx.ui.confirm(
+        "Approve external sandbox command",
+        externalBashApprovalMessage(params, args)
+      );
+      if (!approved) {{
+        return {{
+          isError: true,
+          content: [{{ type: "text", text: "ext_rw_bash blocked by user" }}],
+          details: {{ blocked: true }},
+        }};
+      }}
+      if (params.async === true) {{
+        return startSandboxBackgroundTool(pi, params, args, ctx, "ext_rw_bash");
+      }}
+      return runSandboxTool(params, args, signal, ctx, "ext_rw_bash", _onUpdate);
+    }},
+  }});
+  pi.on("session_start", async (event, ctx) => {{
+    const result = runStatefulHook("session-start", {{
+      session_id: sessionId(event, ctx),
+      cwd: ctx.cwd,
+    }});
+    startReservationStream(pi, result?.notifications_stream);
+  }});
+  pi.on("tool_call", async (event, ctx) => {{
+    const decision = runStatefulHook("pre-tool-use", {{
+      session_id: sessionId(event, ctx),
+      cwd: ctx.cwd,
+      yolo: isYolo(event, ctx),
+      tool_name: event.toolName,
+      tool_input: event.input || {{}},
+    }});
+    if (decision.decision === "prompt") {{
+      if (typeof ctx?.ui?.confirm !== "function") {{
+        return {{
+          block: true,
+          reason: "Stateful requested approval, but OMP UI confirmation is unavailable.",
+        }};
+      }}
+      const approved = await ctx.ui.confirm(
+        decision.title || "Approve stateful action",
+        decision.message || decision.reason || "Approve this stateful action?"
+      );
+      if (!approved) {{
+        return {{ block: true, reason: decision.reason || "Blocked by user" }};
+      }}
+    }}
+    if (decision.decision === "block") {{
+      return {{ block: true, reason: decision.reason }};
+    }}
+  }});
+  pi.on("tool_result", async (event, ctx) => {{
+    runStatefulHook("post-tool-use", {{
+      session_id: sessionId(event, ctx),
+      cwd: ctx.cwd,
+      tool_name: event.toolName,
+      tool_input: event.input || {{}},
+    }});
+  }});
+  pi.on("session_shutdown", async (event, ctx) => {{
+    stopReservationStream();
+    runStatefulHook("stop", {{
+      session_id: sessionId(event, ctx),
+      cwd: ctx.cwd,
+    }});
+  }});
+}};
+"#
+    );
+    write_or_replace_text_file_with_mode(extension_path, &contents, private_file_mode())
+}
+
+fn write_omp_mcp_config(mcp_path: &Path, binary_path: &str) -> anyhow::Result<()> {
+    let contents = serde_json::to_string_pretty(&json!({
+        "mcpServers": {
+            "stateful": {
+                "type": "stdio",
+                "command": binary_path,
+                "args": ["mcp", "serve"]
+            }
+        }
+    }))?;
+    write_or_replace_text_file_with_mode(mcp_path, &format!("{contents}\n"), private_file_mode())
 }
 
 fn shell_quote_posix(value: &str) -> anyhow::Result<String> {
@@ -872,6 +2115,10 @@ fn stateful_command_policy_skill() -> &'static str {
     include_str!("../assets/stateful-command-policy/SKILL.md")
 }
 
+fn omp_stateful_required_rule() -> &'static str {
+    include_str!("../assets/omp-stateful-required-rule.md")
+}
+
 fn toml_string(value: &str) -> String {
     let mut escaped = String::from("\"");
     for character in value.chars() {
@@ -891,4 +2138,32 @@ fn toml_string(value: &str) -> String {
     }
     escaped.push('"');
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_omp_agent_dir_uses_user_omp_profile() {
+        assert_eq!(
+            default_omp_agent_dir_from_home("/tmp/home"),
+            PathBuf::from("/tmp/home/.omp/profiles/stateful/agent")
+        );
+    }
+
+    #[test]
+    fn omp_install_places_stateful_rule_in_agent_rules_dir() {
+        assert_eq!(
+            omp_required_rule_path(Path::new("/tmp/home/.omp/profiles/stateful/agent")),
+            PathBuf::from("/tmp/home/.omp/profiles/stateful/agent/rules/stateful-required.md")
+        );
+    }
+
+    #[test]
+    fn omp_stateful_required_rule_is_always_apply() {
+        let rule = omp_stateful_required_rule();
+        assert!(rule.contains("alwaysApply: true"));
+        assert!(rule.contains("skill://stateful-command-policy"));
+    }
 }

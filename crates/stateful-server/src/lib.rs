@@ -5,6 +5,10 @@ use axum::{
     Json, Router,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
+    response::{
+        IntoResponse, Response,
+        sse::{Event as SseEvent, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use policy_service::{
@@ -15,17 +19,21 @@ use policy_service::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stateful_core::{
-    ContextPackage, ReconciliationDecision, RenderMode, normalized_relative_path_is_empty,
-    render_prompt_text,
+    ActivityPhase, ContextPackage, ReconciliationDecision, RenderMode,
+    normalized_relative_path_is_empty, render_prompt_text,
 };
 use stateful_store::{
-    CurrentStateIdentityFilter, Event, OutboxEntry, Store, StoreError, WaitRecord,
+    CurrentStateIdentityFilter, Event, NotificationRecord, OutboxEntry, Store, StoreError,
+    WaitRecord,
 };
 use std::{
+    collections::VecDeque,
+    convert::Infallible,
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tokio_stream::{Stream, StreamExt, wrappers::IntervalStream};
 
 pub const CRATE_NAME: &str = "stateful-server";
 const RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
@@ -87,6 +95,7 @@ pub fn build_router(config: ServerConfig) -> Router {
         .route("/v1/context/render", post(context_render))
         .route("/v1/reconcile/ack", post(reconcile_ack))
         .route("/v1/notifications/poll", post(notifications_poll))
+        .route("/v1/notifications/stream", get(notifications_stream))
         .route("/v1/resume/next", post(resume_next))
         .route("/v1/outbox/sync", post(outbox_sync))
         .with_state(config)
@@ -301,6 +310,7 @@ async fn authorize(
         root: non_empty_identity(workspace.root),
         branch: non_empty_identity(workspace.branch),
         source_kind: Some(source.kind),
+        source_event: Some(source.event),
         queue_on_conflict: payload.queue_on_conflict,
         queue_purpose,
         action: payload.action,
@@ -550,6 +560,17 @@ fn missing_intent_response() -> (StatusCode, Json<Value>) {
     )
 }
 
+fn invalid_lease_path_response(path: String) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "status": "error",
+            "reason_code": "invalid_lease_path",
+            "message": format!("Invalid lease path `{path}`: direct tmp leases are not allowed; lease a file or subdirectory under tmp instead.")
+        })),
+    )
+}
+
 fn lease_conflict_response() -> (StatusCode, Json<Value>) {
     (
         StatusCode::CONFLICT,
@@ -558,6 +579,30 @@ fn lease_conflict_response() -> (StatusCode, Json<Value>) {
             "reason_code": "lease_conflict",
             "message": "Requested lease conflicts with an active lease or reserved request.",
             "required_next_action": "To wait for this path, call state.intent.request with action, path, purpose, and request_id. Then poll state.notifications.poll or state.resume.next; when reserved, reread the target and call state.intent.claim with the wait_id before retrying the write."
+        })),
+    )
+}
+
+fn lease_already_held_response() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "lease_state": "already_held",
+            "message": "Session already holds an active lease for this path."
+        })),
+    )
+}
+
+fn reservation_claim_required_response(reservation: WaitRecord) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "status": "error",
+            "reason_code": "reservation_claim_required",
+            "message": "A reservation for this session must be claimed before acquiring the lease.",
+            "reservation": reservation,
+            "required_next_action": "Reread the target, then call state.intent.claim with the wait_id before retrying the write."
         })),
     )
 }
@@ -601,7 +646,8 @@ fn require_files_planned(
     if files_planned.is_empty()
         || files_planned
             .iter()
-            .any(|path| normalized_relative_path_is_empty(path))
+            .map(String::as_str)
+            .any(normalized_relative_path_is_empty)
     {
         return Err(missing_scope_response());
     }
@@ -650,7 +696,27 @@ async fn lease_acquire(
                 &path,
                 observation,
             ) {
-                Ok(()) => Ok(()),
+                Ok(()) => Ok(None),
+                Err(StoreError::LeaseConflict) => {
+                    let reservation = if path.ends_with('/') {
+                        store.active_reservation_for_directory_by_session(
+                            &workspace_id,
+                            &path,
+                            &session_id,
+                        )
+                    } else {
+                        store.active_reservation_for_path_by_session(
+                            &workspace_id,
+                            &path,
+                            &session_id,
+                        )
+                    };
+                    match reservation {
+                        Ok(Some(reservation)) => Ok(Some(reservation)),
+                        Ok(None) => Err(StoreError::LeaseConflict),
+                        Err(error) => Err(error),
+                    }
+                }
                 Err(error) => Err(error),
             }
         }
@@ -658,9 +724,12 @@ async fn lease_acquire(
     };
 
     match result {
-        Ok(()) => status_response(Ok(())),
+        Ok(Some(reservation)) => reservation_claim_required_response(reservation),
+        Ok(None) => status_response(Ok(())),
         Err(StoreError::MissingPurpose) => missing_purpose_response(),
         Err(StoreError::MissingIntent) => missing_intent_response(),
+        Err(StoreError::InvalidLeasePath(path)) => invalid_lease_path_response(path),
+        Err(StoreError::LeaseAlreadyHeld) => lease_already_held_response(),
         Err(StoreError::LeaseConflict) => lease_conflict_response(),
         Err(error) => status_response(Err(error.to_string())),
     }
@@ -755,7 +824,11 @@ async fn activity_finalize(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .finalize_session_activity(&input.session_id, &input.workspace_id)
+                .finalize_session_activity_with_phase(
+                    &input.session_id,
+                    &input.workspace_id,
+                    input.phase.unwrap_or(ActivityPhase::Done),
+                )
                 .map_err(|error| error.to_string())
         });
 
@@ -866,6 +939,7 @@ async fn conflicts_check(
         root: None,
         branch: None,
         source_kind: None,
+        source_event: None,
         queue_on_conflict: input.queue_on_conflict,
         queue_purpose: None,
         action: input.action,
@@ -1003,7 +1077,7 @@ async fn notifications_poll(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .pending_notifications(&input.session_id)
+                .pending_notifications(&input.session_id, &input.workspace_id)
                 .map_err(|error| error.to_string())
         });
 
@@ -1023,6 +1097,76 @@ async fn notifications_poll(
             })),
         ),
     }
+}
+
+async fn notifications_stream(
+    State(config): State<ServerConfig>,
+    headers: HeaderMap,
+    Query(input): Query<NotificationsPollRequest>,
+) -> Response {
+    if !has_valid_bearer_token(&headers, &config.bearer_token) {
+        return unauthorized().into_response();
+    }
+
+    Sse::new(notification_sse_stream(config.store.clone(), input))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+fn notification_sse_stream(
+    store: SharedStore,
+    input: NotificationsPollRequest,
+) -> impl Stream<Item = Result<SseEvent, Infallible>> {
+    let pending = Arc::new(Mutex::new(VecDeque::<NotificationRecord>::new()));
+    let interval = tokio::time::interval(Duration::from_secs(1));
+    IntervalStream::new(interval).filter_map(move |_| {
+        let store = store.clone();
+        let input = input.clone();
+        let pending = pending.clone();
+        let next = {
+            let mut queued = pending
+                .lock()
+                .expect("notification queue lock should not poison");
+            if queued.is_empty() {
+                if let Ok(notifications) = store
+                    .lock()
+                    .map_err(|_| "store lock poisoned".to_string())
+                    .and_then(|store| {
+                        store
+                            .pending_notifications(&input.session_id, &input.workspace_id)
+                            .map_err(|error| error.to_string())
+                    })
+                {
+                    queued.extend(notifications);
+                }
+            }
+            queued.pop_front()
+        };
+
+        next.map(|notification| Ok(notification_sse_event(notification)))
+    })
+}
+
+fn notification_sse_event(notification: NotificationRecord) -> SseEvent {
+    let required_next_action = if notification.kind == "reservation_granted" {
+        Some("Reread the target, then call state.intent.claim for the reservation before writing.")
+    } else {
+        None
+    };
+    SseEvent::default()
+        .id(notification.notification_id.clone())
+        .event(notification.kind.clone())
+        .data(
+            json!({
+                "status": "ok",
+                "notification_id": notification.notification_id,
+                "workspace_id": notification.workspace_id,
+                "kind": notification.kind,
+                "payload": notification.payload,
+                "required_next_action": required_next_action
+            })
+            .to_string(),
+        )
 }
 
 async fn resume_next(
@@ -1218,7 +1362,11 @@ fn append_activity_response(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .append_activity(input.session_id, input.workspace_id)
+                .append_activity_with_phase(
+                    input.session_id,
+                    input.workspace_id,
+                    input.phase.unwrap_or(ActivityPhase::Exploring),
+                )
                 .map_err(|error| error.to_string())
         });
 
@@ -1351,6 +1499,7 @@ fn authorization_denied_audit_event(
             "relative_path": wait.record.relative_path,
             "action": wait.record.action,
             "status": wait.record.status,
+            "purpose": wait.record.purpose,
             "queue_position": wait.queue_position,
             "blocking_session_id": wait.record.blocking_session_id,
         });
@@ -1411,6 +1560,7 @@ fn authorization_json(outcome: AuthorizationOutcome) -> Value {
             "relative_path": reservation.relative_path,
             "action": reservation.action,
             "status": reservation.status,
+            "purpose": reservation.purpose,
             "reservation_expires_at": reservation.reservation_expires_at,
         });
     }
@@ -1563,6 +1713,8 @@ struct LeaseRequest {
 struct ActivityRequest {
     session_id: String,
     workspace_id: String,
+    #[serde(default)]
+    phase: Option<ActivityPhase>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1577,7 +1729,7 @@ struct WorkspaceIdentityRequest {
     branch: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct NotificationsPollRequest {
     session_id: String,
     workspace_id: String,

@@ -159,21 +159,23 @@ shipped v1 policy. They require exact source and destination file intent and
 leases, but conflicting rename/move attempts do not enqueue wait records until
 the multi-resource scheduler is implemented.
 
-The server promotes the first eligible queued waiter when one of these grant
+The server promotes every eligible queued waiter when one of these grant
 triggers makes the requested resource available:
 
 - explicit lease release
 - session or activity finalization
 - lease expiry
 
-The promoted waiter receives a short reservation. Reservations prevent a later
-session from taking the resource ahead of the first waiter, but they are not
-active write authority. The reserved session must reread the target, call
-`state.intent.claim` / `stateful intent claim --wait-id <id>`, and only then
-retry the write. The claim creates write-authorizing intent and the active
-same-session lease; retrying the write does not claim the reservation. The
-default reservation TTL is 120 seconds. If the reservation expires without being
-claimed, the server may promote the next eligible FIFO waiter.
+Each promoted waiter receives a short reservation. Reservations prevent a later
+session from taking the same resource ahead of an earlier conflicting waiter, but
+they are not active write authority. The reserved session must reread the
+target. Manual MCP/CLI flows then call `state_intent_claim` /
+`stateful intent claim --wait-id <id>` before writing; native edit hooks and
+sandbox `write-targets` authorization can lazy-claim the reservation when the
+write is retried. Claiming creates write-authorizing intent and the active
+same-session lease. The default reservation TTL is 120 seconds. If a reservation
+expires without being claimed, the server may promote the next eligible FIFO
+waiter.
 
 Resume is notification-driven rather than process-driven. The state server
 records a pending notification when it promotes a reservation. Agents and
@@ -181,16 +183,17 @@ orchestrators discover that signal by polling notifications, asking for the
 next resumable reservation, or receiving that context from a lifecycle hook.
 Polling returns each pending notification once and marks it delivered; callers
 that miss or discard a poll response should use `stateful resume next` /
-`state.resume.next` to rediscover any still-active reservation.
+`state_resume_next` to rediscover any still-active reservation.
 The state server does not wake a sleeping Codex process by itself; external
 orchestration can build on the notification and resume APIs.
 
 Full scheduling works through immediate request/response plus polling. Intent
 request APIs return `queued`, `reserved`, `claimed`, `canceled`, or `expired`
 state without blocking indefinitely. Immediate availability creates a `reserved` request state;
-the session must still reread the target, claim the reservation with
-`state.intent.claim` / `stateful intent claim --wait-id <id>`, and retry only
-after the claim creates write-authorizing intent and the same-session lease.
+the session must still reread the target. Manual MCP/CLI flows claim with
+`state_intent_claim` / `stateful intent claim --wait-id <id>` before retrying,
+while native edit hooks and sandbox `write-targets` authorization can
+lazy-claim at the retry write boundary.
 Waiting is handled by polling `stateful notifications poll` or
 `stateful resume next`.
 `stateful intent wait --timeout` is not part of the v1 hardening implementation.
@@ -204,7 +207,7 @@ returns the existing request state and must not create duplicate queue entries o
 replace the original purpose. Repeating an expired request requeues the same
 waiter in place, preserving its original FIFO row while requiring a new
 reservation and claim before writing. A queued or reserved request can be
-canceled explicitly with `state.intent.cancel` /
+canceled explicitly with `state_intent_cancel` /
 `stateful intent cancel --request-id <id>`. Session or activity finalization
 releases that session's active leases, cancels that session's queued and
 reserved requests, and promotes the next eligible waiter for any released or
@@ -226,52 +229,101 @@ before session stops    -> require final status
 
 For the first implementation, supported write actions are blocked unless the
 session has active intent. Conflict enforcement is advisory but blocking where
-the Codex runtime exposes a hookable action. Hard global locks are a later
-policy decision.
+supported runtime adapters expose a hookable action. Hard global locks are a
+later policy decision.
 
-## Codex CLI MVP
+## Agent Runtime MVP
 
 The chosen MVP direction is:
 
 ```text
-Codex lifecycle hooks
+Codex lifecycle hooks and OMP extension hooks
 + MCP tools
 + state server
 ```
 
-This gives useful control without forking Codex immediately.
+This gives useful control without forking Codex or changing the default OMP
+profile.
 
 The prototype supports user-level installation with repo allowlist gating.
-`stateful install --yes` configures global Codex hooks and MCP. `stateful enable`
-opts the current repo into enforcement. Repo-local hooks remain available through
-`stateful enable --repo-local-codex` as a compatibility fallback.
+`stateful install --agent codex --yes` configures global Codex hooks and MCP.
+For OMP, `stateful install --agent omp --yes` writes OMP config containing the
+stateful extension under the OMP `stateful` profile agent directory
+(`~/.omp/profiles/stateful/agent`) and ensures the target keys
+`tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
+`eval.js: false`, `eval.rb: false`, `eval.jl: false`,
+`tools.approval.task: allow`, `tools.approval.sandbox_bash: allow`,
+`tools.approval.ext_ro_bash: allow`, and
+`tools.approval.ext_rw_bash: allow`. Without `--update`, existing values are
+preserved and only missing keys are inserted; with `--update`, existing target
+values are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
+tools are denied at the host approval and hook levels. The installer also writes
+`rules/stateful-required.md` and `skills/stateful-command-policy/SKILL.md` under
+that isolated agent directory:
+the always-apply rule tells the model when Stateful policy applies, the skill
+keeps the detailed procedure, and hooks remain the enforcement boundary. The
+generated extension registers `sandbox_bash` for read-only, write-targets,
+build, git, and github-pr sandbox runs, including common sandbox flags,
+registers `ext_ro_bash` for read-only `--fs external` commands, and registers
+`ext_rw_bash` for external writes that require write/create/dir scope and OMP UI
+confirmation. `sandbox_bash` rejects `--fs external` with guidance to use
+`ext_ro_bash` or `ext_rw_bash`. Raw Bash and Python/JavaScript/JS/Ruby/Julia
+eval-tool calls
+are blocked even if their command text
+invokes `stateful sandbox run`. The OMP
+global/default profile is not modified.
+`stateful enable` opts the current repo into enforcement through the user-level
+install and repo allowlist.
 
 ```text
 global Codex hooks and MCP config
+isolated OMP `stateful` profile config
 repo allowlist entry
 optional <repo>/.codex/hooks.json compatibility fallback
 <repo>/.stateful/config.yml
 stateful binary available by absolute path or PATH lookup
 ```
 
-The hook event model stays the same across global hooks, repo-local
-compatibility hooks, and managed hooks; only the configuration and script
-location change. Plugin packaging is deferred to team beta for distribution and
-update UX, while managed hooks remain the long-term organization-enforcement
-path.
+Codex global hooks, repo-local compatibility hooks, and managed Codex hooks
+share the Codex lifecycle model: `SessionStart`, `UserPromptSubmit`,
+`PreToolUse`, `PostToolUse`, and `Stop`. The isolated OMP `stateful` profile
+uses OMP extension entry points for `SessionStart`, `PreToolUse`,
+`PostToolUse`, and `Stop`; OMP does not expose `UserPromptSubmit`. OMP
+`session-start` prefers the actual runtime id from `event.sessionId` or
+`ctx.sessionManager.session.id`, stores it in `process.env.STATEFUL_SESSION_ID`,
+and persists the same current-session files used by session-aware CLI and MCP
+callers. With that state in place, `state_session_register` ->
+`state_intent_declare` -> `state_lease_acquire` resolves the active OMP session
+without a caller-supplied environment override. Plugin packaging is deferred to
+team beta for distribution and update UX, while managed hooks remain the
+long-term organization-enforcement path.
 
-Hook scripts are thin integration adapters. They parse Codex hook input,
-classify runtime-specific tool calls, extract action and targets when
-supported, call the local HTTP state server for store-backed coordination
-policy, and translate the decision back into Codex hook output. Adapter-local
-policy is limited to fail-closed classification and trusted wrapper validation
-for command-shaped execution. V1 implementation is Rust-only, so hooks invoke
-the compiled `stateful` binary.
+Hook scripts are thin integration adapters. They parse runtime hook input,
+classify runtime-specific tool calls, extract action and targets when supported,
+call the local HTTP state server for store-backed coordination policy, and
+translate the decision back into runtime hook output. Adapter-local policy is
+limited to fail-closed classification and trusted wrapper validation for
+command-shaped execution. V1 implementation is Rust-only, so hooks invoke the
+compiled `stateful` binary.
 
-Every hook request should include a `protocol_version`. A major protocol
-mismatch fails closed for write and reconciliation paths.
+Envelope-enforced write authorization, intent, and reconciliation requests
+include `protocol_version`; a major protocol mismatch fails closed on those
+paths. OMP `SessionStart`, `PostToolUse`, and `Stop` lifecycle posts use flat
+session-event bodies with `metadata` and `source`, while OMP `PreToolUse`
+authorization still uses the v1 envelope.
+
+OMP adapters preserve stateful hard blocks: `sandbox_bash` owns non-external
+sandbox command execution for read-only, write-targets, build, git, and
+github-pr profiles; `ext_ro_bash` owns read-only external commands without OMP
+UI confirmation; `ext_rw_bash` owns external writes with OMP UI confirmation;
+stateful allow maps to allow; and stateful denial or
+unavailable state maps to block even when OMP yolo metadata is present.
 
 ### Hook Responsibilities
+
+These responsibilities apply to Codex hooks unless noted. OMP supports
+`SessionStart`, `PreToolUse`, `PostToolUse`, and `Stop`; it does not expose a
+`UserPromptSubmit` hook.
 
 `SessionStart`:
 
@@ -288,9 +340,13 @@ mismatch fails closed for write and reconciliation paths.
 
 - intercept supported tool calls before execution
 - deny supported write calls when the session has no active intent
-- deny raw Bash and allow Bash only when the outer command is a single strict
-  invocation of the trusted absolute `stateful` binary running
-  `<absolute-stateful-binary> sandbox run ... --command <cmd>`
+- deny Codex raw Bash with sandbox guidance. For OMP, raw Bash and the
+  Python/JavaScript/JS/Ruby/Julia eval tools are denied at host approval and hook
+  levels, even when the raw command itself invokes `stateful sandbox run`;
+  non-external sandbox command work must use `sandbox_bash`, read-only
+  repo-external command-shaped work must use `ext_ro_bash` without OMP UI
+  confirmation, and external writes must use `ext_rw_bash` with write/create/dir
+  scope and OMP UI confirmation.
 - check whether requested files or resources conflict with active leases
 - deny, warn, or add context based on policy
 
@@ -298,59 +354,64 @@ mismatch fails closed for write and reconciliation paths.
 
 - observe supported tool results
 - update files touched, phase, test results, and last result
-- refresh heartbeat timestamps and lease timestamps only for leases still
-  covered by active intent
+- release same-session repo-write leases after completed native edit and
+  `write-targets` transactions
+- refresh heartbeat timestamps and lease timestamps only for remaining active
+  leases still covered by active intent
 
 `Stop`:
 
-- check whether the turn has a final state
-- continue the turn if the agent has not reported `done`, `failed`, or
-  `blocked`
-- release or shorten leases when work is complete
+- post activity finalization for the session
+- release the session's leases through finalization
+- leave explicit `state_activity_finalize` available for manual final status
+  updates before shutdown
 
 Subagents:
 
-- may write only inside the parent session's active valid intent scope
+- coordinate in the same workspace state but use their own effective session
+  identity when the adapter exposes one
 - record activity and leases with their own `actor_id`
 - do not receive automatic override authority from a shared owner
 
 ### MCP Responsibilities
 
-The MCP surface should expose structured tools for the agent and hooks:
+The MCP surface should expose structured tools for the agent and hooks. Canonical
+callable tool names map to dotted protocol names:
 
 ```text
-state.session.register
-state.session.heartbeat
-state.intent.declare
-state.intent.request
-state.intent.claim
-state.intent.cancel
-state.lease.acquire
-state.lease.release
-state.activity.observe
-state.activity.finalize
-state.conflicts.check
-state.current.read
-state.events.read
-state.context.render
-state.reconcile.ack
-state.notifications.poll
-state.resume.next
+state_session_register (state.session.register)
+state_session_heartbeat (state.session.heartbeat)
+state_intent_declare (state.intent.declare)
+state_intent_request (state.intent.request)
+state_intent_claim (state.intent.claim)
+state_intent_cancel (state.intent.cancel)
+state_lease_acquire (state.lease.acquire)
+state_lease_release (state.lease.release)
+state_activity_observe (state.activity.observe)
+state_activity_finalize (state.activity.finalize)
+state_conflicts_check (state.conflicts.check)
+state_current_read (state.current.read)
+state_events_read (state.events.read)
+state_context_render (state.context.render)
+state_reconcile_ack (state.reconcile.ack)
+state_notifications_poll (state.notifications.poll)
+state_resume_next (state.resume.next)
 ```
 
-`state.intent.declare` and `state.intent.request` require a non-empty `purpose`.
+`state_intent_declare` and `state_intent_request` require a non-empty `purpose`.
 The caller must infer that purpose from the user or agent instruction when it is
 not explicit; the server must not synthesize a fallback purpose.
-`state.intent.declare` also requires non-empty `files_planned`; empty arrays
+`state_intent_declare` also requires non-empty `files_planned`; empty arrays
 and empty or normalized-empty entries are rejected with `missing_scope`.
-`state.intent.request` also requires a non-empty `path`; empty or
+`state_intent_request` also requires a non-empty `path`; empty or
 normalized-empty request paths are rejected with `missing_scope`.
-`state.intent.request` and `state.intent.cancel` expose the explicit scheduling
-queue. `state.intent.claim` is the explicit reservation claim path.
+`state_intent_request` and `state_intent_cancel` expose the explicit scheduling
+queue. `state_intent_claim` is the explicit reservation claim path.
 
 Hooks should call the same state server API as MCP tools so policy remains
-centralized. Native Codex edit tools are the repo file edit path after intent
-and lease; sandbox-run remains the Bash wrapper for command-shaped shell writes.
+centralized. Native edit tools with hook-visible targets are the repo file edit
+path after intent and lease; sandbox-run remains the Bash wrapper for
+command-shaped shell writes.
 
 ### State Server Responsibilities
 
@@ -365,17 +426,17 @@ It should:
 - expose current-state views for prompt rendering
 - retain historical activity as evidence after expiration
 
-The Codex integration should stay thin. Store-backed coordination policy belongs
-in the state server; hook-side policy is limited to tool classification,
-fail-closed unknown-tool handling, and trusted wrapper validation.
+Runtime hook integrations should stay thin. Store-backed coordination policy
+belongs to the server, not to hook scripts. Hook logic should only handle
+runtime parsing, fail-closed unknown-tool handling, and trusted wrapper validation.
 
 V1 persistence is SQLite with append-only event tables and materialized
 current-state views. JSONL may be used for debugging exports, but not as the
 primary store.
 
-V1 transport is local HTTP. Codex hooks, MCP tools, filesystem watchers, and the
-future IDE extension should call the same local HTTP API. MCP remains an adapter,
-not a separate policy implementation.
+V1 transport is local HTTP. Codex hooks, OMP hooks, MCP tools, filesystem
+watchers, and the future IDE extension should call the same local HTTP API. MCP
+remains an adapter, not a separate policy implementation.
 
 Policy evaluation should use one entry point:
 
@@ -397,25 +458,41 @@ V1 write enforcement is limited to tool paths where targets can be determined
 reliably:
 
 ```text
-native Codex edit tools -> enforce by inspecting hook-exposed targets after
-  intent and lease
-Bash read-only inspection -> require a strict trusted wrapper:
+namespaced runtime tool names -> classify by leaf
+  (functions.bash as Bash; functions.python/javascript/js/ruby/julia as eval
+  tools; functions.read / functions.search as native read/search)
+native read/search/diff tools -> preferred path for ordinary read work
+native edit tools with hook-visible targets -> enforce by inspecting targets
+  after exact intent and a same-session lease; release the lease after the
+  completed write transaction
+Codex Bash read-only inspection that genuinely needs a shell -> require a strict
+  trusted wrapper:
   <absolute-stateful-binary> sandbox run --fs read-only --network disabled
   --command <cmd>
-Bash command-shaped writes -> require the trusted wrapper with
-  --fs write-targets plus explicit --write-target/--create-target values
-test execution -> run through sandbox run --fs build after exact tmp/
-  directory intent and a same-session directory lease
-raw Bash or non-wrapper Bash -> deny
+OMP read-only/write-targets/build/git/github-pr sandbox runs -> require
+  `sandbox_bash`
+process inspection -> use sandbox process find <selector>, not raw ps/pgrep
+Codex Bash command-shaped repo writes -> require the trusted wrapper with
+  --fs write-targets plus explicit --write-target <file>/--create-target <file> values
+test execution -> run through sandbox run --fs build --network enabled with
+  --write-dir <scratch-purpose>; scratch lives under /tmp/stateful/<session>/
+Codex raw Bash, OMP raw Bash, or OMP Python/JavaScript/JS/Ruby/Julia eval tools
+  -> deny
+repo-external OMP command-shaped work -> require `ext_ro_bash` for reads or `ext_rw_bash` for writes
 ```
 
-Bash denial should tell the agent to use
+Bash denial should tell the agent to use native read/search/diff tools for
+ordinary read work,
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
---command <cmd>` for read-only inspection,
-`<absolute-stateful-binary> sandbox run --fs write-targets ... --command <cmd>`
-for command-shaped writes, native Codex edit tools for repo file edits, and
-`sandbox run --fs build` wrappers for tests after exact `tmp/` directory intent
-and a same-session directory lease.
+--command <cmd>` for Codex shell-based read-only inspection,
+`<absolute-stateful-binary> sandbox run --fs write-targets --write-target <file> ... --command <cmd>`
+for Codex command-shaped repo writes after intent and same-session lease,
+OMP `sandbox_bash` for read-only, write-targets, build, git, and github-pr
+sandbox runs,
+Codex `<absolute-stateful-binary> sandbox run --fs external --purpose ...
+--command <cmd>`, OMP `ext_ro_bash` for read-only external work, or OMP
+`ext_rw_bash` for approved repo-external writes,
+and native edit tools for repo file edits.
 
 The read-only sandbox profile is a write-confinement profile. It does not
 provide full process containment, and it cannot be combined with
@@ -424,23 +501,23 @@ provide full process containment, and it cannot be combined with
 There is no command-text authorization path. Command text alone does not
 authorize `rg`, `git diff`, test runners, stateful operational commands, or any
 other Bash command. Test commands should run through the trusted
-`stateful sandbox run --fs build --network enabled --command <cmd>` wrapper
-after exact `tmp/` directory intent and a successful same-session directory
-lease. Source-tree writes remain denied unless a later policy
-explicitly permits them.
+`stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
+--command <cmd>` wrapper. Repo writes require exact intent plus a matching
+same-session lease and must use native edit tools or `--fs write-targets` with
+explicit targets.
 
 Minimum sandboxed test shape:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." tmp/
-stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"tmp/"}'
-stateful sandbox run --fs build --network enabled --command <cmd>
+stateful sandbox run --fs build --network enabled --write-dir test-run --command <cmd>
 ```
 
-The build profile is limited to the `tmp/` artifact tree. Source-tree edits use
-native Codex edit tools such as `apply_patch` or Edit after exact intent
-declaration and a successful same-session file lease. Command-shaped source
-writes must use exact `--write-target` or `--create-target` entries.
+The build profile writes disposable artifacts under
+`/tmp/stateful/<session>/<scratch-purpose>/`. Source-tree edits use native edit tools
+with hook-visible targets, such as Codex `apply_patch` or Edit, after exact
+intent declaration and a successful same-session file lease; the completed write
+transaction releases the authorizing lease. Command-shaped source writes must
+use exact `--write-target <file>` or `--create-target <file>` entries.
 
 ## Conflict Policy
 
@@ -451,11 +528,18 @@ Initial policy should prefer advisory leases:
 - supported write with expired intent: deny
 - supported write while phase is `blocked`: deny
 - supported write after session finalization: deny
-- supported write outside matching file or directory scope: deny
-- raw Bash or a Bash call that is not a strict trusted
-  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper: deny
-- directory scope permits `write_file` targets only up to depth 2 below that
-  directory
+- supported write outside matching exact file scope or exact directory
+  `write_directory` scope: deny
+- Codex raw Bash or non-wrapper Bash: deny, including repo-external
+  command-shaped work
+- OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution: deny at
+  host approval and hook levels, even when the raw command invokes
+  `stateful sandbox run`; use `sandbox_bash` for non-external sandbox profiles,
+  `ext_ro_bash` for read-only `--fs external`, and `ext_rw_bash` for external
+  writes
+- directory intent and directory lease authorize only `write_directory` for the
+  exact directory resource; they do not authorize `write_file`, delete, rename,
+  or move actions on child paths
 - `write_directory` requires exact directory scope, and the matching directory
   lease blocks the whole subtree because command-shaped `--write-dir` execution
   receives writable access to that subtree
@@ -531,8 +615,8 @@ match should be rendered as unknown-confidence context.
 
 ## Human Activity
 
-Human activity cannot be captured only through Codex hooks. The system should
-also support external observation:
+Human activity cannot be captured only through agent runtime hooks. The system
+should also support external observation:
 
 - git working tree diff
 - filesystem watcher
@@ -622,13 +706,23 @@ human save path: fail open with warning
 non-Bash read/search/diff path: allow
 ```
 
+At the OMP adapter boundary, a stateful hook deny or unavailable result is
+returned as block, not warning, regardless of OMP yolo metadata. Non-external
+sandbox runs must use `sandbox_bash`, repo-external command-shaped reads must
+use `ext_ro_bash`, external writes must use `ext_rw_bash`, and raw OMP Bash plus
+Python/JavaScript/JS/Ruby/Julia
+eval-tool sandbox invocations are denied.
+
 When the state server is unavailable:
 
 - supported writes are denied because active intent, lease conflict, and
   reconciliation state cannot be proven
-- raw Bash and Bash calls that are not strict trusted
-  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrappers remain
-  denied
+- Codex raw Bash and repo-internal Bash calls remain denied unless they use a
+  strict trusted `<absolute-stateful-binary> sandbox run ... --command <cmd>`
+  wrapper
+- OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution remains
+  denied at host approval and hook levels; non-external sandbox runs must use
+  `sandbox_bash`
 - sandbox-run wrappers that need authorization fail closed and do not run the
   command
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block
@@ -653,11 +747,14 @@ not enough to continue writing while the state server is down.
 
 ## Known Limits
 
-Codex hooks are a practical guardrail, not a complete enforcement boundary.
-They can intercept important supported paths such as shell commands,
+Agent runtime hooks are a practical guardrail, not a complete enforcement
+boundary. They can intercept important supported paths such as shell commands,
 `apply_patch`, and MCP calls, but they do not make the state protocol a full
 security boundary. Post-action hooks also cannot undo side effects that already
 happened.
+
+For OMP, yolo metadata does not downgrade a stateful denial to a warning; deny
+and unavailable-state decisions remain hard blocks.
 
 IDE save interception has the same character. It can warn before many human
 saves, but it cannot guarantee exclusive file ownership.
@@ -687,20 +784,20 @@ authorization orchestration in `stateful-server::policy_service` and uses
 
 ## Initial Decision
 
-Build the first version with Codex lifecycle hooks, MCP tools, and a
-`stateful_core` state server.
+Build the first version with Codex lifecycle hooks, OMP extension hooks, MCP
+tools, and a `stateful_core` state server.
 
-The v1 MVP includes Codex hooks, MCP tools, the state server, sandboxed test
-execution, and explicit reconciliation acknowledgements. Automatic
+The v1 MVP includes Codex and OMP hooks, MCP tools, the state server, sandboxed
+test execution, and explicit reconciliation acknowledgements. Automatic
 human-write observation and reconciliation blocks remain target behavior.
 
 V1 is local-only. It coordinates one machine/workspace boundary. Team-shared,
 cross-machine, or hosted state sync is deferred to v1.5/v2.
 
-The project should keep the policy model portable across agent runtimes, while
-the shipped implementation remains Codex-first. Codex-specific behavior belongs
-in adapters, and adding a non-Codex runtime is future integration work rather
-than current shipped behavior.
+The project should keep the policy model portable across agent runtimes. The
+shipped implementation remains Codex-first, with OMP extension support for the
+runtime lifecycle events OMP exposes. Runtime-specific behavior belongs in
+adapters, and broader non-Codex runtime support remains future work.
 
 V1 defaults to strict enforcement. Supported writes and reconciliation fail
 closed when state cannot be trusted. Usability comes from
@@ -718,7 +815,10 @@ supported write action + no active intent -> deny
 supported write action + expired intent -> deny as missing active intent
 supported write action + intent without file/directory scope -> deny
 supported write action + target outside intent scope -> deny
-raw Bash or non-wrapper Bash -> deny
+Codex raw Bash -> deny; OMP raw Bash plus Python/JavaScript/JS/Ruby/Julia
+  eval tools -> deny even when the command invokes `stateful sandbox run`; use
+  `sandbox_bash` for non-external sandbox profiles, `ext_ro_bash` for read-only
+  external work, and `ext_rw_bash` for external writes
 delete action + non-exact file scope -> deny
 rename/move action + non-exact source or destination scope -> deny
 active write lease in hard conflict domain -> deny
@@ -737,10 +837,10 @@ reorder existing waiters, steal a reservation, or move the overriding session to
 the head of a queue.
 
 A v1 write-authorizing intent must be active, unexpired, belong to the same
-session, and include matching file or directory scope. Abstract task, test, port,
-or migration intent can be stored as context but does not permit writes.
-Directory scope permits writes only up to two path segments below the scoped
-directory.
+session, and include matching exact file or directory scope. Abstract task,
+test, port, or migration intent can be stored as context but does not permit
+writes. Directory scope authorizes `write_directory` for the exact directory
+resource; file writes, deletes, renames, and moves require exact file scope.
 
 Resource authorization classes:
 
@@ -772,8 +872,8 @@ fail because no active write-authorizing intent remains.
 
 The shipped hook path records target existence and content hash when an exact
 file lease is acquired with `root`, denies hook-originated native file writes
-when that file changes before authorization, and refreshes the same-session
-exact file lease observation after supported file tools complete. This is a
+when that file changes before authorization, and releases the same-session lease
+after a completed native edit or `write-targets` transaction. This is a
 per-lease freshness check, not a filesystem watcher or IDE human-save observer.
 
 Override policy:
@@ -796,7 +896,7 @@ record and authorization path.
 Prompt context rendering:
 
 ```text
-state.context.render(workspace, session_id, resources?, mode)
+state_context_render(workspace, session_id, resources?, mode)
 mode: brief | detailed
 sections: Blocking, Required Next Action, Warnings, Nearby Activity, Stale/Expired
 ```
@@ -828,6 +928,7 @@ Each rendered item uses:
 ```text
 - [severity] resource: summary.
   next: concrete action.
+  evidence kind: coordination signal classification.
   evidence: detailed mode only.
 ```
 
@@ -835,6 +936,10 @@ Severity values are `block`, `warn`, and `info`. `brief` mode has at most 8
 bullets. `detailed` mode has at most 20 bullets. Empty sections are omitted
 except `Blocking: None` when a resource filter is present. Raw event dumps are
 forbidden.
+
+Evidence kind distinguishes declared intent, lease-only blockers, queue or
+reservation state, observed writes, and verified diffs; `evidence` remains
+optional supporting detail.
 
 When the block is an unreconciled human write, `Required Next Action` should tell
 the agent to reread the file, summarize the human change, decide whether to

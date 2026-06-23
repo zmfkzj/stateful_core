@@ -1,11 +1,12 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use stateful_core::{
-    CurrentFreshness, CurrentItem, CurrentItemKind, CurrentSeverity, IntentScope, PolicyState,
+    ActivityPhase, CURRENT_SESSION_SCOPE_SOURCE_REF, CurrentEvidenceKind, CurrentFreshness,
+    CurrentItem, CurrentItemKind, CurrentSeverity, IntentScope, PolicyState,
     normalize_relative_path,
 };
-use std::path::Path;
 use std::time::Duration as StdDuration;
+use std::{fs, path::Path};
 use thiserror::Error;
 use time::{Date, Duration, Month, OffsetDateTime, Time};
 use uuid::Uuid;
@@ -36,12 +37,18 @@ pub enum StoreError {
     IntentRequestNotCancelable,
     #[error("active lease conflict")]
     LeaseConflict,
+    #[error("lease is already held by this session")]
+    LeaseAlreadyHeld,
     #[error("lease not found")]
     LeaseNotFound,
     #[error("lease owner mismatch")]
     LeaseOwnerMismatch,
     #[error("matching active intent is required")]
     MissingIntent,
+    #[error(
+        "invalid lease path `{0}`: direct tmp leases are not allowed; lease a file or subdirectory under tmp instead"
+    )]
+    InvalidLeasePath(String),
     #[error("purpose is required")]
     MissingPurpose,
     #[error("intent scope is required")]
@@ -97,12 +104,11 @@ pub struct Store {
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        prepare_private_database_path(path)?;
 
         let conn = Connection::open(path)?;
         configure_file_connection(&conn)?;
+        restrict_database_file_permissions(path)?;
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
@@ -401,7 +407,7 @@ impl Store {
         identity_filter: CurrentStateIdentityFilter<'_>,
         resource_filter: Option<&str>,
     ) -> StoreResult<LiveCurrentState> {
-        self.expire_stale()?;
+        self.refresh_live_current_state()?;
         let summary = self.current_summary_filtered(workspace_filter, identity_filter)?;
         let resource_filter = resource_filter.map(normalize_relative_path);
         let mut items = Vec::new();
@@ -477,9 +483,8 @@ impl Store {
             if workspace_filter.is_some_and(|filter| workspace_id != filter) {
                 continue;
             }
-            if identity_filter.exclude_session_id == Some(session_id.as_str()) {
-                continue;
-            }
+            let current_session_scope =
+                identity_filter.exclude_session_id == Some(session_id.as_str());
             if !identity_filter_matches(
                 identity_filter,
                 repo_id.as_deref(),
@@ -500,24 +505,39 @@ impl Store {
                 if !resource_matches_filter(&resource, resource_filter) {
                     continue;
                 }
-                items.push(
-                    CurrentItem::new(
-                        CurrentItemKind::Intent,
-                        CurrentSeverity::Info,
-                        CurrentFreshness::Live,
-                        resource.clone(),
-                        purpose.clone(),
-                        format!("Session {session_id} declared intent for {resource}."),
+                let summary = if current_session_scope {
+                    format!("This session declared intent for {resource}.")
+                } else {
+                    format!("Session {session_id} declared intent for {resource}.")
+                };
+                let next_action = if current_session_scope {
+                    format!(
+                        "Before writing {resource}, keep an exact same-session file lease active."
                     )
-                    .with_next_action(format!(
+                } else {
+                    format!(
                         "Avoid overlapping edits to {resource} unless coordinating with {session_id}."
-                    ))
-                    .with_session(session_id.clone())
-                    .with_workspace(workspace_id.clone())
-                    .with_source_ref("IntentDeclared")
-                    .with_observed_at(declared_at.clone())
-                    .with_expires_at(expires_at.clone()),
-                );
+                    )
+                };
+                let mut item = CurrentItem::new(
+                    CurrentItemKind::Intent,
+                    CurrentSeverity::Info,
+                    CurrentFreshness::Live,
+                    resource.clone(),
+                    purpose.clone(),
+                    summary,
+                )
+                .with_next_action(next_action)
+                .with_session(session_id.clone())
+                .with_workspace(workspace_id.clone())
+                .with_source_ref("IntentDeclared")
+                .with_evidence_kind(CurrentEvidenceKind::DeclaredIntent)
+                .with_observed_at(declared_at.clone())
+                .with_expires_at(expires_at.clone());
+                if current_session_scope {
+                    item = item.with_source_ref(CURRENT_SESSION_SCOPE_SOURCE_REF);
+                }
+                items.push(item);
             }
         }
 
@@ -609,12 +629,9 @@ impl Store {
             if workspace_filter.is_some_and(|filter| workspace_id != filter) {
                 continue;
             }
-            if identity_filter
+            let current_session_scope = identity_filter
                 .exclude_session_id
-                .is_some_and(|excluded| session_id.as_deref() == Some(excluded))
-            {
-                continue;
-            }
+                .is_some_and(|excluded| session_id.as_deref() == Some(excluded));
             if !identity_filter.is_empty() {
                 let Some(session_id) = session_id.as_deref() else {
                     continue;
@@ -639,22 +656,39 @@ impl Store {
             } else {
                 relative_path.clone()
             };
+            let (severity, summary, next_action) = if current_session_scope {
+                (
+                    CurrentSeverity::Info,
+                    format!("This session has an active write lease on {resource}."),
+                    format!(
+                        "You can write {resource} while this same-session lease remains fresh."
+                    ),
+                )
+            } else {
+                (
+                    CurrentSeverity::Block,
+                    format!("{session_summary} has an active write lease on {resource}."),
+                    format!("Wait for the lease to release, or coordinate with {session_summary}."),
+                )
+            };
             let mut item = CurrentItem::new(
                 CurrentItemKind::Lease,
-                CurrentSeverity::Block,
+                severity,
                 CurrentFreshness::Live,
                 resource.clone(),
                 purpose,
-                format!("{session_summary} has an active write lease on {resource}."),
+                summary,
             )
-            .with_next_action(format!(
-                "Wait for the lease to release, or coordinate with {session_summary}."
-            ))
+            .with_next_action(next_action)
             .with_workspace(workspace_id.clone())
             .with_source_ref("LeaseAcquired")
+            .with_evidence_kind(CurrentEvidenceKind::LeaseOnly)
             .with_expires_at(expires_at);
             if let Some(session_id) = session_id {
                 item = item.with_session(session_id);
+            }
+            if current_session_scope {
+                item = item.with_source_ref(CURRENT_SESSION_SCOPE_SOURCE_REF);
             }
             items.push(item);
         }
@@ -729,12 +763,9 @@ impl Store {
             if workspace_filter.is_some_and(|filter| workspace_id != filter) {
                 continue;
             }
-            if identity_filter
+            let current_session_scope = identity_filter
                 .exclude_session_id
-                .is_some_and(|excluded| session_id == excluded)
-            {
-                continue;
-            }
+                .is_some_and(|excluded| session_id == excluded);
             if !identity_filter_matches(
                 identity_filter,
                 repo_id.as_deref(),
@@ -767,6 +798,11 @@ impl Store {
                     ),
                 )
             };
+            let evidence_kind = if status == "reserved" {
+                CurrentEvidenceKind::Reservation
+            } else {
+                CurrentEvidenceKind::WaitQueue
+            };
             let evidence = blocking_session_id.map(|blocking_session_id| {
                 format!("Blocked by session {blocking_session_id}; wait_id {wait_id}.")
             });
@@ -782,10 +818,14 @@ impl Store {
             .with_session(session_id)
             .with_workspace(workspace_id)
             .with_source_ref("IntentRequested")
+            .with_evidence_kind(evidence_kind)
             .with_observed_at(requested_at)
             .with_expires_at(reservation_expires_at);
             if let Some(evidence) = evidence {
                 item = item.with_evidence(evidence);
+            }
+            if current_session_scope {
+                item = item.with_source_ref(CURRENT_SESSION_SCOPE_SOURCE_REF);
             }
             items.push(item);
         }
@@ -1096,6 +1136,17 @@ impl Store {
             "write_file"
         };
         let relative_path = normalize_relative_path(requested_relative_path);
+        if direct_tmp_lease_path(&relative_path) {
+            return Err(StoreError::InvalidLeasePath(relative_path));
+        }
+        if self.active_exact_lease_for_session(
+            session_id,
+            workspace_id,
+            &relative_path,
+            lease_action,
+        )? {
+            return Err(StoreError::LeaseAlreadyHeld);
+        }
         let Some(purpose) = self.active_intent_purpose_for_lease(
             session_id,
             workspace_id,
@@ -1150,6 +1201,29 @@ impl Store {
         )?;
 
         Ok(())
+    }
+
+    fn active_exact_lease_for_session(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        relative_path: &str,
+        lease_action: &str,
+    ) -> StoreResult<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM leases
+                    WHERE session_id = ?1
+                       AND workspace_id = ?2
+                       AND relative_path = ?3
+                       AND action = ?4
+                       AND status = 'active'
+                )",
+                params![session_id, workspace_id, relative_path, lease_action],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StoreError::from)
     }
 
     fn active_lease_conflicts_for_acquire(
@@ -2592,6 +2666,7 @@ impl Store {
     pub fn pending_notifications(
         &self,
         target_session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
     ) -> StoreResult<Vec<NotificationRecord>> {
         self.expire_stale()?;
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -2607,10 +2682,15 @@ impl Store {
                     created_at,
                     expires_at
                  FROM notifications
-                 WHERE target_session_id = ?1 AND status = 'pending'
+                 WHERE target_session_id = ?1
+                    AND workspace_id = ?2
+                    AND status = 'pending'
                  ORDER BY rowid ASC",
             )?;
-            let rows = statement.query_map([target_session_id.as_ref()], notification_from_row)?;
+            let rows = statement.query_map(
+                params![target_session_id.as_ref(), workspace_id.as_ref()],
+                notification_from_row,
+            )?;
             let notifications = rows
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(StoreError::from)?;
@@ -2675,10 +2755,24 @@ impl Store {
         session_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<()> {
-        self.append_activity_inner(session_id.as_ref(), workspace_id.as_ref())
+        self.append_activity_with_phase(session_id, workspace_id, ActivityPhase::Exploring)
     }
 
-    fn append_activity_inner(&self, session_id: &str, workspace_id: &str) -> StoreResult<()> {
+    pub fn append_activity_with_phase(
+        &self,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        phase: ActivityPhase,
+    ) -> StoreResult<()> {
+        self.append_activity_inner(session_id.as_ref(), workspace_id.as_ref(), phase)
+    }
+
+    fn append_activity_inner(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        phase: ActivityPhase,
+    ) -> StoreResult<()> {
         let now = now_timestamp();
         let expires_at = timestamp_after(&now, ACTIVITY_TTL_SECONDS)?;
         self.conn.execute(
@@ -2686,12 +2780,14 @@ impl Store {
                 activity_id,
                 session_id,
                 workspace_id,
+                phase,
                 expires_at
-            ) VALUES (?1, ?2, ?3, ?4)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 Uuid::new_v4().to_string(),
                 session_id,
                 workspace_id,
+                phase.as_str(),
                 expires_at,
             ],
         )?;
@@ -2704,22 +2800,35 @@ impl Store {
         session_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<(u64, u64)> {
+        self.finalize_session_activity_with_phase(session_id, workspace_id, ActivityPhase::Done)
+    }
+
+    pub fn finalize_session_activity_with_phase(
+        &self,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        _phase: ActivityPhase,
+    ) -> StoreResult<(u64, u64)> {
         let session_id = session_id.as_ref().to_string();
         let workspace_id = workspace_id.as_ref().to_string();
-        if !self.conn.is_autocommit() {
-            return self.finalize_session_activity_inner(&session_id, &workspace_id);
-        }
+        self.conn
+            .execute_batch("SAVEPOINT stateful_finalize_activity")?;
 
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-
-        let result = (|| -> StoreResult<(u64, u64)> {
-            let finalized = self.finalize_session_activity_inner(&session_id, &workspace_id)?;
-            self.conn.execute_batch("COMMIT")?;
-            Ok(finalized)
-        })();
+        let result = self
+            .finalize_session_activity_inner(&session_id, &workspace_id)
+            .and_then(|finalized| {
+                self.conn
+                    .execute_batch("RELEASE SAVEPOINT stateful_finalize_activity")?;
+                Ok(finalized)
+            });
 
         if result.is_err() {
-            let _ = self.conn.execute_batch("ROLLBACK");
+            let _ = self
+                .conn
+                .execute_batch("ROLLBACK TO SAVEPOINT stateful_finalize_activity");
+            let _ = self
+                .conn
+                .execute_batch("RELEASE SAVEPOINT stateful_finalize_activity");
         }
 
         result
@@ -2730,7 +2839,6 @@ impl Store {
         session_id: &str,
         workspace_id: &str,
     ) -> StoreResult<(u64, u64)> {
-        self.append_activity_inner(session_id, workspace_id)?;
         self.cancel_session_waiters_inner(session_id, workspace_id)?;
         let released = self.release_session_leases_inner(session_id, workspace_id)?;
         let completed = self.complete_session_intents_inner(session_id, workspace_id)?;
@@ -2771,12 +2879,36 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    fn active_session_phase(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+    ) -> StoreResult<Option<ActivityPhase>> {
+        let now = now_timestamp();
+        self.conn
+            .query_row(
+                "SELECT phase
+                 FROM activities
+                 WHERE session_id = ?1
+                    AND workspace_id = ?2
+                    AND (expires_at IS NULL OR expires_at > ?3)
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                params![session_id, workspace_id, now],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map(|phase| phase.and_then(|phase| parse_activity_phase(&phase)))
+            .map_err(StoreError::from)
+    }
+
     pub fn policy_state_for_session(
         &self,
         session_id: &str,
         workspace_id: &str,
     ) -> StoreResult<PolicyState> {
         self.expire_stale()?;
+        let phase = self.active_session_phase(session_id, workspace_id)?;
         let scopes = self
             .active_intent_scope_rows(session_id, workspace_id)?
             .into_iter()
@@ -2786,7 +2918,12 @@ impl Store {
             return Ok(PolicyState::default());
         }
 
-        Ok(PolicyState::default().with_active_intent_scopes(scopes))
+        let mut state = PolicyState::default().with_active_intent_scopes(scopes);
+        if let Some(phase) = phase {
+            state = state.with_activity_phase(phase);
+        }
+
+        Ok(state)
     }
 
     pub fn active_exact_file_intent_by_session(
@@ -2851,6 +2988,30 @@ impl Store {
 
         let result = (|| -> StoreResult<()> {
             self.expire_stale_at_inner(now)?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
+    fn refresh_live_current_state(&self) -> StoreResult<()> {
+        let now = now_timestamp();
+        if !self.conn.is_autocommit() {
+            self.expire_stale_at_inner(&now)?;
+            self.promote_unblocked_waiters()?;
+            return Ok(());
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<()> {
+            self.expire_stale_at_inner(&now)?;
+            self.promote_unblocked_waiters()?;
             self.conn.execute_batch("COMMIT")?;
             Ok(())
         })();
@@ -2994,11 +3155,15 @@ impl Store {
                 activity_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
+                phase TEXT NOT NULL DEFAULT 'exploring',
                 expires_at TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_activities_workspace_expires_at
                 ON activities(workspace_id, expires_at);
+
+            CREATE INDEX IF NOT EXISTS idx_activities_session_workspace_expires_at
+                ON activities(session_id, workspace_id, expires_at);
 
             CREATE TABLE IF NOT EXISTS intents (
                 intent_id TEXT PRIMARY KEY,
@@ -3194,6 +3359,11 @@ impl Store {
             "ALTER TABLE leases ADD COLUMN observed_content_hash TEXT;",
         )?;
         self.add_column_if_missing(
+            "activities",
+            "phase",
+            "ALTER TABLE activities ADD COLUMN phase TEXT NOT NULL DEFAULT 'exploring';",
+        )?;
+        self.add_column_if_missing(
             "outbox",
             "workspace_id",
             "ALTER TABLE outbox ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '';",
@@ -3270,7 +3440,8 @@ impl Store {
                 && matches!(
                     column,
                     "request_id" | "purpose" | "repo_id" | "worktree_id" | "root" | "branch"
-                ));
+                ))
+            || (table == "activities" && column == "phase");
         if !supported {
             return Ok(());
         }
@@ -3345,6 +3516,7 @@ impl Store {
              SET expires_at = ?1
              WHERE session_id = ?2
                 AND workspace_id = ?3
+                AND phase IN ('exploring', 'editing', 'testing')
                 AND (expires_at IS NULL OR expires_at < ?1)",
             params![activity_expires_at, session_id, workspace_id],
         )?;
@@ -3446,6 +3618,11 @@ impl Store {
                         expires_at,
                     ],
                 )?;
+                self.append_activity_inner(
+                    &event.session_id,
+                    &event.workspace_id,
+                    ActivityPhase::Exploring,
+                )?;
             }
             EventType::LeaseAcquired
             | EventType::LeaseReleased
@@ -3491,9 +3668,52 @@ impl Store {
         workspace_id: &str,
         relative_path: &str,
     ) -> StoreResult<()> {
-        self.promote_next_waiter_after_path_release(workspace_id, relative_path)?;
+        while self
+            .promote_next_waiter_after_path_release(workspace_id, relative_path)?
+            .is_some()
+        {}
 
         Ok(())
+    }
+
+    fn promote_unblocked_waiters(&self) -> StoreResult<()> {
+        loop {
+            let mut statement = self.conn.prepare(
+                "SELECT
+                    wait_id,
+                    session_id,
+                    workspace_id,
+                    relative_path,
+                    action,
+                    status,
+                    requested_at,
+                    reservation_expires_at,
+                    blocking_session_id,
+                    purpose
+                 FROM wait_queue
+                 WHERE status = 'queued'
+                 ORDER BY rowid ASC",
+            )?;
+            let waiters = statement
+                .query_map([], wait_record_from_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+
+            let mut promoted = false;
+            for waiter in waiters {
+                if self.waiter_has_active_conflict(&waiter)? {
+                    continue;
+                }
+                if self.promote_waiter_by_id(&waiter.wait_id)?.is_some() {
+                    promoted = true;
+                    break;
+                }
+            }
+
+            if !promoted {
+                return Ok(());
+            }
+        }
     }
 
     fn promote_next_waiter_after_path_release(
@@ -3572,36 +3792,89 @@ impl Store {
 
     fn waiter_has_active_conflict(&self, waiter: &WaitRecord) -> StoreResult<bool> {
         if waiter.action == "write_directory" {
-            return Ok(self
-                .active_lease_conflict_owner_for_directory(
+            let directory_prefix = format!("{}/", waiter.relative_path);
+            let active_lease_conflict = self.conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM leases
+                    WHERE workspace_id = ?1
+                       AND session_id != ?2
+                       AND status = 'active'
+                       AND (
+                           (action = 'write_directory' AND relative_path = ?3)
+                           OR substr(relative_path, 1, ?4) = ?5
+                           OR (action = 'write_directory'
+                              AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
+                       )
+                )",
+                params![
                     &waiter.workspace_id,
-                    &waiter.relative_path,
                     &waiter.session_id,
-                )?
-                .is_some()
-                || self
-                    .active_reservation_conflict_for_directory(
-                        &waiter.workspace_id,
-                        &waiter.relative_path,
-                        &waiter.session_id,
-                    )?
-                    .is_some());
+                    &waiter.relative_path,
+                    directory_prefix.len() as i64,
+                    &directory_prefix,
+                ],
+                |row| row.get::<_, bool>(0),
+            )?;
+            let active_reservation_conflict = self.conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM wait_queue
+                    WHERE workspace_id = ?1
+                       AND wait_id != ?2
+                       AND status = 'reserved'
+                       AND (
+                           (action = 'write_directory' AND relative_path = ?3)
+                           OR substr(relative_path, 1, ?4) = ?5
+                           OR (action = 'write_directory'
+                              AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
+                       )
+                )",
+                params![
+                    &waiter.workspace_id,
+                    &waiter.wait_id,
+                    &waiter.relative_path,
+                    directory_prefix.len() as i64,
+                    &directory_prefix,
+                ],
+                |row| row.get::<_, bool>(0),
+            )?;
+            return Ok(active_lease_conflict || active_reservation_conflict);
         }
 
-        Ok(self
-            .active_lease_conflict_owner_for_path(
+        let active_lease_conflict = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM leases
+                WHERE workspace_id = ?1
+                   AND session_id != ?2
+                   AND status = 'active'
+                   AND (
+                       (action = 'write_file' AND relative_path = ?3)
+                       OR (action = 'write_directory'
+                          AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
+                   )
+            )",
+            params![
                 &waiter.workspace_id,
-                &waiter.relative_path,
                 &waiter.session_id,
-            )?
-            .is_some()
-            || self
-                .active_reservation_conflict_for_path(
-                    &waiter.workspace_id,
-                    &waiter.relative_path,
-                    &waiter.session_id,
-                )?
-                .is_some())
+                &waiter.relative_path
+            ],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let active_reservation_conflict = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM wait_queue
+                WHERE workspace_id = ?1
+                   AND wait_id != ?2
+                   AND status = 'reserved'
+                   AND (
+                       (action = 'write_file' AND relative_path = ?3)
+                       OR (action = 'write_directory'
+                          AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
+                   )
+            )",
+            params![&waiter.workspace_id, &waiter.wait_id, &waiter.relative_path],
+            |row| row.get::<_, bool>(0),
+        )?;
+        Ok(active_lease_conflict || active_reservation_conflict)
     }
 
     fn promote_waiter_by_id(&self, wait_id: &str) -> StoreResult<Option<WaitRecord>> {
@@ -3658,6 +3931,10 @@ fn intent_scope_is_empty(scope: &IntentScope) -> bool {
     match scope {
         IntentScope::File(path) | IntentScope::Directory(path) => path.trim().is_empty(),
     }
+}
+
+fn direct_tmp_lease_path(relative_path: &str) -> bool {
+    relative_path == "tmp"
 }
 
 fn required_purpose(purpose: &str) -> StoreResult<String> {
@@ -3717,6 +3994,94 @@ fn identity_filter_matches(
     true
 }
 
+fn prepare_private_database_path(path: &Path) -> StoreResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+        restrict_directory_permissions(parent)?;
+    }
+    reject_linked_database_path(path)?;
+    if !path.exists() {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+    }
+    restrict_database_file_permissions(path)
+}
+
+fn reject_linked_database_path(path: &Path) -> StoreResult<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StoreError::Io(
+            std::io::Error::other("state database path must not be a symlink"),
+        )),
+        Ok(metadata) if database_metadata_is_hard_linked(&metadata) => Err(StoreError::Io(
+            std::io::Error::other("state database path must not be hard-linked"),
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StoreError::Io(error)),
+    }
+}
+
+fn restrict_database_file_permissions(path: &Path) -> StoreResult<()> {
+    restrict_file_permissions(path)?;
+    restrict_file_permissions(&path.with_extension("db-wal"))?;
+    restrict_file_permissions(&path.with_extension("db-shm"))?;
+    restrict_file_permissions(&path.with_extension("wal"))?;
+    restrict_file_permissions(&path.with_extension("shm"))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_directory_permissions(path: &Path) -> StoreResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_directory_permissions(_path: &Path) -> StoreResult<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_file_permissions(path: &Path) -> StoreResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StoreError::Io(
+            std::io::Error::other("state database file must not be a symlink"),
+        )),
+        Ok(metadata) if database_metadata_is_hard_linked(&metadata) => Err(StoreError::Io(
+            std::io::Error::other("state database file must not be hard-linked"),
+        )),
+        Ok(metadata) if metadata.is_file() => {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            Ok(())
+        }
+        Ok(_) => Err(StoreError::Io(std::io::Error::other(
+            "state database path must be a regular file",
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StoreError::Io(error)),
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_file_permissions(path: &Path) -> StoreResult<()> {
+    reject_linked_database_path(path)
+}
+
+#[cfg(unix)]
+fn database_metadata_is_hard_linked(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.is_file() && metadata.nlink() > 1
+}
+
+#[cfg(not(unix))]
+fn database_metadata_is_hard_linked(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
 fn configure_file_connection(conn: &Connection) -> StoreResult<()> {
     configure_connection(conn)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -3730,6 +4095,18 @@ fn configure_connection(conn: &Connection) -> StoreResult<()> {
 
 fn now_timestamp() -> String {
     format_timestamp(OffsetDateTime::now_utc())
+}
+
+fn parse_activity_phase(phase: &str) -> Option<ActivityPhase> {
+    match phase {
+        "exploring" => Some(ActivityPhase::Exploring),
+        "editing" => Some(ActivityPhase::Editing),
+        "testing" => Some(ActivityPhase::Testing),
+        "blocked" => Some(ActivityPhase::Blocked),
+        "done" => Some(ActivityPhase::Done),
+        "failed" => Some(ActivityPhase::Failed),
+        _ => None,
+    }
 }
 
 fn timestamp_after(timestamp: &str, seconds: i64) -> StoreResult<String> {
@@ -3994,6 +4371,7 @@ impl Event {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn intent_requested(
         session_id: impl Into<String>,
         workspace_id: impl Into<String>,
@@ -4174,6 +4552,7 @@ impl Event {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn authorization_denied(
         session_id: impl Into<String>,
         workspace_id: impl Into<String>,

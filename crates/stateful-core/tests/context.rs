@@ -1,6 +1,6 @@
 use stateful_core::{
-    ContextPackage, CurrentFreshness, CurrentItem, CurrentItemKind, CurrentSeverity,
-    ReconciliationDecision, RenderMode, render_prompt_text,
+    ContextPackage, CurrentEvidenceKind, CurrentFreshness, CurrentItem, CurrentItemKind,
+    CurrentSeverity, ReconciliationDecision, RenderMode, render_prompt_text,
 };
 
 #[test]
@@ -61,7 +61,8 @@ fn structured_items_render_purpose_and_required_actions() {
             "src/session.ts",
             "Resume queued session cleanup after rereading.",
             "Session s2 has a claimable reservation.",
-        ),
+        )
+        .with_next_action("Reread src/session.ts before continuing."),
     ]);
 
     let text = render_prompt_text(&package, RenderMode::Brief);
@@ -69,8 +70,100 @@ fn structured_items_render_purpose_and_required_actions() {
     assert!(text.contains("Blocking"));
     assert!(text.contains("Required Next Action"));
     assert!(text.contains("purpose: Fix auth validation behavior requested by the user"));
+    assert!(text.contains("next: Wait for s1 to release the lease"));
     assert!(text.contains("Nearby Activity"));
     assert!(text.contains("purpose: Resume queued session cleanup after rereading"));
+    assert!(!text.contains("next: Reread src/session.ts before continuing"));
+}
+
+#[test]
+fn required_next_action_deduplicates_repeated_blocking_actions() {
+    let repeated = "Wait for the lease to release, or coordinate with session-a.";
+    let package = ContextPackage::from_items(vec![
+        CurrentItem::new(
+            CurrentItemKind::Lease,
+            CurrentSeverity::Block,
+            CurrentFreshness::Live,
+            "src/auth.ts",
+            "Fix auth validation behavior.",
+            "session-a has an active write lease on src/auth.ts.",
+        )
+        .with_next_action(repeated),
+        CurrentItem::new(
+            CurrentItemKind::Lease,
+            CurrentSeverity::Block,
+            CurrentFreshness::Live,
+            "src/session.ts",
+            "Fix auth validation behavior.",
+            "session-a has an active write lease on src/session.ts.",
+        )
+        .with_next_action(repeated),
+        CurrentItem::new(
+            CurrentItemKind::Reservation,
+            CurrentSeverity::Block,
+            CurrentFreshness::Live,
+            "src/cache.ts",
+            "Resume queued cache update.",
+            "A reservation is ready for src/cache.ts.",
+        )
+        .with_next_action("Reread src/cache.ts before continuing."),
+    ]);
+
+    let text = render_prompt_text(&package, RenderMode::Brief);
+    let required_section = text
+        .split("Required Next Action\n")
+        .nth(1)
+        .expect("required next action section should render");
+
+    assert_eq!(
+        required_section
+            .matches("- Wait for the lease to release, or coordinate with session-a")
+            .count(),
+        1
+    );
+    assert!(required_section.contains("- Reread src/cache.ts before continuing"));
+}
+
+#[test]
+fn brief_context_renders_evidence_kind_without_evidence_text() {
+    let package = ContextPackage::from_items(vec![
+        CurrentItem::new(
+            CurrentItemKind::Intent,
+            CurrentSeverity::Info,
+            CurrentFreshness::Live,
+            "src/auth.ts",
+            "Fix auth validation behavior.",
+            "Session s1 declared intent for src/auth.ts.",
+        )
+        .with_evidence("IntentDeclared event from session s1.")
+        .with_evidence_kind(CurrentEvidenceKind::DeclaredIntent),
+    ]);
+
+    let text = render_prompt_text(&package, RenderMode::Brief);
+
+    assert!(text.contains("evidence kind: declared_intent"));
+    assert!(!text.contains("evidence: IntentDeclared event"));
+}
+
+#[test]
+fn detailed_context_renders_evidence_text() {
+    let package = ContextPackage::from_items(vec![
+        CurrentItem::new(
+            CurrentItemKind::Intent,
+            CurrentSeverity::Info,
+            CurrentFreshness::Live,
+            "src/auth.ts",
+            "Fix auth validation behavior.",
+            "Session s1 declared intent for src/auth.ts.",
+        )
+        .with_evidence("IntentDeclared event from session s1.")
+        .with_evidence_kind(CurrentEvidenceKind::DeclaredIntent),
+    ]);
+
+    let text = render_prompt_text(&package, RenderMode::Detailed);
+
+    assert!(text.contains("evidence kind: declared_intent"));
+    assert!(text.contains("evidence: IntentDeclared event from session s1"));
 }
 
 #[test]

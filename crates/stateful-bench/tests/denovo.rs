@@ -1,12 +1,8 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
 use stateful_bench::{
-    DeNovoAgentKind, DeNovoCodexRunOptions, DeNovoComparisonReport, DeNovoCondition,
-    DeNovoConditionRunOptions, DeNovoExtractOptions, DeNovoExtractRecipeOptions,
+    DeNovoAgentKind, DeNovoCliRuntime, DeNovoCodexRunOptions, DeNovoComparisonReport,
+    DeNovoCondition, DeNovoConditionRunOptions, DeNovoExtractOptions, DeNovoExtractRecipeOptions,
     DeNovoMatrixRunOptions, DeNovoOfficialResult, DeNovoRunMode, DeNovoRunRecipeOptions,
     build_denovo_codex_adapter_command, build_denovo_condition_report,
     build_denovo_extract_recipe_command, build_denovo_run_recipe_command, compare_denovo_reports,
@@ -125,11 +121,11 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
     };
     let results = vec![
         serde_json::from_str::<DeNovoOfficialResult>(
-            r#"{"instance_id":"a","success":true,"score":1.0,"subagent_used":true,"eval_result":{"details":{"pass_rate":1.0}}}"#,
+            r#"{"instance_id":"a","success":true,"score":1.0,"subagent_used":true,"token_usage":{"turns":2,"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"reasoning_output_tokens":3},"eval_result":{"details":{"pass_rate":1.0}}}"#,
         )
         .expect("result a"),
         serde_json::from_str::<DeNovoOfficialResult>(
-            r#"{"instance_id":"b","success":false,"score":0.75,"subagent_used":false,"eval_result":{"details":{"pass_rate":0.5}}}"#,
+            r#"{"instance_id":"b","success":false,"score":0.75,"subagent_used":false,"token_usage":{"turns":1,"input_tokens":50,"cached_input_tokens":20,"output_tokens":5,"reasoning_output_tokens":2},"eval_result":{"details":{"pass_rate":0.5}}}"#,
         )
         .expect("result b"),
         serde_json::from_str::<DeNovoOfficialResult>(
@@ -163,6 +159,17 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
     assert_eq!(report.subagent_observed_instances, 2);
     assert_eq!(report.subagent_used_count, 1);
     assert_eq!(report.subagent_used_rate, Some(0.5));
+    assert_eq!(report.token_observed_instances, 2);
+    assert_eq!(report.token_usage_turns, 3);
+    assert_eq!(report.token_input_tokens, 150);
+    assert_eq!(report.token_cached_input_tokens, 60);
+    assert_eq!(report.token_output_tokens, 15);
+    assert_eq!(report.token_reasoning_output_tokens, 5);
+    assert_eq!(report.token_input_plus_output_tokens, 165);
+    assert_eq!(report.token_uncached_input_tokens, 90);
+    assert_eq!(report.token_uncached_input_plus_output_tokens, 105);
+    assert_eq!(report.average_input_plus_output_tokens, Some(82.5));
+    assert_eq!(report.average_uncached_input_plus_output_tokens, Some(52.5));
 }
 
 #[test]
@@ -401,7 +408,10 @@ fn denovo_codex_adapter_command_uses_stateful_adapter_and_condition_axes() {
         prompt_version: "v1".to_string(),
         verbose: true,
         codex_bin: "/opt/homebrew/bin/codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "/Users/arthur/.cargo/bin/stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -411,6 +421,7 @@ fn denovo_codex_adapter_command_uses_stateful_adapter_and_condition_axes() {
         max_resumes: 2,
         codex_timeout_seconds: 7200,
         adapter_script: Some("crates/stateful-bench/scripts/denovo_codex_agent.py".into()),
+        cli_runtime: DeNovoCliRuntime::Codex,
     })
     .expect("codex adapter command should build");
 
@@ -467,6 +478,89 @@ fn denovo_codex_adapter_command_uses_stateful_adapter_and_condition_axes() {
 }
 
 #[test]
+fn denovo_omp_adapter_command_uses_existing_adapter_with_omp_runtime() {
+    let command = build_denovo_codex_adapter_command(DeNovoCodexRunOptions {
+        aweagent_root: "../AweAgent".into(),
+        python: "python3".to_string(),
+        data_file: "denovoswe_with_patches.jsonl".into(),
+        output: "target/stateful-bench/denovo/runs/dev/omp-cli".into(),
+        base_config: "configs/tasks/denovoswe.yaml".into(),
+        condition: DeNovoCondition::new(true, true),
+        mode: DeNovoRunMode::Batch,
+        instance_ids: vec!["PyCQA_pep8_pr970".to_string()],
+        max_steps: Some(500),
+        max_concurrent: Some(1),
+        skip_eval: false,
+        validate_run: true,
+        eval_iters: 1,
+        del_done_images: false,
+        dump_clean_snapshot: None,
+        prompt_version: "v2".to_string(),
+        verbose: true,
+        codex_bin: "/opt/homebrew/bin/codex".to_string(),
+        omp_bin: "/opt/homebrew/bin/omp".to_string(),
+        stateful_binary: "/Users/arthur/.cargo/bin/stateful".to_string(),
+        agent_docker_image: Some("ghcr.io/stateful/omp-agent:latest".to_string()),
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        benchmark_model: "deepseek-v4-flash".to_string(),
+        benchmark_reasoning_effort: "low".to_string(),
+        benchmark_model_context_window: 256000,
+        benchmark_temperature: "1".to_string(),
+        benchmark_max_turns: 500,
+        subagent_min_count: 4,
+        max_resumes: 2,
+        codex_timeout_seconds: 7200,
+        adapter_script: Some("crates/stateful-bench/scripts/denovo_codex_agent.py".into()),
+        cli_runtime: DeNovoCliRuntime::Omp,
+    })
+    .expect("omp adapter command should build");
+
+    assert_eq!(command.program, "python3");
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--cli-runtime", "omp"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--omp-bin", "/opt/homebrew/bin/omp"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--benchmark-model", "deepseek-v4-flash"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--agent-mode", "stateful"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--subagent", "on"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--agent-docker-image", "ghcr.io/stateful/omp-agent:latest"])
+    );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--agent-docker-stateful-binary", "/usr/local/bin/stateful"])
+    );
+}
+
+#[test]
 fn denovo_condition_run_executes_fake_recipe_and_writes_metadata() {
     let root = temp_root("stateful-bench-denovo-fake-recipe");
     let aweagent = root.join("AweAgent");
@@ -508,7 +602,10 @@ out.mkdir(parents=True, exist_ok=True)
         condition,
         agent: DeNovoAgentKind::Official,
         codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -558,6 +655,65 @@ out.mkdir(parents=True, exist_ok=True)
 }
 
 #[test]
+fn denovo_codex_agent_git_diff_ignores_gitignored_pytest_cache() {
+    let root = temp_root("stateful-bench-denovo-git-diff-ignored-cache");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace should exist");
+
+    run_git(&workspace, &["init"]);
+    run_git(&workspace, &["config", "user.email", "codex@example.com"]);
+    run_git(&workspace, &["config", "user.name", "Codex"]);
+    fs::write(workspace.join(".gitignore"), ".pytest_cache/\n")
+        .expect("gitignore should be written");
+    fs::write(workspace.join("tracked.py"), "before\n").expect("tracked file should be written");
+    run_git(&workspace, &["add", "."]);
+    run_git(&workspace, &["commit", "-m", "initial"]);
+
+    fs::write(workspace.join("tracked.py"), "after\n").expect("tracked file should be modified");
+    fs::create_dir_all(workspace.join(".pytest_cache")).expect("pytest cache dir should exist");
+    fs::write(workspace.join(".pytest_cache/README"), "cache\n")
+        .expect("ignored cache file should be written");
+
+    let adapter_script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/denovo_codex_agent.py");
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(
+            r#"
+import importlib.util
+import pathlib
+import sys
+
+script = pathlib.Path(sys.argv[1])
+workspace = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("denovo_codex_agent", script)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+print(module.git_diff(workspace))
+"#,
+        )
+        .arg(adapter_script)
+        .arg(&workspace)
+        .output()
+        .expect("python should run git_diff");
+
+    assert!(
+        output.status.success(),
+        "git_diff should ignore gitignored pytest cache\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let patch = String::from_utf8(output.stdout).expect("patch should be utf8");
+    assert!(patch.contains("tracked.py"));
+    assert!(patch.contains("+after"));
+    assert!(!patch.contains(".pytest_cache"));
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
 fn denovo_condition_run_routes_codex_cli_to_adapter_and_writes_metadata() {
     let root = temp_root("stateful-bench-denovo-codex-cli-adapter");
     let aweagent = root.join("AweAgent");
@@ -595,7 +751,10 @@ out.mkdir(parents=True, exist_ok=True)
         condition: DeNovoCondition::new(false, true),
         agent: DeNovoAgentKind::CodexCli,
         codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -675,10 +834,7 @@ out.mkdir(parents=True, exist_ok=True)
 
 #[test]
 fn denovo_condition_run_resolves_relative_codex_adapter_script_from_caller_cwd() {
-    let root = PathBuf::from("../..").join("tmp/target").join(format!(
-        "stateful-bench-denovo-relative-adapter-{}",
-        std::process::id()
-    ));
+    let root = temp_root("stateful-bench-denovo-relative-adapter");
     if root.exists() {
         fs::remove_dir_all(&root).expect("old temp root should clean up");
     }
@@ -714,7 +870,10 @@ out.mkdir(parents=True, exist_ok=True)
         condition: DeNovoCondition::new(false, true),
         agent: DeNovoAgentKind::CodexCli,
         codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -765,22 +924,28 @@ fn denovo_condition_run_reports_neutral_command_failure_for_codex_adapter() {
         &adapter,
         r#"#!/usr/bin/env python3
 import sys
+print("adapter stdout before failure")
+print("adapter stderr before failure", file=sys.stderr)
 sys.exit(2)
 "#,
     )
     .expect("fake adapter should write");
 
+    let run_dir = root.join("runs/dev-denovo-codex-failure");
     let error = run_denovo_condition(DeNovoConditionRunOptions {
         run_id: "dev-denovo-codex-failure".to_string(),
         aweagent_root: aweagent,
         python: "python3".to_string(),
         data_file: "denovoswe_with_patches.jsonl".into(),
-        run_dir: root.join("runs/dev-denovo-codex-failure"),
+        run_dir: run_dir.clone(),
         base_config: "configs/tasks/denovoswe.yaml".into(),
         condition: DeNovoCondition::new(false, true),
         agent: DeNovoAgentKind::CodexCli,
         codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -810,6 +975,42 @@ sys.exit(2)
     let message = error.to_string();
     assert!(message.contains("DeNovoSWE command failed with status"));
     assert!(!message.contains("official DeNovoSWE recipe failed"));
+    assert!(message.contains("command.stderr.log"));
+
+    let condition_dir = run_dir.join("conditions/stateful-off_subagent-on");
+    assert_eq!(
+        fs::read_to_string(condition_dir.join("command.stdout.log"))
+            .expect("stdout log should be written"),
+        "adapter stdout before failure\n"
+    );
+    assert_eq!(
+        fs::read_to_string(condition_dir.join("command.stderr.log"))
+            .expect("stderr log should be written"),
+        "adapter stderr before failure\n"
+    );
+    let metadata: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(condition_dir.join("condition.json"))
+            .expect("failure metadata should be written"),
+    )
+    .expect("failure metadata should parse");
+    assert!(
+        metadata["error"]
+            .as_str()
+            .expect("error should be recorded")
+            .contains("command.stderr.log")
+    );
+    assert!(
+        metadata["stdout_log"]
+            .as_str()
+            .expect("stdout log path should be recorded")
+            .ends_with("command.stdout.log")
+    );
+    assert!(
+        metadata["stderr_log"]
+            .as_str()
+            .expect("stderr log path should be recorded")
+            .ends_with("command.stderr.log")
+    );
 
     fs::remove_dir_all(root).expect("temp root should clean up");
 }
@@ -858,7 +1059,10 @@ score = 1.0 if "stateful" in args.config else 0.5
         ],
         agent: DeNovoAgentKind::Official,
         codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -945,10 +1149,7 @@ out.mkdir(parents=True, exist_ok=True)
 
 #[test]
 fn denovo_extract_relative_paths_are_resolved_from_caller_cwd() {
-    let root = PathBuf::from("../..").join("tmp/target").join(format!(
-        "stateful-bench-denovo-extract-relative-{}",
-        std::process::id()
-    ));
+    let root = temp_root("stateful-bench-denovo-extract-relative");
     if root.exists() {
         fs::remove_dir_all(&root).expect("old temp root should clean up");
     }
@@ -998,7 +1199,7 @@ out.mkdir(parents=True, exist_ok=True)
 
     assert!(metadata.results_jsonl.starts_with(&output));
     assert!(output.join("extract_patch_fake/results.jsonl").is_file());
-    assert!(!root.join("AweAgent").join(&output).exists());
+    assert!(!root.join("AweAgent/extracts").exists());
 
     let received: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(output.join("extract_patch_fake/received.json"))
@@ -1018,4 +1219,18 @@ fn temp_root(name: &str) -> std::path::PathBuf {
         fs::remove_dir_all(&root).expect("old temp root should clean up");
     }
     root
+}
+
+fn run_git(workspace: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

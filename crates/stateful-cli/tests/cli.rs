@@ -1,6 +1,6 @@
 use clap::Parser;
 use stateful_cli::{
-    Cli, CodexSandboxMode, Command, ExternalRunCommand, GlobalPaths, HookCommand, InstallAgent,
+    Cli, CodexSandboxMode, Command, GlobalPaths, HookCommand, HookRuntime, InstallAgent,
     McpCommand, NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand,
     SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, ToolsCommand, allow_tool_for_repo,
     doctor_report_with_global, enable_repo, record_unclassified_tool_for_repo,
@@ -16,17 +16,23 @@ fn parses_sandbox_run_read_only_defaults() {
         Command::Sandbox(SandboxCommand::Run {
             fs,
             network,
+            purpose,
             write_targets,
             create_targets,
             write_dirs,
+            connect_sockets,
+            allow_signal,
             command,
             timeout_seconds,
         }) => {
             assert_eq!(fs, SandboxFsProfile::ReadOnly);
             assert_eq!(network, SandboxNetworkPolicy::Disabled);
+            assert_eq!(purpose, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
+            assert!(connect_sockets.is_empty());
+            assert!(!allow_signal);
             assert_eq!(command, "rg auth src");
             assert_eq!(timeout_seconds, None);
         }
@@ -95,17 +101,23 @@ fn parses_sandbox_run_write_targets_network_enabled() {
         Command::Sandbox(SandboxCommand::Run {
             fs,
             network,
+            purpose,
             write_targets,
             create_targets,
             write_dirs,
+            connect_sockets,
+            allow_signal,
             command,
             timeout_seconds,
         }) => {
             assert_eq!(fs, SandboxFsProfile::WriteTargets);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
+            assert_eq!(purpose, None);
             assert_eq!(write_targets, vec!["README.md"]);
             assert_eq!(create_targets, vec!["docs/new.md"]);
             assert_eq!(write_dirs, vec!["tmp"]);
+            assert!(connect_sockets.is_empty());
+            assert!(!allow_signal);
             assert_eq!(command, "printf x > README.md");
             assert_eq!(timeout_seconds, Some(12));
         }
@@ -134,18 +146,69 @@ fn parses_sandbox_run_git_profile() {
         Command::Sandbox(SandboxCommand::Run {
             fs,
             network,
+            purpose,
             write_targets,
             create_targets,
             write_dirs,
+            connect_sockets,
+            allow_signal,
             command,
             timeout_seconds,
         }) => {
             assert_eq!(fs, SandboxFsProfile::Git);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
+            assert_eq!(purpose, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
+            assert!(connect_sockets.is_empty());
+            assert!(!allow_signal);
             assert_eq!(command, "git fetch --all");
+            assert_eq!(timeout_seconds, Some(30));
+        }
+        other => panic!("expected sandbox run command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_sandbox_run_github_pr_profile() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "run",
+        "--fs",
+        "github-pr",
+        "--network",
+        "enabled",
+        "--timeout-seconds",
+        "30",
+        "--command",
+        "gh pr status",
+    ])
+    .expect("sandbox github-pr profile should parse");
+
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Run {
+            fs,
+            network,
+            purpose,
+            write_targets,
+            create_targets,
+            write_dirs,
+            connect_sockets,
+            allow_signal,
+            command,
+            timeout_seconds,
+        }) => {
+            assert_eq!(fs, SandboxFsProfile::GithubPr);
+            assert_eq!(network, SandboxNetworkPolicy::Enabled);
+            assert_eq!(purpose, None);
+            assert!(write_targets.is_empty());
+            assert!(create_targets.is_empty());
+            assert!(write_dirs.is_empty());
+            assert!(connect_sockets.is_empty());
+            assert!(!allow_signal);
+            assert_eq!(command, "gh pr status");
             assert_eq!(timeout_seconds, Some(30));
         }
         other => panic!("expected sandbox run command, got {other:?}"),
@@ -173,17 +236,23 @@ fn parses_sandbox_run_build_profile() {
         Command::Sandbox(SandboxCommand::Run {
             fs,
             network,
+            purpose,
             write_targets,
             create_targets,
             write_dirs,
+            connect_sockets,
+            allow_signal,
             command,
             timeout_seconds,
         }) => {
             assert_eq!(fs, SandboxFsProfile::Build);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
+            assert_eq!(purpose, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
+            assert!(connect_sockets.is_empty());
+            assert!(!allow_signal);
             assert_eq!(command, "npm test");
             assert_eq!(timeout_seconds, Some(60));
         }
@@ -310,11 +379,13 @@ fn nested_codex_benchmark_sandbox_requires_purpose_home_root_and_command() {
 }
 
 #[test]
-fn parses_external_run_request_command() {
+fn parses_sandbox_run_external_profile() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "external-run",
-        "request",
+        "sandbox",
+        "run",
+        "--fs",
+        "external",
         "--purpose",
         "install rebuilt binaries",
         "--write-target",
@@ -323,58 +394,79 @@ fn parses_external_run_request_command() {
         "/Users/me/.cargo/bin/stateful-bench",
         "--write-dir",
         "/Users/me/.cargo/bin",
+        "--connect-socket",
+        "/private/tmp/tmux-501/default",
+        "--allow-signal",
         "--network",
-        "disabled",
+        "enabled",
         "--timeout-seconds",
         "10",
         "--command",
         "install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful",
     ])
-    .expect("external-run request should parse");
+    .expect("sandbox external run should parse");
 
     match cli.command {
-        Command::ExternalRun(ExternalRunCommand::Request {
+        Command::Sandbox(SandboxCommand::Run {
+            fs,
+            network,
             purpose,
             write_targets,
             create_targets,
             write_dirs,
-            network,
+            connect_sockets,
+            allow_signal,
             timeout_seconds,
             command,
         }) => {
-            assert_eq!(purpose, "install rebuilt binaries");
+            assert_eq!(fs, SandboxFsProfile::External);
+            assert_eq!(purpose, Some("install rebuilt binaries".to_string()));
             assert_eq!(write_targets, vec!["/Users/me/.cargo/bin/stateful"]);
             assert_eq!(create_targets, vec!["/Users/me/.cargo/bin/stateful-bench"]);
             assert_eq!(write_dirs, vec!["/Users/me/.cargo/bin"]);
-            assert_eq!(network, SandboxNetworkPolicy::Disabled);
+            assert_eq!(connect_sockets, vec!["/private/tmp/tmux-501/default"]);
+            assert!(allow_signal);
+            assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(timeout_seconds, Some(10));
             assert_eq!(
                 command,
                 "install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful"
             );
         }
-        other => panic!("expected external-run request command, got {other:?}"),
+        other => panic!("expected sandbox external run command, got {other:?}"),
     }
 }
 
 #[test]
-fn parses_external_run_approve_and_run_command() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "external-run",
-        "approve",
-        "request-123",
-        "--run",
-    ])
-    .expect("external-run approve should parse");
+fn rejects_external_run_command() {
+    for args in [
+        vec![
+            "stateful",
+            "external-run",
+            "request",
+            "--purpose",
+            "install rebuilt binaries",
+            "--write-dir",
+            "/Users/me/.cargo/bin",
+            "--command",
+            "true",
+        ],
+        vec![
+            "stateful",
+            "external-run",
+            "approve",
+            "request-123",
+            "--run",
+        ],
+        vec!["stateful", "external-run", "run", "request-123"],
+    ] {
+        let error = Cli::try_parse_from(args).expect_err("external-run command should be removed");
 
-    assert!(matches!(
-        cli.command,
-        Command::ExternalRun(ExternalRunCommand::Approve {
-            ref request_id,
-            run: true
-        }) if request_id == "request-123"
-    ));
+        assert!(
+            error.to_string().contains("unrecognized subcommand"),
+            "unexpected parse error: {error}"
+        );
+    }
 }
 
 #[test]
@@ -413,8 +505,8 @@ fn parses_disable_command() {
 }
 
 #[test]
-fn parses_codex_wrapper_command_with_explicit_read_only_tmp_sandbox() {
-    let cli = Cli::try_parse_from([
+fn rejects_codex_wrapper_command_with_read_only_tmp_sandbox() {
+    let error = Cli::try_parse_from([
         "stateful",
         "codex",
         "--codex-bin",
@@ -425,18 +517,12 @@ fn parses_codex_wrapper_command_with_explicit_read_only_tmp_sandbox() {
         "--json",
         "-",
     ])
-    .expect("codex wrapper command should parse");
+    .expect_err("read-only-tmp sandbox mode should be removed");
 
-    assert!(matches!(
-        cli.command,
-        Command::Codex {
-            ref codex_bin,
-            sandbox: CodexSandboxMode::ReadOnlyTmp,
-            no_stateful: false,
-            ref args,
-        } if codex_bin == "/opt/codex/bin/codex"
-            && args == &vec!["exec".to_string(), "--json".to_string(), "-".to_string()]
-    ));
+    assert!(
+        error.to_string().contains("read-only-tmp"),
+        "error should name the rejected sandbox mode: {error}"
+    );
 }
 
 #[test]
@@ -491,6 +577,7 @@ fn parses_install_yes_command() {
             ref agents,
             codex_config: None,
             binary: None,
+            update: false,
         }
         if agents.is_empty()
     ));
@@ -518,9 +605,26 @@ fn parses_install_agent_codex_command() {
             ref agents,
             ref codex_config,
             ref binary,
+            update: false,
         } if codex_config == &Some(PathBuf::from("/home/me/.codex/config.toml"))
             && binary.as_deref() == Some("/opt/stateful/bin/stateful")
             && agents == &vec![InstallAgent::Codex]
+    ));
+}
+
+#[test]
+fn parses_install_agent_omp_command() {
+    let cli = Cli::try_parse_from(["stateful", "install", "--agent", "omp", "--yes", "--update"])
+        .expect("install --agent omp command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Install {
+            yes: true,
+            ref agents,
+            update: true,
+            ..
+        } if agents == &vec![InstallAgent::Omp]
     ));
 }
 
@@ -614,6 +718,7 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
             "mcp__openaiDeveloperDocs__fetch_openai_doc",
             "mcp__openaiDeveloperDocs__search_openai_docs",
             "multi_agent_v1send_input",
+            "task",
             "KnownTool"
         ])
     );
@@ -672,14 +777,34 @@ fn parses_resume_next_command() {
 }
 
 #[test]
-fn hook_pre_tool_use_command_parses() {
-    let cli = Cli::try_parse_from(["stateful", "hook", "pre-tool-use"])
-        .expect("hook pre-tool-use command should parse");
+fn hook_codex_pre_tool_use_command_parses() {
+    let cli = Cli::try_parse_from(["stateful", "hook", "codex", "pre-tool-use"])
+        .expect("hook codex pre-tool-use command should parse");
 
     assert!(matches!(
         cli.command,
-        Command::Hook(HookCommand::PreToolUse)
+        Command::Hook(HookRuntime::Codex {
+            command: HookCommand::PreToolUse,
+        })
     ));
+}
+
+#[test]
+fn hook_omp_pre_tool_use_command_parses() {
+    let cli = Cli::try_parse_from(["stateful", "hook", "omp", "pre-tool-use"])
+        .expect("hook omp pre-tool-use command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Hook(HookRuntime::Omp {
+            command: HookCommand::PreToolUse,
+        })
+    ));
+}
+
+#[test]
+fn hook_legacy_pre_tool_use_command_is_rejected() {
+    assert!(Cli::try_parse_from(["stateful", "hook", "pre-tool-use"]).is_err());
 }
 
 #[test]

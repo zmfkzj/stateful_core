@@ -19,11 +19,25 @@ Watcher-driven human observation and richer store-backed prompt rendering remain
 design targets unless a section below says they are implemented.
 
 The prototype supports user-level installation with repo allowlist gating.
-`stateful install --yes` configures global Codex hooks and MCP. `stateful enable`
-opts the current repo into enforcement. Repo-local hooks remain available through
-`stateful enable --repo-local-codex` as a compatibility fallback.
+`stateful install --yes` installs stateful global files only. `stateful install
+--agent codex --yes` configures global Codex hooks and MCP. `stateful install
+--agent omp --yes` configures the isolated OMP `stateful` profile with stateful
+hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `ext_ro_bash`
+for read-only `--fs external`, `ext_rw_bash` for external writes, and approval
+entries that deny raw Bash while setting
+Python/JavaScript/JS/Ruby/Julia eval tools to false. The OMP installer also
+writes `rules/stateful-required.md` and
+`skills/stateful-command-policy/SKILL.md` under that isolated agent directory:
+the always-apply rule owns model-facing activation, the skill owns detailed
+procedure, and hooks remain the enforcement boundary. `stateful enable` opts the
+current repo into enforcement.
+For OMP, the extension prefers the actual OMP runtime session id from
+`event.sessionId` or `ctx.sessionManager.session.id`, stores it in
+`process.env.STATEFUL_SESSION_ID`, and `stateful hook omp session-start`
+persists current-session files so session-aware MCP tools resolve the same
+session.
 
-Codex hooks should invoke the compiled `stateful` binary instead of embedding
+Hook adapters should invoke the compiled `stateful` binary instead of embedding
 policy or adapter logic in separate scripts. Hook configuration may reference
 the binary directly by absolute path or by PATH lookup.
 
@@ -126,13 +140,16 @@ it returns the first active reservation that the session can claim after
 rereading the target, even if the reservation notification was already delivered
 or the client missed the poll response. `/v1/intent/claim` is the explicit
 reservation claim path; it creates write-authorizing intent and an active lease
-for the reservation owner. `/v1/authorize` must not claim reservations
-implicitly. `/v1/lease/acquire` records the target existence and content hash
-when `root` is supplied; hook-originated native file writes compare that
-observation before each authorization. `/v1/lease/refresh-observation` refreshes
-the same-session exact file lease observation after a supported file tool has
-completed, so later same-session writes are compared against the session's own
-latest completed write rather than the original lease snapshot. `/v1/intent/request`
+for the reservation owner. `/v1/authorize` may lazy-claim an active reservation
+for hook and sandbox authorization sources after the client rereads and retries
+the write boundary; read-only conflict checks must not claim reservations.
+`/v1/lease/acquire` records the target existence and content hash when `root` is
+supplied; hook-originated native file writes compare that observation before
+authorization. `/v1/lease/refresh-observation` refreshes the same-session exact
+file lease observation while a lease remains active. Completed native edit and
+`write-targets` hook flows release their authorizing lease instead of carrying
+it forward, so later writes must reread and acquire a fresh lease or claim an
+eligible reservation. `/v1/intent/request`
 creates or returns an idempotent queued or reserved request by `request_id`;
 `/v1/intent/cancel` cancels queued or reserved requests owned by the caller.
 `/v1/runtime/identity` is an authenticated server identity endpoint used by
@@ -140,8 +157,13 @@ creates or returns an idempotent queued or reserved request by `request_id`;
 the same stateful server.
 
 MCP tools map directly onto these endpoints. MCP handlers do not implement
-policy branches; they validate tool arguments, call the HTTP API, and return the
-server result.
+policy branches; they validate tool arguments, resolve the current session from
+explicit arguments, `STATEFUL_SESSION_ID`, or hook-persisted current-session
+files as appropriate, call the HTTP API, and return the server result. The OMP
+current-session path supports `state_session_register` ->
+`state_intent_declare` -> `state_lease_acquire` without a caller-supplied env
+override after `stateful hook omp session-start` has persisted the active
+session.
 
 Current envelope enforcement is limited to `/v1/authorize` and
 `/v1/intent/declare`, `/v1/intent/request`, `/v1/intent/claim`, and
@@ -176,28 +198,62 @@ The shipped `/v1/intent/request` scheduling API accepts only `write_file` and
 from `/v1/authorize` does not queue `rename_file` or `move_file`, because those
 actions affect multiple paths and need the target all-or-nothing scheduler.
 
-Native Codex edit tools such as `apply_patch`, `Edit`, and `Write` expose
-targets to hooks. After exact intent and a successful same-session file lease,
-hooks call `/v1/authorize` with the operation-specific action before allowing
-the edit, including `write_file`, `delete_file`, and `move_file` with source
-`path` / `old_path` and destination `new_path`. PreToolUse authorization sends
-current `base_observations` for each affected target when the hook can read the
-workspace file state. PostToolUse refreshes the active same-session exact file
-lease observation for completed supported file tools. For Bash, command text
-alone never authorizes tool use.
+Native edit tools with hook-visible targets, such as Codex `apply_patch`,
+`Edit`, and `Write` or OMP `edit` and `write`, expose targets to hooks. After
+exact intent and a successful same-session file lease, hooks call
+`/v1/authorize` with the operation-specific action before allowing the edit,
+including `write_file`, `delete_file`, and `move_file` with source `path` /
+`old_path` and destination `new_path`. PreToolUse authorization sends current
+`base_observations` for each affected target when the hook can read the
+workspace file state. PostToolUse observes completed native edits and sandbox
+`write-targets` transactions, records the result, and releases the same-session
+leases that authorized the completed write boundary. Released leases leave the
+live context render and do not authorize a later write; the session must reread
+and reacquire a lease, or lazy-claim an eligible reservation, before retrying.
+For Bash, command text alone never authorizes tool use.
 `/v1/authorize` accepts optional `base_observations` for OCC-style freshness
 checks. When supplied, each observation is compared against the current
 workspace file state under `workspace.root`; existence or `content_hash` changes
 for an affected target return `deny` with `reason_code:
 stale_target_observation` and require the caller to reread before retrying.
-Raw Bash is denied by stateful hooks. Bash hook calls are allowed only when the
-outer command is a single strict invocation of the trusted absolute `stateful`
-binary running `<absolute-stateful-binary> sandbox run ... --command <cmd>`.
-Read-only command-shaped inspection uses `<absolute-stateful-binary> sandbox run
---fs read-only --network disabled --command <cmd>`; the read-only profile rejects
-`--network enabled`. Command-shaped writes use
-`--fs write-targets` with explicit `--write-target` / `--create-target` values
-and target authorization.
+Hook adapters normalize namespaced runtime tool names to their leaf before
+policy classification: `functions.bash` follows Bash rules,
+`functions.python` / `functions.javascript` / `functions.js` /
+`functions.ruby` / `functions.julia` follow eval-tool rules, and
+`functions.read` / `functions.search` follow native read/search rules.
+Codex raw Bash is denied by stateful hooks with sandbox guidance. Bash hook
+calls for repo-internal shell work are allowed only when the outer command is a
+single strict invocation of the trusted absolute `stateful` binary running
+`<absolute-stateful-binary> sandbox run ... --command <cmd>`. Ordinary read work
+should use agent-native read/search/diff tools when available. Read-only
+command-shaped inspection uses `<absolute-stateful-binary> sandbox run --fs
+read-only --network disabled --command <cmd>`; the read-only profile rejects
+`--network enabled`. Command-shaped repo writes use `--fs write-targets` with
+explicit `--write-target <file>` / `--create-target <file>` values and target authorization.
+OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution are denied
+at host approval and hook levels, even when the raw command itself invokes
+`stateful sandbox run`. OMP
+sandbox command execution uses generated custom tools: `sandbox_bash` invokes
+the trusted stateful binary for read-only, write-targets, build, git, and
+github-pr profiles, including common sandbox flags, and rejects `--fs external`
+with guidance to use `ext_ro_bash` or `ext_rw_bash`; `ext_ro_bash` runs
+purpose-and-command-only external reads without OMP UI confirmation; `ext_rw_bash`
+asks OMP UI confirmation before spawning the trusted stateful binary with
+`sandbox run --fs external --purpose ...` for external writes that declare at
+least one write target, create target, or write dir. The external sandbox
+profile requires purpose and command; read-only/no-declared-scope operations may
+omit targets, while supplied external write scopes are validated as absolute
+paths outside the repo. On macOS, external profile runs also allow
+trust/identity Mach lookups for `trustd` and DirectoryService so Go TLS clients
+such as `gh` can verify certificates. It runs through the sandbox after Codex
+approval, `ext_ro_bash` execution, or `ext_rw_bash` confirmation and does not
+require repo intent or lease unless repo-relative write scope is supplied.
+Local git operations use `<absolute-stateful-binary> sandbox run --fs git
+--network disabled --command 'git <args>'`; use `--network enabled` only for
+remote git operations. GitHub pull request list/view/status/create commands use
+`<absolute-stateful-binary> sandbox run --fs github-pr --network enabled --command
+'gh pr <list|view|status|create> ...'`; in OMP, call `sandbox_bash`. Use the
+GitHub connector instead when that connector is explicitly allowlisted for the repo.
 
 ## Decision Output
 
@@ -232,15 +288,18 @@ integration risk rather than immediate physical file overwrite.
 Queued requests are promoted FIFO. The shipped queue stores one requested path
 per wait request, and a request is reservable only when that requested resource
 is available. Promotion is triggered by explicit lease release, session or
-activity finalization, or lease/reservation expiry. Promotion creates a short
-reservation and a pending notification for the waiting session.
+activity finalization, lease/reservation expiry, or current-state materialization
+that finds an already-unblocked queued waiter. Promotion creates short
+reservations and pending notifications for the waiting sessions.
 
-Promotion creates a reservation first. A reservation is not active write
-authority. The waiting session must reread the target, then explicitly claim the
-reservation with `state.intent.claim` or `stateful intent claim --wait-id <id>`.
-Only that claim creates write-authorizing intent and active same-session leases.
-The default reservation TTL is 120 seconds; the default lease TTL is 300 seconds
-and is refreshed by heartbeat.
+Promotion creates reservations first. A reservation is not active write
+authority. Each waiting session must reread the target. Manual MCP/CLI flows
+then explicitly claim with `state_intent_claim` or
+`stateful intent claim --wait-id <id>`. Hook and sandbox authorization sources
+may lazy-claim the reservation at the retried write boundary. Claiming creates
+write-authorizing intent and active same-session leases. The default reservation
+TTL is 120 seconds; the default lease TTL is 300 seconds and is refreshed by
+heartbeat.
 
 The target multi-resource model is atomic all-or-nothing: a multi-resource
 request is reservable only when it is the head entry for every requested resource
@@ -254,9 +313,9 @@ reservation and claim before writing.
 Full scheduling APIs return immediately with request state. Blocking waits can
 be implemented as a future client convenience by polling notifications or resume
 endpoints. Queued and reserved request cancellation is explicit through
-`intent/cancel`; session or activity finalization cancellation remains future
-cleanup work. Explicit user overrides do not reorder the wait queue or transfer
-reservations.
+`intent/cancel`; shipped session or activity finalization also cancels that
+session's queued and reserved requests. Explicit user overrides do not reorder
+the wait queue or transfer reservations.
 
 ## SQLite Storage
 
@@ -354,12 +413,12 @@ $STATEFUL_HOME/state.db
 ```
 
 When `STATEFUL_HOME` is not set, the default global home is
-`$HOME/.stateful_core/`. Repo-local compatibility runtime state lives under:
+`$HOME/.stateful_core/`. Repo-local compatibility runtime state keeps only
+runtime discovery and legacy database artifacts:
 
 ```text
 .stateful_core/
 .stateful_core/runtime/server.json
-.stateful_core/outbox/
 .stateful_core/state.db
 ```
 
@@ -440,10 +499,10 @@ denied. A timed-out observation is queued to the local outbox when possible. A
 timed-out context render should show a concise state-unavailable warning rather
 than raw error output.
 
-## Local Outbox
+## Global Outbox
 
 When the state server is unavailable, hook and observer events that are allowed
-to be queued are appended under `.stateful_core/outbox/`.
+to be queued are appended under `$STATEFUL_HOME/outbox/`.
 
 The file format is newline-delimited JSON. Each line carries:
 
@@ -471,9 +530,8 @@ leases while the state server is unavailable.
 The implementation should include a small CLI for setup and debugging:
 
 ```text
-stateful init
 stateful install [--yes]
-stateful enable [--repo <path>] [--repo-local-codex]
+stateful enable [--repo <path>]
 stateful disable [--repo <path>]
 stateful repos list
 stateful server
@@ -486,21 +544,39 @@ stateful status
 stateful current
 stateful events
 stateful doctor
-stateful sandbox run --fs read-only|write-targets ...
+stateful sandbox run --fs read-only|write-targets|build|git|github-pr ...
+stateful sandbox process find <selector>
 stateful intent declare [--session-id <id>] [--workspace-id <id>] --purpose <purpose> <paths...>
 stateful notifications poll [--session-id <id>] [--workspace-id <id>]
 stateful resume next [--session-id <id>] [--workspace-id <id>]
 stateful mcp call <tool> [arguments-json]
 stateful mcp serve
-stateful hook <event>
+stateful hook <codex|omp> <event>
 stateful sync-outbox
-stateful commit -m <message> -- <paths...>
-stateful push [remote branch]
 ```
 
-`stateful install --yes` configures global Codex hooks and MCP. `stateful enable`
-opts a repo into enforcement and can install repo-local Codex hooks with
-`--repo-local-codex` as a compatibility fallback. `stateful server start`
+`stateful install --agent codex --yes` configures global Codex hooks, MCP, MCP
+tool approval policy, and external sandbox approval rules. Codex installs wire
+`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`.
+Stateful MCP tools default to automatic approval; `stateful sandbox run --fs
+external --purpose ... --command ...` is gated by a Codex execpolicy prompt
+before it runs the external sandbox command. Purpose-and-command-only operations
+are allowed for read-only/no-declared-scope use; supplied external write scopes
+are validated before the sandbox starts. On macOS, that external profile also
+permits `trustd` and DirectoryService Mach lookups needed by Go TLS certificate
+verification.
+`stateful
+install --agent omp --yes` registers `sandbox_bash` for read-only,
+write-targets, build, git, and github-pr sandbox profiles, `ext_ro_bash` for
+read-only external commands, and `ext_rw_bash` for external writes. `ext_ro_bash`
+does not ask OMP UI confirmation; `ext_rw_bash` asks before spawning the trusted
+stateful binary with the external profile. Raw OMP Bash and
+Python/JavaScript/JS/Ruby/Julia eval-tool sandbox invocations are denied.
+OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
+extension events to `stateful hook omp session-start`, `pre-tool-use`,
+`post-tool-use`, and `stop`; OMP does not expose a stateful
+`user-prompt-submit` hook. `stateful enable` opts a repo into enforcement.
+`stateful server start`
 without `--foreground` uses the detached lazy lifecycle. Bare legacy
 `stateful server` and `stateful server start --foreground` run in the
 foreground and write runtime discovery. `stateful doctor` checks current Codex
@@ -509,12 +585,6 @@ global path or registry errors. Legacy `.codex/hooks.json` and repo-local
 `.stateful_core/state.db` artifacts are reported as legacy artifacts, not as
 installed-state evidence. Active server reachability, config schema validation
 and SQLite migration inspection are future doctor extensions.
-`stateful commit -m <message> -- <paths...>` is the structured commit wrapper.
-`stateful push [remote branch]` is the structured push wrapper. It requires a
-clean working tree, an attached current branch, either the current branch's
-configured upstream or an explicit `<remote> <branch>` pair matching the current
-branch, and rejects force-like target values. Raw `git add`, `git commit`, and
-`git push` through Bash remain denied.
 
 ## Verification
 
@@ -523,7 +593,6 @@ Before publishing or releasing a build, run:
 ```text
 cargo fmt --all --check
 env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo test --workspace
-env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Unset `STATEFUL_CODEX_RUN_ID` and `CODEX_THREAD_ID` when running workspace tests
@@ -559,11 +628,10 @@ the built-in 14-day retention window for historical pruning; configurable
 runtime loading is future hardening work.
 
 Command-shaped tests and checks run through the trusted `stateful sandbox run`
-wrapper. Build and test artifact writes are scoped with `--fs build` after
-exact `tmp/` directory intent and a successful same-session directory lease.
-The profile sets standard temp variables under `tmp/.stateful-tmp` and sets
-`CARGO_TARGET_DIR` to `tmp/target` so Cargo build output stays in the authorized
-artifact tree.
+wrapper. Build and test artifact writes are scoped with
+`--fs build --network enabled --write-dir <scratch-purpose>`. The profile writes
+disposable artifacts under `/tmp/stateful/<session>/<scratch-purpose>/`, sets
+standard temp variables under that scratch root, and sets `CARGO_TARGET_DIR` to its `target` child.
 
 Glob semantics should use gitignore-style path matching relative to the
 workspace root. Identity and policy checks still use normalized canonical paths
@@ -581,7 +649,7 @@ Implemented v1 behavior must have tests for:
 - Bash full-deny classification and sandbox-gated hook authorization
 - nested Codex benchmark sandbox hook authorization only when the
   `codex-benchmark` cargo feature is enabled
-- native Codex edit hook authorization plus Bash sandbox fixtures
+- native edit hook authorization plus Bash sandbox fixtures
 - prompt renderer golden output for shipped store-backed rendering
 - heartbeat refresh of activities, capped active intent TTL, and active leases
   still covered by active intent
@@ -603,11 +671,22 @@ pieces into `stateful-core` without duplicating product policy in adapters.
 ## Migration Path
 
 The prototype supports user-level installation with repo allowlist gating.
-`stateful install --yes` configures global Codex hooks and MCP. `stateful enable`
-opts the current repo into enforcement. Repo-local hooks remain available through
-`stateful enable --repo-local-codex` as a compatibility fallback. Plugin
-packaging and managed hooks must reuse the same hook adapter library and HTTP
-protocol.
+`stateful install --yes` installs stateful global files only. `stateful install
+--agent codex --yes` configures global Codex hooks and MCP. `stateful install
+--agent omp --yes` installs the OMP extension entry point, MCP config,
+always-apply `rules/stateful-required.md` rule,
+`skills/stateful-command-policy/SKILL.md` manual, and OMP config under the
+`stateful` profile agent directory (`~/.omp/profiles/stateful/agent`) with
+`tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
+`eval.js: false`, `eval.rb: false`, `eval.jl: false`,
+`tools.approval.sandbox_bash: allow`, `tools.approval.ext_ro_bash: allow`, and
+`tools.approval.ext_rw_bash: allow`, so that profile carries the stateful
+approval context, denies raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool
+execution at host approval, allows sandbox runs through `sandbox_bash`,
+`ext_ro_bash`, or `ext_rw_bash`, and keeps the trusted external write approval
+prompt inside `ext_rw_bash`. `stateful enable`
+opts the current repo into enforcement. Repo-local packaging and managed hooks
+must reuse the same hook adapter library and HTTP protocol.
 
 The migration order is:
 

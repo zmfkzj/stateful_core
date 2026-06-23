@@ -16,12 +16,12 @@ const TOOLS: &[(&str, &str, &str)] = &[
     (
         "state_intent_declare",
         "state.intent.declare",
-        "Declare file or directory intent before write actions.",
+        "Declare repo-internal file or directory intent before repo write actions.",
     ),
     (
         "state_intent_request",
         "state.intent.request",
-        "Request a write reservation explicitly, returning queued or reserved state.",
+        "Request a repo-internal write reservation explicitly, returning queued or reserved state.",
     ),
     (
         "state_intent_claim",
@@ -36,12 +36,12 @@ const TOOLS: &[(&str, &str, &str)] = &[
     (
         "state_lease_acquire",
         "state.lease.acquire",
-        "Acquire an advisory lease on a file or resource.",
+        "Acquire an advisory lease on a repo file or directory resource.",
     ),
     (
         "state_lease_release",
         "state.lease.release",
-        "Release a same-session advisory lease on a file or resource.",
+        "Release a same-session advisory lease on a repo file or directory resource.",
     ),
     (
         "state_activity_observe",
@@ -56,7 +56,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     (
         "state_conflicts_check",
         "state.conflicts.check",
-        "Dry-run an authorization or conflict check.",
+        "Dry-run a repo-internal authorization or conflict check.",
     ),
     (
         "state_current_read",

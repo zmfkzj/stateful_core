@@ -4,8 +4,9 @@ use std::{
 };
 
 use stateful_cli::{
-    CodexInstallOptions, GlobalPaths, InstallOptions, RepoRegistry, apply_codex_install,
-    apply_global_install, plan_codex_install, plan_global_install,
+    CodexInstallOptions, GlobalPaths, InstallOptions, OmpInstallOptions, RepoRegistry,
+    apply_codex_install, apply_global_install, apply_omp_install, plan_codex_install,
+    plan_global_install, plan_omp_install,
 };
 
 #[cfg(unix)]
@@ -47,6 +48,26 @@ fn install_codex_dry_run_plans_codex_config_without_writing() {
     assert!(plan.files.contains(&skill_path));
     assert!(!fixture.paths.home.exists());
     assert!(!fixture.codex_config.exists());
+}
+
+#[test]
+fn install_omp_dry_run_plans_command_policy_skill_without_writing() {
+    let fixture = TestFixture::new("omp-dry-run-skill");
+    let options = fixture.omp_options(false);
+
+    let plan = plan_omp_install(&options).expect("omp install should plan");
+    let applied = apply_omp_install(options).expect("dry-run omp install should succeed");
+    let skill_path = fixture
+        .omp_agent_dir()
+        .join("skills")
+        .join("stateful-command-policy")
+        .join("SKILL.md");
+
+    assert!(plan.summary.contains("dry-run"));
+    assert!(applied.summary.contains("dry-run"));
+    assert!(plan.files.contains(&skill_path));
+    assert!(!fixture.paths.home.exists());
+    assert!(!skill_path.exists());
 }
 
 #[test]
@@ -98,6 +119,7 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     assert!(fixture.paths.state_db.is_file());
     assert!(fixture.codex_config.is_file());
     assert!(!fixture.codex_config_parent().join("hooks.json").exists());
+    assert!(fixture.codex_rules_path().is_file());
 
     let registry = RepoRegistry::load(&fixture.paths).expect("registry should load");
     assert_eq!(registry, RepoRegistry::default());
@@ -110,9 +132,23 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     assert!(first_config.contains("[mcp_servers.stateful]"));
     assert!(first_config.contains("command = \"/opt/stateful/bin/stateful\""));
     assert!(first_config.contains(
-        "env_vars = [\"STATEFUL_SESSION_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
+        "env_vars = [\"CODEX_THREAD_ID\", \"STATEFUL_CODEX_RUN_ID\", \"STATEFUL_SESSION_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
     ));
-    assert!(first_config.contains("hook pre-tool-use"));
+    assert!(first_config.contains(
+        "approval_policy = { granular = { sandbox_approval = false, rules = true, mcp_elicitations = false, request_permissions = false, skill_approval = false } }"
+    ));
+    assert!(first_config.contains("default_tools_approval_mode = \"approve\""));
+    assert!(
+        !first_config.contains("[mcp_servers.stateful.tools.state_current_read]"),
+        "stateful MCP tools should inherit the default approve mode"
+    );
+    assert!(
+        !first_config.contains(
+            "[mcp_servers.stateful.tools.state_lease_acquire]\napproval_mode = \"approve\""
+        )
+    );
+    assert!(first_config.contains("hook codex pre-tool-use"));
+    assert!(!first_config.contains("hook pre-tool-use"));
     assert!(first_config.contains("[[hooks.PreToolUse]]\nmatcher = \".*\""));
     assert!(first_config.contains(
         "[[hooks.PostToolUse]]\nmatcher = \"Bash|apply_patch|Edit|Write|file_change|mcp__filesystem__.*\""
@@ -125,8 +161,334 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
         fs::read_to_string(&fixture.codex_config).expect("codex config should reread");
     assert_eq!(count(&second_config, "# stateful-core-global-install"), 1);
     assert_eq!(count(&second_config, "[mcp_servers.stateful]"), 1);
+    assert_eq!(count(&second_config, "default_tools_approval_mode"), 1);
+    assert_eq!(count(&second_config, "approval_policy = { granular"), 1);
+    assert!(!second_config.contains("[mcp_servers.stateful.tools."));
     assert_eq!(count(&second_config, "[features]"), 1);
     assert_eq!(count(&second_config, "[[hooks.PreToolUse]]"), 1);
+}
+
+#[test]
+fn install_omp_yes_creates_extension_and_mcp_config() {
+    let fixture = TestFixture::new("omp-install");
+
+    let plan = apply_omp_install(fixture.omp_options(true)).expect("omp install should apply");
+
+    let omp_agent_dir = fixture.omp_agent_dir();
+    let omp_config = omp_agent_dir.join("config.yml");
+    let omp_mcp = omp_agent_dir.join("mcp.json");
+    let omp_extension = omp_agent_dir
+        .join("extensions")
+        .join("stateful-omp-extension.js");
+    let omp_skill = omp_agent_dir
+        .join("skills")
+        .join("stateful-command-policy")
+        .join("SKILL.md");
+
+    assert!(omp_config.is_file());
+    assert!(omp_mcp.is_file());
+    assert!(omp_extension.is_file());
+    assert!(omp_skill.is_file());
+    assert!(
+        fs::read_to_string(&omp_config)
+            .expect("omp config should read")
+            .contains("stateful-omp-extension.js")
+    );
+    let config = fs::read_to_string(&omp_config).expect("omp config should read");
+    assert!(config.contains("stateful-omp-extension.js"));
+    assert!(config.contains(
+        "tools:\n  approvalMode: write\n  approval:\n    task: allow\n    sandbox_bash: allow\n    ext_ro_bash: allow\n    ext_rw_bash: allow\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: false\n",
+    ));
+    assert!(
+        fs::read_to_string(&omp_mcp)
+            .expect("omp mcp should read")
+            .contains("\"mcpServers\"")
+    );
+    let extension = fs::read_to_string(&omp_extension).expect("omp extension should read");
+    assert!(!extension.contains("@sinclair/typebox"));
+    assert!(!extension.contains("Type.Object"));
+    assert!(extension.contains("export default function statefulOmpExtension"));
+    assert!(extension.contains("[\"hook\", \"omp\", event]"));
+    assert!(extension.contains("event?.sessionId || ctx?.sessionManager?.session?.id"));
+    assert!(extension.contains("pi.registerTool"));
+    assert!(extension.contains("name: \"ext_ro_bash\""));
+    assert!(extension.contains("name: \"ext_rw_bash\""));
+    assert!(!extension.contains("name: \"external_bash\""));
+    assert!(extension.contains("name: \"sandbox_bash\""));
+    assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
+    assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));
+    assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
+    assert!(
+        extension.contains("function runSandboxTool(params, args, signal, ctx, label, onUpdate)")
+    );
+    assert!(extension.contains("return new Promise((resolve) =>"));
+    assert!(extension.contains("spawn(STATEFUL, args"));
+    assert!(extension.contains("function emitSandboxToolOutput(onUpdate, stream, chunk)"));
+    assert!(extension.contains("onUpdate(update)"));
+    assert!(extension.contains("details: { stream }"));
+    assert!(extension.contains("emitSandboxToolOutput(onUpdate, \"stdout\", chunk)"));
+    assert!(extension.contains("emitSandboxToolOutput(onUpdate, \"stderr\", chunk)"));
+    assert!(
+        extension.contains("function startSandboxBackgroundTool(pi, params, args, ctx, label)")
+    );
+    assert!(extension.contains("params.async === true"));
+    assert!(extension.contains("pi.sendMessage"));
+    assert!(extension.contains("display: true"));
+    assert!(extension.contains("triggerTurn: true"));
+    assert!(extension.contains("Result will be delivered automatically when complete."));
+    assert!(extension.contains("function startReservationStream(pi, stream)"));
+    assert!(extension.contains("/v1/notifications/stream?session_id="));
+    assert!(extension.contains("customType: \"stateful_reservation_ready\""));
+    assert!(extension.contains("startReservationStream(pi, result?.notifications_stream)"));
+    assert!(extension.contains("stopReservationStream();"));
+    assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", fs]"));
+    assert!(extension.contains("ctx.ui.confirm"));
+    assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", \"external\""));
+    assert!(extension.contains("without OMP UI confirmation"));
+    assert!(
+        extension.contains(
+            "At least one write_targets, create_targets, or write_dirs entry is required"
+        )
+    );
+    assert!(extension.contains("ext_ro_bash does not accept write, socket, or signal scope"));
+    assert!(extension.contains("ext_rw_bash requires at least one write_targets"));
+    assert!(extension.contains("required: [\"purpose\", \"command\"]"));
+    assert!(extension.contains("process.env.STATEFUL_SESSION_ID = id"));
+    assert!(extension.contains("pre-tool-use"));
+    assert!(extension.contains("decision: \"block\""));
+    assert!(extension.contains("decision.decision === \"prompt\""));
+    assert!(extension.contains("ctx?.ui?.confirm"));
+    let command_policy_skill = fs::read_to_string(&omp_skill).expect("omp skill should read");
+    let source_command_policy_skill = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/stateful-command-policy/SKILL.md"),
+    )
+    .expect("source stateful command policy skill should exist");
+    assert_eq!(command_policy_skill, source_command_policy_skill);
+    assert!(command_policy_skill.contains("name: stateful-command-policy"));
+    assert!(plan.files.contains(&omp_skill));
+    assert!(plan.files.iter().any(|path| path.ends_with("mcp.json")));
+}
+
+#[test]
+fn install_omp_yes_can_target_user_omp_profile_separate_from_stateful_home() {
+    let fixture = TestFixture::new("omp-install-default-home");
+    let user_home = fixture.root.join("home");
+    let stateful_home = user_home.join(".stateful_core");
+    let paths = GlobalPaths::new(&stateful_home);
+    let omp_agent_dir = user_home
+        .join(".omp")
+        .join("profiles")
+        .join("stateful")
+        .join("agent");
+
+    let plan = apply_omp_install(OmpInstallOptions {
+        yes: true,
+        paths,
+        binary_path: "/opt/stateful/bin/stateful".to_string(),
+        project_config_path: None,
+        omp_agent_dir: Some(omp_agent_dir.clone()),
+        update: false,
+    })
+    .expect("omp install should apply");
+
+    let misplaced_agent_dir = stateful_home
+        .join(".omp")
+        .join("profiles")
+        .join("stateful")
+        .join("agent");
+
+    assert!(omp_agent_dir.join("config.yml").is_file());
+    assert!(omp_agent_dir.join("mcp.json").is_file());
+    assert!(
+        omp_agent_dir
+            .join("extensions")
+            .join("stateful-omp-extension.js")
+            .is_file()
+    );
+    assert!(plan.files.contains(&omp_agent_dir.join("config.yml")));
+    assert!(!misplaced_agent_dir.exists());
+}
+
+#[test]
+fn install_omp_yes_can_run_twice_without_existing_file_errors() {
+    let fixture = TestFixture::new("omp-install-idempotent");
+    let options = || fixture.omp_options(true);
+
+    apply_omp_install(options()).expect("first omp install should apply");
+    apply_omp_install(options()).expect("second omp install should be idempotent");
+
+    let omp_agent_dir = fixture.omp_agent_dir();
+    let omp_config = omp_agent_dir.join("config.yml");
+    let omp_mcp = omp_agent_dir.join("mcp.json");
+    let omp_extension = omp_agent_dir
+        .join("extensions")
+        .join("stateful-omp-extension.js");
+
+    let config = fs::read_to_string(&omp_config).expect("omp config should read");
+    assert_eq!(count(&config, "stateful-omp-extension.js"), 1);
+    assert_eq!(count(&config, "approvalMode: write"), 1);
+    assert_eq!(count(&config, "\n    task: allow"), 1);
+    assert_eq!(count(&config, "\n    sandbox_bash: allow"), 1);
+    assert_eq!(count(&config, "ext_ro_bash: allow"), 1);
+    assert_eq!(count(&config, "ext_rw_bash: allow"), 1);
+    assert_eq!(count(&config, "external_bash:"), 0);
+    assert_eq!(count(&config, "\n  py: false"), 1);
+    assert_eq!(count(&config, "\n  js: false"), 1);
+    assert_eq!(count(&config, "\n  rb: false"), 1);
+    assert_eq!(count(&config, "\n  jl: false"), 1);
+    assert_eq!(count(&config, "\n  enabled: false"), 1);
+    assert!(
+        fs::read_to_string(&omp_mcp)
+            .expect("omp mcp should read")
+            .contains("\"mcpServers\"")
+    );
+    assert!(
+        fs::read_to_string(&omp_extension)
+            .expect("omp extension should read")
+            .contains("[\"hook\", \"omp\", event]")
+    );
+}
+
+#[test]
+fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
+    let fixture = TestFixture::new("omp-install-existing");
+    let omp_agent_dir = fixture.omp_agent_dir();
+    fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
+    let omp_config = omp_agent_dir.join("config.yml");
+    fs::write(
+        &omp_config,
+        "model: gpt-5.5\nextensions:\n  - existing-extension.js\n",
+    )
+    .expect("existing config should write");
+
+    apply_omp_install(fixture.omp_options(true)).expect("omp install should apply");
+
+    let config = fs::read_to_string(&omp_config).expect("omp config should read");
+    assert!(config.contains("model: gpt-5.5"));
+    assert!(config.contains("existing-extension.js"));
+    assert!(config.contains("stateful-omp-extension.js"));
+    assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n    task: allow\n"));
+    assert!(config.contains("task: allow"));
+    assert!(config.contains("sandbox_bash: allow"));
+    assert!(config.contains("ext_ro_bash: allow"));
+    assert!(config.contains("ext_rw_bash: allow"));
+    assert!(!config.contains("external_bash:"));
+    assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
+    assert!(config.contains("bash:\n  enabled: false\n"));
+    let extension = fs::read_to_string(
+        omp_agent_dir
+            .join("extensions")
+            .join("stateful-omp-extension.js"),
+    )
+    .expect("omp extension should read");
+    assert!(extension.contains("function isYolo"));
+    assert!(extension.contains("yolo: isYolo(event, ctx)"));
+}
+
+#[test]
+fn install_omp_yes_preserves_existing_tool_values_without_update() {
+    let fixture = TestFixture::new("omp-install-tools-preserve");
+    let omp_agent_dir = fixture.omp_agent_dir();
+    fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
+    let omp_config = omp_agent_dir.join("config.yml");
+    fs::write(
+        &omp_config,
+        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    bash: prompt\n    edit: prompt\n",
+    )
+    .expect("existing config should write");
+
+    apply_omp_install(fixture.omp_options(true)).expect("omp install should apply");
+
+    let config = fs::read_to_string(&omp_config).expect("omp config should read");
+    assert!(config.contains("tools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n"));
+    assert!(config.contains("bash: prompt"));
+    assert!(config.contains("edit: prompt"));
+    assert!(!config.contains("task: allow"));
+    assert!(config.contains("sandbox_bash: allow"));
+    assert!(config.contains("ext_ro_bash: allow"));
+    assert!(config.contains("ext_rw_bash: allow"));
+    assert!(!config.contains("external_bash:"));
+    assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
+    assert!(config.contains("bash:\n  enabled: false\n"));
+    assert_eq!(count(&config, "approvalMode:"), 1);
+    assert_eq!(count(&config, "\n    sandbox_bash: allow"), 1);
+    assert_eq!(count(&config, "ext_ro_bash: allow"), 1);
+    assert_eq!(count(&config, "ext_rw_bash: allow"), 1);
+}
+
+#[test]
+fn install_omp_update_replaces_existing_stateful_tool_values() {
+    let fixture = TestFixture::new("omp-install-tools-update");
+    let omp_agent_dir = fixture.omp_agent_dir();
+    fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
+    let omp_config = omp_agent_dir.join("config.yml");
+    fs::write(
+        &omp_config,
+        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    sandbox_bash: prompt\n    external_bash: prompt\n    ext_ro_bash: prompt\n    ext_rw_bash: prompt\n    edit: prompt\neval:\n  py: true\n  js: true\n  rb: true\n  jl: true\nbash:\n  enabled: true\n",
+    )
+    .expect("existing config should write");
+
+    let mut options = fixture.omp_options(true);
+    options.update = true;
+    apply_omp_install(options).expect("omp install with --update should apply");
+
+    let config = fs::read_to_string(&omp_config).expect("omp config should read");
+    assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n    task: allow\n"));
+    assert!(config.contains("task: allow"));
+    assert!(config.contains("sandbox_bash: allow"));
+    assert!(config.contains("ext_ro_bash: allow"));
+    assert!(config.contains("ext_rw_bash: allow"));
+    assert!(!config.contains("external_bash:"));
+    assert!(config.contains("edit: prompt"));
+    assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
+    assert!(config.contains("bash:\n  enabled: false\n"));
+    assert_eq!(count(&config, "approvalMode: write"), 1);
+    assert_eq!(count(&config, "task: allow"), 1);
+    assert_eq!(count(&config, "sandbox_bash: allow"), 1);
+    assert_eq!(count(&config, "ext_ro_bash: allow"), 1);
+    assert_eq!(count(&config, "ext_rw_bash: allow"), 1);
+}
+
+#[test]
+fn install_omp_rejects_invalid_existing_yaml_without_writing() {
+    let fixture = TestFixture::new("omp-install-invalid-yaml");
+    let omp_agent_dir = fixture.omp_agent_dir();
+    fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
+    let omp_config = omp_agent_dir.join("config.yml");
+    let existing = "model: [unterminated\n";
+    fs::write(&omp_config, existing).expect("existing config should write");
+
+    let error = apply_omp_install(fixture.omp_options(true)).expect_err("invalid YAML should fail");
+
+    assert!(error.to_string().contains("invalid OMP config YAML"));
+    assert_eq!(
+        fs::read_to_string(&omp_config).expect("config should remain readable"),
+        existing
+    );
+}
+
+#[test]
+fn install_codex_yes_creates_sandbox_external_prompt_rule() {
+    let fixture = TestFixture::new("codex-rules");
+
+    apply_codex_install(fixture.codex_options(true)).expect("install should apply");
+
+    let rules = fs::read_to_string(fixture.codex_rules_path()).expect("rules should read");
+    assert!(rules.contains("prefix_rule("));
+    assert!(rules.contains(
+        "pattern = [\"/opt/stateful/bin/stateful\", \"sandbox\", \"run\", \"--fs\", \"external\"]"
+    ));
+    assert!(rules.contains("decision = \"prompt\""));
+    assert!(rules.contains("stateful sandbox run --fs external"));
+    assert!(rules.contains(
+        "/opt/stateful/bin/stateful sandbox run --fs external --purpose 'install rebuilt binaries'"
+    ));
+    assert!(!rules.contains("external-run"));
+
+    apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");
+
+    let second_rules = fs::read_to_string(fixture.codex_rules_path()).expect("rules should reread");
+    assert_eq!(count(&second_rules, "prefix_rule("), 1);
 }
 
 #[test]
@@ -146,13 +508,21 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     .expect("source stateful command policy skill should exist");
     assert_eq!(command_policy_skill, source_command_policy_skill);
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
+    assert!(command_policy_skill.contains("Use canonical Stateful MCP tool names"));
+    assert!(command_policy_skill.contains("state_intent_declare"));
+    assert!(command_policy_skill.contains("state_lease_acquire"));
+    assert!(command_policy_skill.contains("runtime-specific tool names"));
+    assert!(
+        command_policy_skill
+            .contains("Do not run `stateful intent declare` or `stateful mcp call` through Bash")
+    );
     assert!(command_policy_skill.contains("Intent declarations add"));
     assert!(command_policy_skill.contains("--fs build --network enabled"));
-    assert!(command_policy_skill.contains("--write-dir tmp"));
-    assert!(command_policy_skill.contains("state.intent.request"));
-    assert!(command_policy_skill.contains("state.notifications.poll"));
-    assert!(command_policy_skill.contains("state.resume.next"));
-    assert!(command_policy_skill.contains("state.intent.claim"));
+    assert!(command_policy_skill.contains("--write-dir <scratch-purpose>"));
+    assert!(command_policy_skill.contains("state_intent_request"));
+    assert!(command_policy_skill.contains("state_notifications_poll"));
+    assert!(command_policy_skill.contains("state_resume_next"));
+    assert!(command_policy_skill.contains("state_intent_claim"));
     assert!(!command_policy_skill.contains("Intent declarations replace"));
     assert!(
         !command_policy_skill.contains("--fs write-targets --network enabled --write-dir target")
@@ -204,6 +574,22 @@ fn install_yes_preserves_existing_features_and_enables_hooks() {
 }
 
 #[test]
+fn install_yes_replaces_existing_approval_policy_for_sandbox_external_rules() {
+    let fixture = TestFixture::new("approval-policy");
+    let existing = "approval_policy = \"on-request\"\nmodel = \"gpt-5.5\"\n";
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
+    fs::write(&fixture.codex_config, existing).expect("existing config should write");
+
+    apply_codex_install(fixture.codex_options(true)).expect("install should apply");
+
+    let merged = fs::read_to_string(&fixture.codex_config).expect("merged config should read");
+    assert!(!merged.contains("approval_policy = \"on-request\""));
+    assert!(merged.contains("approval_policy = { granular = {"));
+    assert_eq!(count(&merged, "approval_policy = "), 1);
+    assert!(merged.contains("model = \"gpt-5.5\""));
+}
+
+#[test]
 fn install_yes_preserves_quoted_project_tables() {
     let fixture = TestFixture::new("quoted-project");
     let existing =
@@ -229,6 +615,24 @@ fn install_yes_rejects_existing_unmarked_stateful_mcp_server() {
 
     let error = apply_codex_install(fixture.codex_options(true))
         .expect_err("unmarked stateful mcp config should conflict");
+
+    assert!(error.to_string().contains("mcp_servers.stateful"));
+    assert_eq!(
+        fs::read_to_string(&fixture.codex_config).expect("config should remain readable"),
+        existing
+    );
+    assert!(backup_paths_for(&fixture.codex_config).is_empty());
+}
+
+#[test]
+fn install_yes_rejects_existing_unmarked_stateful_mcp_tool_config() {
+    let fixture = TestFixture::new("mcp-tool-conflict");
+    let existing = "[mcp_servers.stateful.tools.state_current_read]\napproval_mode = \"approve\"\n";
+    fs::create_dir_all(fixture.codex_config_parent()).expect("codex dir should create");
+    fs::write(&fixture.codex_config, existing).expect("existing config should write");
+
+    let error = apply_codex_install(fixture.codex_options(true))
+        .expect_err("unmarked stateful mcp tool config should conflict");
 
     assert!(error.to_string().contains("mcp_servers.stateful"));
     assert_eq!(
@@ -339,7 +743,7 @@ fn install_yes_shell_quotes_dangerous_binary_path() {
     let config = fs::read_to_string(&fixture.codex_config).expect("codex config should read");
     assert!(config.contains(r##"command = "/opt/stateful dir/$(touch x)`cmd`/foo'bar/stateful""##));
     assert!(config.contains(
-        r##"command = "'/opt/stateful dir/$(touch x)`cmd`/foo'\\''bar/stateful' hook pre-tool-use""##
+        r##"command = "'/opt/stateful dir/$(touch x)`cmd`/foo'\\''bar/stateful' hook codex pre-tool-use""##
     ));
     assert_eq!(count(&config, "[mcp_servers.stateful]"), 1);
 }
@@ -465,10 +869,36 @@ impl TestFixture {
         }
     }
 
+    fn omp_agent_dir(&self) -> PathBuf {
+        self.paths
+            .home
+            .join(".omp")
+            .join("profiles")
+            .join("stateful")
+            .join("agent")
+    }
+
+    fn omp_options(&self, yes: bool) -> OmpInstallOptions {
+        OmpInstallOptions {
+            yes,
+            paths: self.paths.clone(),
+            binary_path: "/opt/stateful/bin/stateful".to_string(),
+            project_config_path: None,
+            omp_agent_dir: Some(self.omp_agent_dir()),
+            update: false,
+        }
+    }
+
     fn codex_config_parent(&self) -> &Path {
         self.codex_config
             .parent()
             .expect("codex config should have a parent directory")
+    }
+
+    fn codex_rules_path(&self) -> PathBuf {
+        self.codex_config_parent()
+            .join("rules")
+            .join("stateful.rules")
     }
 }
 

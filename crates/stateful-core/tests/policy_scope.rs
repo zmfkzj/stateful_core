@@ -3,11 +3,11 @@ use stateful_core::{
 };
 
 #[test]
-fn directory_scope_allows_depth_two_but_not_depth_three() {
+fn directory_scope_does_not_allow_file_writes() {
     let scope = IntentScope::directory("src/");
 
-    assert!(scope.allows_write("src/auth/auth.ts"));
-    assert!(!scope.allows_write("src/auth/codex/auth.ts"));
+    assert!(!scope.allows_write("src/auth.ts"));
+    assert!(!scope.allows_write("src/auth/nested.ts"));
 }
 
 #[test]

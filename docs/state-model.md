@@ -45,10 +45,13 @@ session
         write actions
 ```
 
-For v1, hooks must treat the current Codex hook `thread_id` as authoritative
-when present, falling back to `session_id` for older payloads. MCP intent
-declaration may omit `session_id`; in that case the adapter uses the current
-session recorded by lifecycle hooks so that MCP-declared intent and write
+For v1, Codex hooks must treat the current Codex hook `thread_id` as
+authoritative when present, falling back to `session_id` for older payloads. The
+OMP extension must prefer the actual OMP session id from `event.sessionId` or
+`ctx.sessionManager.session.id`, store it in `process.env.STATEFUL_SESSION_ID`,
+and persist current-session files during `stateful hook omp session-start`. MCP
+intent declaration may omit `session_id`; in that case the adapter uses the
+current session recorded by lifecycle hooks so that MCP-declared intent and write
 authorization evaluate against the same session.
 
 ## Activity Record
@@ -263,9 +266,10 @@ explicit; the server does not generate a fallback purpose. Abstract resources in
 `task`, `test`, `port`, or `migration`, can provide context but cannot authorize
 writes.
 
-`phase`, `goal`, `resources_planned`, `next_intent`, and `max_expires_at` are
-target model fields. Shipped authorization is based on active, unexpired scope
-rows and same-session leases.
+`phase` is shipped for activity records and write authorization. `goal`,
+`resources_planned`, `next_intent`, and `max_expires_at` remain target model
+fields. Shipped authorization is based on active, unexpired scope rows,
+same-session leases, and active phases.
 
 Intent declarations add to the session's active scope in that workspace. This
 lets a session keep an edit scope and add a `tmp/` build/test scope without
@@ -285,23 +289,25 @@ target: src/auth.ts -> allow
 target: src/session.ts -> deny
 ```
 
-Directory scopes authorize writes only up to two path segments below the scoped
-directory:
+Directory scopes authorize `write_directory` actions only for the exact scoped
+directory. They do not authorize `write_file`, delete, rename, or move actions
+for child paths:
 
 ```text
 scope: src/
-target: src/auth/auth.ts -> allow
-target: src/auth/codex/auth.ts -> deny
+action: write_directory target: src/ -> allow
+action: write_directory target: src/auth/ -> deny
+action: write_file target: src/auth.ts -> deny
 ```
 
-That depth rule applies to `write_file` authorization. `write_directory` is a
-separate action: it requires exact directory scope, and the resulting directory
-lease fences the entire subtree because command-shaped `--write-dir` execution
-can write anywhere below that directory.
+`write_directory` is the only action backed by directory intent and a matching
+directory lease. The resulting directory lease fences the entire subtree because
+command-shaped `--write-dir` execution can write anywhere below that directory.
 
-Multi-file writes are allowed only when every target matches at least one file
-or directory scope. Delete and rename/move operations require exact file scope;
-directory scope does not authorize deletes, renames, or moves.
+Multi-file writes are allowed only when every file target has exact file scope
+and every directory target has exact directory scope. Delete and rename/move
+operations require exact file scope; directory scope does not authorize file
+operations.
 
 ## Conflict Record
 
@@ -365,22 +371,24 @@ Multi-resource `resources[]`, explicit `queue_sequence`, `blocked_by_lease_id`,
 and recorded `grant_trigger` fields are target model for future hardening.
 
 Promotion is triggered by explicit lease release, session or activity
-finalization, or lease/reservation expiry, but the current row does not persist
+finalization, lease/reservation expiry, or current-state materialization that
+finds an already-unblocked queued waiter, but the current row does not persist
 the trigger reason. Soft repo-relative conflicts do not create wait queue
 records in v1.
 
-Promotion creates a reservation, not active write authority. The waiting session
-must reread the target, then explicitly claim the reservation with
-`state.intent.claim` or `stateful intent claim --wait-id <id>`. Only that claim
-creates write-authorizing intent and active same-session leases. The default
-reservation TTL is 120 seconds. If the reservation is not claimed before
-`reservation_expires_at`, the reservation expires and the server may promote the
-next eligible FIFO waiter.
+Promotion creates reservations, not active write authority. Each waiting session
+must reread the target. Manual MCP/CLI flows then explicitly claim the
+reservation with `state_intent_claim` or `stateful intent claim --wait-id <id>`;
+native edit hooks and sandbox `write-targets` authorization can lazy-claim it at
+the retried write boundary. Claiming creates write-authorizing intent and active
+same-session leases. The default reservation TTL is 120 seconds. If a
+reservation is not claimed before `reservation_expires_at`, the reservation
+expires and the server may promote the next eligible FIFO waiter.
 
 Reservation notifications are delivery hints, not the durable reservation
-record. `stateful notifications poll` / `state.notifications.poll` returns each
+record. `stateful notifications poll` / `state_notifications_poll` returns each
 pending notification once and marks it delivered. If the client misses that
-response, `stateful resume next` / `state.resume.next` can still rediscover the
+response, `stateful resume next` / `state_resume_next` can still rediscover the
 active reservation until it is claimed or expires.
 
 For target multi-resource requests, a request is eligible only when it is at the
@@ -444,34 +452,35 @@ parent_actor_id
 ```
 
 Subagent-specific `actor_type`, `parent_session_id`, and `parent_actor_id`
-fields are protocol vocabulary for future subagent hook adapters. The shipped
-Codex integration records session-level agent activity only. When subagent
-adapters are implemented, subagents may write only inside the parent session's
-active valid intent scope, and their activity and leases should be recorded
-under the subagent `actor_id`. Same-owner sessions do not receive automatic
+fields are protocol vocabulary for native subagent-aware adapters. The Codex
+integration records each native subagent under its own effective session
+identity when Codex exposes a thread id. Parent and child sessions coordinate
+through the same workspace state, but a child does not inherit the parent's
+same-session lease authority. Same-owner sessions do not receive automatic
 override authority.
 
 ## Sandboxed Test Execution
 
 Raw Bash test commands are denied by hooks. Agents run tests through the trusted
-wrapper after exact `tmp/` directory intent and a successful same-session
-directory lease, for example:
+build wrapper with a scratch purpose, for example:
 
 ```text
-stateful intent declare --session-id <session> --workspace-id <workspace> --purpose "Run the requested tests." tmp/
-stateful mcp call state_lease_acquire '{"session_id":"<session>","workspace_id":"<workspace>","path":"tmp/"}'
-stateful sandbox run --fs build --network enabled --command 'cargo test --workspace'
+stateful sandbox run --fs build --network enabled --write-dir test-run --command 'cargo test --workspace'
 ```
 
-The build profile sets standard temp variables under `tmp/.stateful-tmp` and
-sets `CARGO_TARGET_DIR` to `tmp/target`, keeping Cargo build output inside the
-authorized artifact tree. Other tool-specific build directories should be
-configured under `tmp/`.
+The build profile sets standard temp variables under
+`/tmp/stateful/<session>/<scratch-purpose>/.stateful-tmp` and sets `CARGO_TARGET_DIR` to
+the scratch `target` child. Other tool-specific build directories should be
+configured under the same external scratch root.
 
-Source-tree edits should use native Codex edit tools such as `apply_patch` or
-Edit after exact intent declaration and a successful same-session file lease.
-Command-shaped source writes must use exact `--write-target` or `--create-target`
-entries, not the `tmp/` artifact directory scope.
+Source-tree edits should use native edit tools with hook-visible targets, such
+as Codex `apply_patch` or Edit, after exact intent declaration and a successful
+same-session file lease. Native edit hooks and `sandbox run --fs write-targets`
+release their authorized same-session leases after the write transaction
+completes; subsequent writes must reread and reacquire a lease or claim an
+eligible reservation. Command-shaped source writes must use exact
+`--write-target` or `--create-target` entries, not the `tmp/` artifact directory
+scope.
 
 ## Finalization Record
 
@@ -489,8 +498,8 @@ finalized_at
 source_ref
 ```
 
-The `Stop` hook should require finalization when a session has active work that
-has not been closed.
+The shipped `Stop` hook posts finalization for the session, which closes active
+work and releases the session's leases.
 
 ## Reconciliation Record
 
@@ -576,12 +585,12 @@ Freshness is required for all active coordination records.
   `declared_at`.
 - Shipped intent authorization is based on active, unexpired scope rows. Expired
   rows are removed from the active policy state and deny as `missing_intent`.
-- Target phase-aware authorization also requires the session to not be finalized
-  and `phase` to be `exploring`, `editing`, or `testing`.
-- Target `phase = blocked` keeps the activity visible but stops write
+- Phase-aware authorization requires the latest activity phase to be
+  `exploring`, `editing`, or `testing` when a phase is present.
+- `phase = blocked`, `done`, or `failed` keeps activity visible but stops write
   authorization.
-- Directory intent scope permits writes only up to two path segments below that
-  directory.
+- Directory intent scope authorizes `write_directory` only for the exact
+  directory resource.
 - Delete operations require exact file scope.
 - Rename and move operations require exact file scope for both source and
   destination.
@@ -589,9 +598,8 @@ Freshness is required for all active coordination records.
   implementation also refreshes active intent expiry during `SessionHeartbeat`
   materialization, capped at 60 minutes from `declared_at`.
 - Missing heartbeats do not imply success.
-- Shipped finalization completes active intents. Target finalization as `done`,
-  `failed`, or `blocked` also drives phase-aware authorization and historical
-  context.
+- Shipped finalization completes active intents and appends a terminal activity
+  phase, defaulting to `done` unless the request supplies another phase.
 - Turn end expires unused overrides.
 - Expired records remain historical evidence but stop blocking new work.
 - Reads should distinguish fresh, stale, and expired state.
@@ -619,10 +627,12 @@ When the state server is unavailable, coordination must fail closed for agent
 write authorization and fail open for human saves.
 
 - Supported writes are denied.
-- Raw Bash and Bash calls that are not a strict
+- Codex raw Bash and Bash calls that are not a strict
   `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper are
-  denied. Command-shaped writes through `--fs write-targets` fail closed when
-  target authorization cannot be proven.
+  denied, including repo-external shell work. Repo-external command-shaped writes
+  must use `sandbox run --fs external --purpose ...`. Command-shaped repo
+  writes through `--fs write-targets` fail closed when target authorization
+  cannot be proven.
 - write-target sandbox authorization fails closed and does not execute the
   command.
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block.
@@ -687,7 +697,7 @@ Expected materialized views:
 - finalization summaries by session
 - prompt context package for Codex hooks and MCP tools
 
-The current server exposes `/v1/context/render` and `state.context.render` as a
+The current server exposes `/v1/context/render` and `state_context_render` as a
 store-backed live view over active intents, active leases, and queued or reserved
 wait records. Responses include current summary counts, structured `items`, and
 prompt-ready `prompt_text`; an empty live state produces an empty prompt.
@@ -718,10 +728,14 @@ severity: block | warn | info
 resource
 summary
 next_action
+evidence_kind: declared_intent | lease_only | wait_queue | reservation | observed_write | verified_diff
 evidence
 source_refs
 ```
 
+`evidence_kind` classifies the coordination signal behind the item, while
+`evidence` is optional supporting detail. Prompt text includes `evidence_kind`
+in both modes and includes supporting `evidence` text only in `detailed` mode.
 `brief` mode is capped at 8 total bullets. `detailed` mode is capped at 20 total
 bullets. `next_action` is required for `block` and `warn`.
 

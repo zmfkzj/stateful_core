@@ -47,16 +47,17 @@ authorize writes.
 
 The original V1 hardening target denied Bash command text as an authorization
 source and explored a constrained read-only hook path. The current
-implementation supersedes that target: raw Bash is denied by stateful hooks.
-Hook-mediated Bash must be a single strict invocation of the trusted absolute
-`stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
-<cmd>`. Repo file edit authorization starts with native Codex edit tools such as
-`apply_patch` or Edit after exact intent and a successful same-session file lease, where
-target paths can be checked before writing, or with `--fs write-targets` wrapper
-calls that declare explicit targets. Raw Bash test commands are not allowlisted;
-use `stateful sandbox run --fs build --network enabled --command <cmd>` after
-exact `tmp/` directory intent and a successful same-session directory
-lease.
+implementation supersedes that target: Codex raw Bash is denied with sandbox
+guidance, and OMP raw Bash is blocked unless it uses the trusted wrapper.
+Repo-external shell work must use `stateful sandbox run --fs external --purpose ...`.
+Repo file edit authorization starts with native edit tools such as Codex `apply_patch` or Edit after exact
+intent and a successful same-session file lease, where target paths can be
+checked before writing, or with `--fs write-targets` wrapper calls that declare
+explicit repo-relative targets after intent and same-session lease. Raw Bash test
+commands are not allowlisted;
+use
+`stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`
+so disposable artifacts stay under `/tmp/stateful/<session>/<purpose>/`.
 
 Overrides are never automatic. A blocked write can proceed only when the user
 explicitly instructs the current session to allow a specific resource override.

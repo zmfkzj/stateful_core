@@ -17,7 +17,7 @@ use std::os::unix::fs::MetadataExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{ServerRuntime, discover_runtime_with_optional_global, post_json};
+use crate::{GlobalPaths, ServerRuntime, discover_runtime_with_global, post_json};
 
 #[derive(Debug, Clone, Deserialize)]
 struct LocalOutboxRecord {
@@ -38,16 +38,24 @@ struct PendingOutboxRecord {
 
 pub fn sync_outbox_in_repo(repo_root: impl AsRef<Path>) -> anyhow::Result<usize> {
     let repo_root = repo_root.as_ref();
-    let runtime = discover_runtime_with_optional_global(repo_root)?;
-    sync_outbox_in_repo_with_runtime(repo_root, &runtime)
+    let paths = GlobalPaths::from_env()?;
+    let runtime = discover_runtime_with_global(repo_root, &paths)?;
+    sync_outbox_with_runtime(&paths, &runtime)
 }
 
 pub fn sync_outbox_in_repo_with_runtime(
-    repo_root: impl AsRef<Path>,
+    _repo_root: impl AsRef<Path>,
     runtime: &ServerRuntime,
 ) -> anyhow::Result<usize> {
-    let repo_root = repo_root.as_ref();
-    let Some(outbox_dir) = existing_trusted_outbox_dir(repo_root)? else {
+    let paths = GlobalPaths::from_env()?;
+    sync_outbox_with_runtime(&paths, runtime)
+}
+
+pub fn sync_outbox_with_runtime(
+    paths: &GlobalPaths,
+    runtime: &ServerRuntime,
+) -> anyhow::Result<usize> {
+    let Some(outbox_dir) = existing_trusted_outbox_dir(paths)? else {
         return Ok(0);
     };
 
@@ -128,13 +136,12 @@ pub fn sync_outbox_in_repo_with_runtime(
 }
 
 pub(crate) fn queue_session_heartbeat_outbox(
-    repo_root: impl AsRef<Path>,
+    paths: &GlobalPaths,
     runtime_workspace_id: &str,
     session_id: &str,
     reason: &str,
 ) -> anyhow::Result<()> {
-    let repo_root = repo_root.as_ref();
-    let outbox_dir = ensure_trusted_outbox_dir(repo_root)?;
+    let outbox_dir = ensure_trusted_outbox_dir(paths)?;
     let _lock = acquire_outbox_lock(&outbox_dir)?;
     recover_claimed_outbox_files(&outbox_dir)?;
     let stem = safe_file_stem(session_id);
@@ -229,30 +236,17 @@ fn max_pending_sequence_in_file(path: &Path) -> anyhow::Result<u64> {
     Ok(max_sequence)
 }
 
-fn outbox_dir_path(repo_root: &Path) -> PathBuf {
-    repo_root.join(".stateful_core").join("outbox")
-}
-
-fn existing_trusted_outbox_dir(repo_root: &Path) -> anyhow::Result<Option<PathBuf>> {
-    let state_dir = repo_root.join(".stateful_core");
-    if !existing_plain_directory(&state_dir, "stateful directory")? {
+fn existing_trusted_outbox_dir(paths: &GlobalPaths) -> anyhow::Result<Option<PathBuf>> {
+    if !existing_plain_directory(&paths.outbox_dir, "global outbox directory")? {
         return Ok(None);
     }
-    let outbox_dir = outbox_dir_path(repo_root);
-    if !existing_plain_directory(&outbox_dir, "outbox directory")? {
-        return Ok(None);
-    }
-    ensure_path_stays_in_repo(repo_root, &outbox_dir)?;
-    Ok(Some(outbox_dir))
+    Ok(Some(paths.outbox_dir.clone()))
 }
 
-fn ensure_trusted_outbox_dir(repo_root: &Path) -> anyhow::Result<PathBuf> {
-    let state_dir = repo_root.join(".stateful_core");
-    ensure_plain_directory(&state_dir, "stateful directory")?;
-    let outbox_dir = outbox_dir_path(repo_root);
-    ensure_plain_directory(&outbox_dir, "outbox directory")?;
-    ensure_path_stays_in_repo(repo_root, &outbox_dir)?;
-    Ok(outbox_dir)
+fn ensure_trusted_outbox_dir(paths: &GlobalPaths) -> anyhow::Result<PathBuf> {
+    ensure_plain_directory(&paths.home, "stateful home directory")?;
+    ensure_plain_directory(&paths.outbox_dir, "global outbox directory")?;
+    Ok(paths.outbox_dir.clone())
 }
 
 fn existing_plain_directory(path: &Path, label: &str) -> anyhow::Result<bool> {
@@ -330,15 +324,6 @@ fn ensure_plain_directory(path: &Path, label: &str) -> anyhow::Result<()> {
         }
         Err(error) => Err(error.into()),
     }
-}
-
-fn ensure_path_stays_in_repo(repo_root: &Path, path: &Path) -> anyhow::Result<()> {
-    let canonical_repo = repo_root.canonicalize()?;
-    let canonical_path = path.canonicalize()?;
-    if !canonical_path.starts_with(canonical_repo) {
-        anyhow::bail!("stateful outbox path escapes the repo");
-    }
-    Ok(())
 }
 
 fn outbox_files(outbox_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {

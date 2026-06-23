@@ -18,13 +18,13 @@ use crate::sandbox::{
     SandboxAuthorizationDenied, SandboxAuthorizeContext, SandboxAuthorizeDecision,
     SandboxCommandResult, SandboxNetworkPolicy, SandboxRunOutput, SandboxWritablePath,
     SandboxWritablePathKind, authorize_sandbox_write, classify_sandbox_authorize_response,
-    enrich_sandbox_write_dir_denial, ensure_repo_dir_target, normalize_sandbox_target_path,
-    push_seatbelt_device_read_allows, resolve_sandbox_cwd, sandbox_temp_dir,
-    sandbox_write_dir_display_path, seatbelt_escape,
+    current_session_for_sandbox_profile, enrich_sandbox_write_dir_denial, ensure_repo_dir_target,
+    normalize_sandbox_target_path, push_seatbelt_device_read_allows, resolve_sandbox_cwd,
+    sandbox_temp_dir, sandbox_write_dir_display_path, seatbelt_escape,
 };
 use crate::{
-    CurrentSession, GlobalPaths, RepoGate, discover_runtime_with_global, ensure_server,
-    read_current_session_file, repo_gate, runtime_env_override_is_configured,
+    GlobalPaths, RepoGate, discover_runtime_with_global, ensure_server, repo_gate,
+    runtime_env_override_is_configured,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,9 +87,12 @@ pub fn run_nested_codex_benchmark_sandbox_in_repo(
         .map(validate_nested_codex_benchmark_docker_socket)
         .transpose()?;
 
-    let current_session: CurrentSession = read_current_session_file(&repo_root).map_err(|_| {
-        anyhow::anyhow!("sandbox run-nested-codex-benchmark requires a current stateful session")
-    })?;
+    let current_session = current_session_for_sandbox_profile(
+        &repo_root,
+        paths,
+        &runtime,
+        "sandbox run-nested-codex-benchmark requires a current stateful session",
+    )?;
     let authorize_context = SandboxAuthorizeContext {
         runtime: &runtime,
         repo_root: &repo_root,
@@ -133,6 +136,7 @@ pub fn run_nested_codex_benchmark_sandbox_in_repo(
         &writable_paths,
         &nested_paths.codex_home_root,
         docker_socket.as_deref(),
+        &runtime,
         timeout,
     )?;
 
@@ -244,6 +248,7 @@ fn run_nested_codex_benchmark_sandboxed_command(
     writable_paths: &[SandboxWritablePath],
     codex_home_root: &Path,
     docker_socket: Option<&Path>,
+    runtime: &crate::ServerRuntime,
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
     let temp_dir = sandbox_temp_dir(writable_paths)
@@ -258,6 +263,7 @@ fn run_nested_codex_benchmark_sandboxed_command(
                 &temp_dir,
                 codex_home_root,
                 docker_socket,
+                runtime,
             ),
             timeout,
         )
@@ -271,6 +277,7 @@ fn run_nested_codex_benchmark_sandboxed_command(
             writable_paths,
             codex_home_root,
             docker_socket,
+            runtime,
             timeout,
             temp_dir,
         );
@@ -287,6 +294,7 @@ fn run_nested_codex_benchmark_sandboxed_command(
             writable_paths,
             codex_home_root,
             docker_socket,
+            runtime,
             timeout,
             temp_dir,
         );
@@ -302,10 +310,15 @@ fn apply_nested_codex_benchmark_env(
     temp_dir: &Path,
     codex_home_root: &Path,
     docker_socket: Option<&Path>,
+    runtime: &crate::ServerRuntime,
 ) {
     apply_sandbox_temp_env(command, Some(temp_dir));
     command.env("STATEFUL_NESTED_CODEX_HOME_ROOT", codex_home_root);
     command.env(STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV, "1");
+    command.env("STATEFUL_SERVER_URL", &runtime.base_url);
+    command.env("STATEFUL_SERVER_TOKEN", &runtime.token);
+    command.env_remove("CODEX_THREAD_ID");
+    command.env_remove("STATEFUL_SESSION_ID");
     if let Some(docker_socket) = docker_socket {
         command.env("DOCKER_HOST", format!("unix://{}", docker_socket.display()));
     }
@@ -319,6 +332,7 @@ fn nested_codex_benchmark_seatbelt_command(
     temp_dir: &Path,
     codex_home_root: &Path,
     docker_socket: Option<&Path>,
+    runtime: &crate::ServerRuntime,
 ) -> Command {
     let profile = nested_codex_benchmark_seatbelt_profile(writable_paths, docker_socket);
     let mut sandbox = Command::new("/usr/bin/sandbox-exec");
@@ -329,7 +343,13 @@ fn nested_codex_benchmark_seatbelt_command(
         .arg("-c")
         .arg(command)
         .current_dir(cwd);
-    apply_nested_codex_benchmark_env(&mut sandbox, temp_dir, codex_home_root, docker_socket);
+    apply_nested_codex_benchmark_env(
+        &mut sandbox,
+        temp_dir,
+        codex_home_root,
+        docker_socket,
+        runtime,
+    );
     sandbox
 }
 
@@ -364,6 +384,7 @@ fn nested_codex_benchmark_seatbelt_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ServerRuntime;
 
     #[test]
     fn nested_codex_benchmark_paths_must_stay_under_target() {
@@ -410,11 +431,13 @@ mod tests {
     #[test]
     fn nested_codex_benchmark_env_sets_isolated_codex_home_root() {
         let mut command = Command::new("printenv");
+        let runtime = ServerRuntime::new("http://127.0.0.1:43873", "token-123", "w1", 1234);
         apply_nested_codex_benchmark_env(
             &mut command,
             Path::new("/repo/target/.stateful-tmp"),
             Path::new("/repo/target/nested-codex-homes/run-1"),
             None,
+            &runtime,
         );
 
         let env = command
@@ -443,16 +466,38 @@ mod tests {
                 .map(|(_, value)| value),
             Some(&Some("1".to_string()))
         );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "STATEFUL_SERVER_URL")
+                .map(|(_, value)| value),
+            Some(&Some("http://127.0.0.1:43873".to_string()))
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "STATEFUL_SERVER_TOKEN")
+                .map(|(_, value)| value),
+            Some(&Some("token-123".to_string()))
+        );
+        assert!(
+            !env.iter()
+                .any(|(key, value)| key == "CODEX_THREAD_ID" && value.is_some())
+        );
+        assert!(
+            !env.iter()
+                .any(|(key, value)| key == "STATEFUL_SESSION_ID" && value.is_some())
+        );
     }
 
     #[test]
     fn nested_codex_benchmark_env_sets_docker_host_when_socket_is_explicit() {
         let mut command = Command::new("printenv");
+        let runtime = ServerRuntime::new("http://127.0.0.1:43873", "token-123", "w1", 1234);
         apply_nested_codex_benchmark_env(
             &mut command,
             Path::new("/repo/target/.stateful-tmp"),
             Path::new("/repo/target/nested-codex-homes/run-1"),
             Some(Path::new("/Users/arthur/.colima/default/docker.sock")),
+            &runtime,
         );
 
         let env = command

@@ -63,7 +63,8 @@ Current state is a scoped, time-bound summary of active work.
 Examples:
 
 - An agent session is exploring auth validation.
-- A subagent is editing within its parent session's declared file scope.
+- A subagent is editing under its own session identity while sharing the
+  workspace-level coordination model.
 - A session intends to edit `src/auth.ts`.
 - A file has an active advisory lease.
 - A session is testing after a change.
@@ -74,8 +75,9 @@ Examples:
 Current state must be compact enough to render into an agent prompt and precise
 enough to drive conflict checks before important tool calls.
 
-The shipped v1 prototype observes Codex sessions, supported tool effects, MCP
-calls, exact file lease freshness, and explicit reconciliation acknowledgements.
+The shipped v1 prototype observes Codex and OMP sessions, supported tool
+effects, MCP calls, exact file lease freshness, and explicit reconciliation
+acknowledgements.
 It does not automatically watch human editor buffers or filesystem saves.
 
 ## Freshness
@@ -127,21 +129,50 @@ before turn stops       -> require final status
 
 For v1, supported write actions are blocked unless the session has active intent
 with matching file or directory scope. Abstract task, test, port, or migration
-intent can provide context but does not permit writes. Codex lifecycle hooks
-provide the enforcement surface. This is a coordination guardrail, not a
-complete sandbox or security boundary.
+intent can provide context but does not permit writes. Codex lifecycle hooks and
+the OMP extension provide the enforcement surface. This is a coordination
+guardrail, not a complete sandbox or security boundary.
 
 V1 only authorizes writes through tool paths with reliable target extraction.
-Repo file edits use native Codex edit tools such as `apply_patch`, `Edit`, and
-`Write` after exact intent and a successful same-session file lease. Bash command text alone
-is never an authorization source; raw Bash is denied by stateful hooks. Command-shaped
-read-only inspection must use the trusted absolute `stateful` wrapper:
-`<absolute-stateful-binary> sandbox run --fs read-only --network disabled
---command <cmd>`. Command-shaped writes must use the wrapper with
-`--fs write-targets` and explicit target flags. Raw Bash test commands are not
-allowlisted; use `stateful sandbox run --fs build --network enabled --command
-<cmd>` after exact `tmp/` directory intent and a successful
-same-session directory lease.
+Repo file edits use hook-visible native edit tools such as Codex `apply_patch`,
+`Edit`, and `Write`, or OMP `edit` and `write`, after exact intent and a
+successful same-session file lease; the lease is released after the completed
+write transaction. Bash command text alone is never a repo-internal
+authorization source. Runtime tool names are classified by their leaf segment,
+so `functions.bash` follows Bash rules, `functions.python` follows Python
+rules, and `functions.read` / `functions.search` remain native read/search
+tools. Codex raw Bash is denied with sandbox guidance. OMP raw Bash and native
+Python execution are denied at host approval and hook levels, even when the raw
+command itself invokes `stateful sandbox run`; OMP sessions use generated custom
+tools instead. `sandbox_bash` invokes the trusted stateful binary for read-only,
+write-targets, build, git, and github-pr sandbox profiles, including common
+sandbox flags, and rejects `--fs external` with guidance to use `ext_ro_bash` or
+`ext_rw_bash`. `ext_ro_bash` runs purpose-and-command-only external reads
+without OMP UI confirmation. `ext_rw_bash` asks OMP UI confirmation before
+foreground or async execution for external writes that declare at least one
+write target, create target, or write dir. In foreground mode, generated command
+tools stream stdout/stderr chunks to OMP while the command runs and return the
+final result. With optional `async: true`, they return immediately with a
+background-job start message while the trusted stateful sandbox process
+continues, then deliver an automatic completion message back into OMP when it
+exits. The generated extension also subscribes to Stateful SSE reservation
+notifications and injects a next-turn OMP message when a queued `wait_id`
+becomes claimable; the claim and write still use the normal Stateful tools.
+Ordinary read work should use agent-native read, search, or diff tools when
+available.
+Read-only inspection that genuinely needs a shell must use the trusted absolute
+`stateful` wrapper: `<absolute-stateful-binary> sandbox run --fs read-only
+--network disabled --command <cmd>`; in OMP, use `sandbox_bash` for that
+profile. Command-shaped repo writes must use the wrapper with
+`--fs write-targets` and explicit repo-relative target flags after intent and
+same-session lease; in OMP, use `sandbox_bash`. Repo-external operations use
+`--fs external` with purpose and command; read-only external commands may omit
+targets and use OMP `ext_ro_bash`, while external writes must declare
+write/create/dir scope and use OMP `ext_rw_bash`. Raw Bash test commands are
+not allowlisted; use
+`stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
+--command <cmd>` so build artifacts go under
+`/tmp/stateful/<session>/<scratch-purpose>/`; in OMP, use `sandbox_bash`.
 
 ## Product Shape
 

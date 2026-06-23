@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub const CURRENT_SESSION_SCOPE_SOURCE_REF: &str = "CurrentSessionScope";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
     Brief,
@@ -44,6 +46,30 @@ pub enum CurrentFreshness {
     Finalized,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CurrentEvidenceKind {
+    DeclaredIntent,
+    LeaseOnly,
+    WaitQueue,
+    Reservation,
+    ObservedWrite,
+    VerifiedDiff,
+}
+
+impl CurrentEvidenceKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DeclaredIntent => "declared_intent",
+            Self::LeaseOnly => "lease_only",
+            Self::WaitQueue => "wait_queue",
+            Self::Reservation => "reservation",
+            Self::ObservedWrite => "observed_write",
+            Self::VerifiedDiff => "verified_diff",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrentItem {
     pub kind: CurrentItemKind,
@@ -56,6 +82,8 @@ pub struct CurrentItem {
     pub next_action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_kind: Option<CurrentEvidenceKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,6 +116,7 @@ impl CurrentItem {
             summary: summary.into(),
             next_action: None,
             evidence: None,
+            evidence_kind: None,
             session_id: None,
             workspace_id: None,
             source_refs: Vec::new(),
@@ -104,6 +133,11 @@ impl CurrentItem {
 
     pub fn with_evidence(mut self, evidence: impl Into<String>) -> Self {
         self.evidence = Some(evidence.into());
+        self
+    }
+
+    pub fn with_evidence_kind(mut self, evidence_kind: CurrentEvidenceKind) -> Self {
+        self.evidence_kind = Some(evidence_kind);
         self
     }
 
@@ -181,7 +215,8 @@ impl ContextPackage {
             .with_next_action(format!(
                 "Reread {path}, summarize the human change, choose adopt/reapply/ask_user/abandon, then call state.reconcile.ack."
             ))
-            .with_evidence("HumanWriteObserved affects active agent work."),
+            .with_evidence("HumanWriteObserved affects active agent work.")
+            .with_evidence_kind(CurrentEvidenceKind::ObservedWrite),
         ])
     }
 
@@ -248,11 +283,29 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
     };
     let mut rendered = 0usize;
 
+    let active_scope = package
+        .items
+        .iter()
+        .filter(|item| {
+            item.freshness == CurrentFreshness::Live && is_current_session_scope_item(item)
+        })
+        .collect::<Vec<_>>();
+    render_section(
+        &mut output,
+        "Your Active Scope",
+        &active_scope,
+        mode,
+        max_total,
+        &mut rendered,
+    );
+
     let blocking = package
         .items
         .iter()
         .filter(|item| {
-            item.freshness == CurrentFreshness::Live && item.severity == CurrentSeverity::Block
+            item.freshness == CurrentFreshness::Live
+                && item.severity == CurrentSeverity::Block
+                && !is_current_session_scope_item(item)
         })
         .collect::<Vec<_>>();
     render_section(
@@ -272,7 +325,9 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         .items
         .iter()
         .filter(|item| {
-            item.freshness == CurrentFreshness::Live && item.severity == CurrentSeverity::Warn
+            item.freshness == CurrentFreshness::Live
+                && item.severity == CurrentSeverity::Warn
+                && !is_current_session_scope_item(item)
         })
         .collect::<Vec<_>>();
     render_section(
@@ -288,7 +343,9 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         .items
         .iter()
         .filter(|item| {
-            item.freshness == CurrentFreshness::Live && item.severity == CurrentSeverity::Info
+            item.freshness == CurrentFreshness::Live
+                && item.severity == CurrentSeverity::Info
+                && !is_current_session_scope_item(item)
         })
         .collect::<Vec<_>>();
     render_section(
@@ -307,7 +364,9 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
     let stale = package
         .items
         .iter()
-        .filter(|item| item.freshness != CurrentFreshness::Live)
+        .filter(|item| {
+            item.freshness != CurrentFreshness::Live && !is_current_session_scope_item(item)
+        })
         .take(stale_limit)
         .collect::<Vec<_>>();
     render_section(
@@ -322,6 +381,12 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
     output
 }
 
+fn is_current_session_scope_item(item: &CurrentItem) -> bool {
+    item.source_refs
+        .iter()
+        .any(|source_ref| source_ref == CURRENT_SESSION_SCOPE_SOURCE_REF)
+}
+
 fn package_status(items: &[CurrentItem]) -> ContextStatus {
     if items.iter().any(|item| {
         item.freshness == CurrentFreshness::Live && item.severity == CurrentSeverity::Block
@@ -333,10 +398,16 @@ fn package_status(items: &[CurrentItem]) -> ContextStatus {
 }
 
 fn render_required_next_action(output: &mut String, items: &[&CurrentItem]) {
-    let next_actions = items
-        .iter()
-        .filter_map(|item| item.next_action.as_deref())
-        .collect::<Vec<_>>();
+    let mut next_actions = Vec::new();
+    for item in items {
+        let Some(next_action) = item.next_action.as_deref() else {
+            continue;
+        };
+        let next_action = trim_trailing_period(next_action);
+        if !next_actions.contains(&next_action) {
+            next_actions.push(next_action);
+        }
+    }
     if next_actions.is_empty() {
         return;
     }
@@ -346,7 +417,7 @@ fn render_required_next_action(output: &mut String, items: &[&CurrentItem]) {
     }
     output.push_str("Required Next Action\n");
     for next_action in next_actions {
-        output.push_str(&format!("- {}\n", trim_trailing_period(next_action)));
+        output.push_str(&format!("- {next_action}\n"));
     }
 }
 
@@ -382,13 +453,18 @@ fn render_section(
             "  purpose: {}\n",
             trim_trailing_period(&item.purpose)
         ));
-        if let Some(next_action) = &item.next_action {
-            output.push_str(&format!("  next: {}\n", trim_trailing_period(next_action)));
+        if item.severity != CurrentSeverity::Info {
+            if let Some(next_action) = &item.next_action {
+                output.push_str(&format!("  next: {}\n", trim_trailing_period(next_action)));
+            }
         }
-        if matches!(mode, RenderMode::Detailed)
-            && let Some(evidence) = &item.evidence
-        {
-            output.push_str(&format!("  evidence: {}\n", trim_trailing_period(evidence)));
+        if let Some(evidence_kind) = item.evidence_kind {
+            output.push_str(&format!("  evidence kind: {}\n", evidence_kind.as_str()));
+        }
+        if matches!(mode, RenderMode::Detailed) {
+            if let Some(evidence) = &item.evidence {
+                output.push_str(&format!("  evidence: {}\n", trim_trailing_period(evidence)));
+            }
         }
     }
 }

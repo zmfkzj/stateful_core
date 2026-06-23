@@ -7,7 +7,6 @@ use std::{
 mod codex_benchmark;
 mod codex_wrapper;
 mod commit;
-mod external_run;
 mod global_paths;
 mod hook;
 mod install;
@@ -26,19 +25,17 @@ pub use codex_wrapper::{
     CodexInvocation, CodexSandboxMode, CodexWrapperOptions, build_codex_invocation, run_codex,
 };
 pub use commit::{CommitRequest, CommitResult, run_structured_commit};
-pub use external_run::{
-    ExternalRunApproval, ExternalRunRequest, approve_external_run, request_external_run,
-    run_approved_external_run,
-};
 pub use global_paths::GlobalPaths;
 pub use hook::{
-    HookOutcome, handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
+    HookOutcome, OmpHookOutcome, handle_omp_post_tool_use_with_runtime,
+    handle_omp_pre_tool_use_with_runtime, handle_omp_session_start_with_runtime,
+    handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
     handle_session_start_in_repo, handle_stop_in_repo, handle_user_prompt_submit_in_repo,
 };
 pub use install::{
-    CodexInstallOptions, InstallOptions, InstallPlan, apply_codex_install, apply_global_install,
-    current_stateful_binary_path, default_codex_config_path, plan_codex_install,
-    plan_global_install,
+    CodexInstallOptions, InstallOptions, InstallPlan, OmpInstallOptions, apply_codex_install,
+    apply_global_install, apply_omp_install, current_stateful_binary_path,
+    default_codex_config_path, plan_codex_install, plan_global_install, plan_omp_install,
 };
 pub use lan::{
     ServerJoinOptions, ServerJoinResult, ServerStartRuntimeOptions, ServerStartRuntimeResult,
@@ -46,7 +43,7 @@ pub use lan::{
     server_start_runtime_result, start_server_runtime,
 };
 pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio_in_repo};
-pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime};
+pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime, sync_outbox_with_runtime};
 pub use push::{PushRequest, PushResult, run_structured_push};
 pub use repo_registry::{
     RepoEntry, RepoGate, RepoIdentity, RepoRegistry, RepoToolList, allow_tool_for_repo,
@@ -94,6 +91,8 @@ pub enum Command {
         codex_config: Option<PathBuf>,
         #[arg(long)]
         binary: Option<String>,
+        #[arg(long)]
+        update: bool,
     },
     Server {
         #[command(subcommand)]
@@ -122,8 +121,6 @@ pub enum Command {
         args: Vec<String>,
     },
     #[command(subcommand)]
-    ExternalRun(ExternalRunCommand),
-    #[command(subcommand)]
     Sandbox(SandboxCommand),
     Enable {
         #[arg(long)]
@@ -147,39 +144,24 @@ pub enum Command {
     Mcp(McpCommand),
     SyncOutbox,
     #[command(subcommand)]
-    Hook(HookCommand),
+    Hook(HookRuntime),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum InstallAgent {
     Codex,
+    Omp,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ExternalRunCommand {
-    Request {
-        #[arg(long)]
-        purpose: String,
-        #[arg(long = "write-target")]
-        write_targets: Vec<String>,
-        #[arg(long = "create-target")]
-        create_targets: Vec<String>,
-        #[arg(long = "write-dir")]
-        write_dirs: Vec<String>,
-        #[arg(long, value_enum, default_value = "disabled")]
-        network: SandboxNetworkPolicy,
-        #[arg(long)]
-        timeout_seconds: Option<u64>,
-        #[arg(long)]
-        command: String,
+pub enum HookRuntime {
+    Codex {
+        #[command(subcommand)]
+        command: HookCommand,
     },
-    Approve {
-        request_id: String,
-        #[arg(long)]
-        run: bool,
-    },
-    Run {
-        request_id: String,
+    Omp {
+        #[command(subcommand)]
+        command: HookCommand,
     },
 }
 
@@ -224,16 +206,26 @@ pub enum SandboxCommand {
         fs: SandboxFsProfile,
         #[arg(long, value_enum, default_value = "disabled")]
         network: SandboxNetworkPolicy,
+        #[arg(long)]
+        purpose: Option<String>,
         #[arg(long = "write-target")]
         write_targets: Vec<String>,
         #[arg(long = "create-target")]
         create_targets: Vec<String>,
         #[arg(long = "write-dir")]
         write_dirs: Vec<String>,
+        #[arg(long = "connect-socket")]
+        connect_sockets: Vec<String>,
+        #[arg(long)]
+        allow_signal: bool,
         #[arg(long)]
         command: String,
         #[arg(long)]
         timeout_seconds: Option<u64>,
+    },
+    Process {
+        #[command(subcommand)]
+        command: SandboxProcessCommand,
     },
     RunNestedCodexBenchmark {
         #[arg(long)]
@@ -248,6 +240,22 @@ pub enum SandboxCommand {
         command: String,
         #[arg(long)]
         timeout_seconds: Option<u64>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SandboxProcessCommand {
+    Find {
+        #[arg(long = "name")]
+        names: Vec<String>,
+        #[arg(long = "contains")]
+        contains: Vec<String>,
+        #[arg(long = "pid")]
+        pids: Vec<u32>,
+        #[arg(long = "parent-pid", alias = "ppid")]
+        parent_pids: Vec<u32>,
+        #[arg(long = "process-group", alias = "pgid")]
+        process_groups: Vec<u32>,
     },
 }
 
@@ -364,30 +372,50 @@ pub fn run() -> anyhow::Result<()> {
             agents,
             codex_config,
             binary,
+            update,
         } => {
             let paths = GlobalPaths::from_env()?;
+            let binary_path = match binary {
+                Some(path) => Some(path),
+                None if agents.is_empty() => None,
+                None => Some(current_stateful_binary_path()?),
+            };
             let plan = if agents.is_empty() {
                 if codex_config.is_some() {
                     anyhow::bail!("--codex-config requires --agent codex");
                 }
-                if binary.is_some() {
-                    anyhow::bail!("--binary requires --agent codex");
+                if binary_path.is_some() {
+                    anyhow::bail!("--binary requires --agent codex or --agent omp");
+                }
+                if update {
+                    anyhow::bail!("--update requires --agent omp");
                 }
                 apply_global_install(InstallOptions { yes, paths })?
             } else if agents.contains(&InstallAgent::Codex) {
+                if update {
+                    anyhow::bail!("--update requires --agent omp");
+                }
                 let codex_config_path = match codex_config {
                     Some(path) => path,
                     None => default_codex_config_path()?,
-                };
-                let binary_path = match binary {
-                    Some(path) => path,
-                    None => current_stateful_binary_path()?,
                 };
                 apply_codex_install(CodexInstallOptions {
                     yes,
                     paths,
                     codex_config_path,
-                    binary_path,
+                    binary_path: binary_path.expect("agent install should resolve binary"),
+                })?
+            } else if agents.contains(&InstallAgent::Omp) {
+                if codex_config.is_some() {
+                    anyhow::bail!("--codex-config requires --agent codex");
+                }
+                apply_omp_install(OmpInstallOptions {
+                    yes,
+                    paths,
+                    binary_path: binary_path.expect("agent install should resolve binary"),
+                    project_config_path: None,
+                    omp_agent_dir: None,
+                    update,
                 })?
             } else {
                 anyhow::bail!("no supported install agents selected");
@@ -494,6 +522,14 @@ pub fn run() -> anyhow::Result<()> {
                 let paths = GlobalPaths::from_env()?;
                 let runtime =
                     discover_runtime_with_global(current_repo_root_or_current_dir()?, &paths).ok();
+                let runtime = runtime.map(|runtime| {
+                    serde_json::json!({
+                        "base_url": runtime.base_url,
+                        "workspace_id": runtime.workspace_id,
+                        "pid": runtime.pid,
+                        "token": "<redacted>",
+                    })
+                });
                 println!("{}", serde_json::to_string_pretty(&runtime)?);
             }
             ServerCommand::Stop => {
@@ -538,62 +574,15 @@ pub fn run() -> anyhow::Result<()> {
             })?;
             std::process::exit(code);
         }
-        Command::ExternalRun(ExternalRunCommand::Request {
+        Command::Sandbox(SandboxCommand::Run {
+            fs,
+            network,
             purpose,
             write_targets,
             create_targets,
             write_dirs,
-            network,
-            timeout_seconds,
-            command,
-        }) => {
-            let approval = request_external_run(ExternalRunRequest {
-                repo_root: current_repo_root_or_current_dir()?,
-                paths: GlobalPaths::from_env()?,
-                purpose,
-                command,
-                write_targets,
-                create_targets,
-                write_dirs,
-                network,
-                timeout_seconds,
-            })?;
-            print!("{}", approval.guidance);
-        }
-        Command::ExternalRun(ExternalRunCommand::Approve { request_id, run }) => {
-            let paths = GlobalPaths::from_env()?;
-            let approval = approve_external_run(&paths, &request_id, run)?;
-            println!("{}", approval.guidance);
-            if run {
-                let output = run_approved_external_run(&paths, &request_id)?;
-                println!("{}", serde_json::to_string(&output)?);
-                if let Some(exit_code) =
-                    sandbox::sandbox_run_cli_exit_code(&sandbox::SandboxRunOutput {
-                        status: output.status,
-                        exit_code: output.exit_code,
-                        stdout: output.stdout.clone(),
-                        stderr: output.stderr.clone(),
-                        allowed_write_targets: Vec::new(),
-                        denied_write_targets: Vec::new(),
-                    })
-                {
-                    std::process::exit(exit_code);
-                }
-            }
-        }
-        Command::ExternalRun(ExternalRunCommand::Run { request_id }) => {
-            let output = run_approved_external_run(&GlobalPaths::from_env()?, &request_id)?;
-            println!("{}", serde_json::to_string(&output)?);
-            if output.status != "exited" || output.exit_code != Some(0) {
-                std::process::exit(output.exit_code.unwrap_or(1));
-            }
-        }
-        Command::Sandbox(SandboxCommand::Run {
-            fs,
-            network,
-            write_targets,
-            create_targets,
-            write_dirs,
+            connect_sockets,
+            allow_signal,
             command,
             timeout_seconds,
         }) => {
@@ -605,9 +594,12 @@ pub fn run() -> anyhow::Result<()> {
                 sandbox::SandboxRunRequest {
                     fs,
                     network,
+                    purpose,
                     write_targets,
                     create_targets,
                     write_dirs,
+                    connect_sockets,
+                    allow_signal,
                     command,
                     timeout_seconds,
                 },
@@ -665,6 +657,25 @@ pub fn run() -> anyhow::Result<()> {
             if let Some(exit_code) = sandbox::sandbox_run_cli_exit_code(&output) {
                 std::process::exit(exit_code);
             }
+        }
+        Command::Sandbox(SandboxCommand::Process {
+            command:
+                SandboxProcessCommand::Find {
+                    names,
+                    contains,
+                    pids,
+                    parent_pids,
+                    process_groups,
+                },
+        }) => {
+            let output = sandbox::run_sandbox_process_find(sandbox::SandboxProcessFindRequest {
+                names,
+                contains,
+                pids,
+                parent_pids,
+                process_groups,
+            })?;
+            println!("{}", serde_json::to_string(&output)?);
         }
         Command::Enable { repo } => {
             let paths = GlobalPaths::from_env()?;

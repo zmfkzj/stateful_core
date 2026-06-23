@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 use serde_json::json;
-use stateful_core::{AuthorizationInput, CurrentItemKind, DecisionKind};
+use stateful_core::{AuthorizationInput, CurrentEvidenceKind, CurrentItemKind, DecisionKind};
 use stateful_store::{Event, IntentRequestInput, OutboxEntry, Store, StoreError};
 use std::fs;
 use std::sync::mpsc;
@@ -288,7 +288,7 @@ fn intent_declarations_allow_edit_and_artifact_scopes_to_coexist() {
             "s1",
             "w1",
             "Run the workspace test suite.",
-            ["tmp/"],
+            ["tmp/test-suite/"],
         ))
         .expect("artifact intent should append");
 
@@ -296,7 +296,7 @@ fn intent_declarations_allow_edit_and_artifact_scopes_to_coexist() {
         .acquire_lease("s1", "w1", "src/auth.ts")
         .expect("edit lease should still be authorized");
     store
-        .acquire_lease("s1", "w1", "tmp/")
+        .acquire_lease("s1", "w1", "tmp/test-suite/")
         .expect("artifact lease should be authorized");
 
     let live = store
@@ -309,7 +309,8 @@ fn intent_declarations_allow_edit_and_artifact_scopes_to_coexist() {
     assert!(
         live.items
             .iter()
-            .any(|item| item.resource == "tmp/" && item.purpose == "Run the workspace test suite.")
+            .any(|item| item.resource == "tmp/test-suite/"
+                && item.purpose == "Run the workspace test suite.")
     );
 }
 
@@ -840,6 +841,10 @@ fn live_current_state_reports_active_items_with_purpose() {
         .expect("intent item should exist");
     assert_eq!(intent.resource, "src/auth.ts");
     assert_eq!(intent.purpose, "Fix auth validation behavior.");
+    assert_eq!(
+        intent.evidence_kind,
+        Some(CurrentEvidenceKind::DeclaredIntent)
+    );
 
     let lease = live
         .items
@@ -847,6 +852,7 @@ fn live_current_state_reports_active_items_with_purpose() {
         .find(|item| item.kind == CurrentItemKind::Lease)
         .expect("lease item should exist");
     assert_eq!(lease.purpose, "Fix auth validation behavior.");
+    assert_eq!(lease.evidence_kind, Some(CurrentEvidenceKind::LeaseOnly));
 
     let waiter = live
         .items
@@ -857,6 +863,7 @@ fn live_current_state_reports_active_items_with_purpose() {
         waiter.purpose,
         "Update the same auth file after the active lease clears."
     );
+    assert_eq!(waiter.evidence_kind, Some(CurrentEvidenceKind::WaitQueue));
 }
 
 #[test]
@@ -1295,6 +1302,32 @@ fn acquire_lease_requires_matching_active_intent() {
 }
 
 #[test]
+fn acquire_lease_rejects_direct_tmp_resource_even_with_matching_intent() {
+    for path in ["tmp", "tmp/"] {
+        let store = Store::open_in_memory().expect("in-memory store should open");
+        store
+            .append(Event::intent_declared(
+                "s1",
+                "w1",
+                "Run test artifacts in a scoped tmp path.",
+                [path],
+            ))
+            .expect("tmp intent should append");
+
+        let error = store
+            .acquire_lease("s1", "w1", path)
+            .expect_err("direct tmp lease should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("direct tmp leases are not allowed"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(store.lease_count().expect("lease count should load"), 0);
+    }
+}
+
+#[test]
 fn acquire_directory_lease_rejects_file_intent_with_same_normalized_path() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
@@ -1336,7 +1369,6 @@ fn acquire_lease_rejects_existing_active_file_lease_conflict() {
     assert!(matches!(error, StoreError::LeaseConflict));
     assert_eq!(store.lease_count().expect("lease count should load"), 1);
 }
-
 #[test]
 fn acquire_lease_allows_same_path_in_different_workspaces() {
     let store = Store::open_in_memory().expect("in-memory store should open");
@@ -1403,16 +1435,16 @@ fn same_session_can_acquire_exact_file_lease_under_directory_lease() {
 }
 
 #[test]
-fn acquire_lease_rejects_same_session_duplicate_exact_file_lease() {
+fn acquire_lease_reports_already_held_for_same_session_duplicate_exact_file_lease() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
 
     let error = store
         .acquire_lease("s1", "w1", "src/auth.ts")
-        .expect_err("duplicate exact file lease should reject");
+        .expect_err("duplicate exact file lease should report already held");
 
-    assert!(matches!(error, StoreError::LeaseConflict));
+    assert!(matches!(error, StoreError::LeaseAlreadyHeld));
     assert_eq!(store.lease_count().expect("lease count should load"), 1);
 }
 
@@ -2364,7 +2396,7 @@ fn released_child_lease_promotes_directory_waiter_to_reservation() {
     assert_eq!(reservation.relative_path, "target");
 
     let notifications = store
-        .pending_notifications("s2")
+        .pending_notifications("s2", "w1")
         .expect("notifications should load");
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].kind, "reservation_granted");
@@ -2625,10 +2657,191 @@ fn released_directory_lease_promotes_child_file_waiter_to_reservation() {
     assert_eq!(reservation.session_id, "s2");
 
     let notifications = store
-        .pending_notifications("s2")
+        .pending_notifications("s2", "w1")
         .expect("notifications should load");
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].payload["relative_path"], "target/out.txt");
+}
+
+#[test]
+fn released_directory_lease_promotes_all_non_conflicting_child_file_waiters() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    acquire_test_lease(&store, "s1", "w1", "target/");
+    let first = store
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target/a.txt",
+            "write_file",
+            "Queue first file write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("first child file waiter should enqueue");
+    let second = store
+        .enqueue_waiter(
+            "s3",
+            "w1",
+            "target/b.txt",
+            "write_file",
+            "Queue second file write after blocker clears.",
+            Some("s1"),
+        )
+        .expect("second child file waiter should enqueue");
+
+    store
+        .release_lease("s1", "w1", "target/")
+        .expect("directory lease should release");
+
+    let first_reservation = store
+        .active_reservation("w1", "target/a.txt")
+        .expect("first reservation lookup should succeed")
+        .expect("first child file waiter should be reserved");
+    assert_eq!(first_reservation.wait_id, first.wait_id);
+    let second_reservation = store
+        .active_reservation("w1", "target/b.txt")
+        .expect("second reservation lookup should succeed")
+        .expect("second child file waiter should be reserved");
+    assert_eq!(second_reservation.wait_id, second.wait_id);
+}
+
+#[test]
+fn released_directory_lease_keeps_same_session_conflicting_waiter_queued() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    acquire_test_lease(&store, "s1", "w1", "target/");
+    let first = store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-1",
+            session_id: "s2",
+            workspace_id: "w1",
+            relative_path: "target/a.txt",
+            action: "write_file",
+            purpose: "Queue first file write after blocker clears.",
+            blocking_session_id: Some("s1"),
+        })
+        .expect("first child file waiter should enqueue");
+    let second = store
+        .enqueue_intent_request(IntentRequestInput {
+            request_id: "request-2",
+            session_id: "s2",
+            workspace_id: "w1",
+            relative_path: "target/a.txt",
+            action: "write_file",
+            purpose: "Queue second file write after blocker clears.",
+            blocking_session_id: Some("s1"),
+        })
+        .expect("second child file waiter should enqueue");
+
+    store
+        .release_lease("s1", "w1", "target/")
+        .expect("directory lease should release");
+
+    let reservation = store
+        .active_reservation("w1", "target/a.txt")
+        .expect("reservation lookup should succeed")
+        .expect("first waiter should be reserved");
+    assert_eq!(reservation.wait_id, first.wait_id);
+    assert_eq!(
+        store
+            .waiter_status(&second.wait_id)
+            .expect("second waiter status should load")
+            .as_deref(),
+        Some("queued")
+    );
+}
+
+#[test]
+fn live_current_state_rolls_back_unblocked_promotion_when_notification_fails() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-live-current-promotion-rollback-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let wait = store
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target/a.txt",
+            "write_file",
+            "Queue file write after a blocker that already cleared.",
+            Some("s1"),
+        )
+        .expect("waiter should enqueue");
+
+    let trigger_conn = Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_current_notification
+             BEFORE INSERT ON notifications
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated current notification failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let error = store
+        .live_current_state(Some("target/a.txt"))
+        .expect_err("current-state promotion should surface notification failure");
+    assert!(
+        error
+            .to_string()
+            .contains("simulated current notification failure"),
+        "error should report trigger failure: {error}"
+    );
+    assert_eq!(
+        store
+            .waiter_status(&wait.wait_id)
+            .expect("waiter status should load")
+            .as_deref(),
+        Some("queued")
+    );
+    assert!(
+        store
+            .active_reservation("w1", "target/a.txt")
+            .expect("reservation lookup should succeed")
+            .is_none(),
+        "failed live current promotion should not leave a reservation"
+    );
+
+    drop(trigger_conn);
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn live_current_state_promotes_queued_waiter_without_active_conflict() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    let wait = store
+        .enqueue_waiter(
+            "s2",
+            "w1",
+            "target/a.txt",
+            "write_file",
+            "Queue file write after a blocker that already cleared.",
+            Some("s1"),
+        )
+        .expect("waiter should enqueue");
+
+    let live = store
+        .live_current_state(Some("target/a.txt"))
+        .expect("live current state should load");
+
+    assert!(
+        live.items
+            .iter()
+            .all(|item| item.kind != CurrentItemKind::WaitQueue)
+    );
+    let reservation = store
+        .active_reservation("w1", "target/a.txt")
+        .expect("reservation lookup should succeed")
+        .expect("unblocked waiter should be reserved");
+    assert_eq!(reservation.wait_id, wait.wait_id);
 }
 
 #[test]
@@ -2679,13 +2892,46 @@ fn reservation_promotion_creates_pending_notification_for_waiter() {
         .expect("waiter should promote");
 
     let notifications = store
-        .pending_notifications("s2")
+        .pending_notifications("s2", "w1")
         .expect("notifications should load");
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].target_session_id, "s2");
     assert_eq!(notifications[0].workspace_id, "w1");
     assert_eq!(notifications[0].kind, "reservation_granted");
     assert_eq!(notifications[0].payload["relative_path"], "src/auth.ts");
+}
+
+#[test]
+fn pending_notifications_are_scoped_to_workspace() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    for workspace_id in ["w1", "w2"] {
+        store
+            .enqueue_waiter(
+                "s2",
+                workspace_id,
+                "src/auth.ts",
+                "write_file",
+                "Queue requested file write after blocker clears.",
+                Some("s1"),
+            )
+            .expect("waiter should enqueue");
+        store
+            .promote_next_waiter(workspace_id, "src/auth.ts")
+            .expect("waiter should promote");
+    }
+
+    let w1_notifications = store
+        .pending_notifications("s2", "w1")
+        .expect("w1 notifications should load");
+    let w2_notifications = store
+        .pending_notifications("s2", "w2")
+        .expect("w2 notifications should load");
+
+    assert_eq!(w1_notifications.len(), 1);
+    assert_eq!(w1_notifications[0].workspace_id, "w1");
+    assert_eq!(w2_notifications.len(), 1);
+    assert_eq!(w2_notifications[0].workspace_id, "w2");
 }
 
 #[test]
@@ -2707,10 +2953,10 @@ fn pending_notifications_are_delivered_once() {
         .expect("waiter should promote");
 
     let first_poll = store
-        .pending_notifications("s2")
+        .pending_notifications("s2", "w1")
         .expect("first poll should load notification");
     let second_poll = store
-        .pending_notifications("s2")
+        .pending_notifications("s2", "w1")
         .expect("second poll should not redeliver notification");
 
     assert_eq!(first_poll.len(), 1);

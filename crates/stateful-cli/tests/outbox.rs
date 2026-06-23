@@ -2,6 +2,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
+    path::Path,
     process::Command,
     sync::mpsc,
     thread,
@@ -9,8 +10,12 @@ use std::{
 };
 
 use stateful_cli::{
-    GlobalPaths, ServerRuntime, sync_outbox_in_repo_with_runtime, write_global_runtime_file,
+    GlobalPaths, ServerRuntime, sync_outbox_with_runtime, write_global_runtime_file,
 };
+
+fn paths_for_temp_root(temp_root: &Path) -> GlobalPaths {
+    GlobalPaths::new(temp_root.join("home"))
+}
 
 #[test]
 fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
@@ -20,8 +25,8 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
         fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
     }
     fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
-    fs::create_dir_all(temp_root.join(".stateful_core/outbox"))
-        .expect("outbox dir should be creatable");
+    let paths = paths_for_temp_root(&temp_root);
+    fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -36,7 +41,7 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    let outbox_file = temp_root.join(".stateful_core/outbox/s1.jsonl");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
     fs::write(
         &outbox_file,
         r#"{"outbox_id":"outbox-2","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
@@ -45,8 +50,7 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
     )
     .expect("outbox file should write");
 
-    let synced =
-        sync_outbox_in_repo_with_runtime(&temp_root, &runtime).expect("outbox should sync");
+    let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
     assert_eq!(synced, 2);
     assert!(!outbox_file.exists());
@@ -70,9 +74,9 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
 #[test]
 fn sync_outbox_refuses_symlinked_outbox_directory() {
     let temp_root = temp_root("stateful-outbox-symlink-test");
-    let repo_root = temp_root.join("repo");
+    let paths = paths_for_temp_root(&temp_root);
     let victim_outbox = temp_root.join("victim-outbox");
-    fs::create_dir_all(repo_root.join(".stateful_core")).expect("stateful dir should be creatable");
+    fs::create_dir_all(paths.home.clone()).expect("stateful dir should be creatable");
     fs::create_dir_all(&victim_outbox).expect("victim outbox should be creatable");
     let victim_file = victim_outbox.join("s1.jsonl");
     fs::write(
@@ -81,14 +85,18 @@ fn sync_outbox_refuses_symlinked_outbox_directory() {
 "#,
     )
     .expect("victim outbox file should write");
-    std::os::unix::fs::symlink(&victim_outbox, repo_root.join(".stateful_core/outbox"))
+    std::os::unix::fs::symlink(&victim_outbox, paths.outbox_dir.clone())
         .expect("outbox symlink should be creatable");
 
     let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret-token", "w1", 42);
-    let error = sync_outbox_in_repo_with_runtime(&repo_root, &runtime)
-        .expect_err("symlinked outbox should be refused");
+    let error =
+        sync_outbox_with_runtime(&paths, &runtime).expect_err("symlinked outbox should be refused");
 
-    assert!(error.to_string().contains("symlinked outbox directory"));
+    assert!(
+        error
+            .to_string()
+            .contains("symlinked global outbox directory")
+    );
     assert!(
         victim_file.exists(),
         "sync should not claim or remove files outside the repo"
@@ -112,10 +120,9 @@ fn sync_outbox_refuses_symlinked_outbox_directory() {
 #[test]
 fn sync_outbox_refuses_symlinked_outbox_file() {
     let temp_root = temp_root("stateful-outbox-file-symlink-test");
-    let repo_root = temp_root.join("repo");
+    let paths = paths_for_temp_root(&temp_root);
     let victim_dir = temp_root.join("victim");
-    fs::create_dir_all(repo_root.join(".stateful_core/outbox"))
-        .expect("outbox dir should be creatable");
+    fs::create_dir_all(paths.outbox_dir.clone()).expect("outbox dir should be creatable");
     fs::create_dir_all(&victim_dir).expect("victim dir should be creatable");
     let victim_file = victim_dir.join("victim.jsonl");
     fs::write(
@@ -124,12 +131,12 @@ fn sync_outbox_refuses_symlinked_outbox_file() {
 "#,
     )
     .expect("victim file should write");
-    let outbox_link = repo_root.join(".stateful_core/outbox/s1.jsonl");
+    let outbox_link = paths.outbox_dir.join("s1.jsonl");
     std::os::unix::fs::symlink(&victim_file, &outbox_link)
         .expect("outbox file symlink should be creatable");
 
     let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret-token", "w1", 42);
-    let error = sync_outbox_in_repo_with_runtime(&repo_root, &runtime)
+    let error = sync_outbox_with_runtime(&paths, &runtime)
         .expect_err("symlinked outbox file should be refused");
 
     assert!(error.to_string().contains("symlinked outbox file"));
@@ -152,10 +159,9 @@ fn sync_outbox_refuses_symlinked_outbox_file() {
 #[test]
 fn sync_outbox_refuses_hard_linked_outbox_file() {
     let temp_root = temp_root("stateful-outbox-file-hardlink-test");
-    let repo_root = temp_root.join("repo");
+    let paths = paths_for_temp_root(&temp_root);
     let victim_dir = temp_root.join("victim");
-    fs::create_dir_all(repo_root.join(".stateful_core/outbox"))
-        .expect("outbox dir should be creatable");
+    fs::create_dir_all(paths.outbox_dir.clone()).expect("outbox dir should be creatable");
     fs::create_dir_all(&victim_dir).expect("victim dir should be creatable");
     let victim_file = victim_dir.join("victim.jsonl");
     fs::write(
@@ -164,11 +170,11 @@ fn sync_outbox_refuses_hard_linked_outbox_file() {
 "#,
     )
     .expect("victim file should write");
-    let outbox_file = repo_root.join(".stateful_core/outbox/s1.jsonl");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
     fs::hard_link(&victim_file, &outbox_file).expect("outbox hard link should be creatable");
 
     let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret-token", "w1", 42);
-    let error = sync_outbox_in_repo_with_runtime(&repo_root, &runtime)
+    let error = sync_outbox_with_runtime(&paths, &runtime)
         .expect_err("hard-linked outbox file should be refused");
 
     assert!(error.to_string().contains("hard-linked outbox file"));
@@ -187,8 +193,8 @@ fn sync_outbox_refuses_hard_linked_outbox_file() {
 #[test]
 fn sync_outbox_skips_malformed_lines_and_posts_valid_pending_records() {
     let temp_root = temp_root("stateful-outbox-malformed-line-test");
-    fs::create_dir_all(temp_root.join(".stateful_core/outbox"))
-        .expect("outbox dir should be creatable");
+    let paths = paths_for_temp_root(&temp_root);
+    fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -201,7 +207,7 @@ fn sync_outbox_skips_malformed_lines_and_posts_valid_pending_records() {
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    let outbox_file = temp_root.join(".stateful_core/outbox/s1.jsonl");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
     fs::write(
         &outbox_file,
         r#"not-json
@@ -210,8 +216,7 @@ fn sync_outbox_skips_malformed_lines_and_posts_valid_pending_records() {
     )
     .expect("outbox file should write");
 
-    let synced =
-        sync_outbox_in_repo_with_runtime(&temp_root, &runtime).expect("outbox should sync");
+    let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
     assert_eq!(synced, 1);
     assert!(!outbox_file.exists());
@@ -226,9 +231,9 @@ fn sync_outbox_skips_malformed_lines_and_posts_valid_pending_records() {
 #[test]
 fn sync_outbox_recovers_stale_lock_before_wait_timeout() {
     let temp_root = temp_root("stateful-outbox-stale-lock-test");
-    fs::create_dir_all(temp_root.join(".stateful_core/outbox/.lock"))
-        .expect("stale lock dir should be creatable");
-    let heartbeat = temp_root.join(".stateful_core/outbox/.lock/heartbeat");
+    let paths = paths_for_temp_root(&temp_root);
+    fs::create_dir_all(paths.outbox_dir.join(".lock")).expect("stale lock dir should be creatable");
+    let heartbeat = paths.outbox_dir.join(".lock/heartbeat");
     fs::write(&heartbeat, "stale\n").expect("stale heartbeat should write");
     let _ = Command::new("touch")
         .args(["-t", "200001010000"])
@@ -245,17 +250,16 @@ fn sync_outbox_recovers_stale_lock_before_wait_timeout() {
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     fs::write(
-        temp_root.join(".stateful_core/outbox/s1.jsonl"),
+        paths.outbox_dir.join("s1.jsonl"),
         r#"{"outbox_id":"outbox-lock","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("outbox file should write");
 
-    let synced =
-        sync_outbox_in_repo_with_runtime(&temp_root, &runtime).expect("outbox should sync");
+    let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
     assert_eq!(synced, 1);
-    assert!(!temp_root.join(".stateful_core/outbox/.lock").exists());
+    assert!(!paths.outbox_dir.join(".lock").exists());
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -270,9 +274,8 @@ fn sync_outbox_command_discovers_global_runtime_file() {
         fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
     }
     fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
-    fs::create_dir_all(temp_root.join(".stateful_core/outbox"))
-        .expect("outbox dir should be creatable");
-    let paths = GlobalPaths::new(temp_root.join("home"));
+    let paths = paths_for_temp_root(&temp_root);
+    fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -286,7 +289,7 @@ fn sync_outbox_command_discovers_global_runtime_file() {
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "global-w", 42);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-    let outbox_file = temp_root.join(".stateful_core/outbox/s1.jsonl");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
     fs::write(
         &outbox_file,
         r#"{"outbox_id":"outbox-global","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"global-w","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
@@ -323,12 +326,12 @@ fn sync_outbox_command_discovers_global_runtime_file() {
 #[test]
 fn sync_outbox_preserves_records_queued_while_file_is_in_flight() {
     let temp_root = temp_root("stateful-outbox-race-test");
-    fs::create_dir_all(temp_root.join(".stateful_core/outbox"))
-        .expect("outbox dir should be creatable");
+    let paths = paths_for_temp_root(&temp_root);
+    fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
-    let outbox_file = temp_root.join(".stateful_core/outbox/s1.jsonl");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
     let outbox_file_for_server = outbox_file.clone();
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("connection should arrive");
@@ -350,8 +353,7 @@ fn sync_outbox_preserves_records_queued_while_file_is_in_flight() {
     )
     .expect("outbox file should write");
 
-    let synced =
-        sync_outbox_in_repo_with_runtime(&temp_root, &runtime).expect("outbox should sync");
+    let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
     assert_eq!(synced, 1);
     let remaining = fs::read_to_string(&outbox_file).expect("late record should remain pending");
@@ -363,8 +365,8 @@ fn sync_outbox_preserves_records_queued_while_file_is_in_flight() {
 #[test]
 fn sync_outbox_requeues_only_unsent_records_after_failure() {
     let temp_root = temp_root("stateful-outbox-partial-failure-test");
-    fs::create_dir_all(temp_root.join(".stateful_core/outbox"))
-        .expect("outbox dir should be creatable");
+    let paths = paths_for_temp_root(&temp_root);
+    fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -387,7 +389,7 @@ fn sync_outbox_requeues_only_unsent_records_after_failure() {
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    let outbox_file = temp_root.join(".stateful_core/outbox/s1.jsonl");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
     fs::write(
         &outbox_file,
         r#"{"outbox_id":"outbox-1","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
@@ -396,7 +398,7 @@ fn sync_outbox_requeues_only_unsent_records_after_failure() {
     )
     .expect("outbox file should write");
 
-    let error = sync_outbox_in_repo_with_runtime(&temp_root, &runtime)
+    let error = sync_outbox_with_runtime(&paths, &runtime)
         .expect_err("outbox sync should fail on server error");
 
     assert!(error.to_string().contains("outbox sync failed"));
@@ -410,8 +412,8 @@ fn sync_outbox_requeues_only_unsent_records_after_failure() {
 #[test]
 fn sync_outbox_recovers_stranded_claimed_files() {
     let temp_root = temp_root("stateful-outbox-stranded-claim-test");
-    fs::create_dir_all(temp_root.join(".stateful_core/outbox"))
-        .expect("outbox dir should be creatable");
+    let paths = paths_for_temp_root(&temp_root);
+    fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -426,8 +428,8 @@ fn sync_outbox_recovers_stranded_claimed_files() {
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    let outbox_file = temp_root.join(".stateful_core/outbox/s1.jsonl");
-    let claimed_file = temp_root.join(".stateful_core/outbox/s1.jsonl.syncing-old");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
+    let claimed_file = paths.outbox_dir.join("s1.jsonl.syncing-old");
     fs::write(
         &outbox_file,
         r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
@@ -441,8 +443,7 @@ fn sync_outbox_recovers_stranded_claimed_files() {
     )
     .expect("claimed outbox file should write");
 
-    let synced =
-        sync_outbox_in_repo_with_runtime(&temp_root, &runtime).expect("outbox should sync");
+    let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
     assert_eq!(synced, 2);
     assert!(!outbox_file.exists());
@@ -463,8 +464,8 @@ fn sync_outbox_recovers_stranded_claimed_files() {
 #[test]
 fn sync_outbox_does_not_trust_symlinked_active_claim_marker() {
     let temp_root = temp_root("stateful-outbox-symlink-active-claim-test");
-    fs::create_dir_all(temp_root.join(".stateful_core/outbox"))
-        .expect("outbox dir should be creatable");
+    let paths = paths_for_temp_root(&temp_root);
+    fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -479,9 +480,9 @@ fn sync_outbox_does_not_trust_symlinked_active_claim_marker() {
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    let outbox_file = temp_root.join(".stateful_core/outbox/s1.jsonl");
-    let claimed_file = temp_root.join(".stateful_core/outbox/s1.jsonl.syncing-old");
-    let active_marker = temp_root.join(".stateful_core/outbox/s1.jsonl.syncing-old.active");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
+    let claimed_file = paths.outbox_dir.join("s1.jsonl.syncing-old");
+    let active_marker = paths.outbox_dir.join("s1.jsonl.syncing-old.active");
     fs::write(
         &outbox_file,
         r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
@@ -497,8 +498,7 @@ fn sync_outbox_does_not_trust_symlinked_active_claim_marker() {
     std::os::unix::fs::symlink(&outbox_file, active_marker)
         .expect("active marker symlink should create");
 
-    let synced =
-        sync_outbox_in_repo_with_runtime(&temp_root, &runtime).expect("outbox should sync");
+    let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
     assert_eq!(synced, 2);
     assert!(!outbox_file.exists());
@@ -518,8 +518,8 @@ fn sync_outbox_does_not_trust_symlinked_active_claim_marker() {
 #[test]
 fn sync_outbox_does_not_let_fake_active_claim_block_base_file() {
     let temp_root = temp_root("stateful-outbox-fake-active-claim-test");
-    fs::create_dir_all(temp_root.join(".stateful_core/outbox"))
-        .expect("outbox dir should be creatable");
+    let paths = paths_for_temp_root(&temp_root);
+    fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -532,9 +532,9 @@ fn sync_outbox_does_not_let_fake_active_claim_block_base_file() {
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    let outbox_file = temp_root.join(".stateful_core/outbox/s1.jsonl");
-    let claimed_file = temp_root.join(".stateful_core/outbox/s1.jsonl.syncing-spoof");
-    let active_marker = temp_root.join(".stateful_core/outbox/s1.jsonl.syncing-spoof.active");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
+    let claimed_file = paths.outbox_dir.join("s1.jsonl.syncing-spoof");
+    let active_marker = paths.outbox_dir.join("s1.jsonl.syncing-spoof.active");
     fs::write(
         &outbox_file,
         r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
@@ -544,8 +544,7 @@ fn sync_outbox_does_not_let_fake_active_claim_block_base_file() {
     fs::write(&claimed_file, "").expect("spoof claimed file should write");
     fs::write(&active_marker, "active\n").expect("spoof active marker should write");
 
-    let synced =
-        sync_outbox_in_repo_with_runtime(&temp_root, &runtime).expect("outbox should sync");
+    let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
     assert_eq!(synced, 1);
     assert!(!outbox_file.exists());
@@ -561,15 +560,12 @@ fn sync_outbox_does_not_let_fake_active_claim_block_base_file() {
 #[test]
 fn sync_outbox_does_not_trust_symlinked_lock_heartbeat() {
     let temp_root = temp_root("stateful-outbox-symlink-lock-heartbeat-test");
-    fs::create_dir_all(temp_root.join(".stateful_core/outbox/.lock"))
-        .expect("lock dir should be creatable");
+    let paths = paths_for_temp_root(&temp_root);
+    fs::create_dir_all(paths.outbox_dir.join(".lock")).expect("lock dir should be creatable");
     let fresh_target = temp_root.join("fresh-heartbeat");
     fs::write(&fresh_target, "fresh\n").expect("fresh heartbeat target should write");
-    std::os::unix::fs::symlink(
-        &fresh_target,
-        temp_root.join(".stateful_core/outbox/.lock/heartbeat"),
-    )
-    .expect("heartbeat symlink should create");
+    std::os::unix::fs::symlink(&fresh_target, paths.outbox_dir.join(".lock/heartbeat"))
+        .expect("heartbeat symlink should create");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -582,7 +578,7 @@ fn sync_outbox_does_not_trust_symlinked_lock_heartbeat() {
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    let outbox_file = temp_root.join(".stateful_core/outbox/s1.jsonl");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
     fs::write(
         &outbox_file,
         r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
@@ -590,8 +586,7 @@ fn sync_outbox_does_not_trust_symlinked_lock_heartbeat() {
     )
     .expect("outbox file should write");
 
-    let synced =
-        sync_outbox_in_repo_with_runtime(&temp_root, &runtime).expect("outbox should sync");
+    let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
     assert_eq!(synced, 1);
     assert!(!outbox_file.exists());
@@ -607,14 +602,12 @@ fn sync_outbox_does_not_trust_symlinked_lock_heartbeat() {
 #[test]
 fn sync_outbox_does_not_trust_symlinked_lock_directory() {
     let temp_root = temp_root("stateful-outbox-symlink-lock-dir-test");
-    fs::create_dir_all(temp_root.join(".stateful_core/outbox/fake-lock"))
+    let paths = paths_for_temp_root(&temp_root);
+    fs::create_dir_all(paths.outbox_dir.join("fake-lock"))
         .expect("fake lock dir should be creatable");
-    fs::write(
-        temp_root.join(".stateful_core/outbox/fake-lock/heartbeat"),
-        "fresh\n",
-    )
-    .expect("fake heartbeat should write");
-    std::os::unix::fs::symlink("fake-lock", temp_root.join(".stateful_core/outbox/.lock"))
+    fs::write(paths.outbox_dir.join("fake-lock/heartbeat"), "fresh\n")
+        .expect("fake heartbeat should write");
+    std::os::unix::fs::symlink("fake-lock", paths.outbox_dir.join(".lock"))
         .expect("lock symlink should create");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -628,7 +621,7 @@ fn sync_outbox_does_not_trust_symlinked_lock_directory() {
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    let outbox_file = temp_root.join(".stateful_core/outbox/s1.jsonl");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
     fs::write(
         &outbox_file,
         r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
@@ -636,8 +629,7 @@ fn sync_outbox_does_not_trust_symlinked_lock_directory() {
     )
     .expect("outbox file should write");
 
-    let synced =
-        sync_outbox_in_repo_with_runtime(&temp_root, &runtime).expect("outbox should sync");
+    let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
     assert_eq!(synced, 1);
     assert!(!outbox_file.exists());
@@ -652,8 +644,8 @@ fn sync_outbox_does_not_trust_symlinked_lock_directory() {
 #[test]
 fn sync_outbox_deduplicates_claimed_records_already_merged_into_base() {
     let temp_root = temp_root("stateful-outbox-duplicate-merge-test");
-    fs::create_dir_all(temp_root.join(".stateful_core/outbox"))
-        .expect("outbox dir should be creatable");
+    let paths = paths_for_temp_root(&temp_root);
+    fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -668,8 +660,8 @@ fn sync_outbox_deduplicates_claimed_records_already_merged_into_base() {
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    let outbox_file = temp_root.join(".stateful_core/outbox/s1.jsonl");
-    let claimed_file = temp_root.join(".stateful_core/outbox/s1.jsonl.syncing-old");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
+    let claimed_file = paths.outbox_dir.join("s1.jsonl.syncing-old");
     let claimed_record = r#"{"outbox_id":"outbox-claimed","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}"#;
     fs::write(
         &outbox_file,
@@ -681,8 +673,7 @@ fn sync_outbox_deduplicates_claimed_records_already_merged_into_base() {
     fs::write(&claimed_file, format!("{claimed_record}\n"))
         .expect("claimed outbox file should write");
 
-    let synced =
-        sync_outbox_in_repo_with_runtime(&temp_root, &runtime).expect("outbox should sync");
+    let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
     assert_eq!(synced, 2);
     assert!(!outbox_file.exists());

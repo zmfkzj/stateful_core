@@ -6,6 +6,7 @@
 
 target/
 tmp/
+datasets/
 .worktrees/
 *.log
 __pycache__/

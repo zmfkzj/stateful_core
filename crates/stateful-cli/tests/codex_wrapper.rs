@@ -85,32 +85,3 @@ fn codex_wrapper_passthrough_allows_user_sandbox_overrides() {
         ]
     );
 }
-
-#[test]
-fn codex_wrapper_explicit_read_only_tmp_profile_remains_available_without_bash_attestation() {
-    let invocation = build_codex_invocation(CodexWrapperOptions {
-        codex_bin: "codex".to_string(),
-        sandbox: CodexSandboxMode::ReadOnlyTmp,
-        no_stateful: false,
-        args: vec!["exec".to_string(), "-".to_string()],
-    })
-    .expect("read-only tmp invocation should build");
-
-    assert!(
-        invocation
-            .args
-            .contains(&"default_permissions=\"stateful-read-only-tmp\"".to_string())
-    );
-    assert!(
-        invocation
-            .args
-            .contains(&"permissions.stateful-read-only-tmp.network.enabled=false".to_string())
-    );
-    assert!(
-        invocation
-            .env
-            .iter()
-            .all(|(key, _)| key != LEGACY_TRUSTED_SANDBOX_ENV),
-        "read-only tmp wrapper mode should not provide trusted Bash attestation env"
-    );
-}

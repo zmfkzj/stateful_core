@@ -3,7 +3,7 @@ use std::{
     env,
     fs::{self, File},
     path::{Path, PathBuf},
-    process::Command as ProcessCommand,
+    process::{Command as ProcessCommand, Stdio},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -35,8 +35,26 @@ impl DeNovoRunMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeNovoCliRuntime {
+    Codex,
+    Omp,
+}
+
+impl DeNovoCliRuntime {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Omp => "omp",
+        }
+    }
+}
+
 const DEFAULT_CODEX_BIN: &str = "codex";
+const DEFAULT_OMP_BIN: &str = "omp";
+const DEFAULT_OMP_AGENT_DOCKER_STATEFUL_BINARY: &str = "/usr/local/bin/stateful";
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.4-mini";
+const DEFAULT_OMP_MODEL: &str = "deepseek-v4-flash";
 const DEFAULT_CODEX_REASONING_EFFORT: &str = "low";
 const DEFAULT_CODEX_MODEL_CONTEXT_WINDOW: usize = 256000;
 const DEFAULT_CODEX_TEMPERATURE: &str = "1";
@@ -51,6 +69,7 @@ const DEFAULT_CODEX_TIMEOUT_SECONDS: u64 = 7200;
 pub enum DeNovoAgentKind {
     Official,
     CodexCli,
+    OmpCli,
 }
 
 #[derive(Debug, Subcommand)]
@@ -98,10 +117,16 @@ pub enum DeNovoCommand {
         agent: DeNovoAgentKind,
         #[arg(long, default_value = DEFAULT_CODEX_BIN)]
         codex_bin: String,
+        #[arg(long, default_value = DEFAULT_OMP_BIN)]
+        omp_bin: String,
         #[arg(long, default_value = "stateful")]
         stateful_binary: String,
-        #[arg(long, default_value = DEFAULT_CODEX_MODEL)]
-        benchmark_model: String,
+        #[arg(long)]
+        agent_docker_image: Option<String>,
+        #[arg(long, default_value = DEFAULT_OMP_AGENT_DOCKER_STATEFUL_BINARY)]
+        agent_docker_stateful_binary: String,
+        #[arg(long)]
+        benchmark_model: Option<String>,
         #[arg(long, default_value = DEFAULT_CODEX_REASONING_EFFORT)]
         benchmark_reasoning_effort: String,
         #[arg(long, default_value_t = DEFAULT_CODEX_MODEL_CONTEXT_WINDOW)]
@@ -234,7 +259,10 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
             condition,
             agent,
             codex_bin,
+            omp_bin,
             stateful_binary,
+            agent_docker_image,
+            agent_docker_stateful_binary,
             benchmark_model,
             benchmark_reasoning_effort,
             benchmark_model_context_window,
@@ -264,6 +292,10 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
                 .iter()
                 .map(|condition| parse_denovo_condition(condition))
                 .collect::<Result<Vec<_>>>()?;
+            let benchmark_model = benchmark_model.unwrap_or_else(|| match agent {
+                DeNovoAgentKind::OmpCli => DEFAULT_OMP_MODEL.to_string(),
+                _ => DEFAULT_CODEX_MODEL.to_string(),
+            });
             let reports = run_denovo_matrix(DeNovoMatrixRunOptions {
                 run_id: run_id.clone(),
                 aweagent_root,
@@ -274,7 +306,10 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
                 conditions,
                 agent,
                 codex_bin,
+                omp_bin,
                 stateful_binary,
+                agent_docker_image,
+                agent_docker_stateful_binary,
                 benchmark_model,
                 benchmark_reasoning_effort,
                 benchmark_model_context_window,
@@ -399,7 +434,10 @@ pub struct DeNovoCodexRunOptions {
     pub prompt_version: String,
     pub verbose: bool,
     pub codex_bin: String,
+    pub omp_bin: String,
     pub stateful_binary: String,
+    pub agent_docker_image: Option<String>,
+    pub agent_docker_stateful_binary: String,
     pub benchmark_model: String,
     pub benchmark_reasoning_effort: String,
     pub benchmark_model_context_window: usize,
@@ -409,6 +447,7 @@ pub struct DeNovoCodexRunOptions {
     pub max_resumes: usize,
     pub codex_timeout_seconds: u64,
     pub adapter_script: Option<PathBuf>,
+    pub cli_runtime: DeNovoCliRuntime,
 }
 
 pub fn build_denovo_extract_recipe_command(
@@ -525,8 +564,12 @@ pub fn build_denovo_codex_adapter_command(options: DeNovoCodexRunOptions) -> Res
         subagent.to_string(),
         "--aweagent-root".to_string(),
         path_arg(&options.aweagent_root),
+        "--cli-runtime".to_string(),
+        options.cli_runtime.as_str().to_string(),
         "--codex-bin".to_string(),
         options.codex_bin,
+        "--omp-bin".to_string(),
+        options.omp_bin,
         "--stateful-binary".to_string(),
         options.stateful_binary,
         "--benchmark-model".to_string(),
@@ -550,6 +593,15 @@ pub fn build_denovo_codex_adapter_command(options: DeNovoCodexRunOptions) -> Res
         "--prompt-version".to_string(),
         options.prompt_version,
     ];
+    push_optional_string(
+        &mut args,
+        "--agent-docker-image",
+        options.agent_docker_image.as_deref(),
+    );
+    if options.agent_docker_image.is_some() {
+        args.push("--agent-docker-stateful-binary".to_string());
+        args.push(options.agent_docker_stateful_binary);
+    }
     push_optional_usize(&mut args, "--max-steps", options.max_steps);
     push_optional_usize(&mut args, "--max-concurrent", options.max_concurrent);
     push_repeated(&mut args, "--instance-id", options.instance_ids);
@@ -636,7 +688,10 @@ pub struct DeNovoConditionRunOptions {
     pub condition: DeNovoCondition,
     pub agent: DeNovoAgentKind,
     pub codex_bin: String,
+    pub omp_bin: String,
     pub stateful_binary: String,
+    pub agent_docker_image: Option<String>,
+    pub agent_docker_stateful_binary: String,
     pub benchmark_model: String,
     pub benchmark_reasoning_effort: String,
     pub benchmark_model_context_window: usize,
@@ -674,6 +729,10 @@ pub struct DeNovoConditionMetadata {
     pub results_jsonl: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_json: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_log: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_log: Option<PathBuf>,
     pub started_at_ms: u64,
     pub finished_at_ms: u64,
     pub running_time_ms: u64,
@@ -699,6 +758,7 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
     let agent_dir_name = match options.agent {
         DeNovoAgentKind::Official => "official",
         DeNovoAgentKind::CodexCli => "codex-cli",
+        DeNovoAgentKind::OmpCli => "omp-cli",
     };
     let agent_output_dir = condition_dir.join(agent_dir_name);
     fs::create_dir_all(&agent_output_dir)
@@ -734,41 +794,53 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
             prompt_version: options.prompt_version,
             verbose: options.verbose,
         }),
-        DeNovoAgentKind::CodexCli => build_denovo_codex_adapter_command(DeNovoCodexRunOptions {
-            aweagent_root: options.aweagent_root.clone(),
-            python: options.python,
-            data_file: command_data_file,
-            output: command_output_dir,
-            base_config: options.base_config,
-            condition: options.condition.clone(),
-            mode: options.mode,
-            instance_ids: options.instance_ids,
-            max_steps: options.max_steps,
-            max_concurrent: options.max_concurrent,
-            skip_eval: options.skip_eval,
-            validate_run: options.validate_run,
-            eval_iters: options.eval_iters,
-            del_done_images: options.del_done_images,
-            dump_clean_snapshot: options.dump_clean_snapshot,
-            prompt_version: options.prompt_version,
-            verbose: options.verbose,
-            codex_bin: options.codex_bin,
-            stateful_binary: options.stateful_binary,
-            benchmark_model: options.benchmark_model,
-            benchmark_reasoning_effort: options.benchmark_reasoning_effort,
-            benchmark_model_context_window: options.benchmark_model_context_window,
-            benchmark_temperature: options.benchmark_temperature,
-            benchmark_max_turns: options.benchmark_max_turns,
-            subagent_min_count: options.subagent_min_count,
-            max_resumes: options.max_resumes,
-            codex_timeout_seconds: options.codex_timeout_seconds,
-            adapter_script: command_adapter_script,
-        }),
+        DeNovoAgentKind::CodexCli | DeNovoAgentKind::OmpCli => {
+            let cli_runtime = match options.agent {
+                DeNovoAgentKind::OmpCli => DeNovoCliRuntime::Omp,
+                _ => DeNovoCliRuntime::Codex,
+            };
+            build_denovo_codex_adapter_command(DeNovoCodexRunOptions {
+                aweagent_root: options.aweagent_root.clone(),
+                python: options.python,
+                data_file: command_data_file,
+                output: command_output_dir,
+                base_config: options.base_config,
+                condition: options.condition.clone(),
+                mode: options.mode,
+                instance_ids: options.instance_ids,
+                max_steps: options.max_steps,
+                max_concurrent: options.max_concurrent,
+                skip_eval: options.skip_eval,
+                validate_run: options.validate_run,
+                eval_iters: options.eval_iters,
+                del_done_images: options.del_done_images,
+                dump_clean_snapshot: options.dump_clean_snapshot,
+                prompt_version: options.prompt_version,
+                verbose: options.verbose,
+                codex_bin: options.codex_bin,
+                omp_bin: options.omp_bin,
+                stateful_binary: options.stateful_binary,
+                agent_docker_image: options.agent_docker_image,
+                agent_docker_stateful_binary: options.agent_docker_stateful_binary,
+                benchmark_model: options.benchmark_model,
+                benchmark_reasoning_effort: options.benchmark_reasoning_effort,
+                benchmark_model_context_window: options.benchmark_model_context_window,
+                benchmark_temperature: options.benchmark_temperature,
+                benchmark_max_turns: options.benchmark_max_turns,
+                subagent_min_count: options.subagent_min_count,
+                max_resumes: options.max_resumes,
+                codex_timeout_seconds: options.codex_timeout_seconds,
+                adapter_script: command_adapter_script,
+                cli_runtime,
+            })
+        }
     }?;
 
+    let stdout_log = condition_dir.join("command.stdout.log");
+    let stderr_log = condition_dir.join("command.stderr.log");
     let started_at_ms = unix_ms();
     let started = Instant::now();
-    let execution = execute_recipe_command(&command);
+    let execution = execute_recipe_command(&command, &stdout_log, &stderr_log);
     let running_time_ms = elapsed_ms(started);
     let finished_at_ms = unix_ms();
     let aweagent_commit = read_aweagent_commit(&options.aweagent_root);
@@ -784,6 +856,8 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
             official_dir: agent_output_dir,
             results_jsonl: None,
             report_json: None,
+            stdout_log: Some(stdout_log),
+            stderr_log: Some(stderr_log),
             started_at_ms,
             finished_at_ms,
             running_time_ms,
@@ -820,6 +894,8 @@ pub fn run_denovo_condition(options: DeNovoConditionRunOptions) -> Result<DeNovo
         official_dir: agent_output_dir,
         results_jsonl: Some(results_jsonl),
         report_json: Some(report_json),
+        stdout_log: Some(stdout_log),
+        stderr_log: Some(stderr_log),
         started_at_ms,
         finished_at_ms,
         running_time_ms,
@@ -841,7 +917,10 @@ pub struct DeNovoMatrixRunOptions {
     pub conditions: Vec<DeNovoCondition>,
     pub agent: DeNovoAgentKind,
     pub codex_bin: String,
+    pub omp_bin: String,
     pub stateful_binary: String,
+    pub agent_docker_image: Option<String>,
+    pub agent_docker_stateful_binary: String,
     pub benchmark_model: String,
     pub benchmark_reasoning_effort: String,
     pub benchmark_model_context_window: usize,
@@ -900,6 +979,7 @@ fn flush_denovo_condition_aggregate(
     let agent_dir_name = match options.agent {
         DeNovoAgentKind::Official => "official",
         DeNovoAgentKind::CodexCli => "codex-cli",
+        DeNovoAgentKind::OmpCli => "omp-cli",
     };
     let agent_output_dir = aggregate
         .official_dir
@@ -930,6 +1010,8 @@ fn flush_denovo_condition_aggregate(
                 official_dir: agent_output_dir,
                 results_jsonl: Some(results_jsonl),
                 report_json: Some(report_json),
+                stdout_log: Some(condition_dir.join("command.stdout.log")),
+                stderr_log: Some(condition_dir.join("command.stderr.log")),
                 started_at_ms: aggregate.started_at_ms.unwrap_or(started_at_ms),
                 finished_at_ms: aggregate.finished_at_ms.unwrap_or_else(unix_ms),
                 running_time_ms: aggregate.running_time_ms,
@@ -1030,6 +1112,87 @@ pub fn run_denovo_matrix(options: DeNovoMatrixRunOptions) -> Result<Vec<DeNovoCo
         })
         .collect::<Vec<_>>();
 
+    let batch_cli_instances = matches!(
+        options.agent,
+        DeNovoAgentKind::CodexCli | DeNovoAgentKind::OmpCli
+    ) && options.max_concurrent.unwrap_or(1) > 1;
+    if batch_cli_instances {
+        let last_condition_index = aggregates.len().saturating_sub(1);
+        for condition_index in 0..aggregates.len() {
+            let condition = aggregates[condition_index].condition.clone();
+            let metadata = match run_denovo_condition(DeNovoConditionRunOptions {
+                run_id: options.run_id.clone(),
+                aweagent_root: options.aweagent_root.clone(),
+                python: options.python.clone(),
+                data_file: options.data_file.clone(),
+                run_dir: options.run_dir.clone(),
+                base_config: options.base_config.clone(),
+                condition,
+                agent: options.agent,
+                codex_bin: options.codex_bin.clone(),
+                omp_bin: options.omp_bin.clone(),
+                stateful_binary: options.stateful_binary.clone(),
+                agent_docker_image: options.agent_docker_image.clone(),
+                agent_docker_stateful_binary: options.agent_docker_stateful_binary.clone(),
+                benchmark_model: options.benchmark_model.clone(),
+                benchmark_reasoning_effort: options.benchmark_reasoning_effort.clone(),
+                benchmark_model_context_window: options.benchmark_model_context_window,
+                benchmark_temperature: options.benchmark_temperature.clone(),
+                benchmark_max_turns: options.benchmark_max_turns,
+                subagent_min_count: options.subagent_min_count,
+                max_resumes: options.max_resumes,
+                codex_timeout_seconds: options.codex_timeout_seconds,
+                codex_adapter_script: options.codex_adapter_script.clone(),
+                mode: options.mode,
+                instance_ids: matrix_instance_ids.clone(),
+                llm_config: options.llm_config.clone(),
+                model: options.model.clone(),
+                max_steps: options.max_steps,
+                max_concurrent: options.max_concurrent,
+                search_override: options.search_override,
+                skip_eval: options.skip_eval,
+                validate_run: options.validate_run,
+                eval_iters: options.eval_iters,
+                del_done_images: options.del_done_images && condition_index == last_condition_index,
+                dump_clean_snapshot: options.dump_clean_snapshot.clone(),
+                prompt_version: options.prompt_version.clone(),
+                verbose: options.verbose,
+            }) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    flush_denovo_matrix_checkpoint(
+                        &options,
+                        &aggregates,
+                        started_at_ms,
+                        started,
+                        false,
+                    )?;
+                    return Err(error);
+                }
+            };
+            let aggregate = &mut aggregates[condition_index];
+            if let Some(results_jsonl) = metadata.results_jsonl.as_ref() {
+                aggregate
+                    .results
+                    .extend(crate::read_jsonl::<DeNovoOfficialResult>(results_jsonl)?);
+            }
+            aggregate.started_at_ms = Some(metadata.started_at_ms);
+            aggregate.finished_at_ms = Some(metadata.finished_at_ms);
+            aggregate.running_time_ms += metadata.running_time_ms;
+            if aggregate.aweagent_commit.is_none() {
+                aggregate.aweagent_commit = metadata.aweagent_commit.clone();
+            }
+            aggregate.command = Some(metadata.command);
+            aggregate.official_dir = Some(metadata.official_dir);
+            flush_denovo_condition_aggregate(&options, aggregate, started_at_ms, true)?;
+            flush_denovo_matrix_checkpoint(&options, &aggregates, started_at_ms, started, true)?;
+        }
+
+        let reports =
+            flush_denovo_matrix_checkpoint(&options, &aggregates, started_at_ms, started, true)?;
+        return Ok(reports);
+    }
+
     let last_condition_index = aggregates.len().saturating_sub(1);
     for instance_id in &matrix_instance_ids {
         for condition_index in 0..aggregates.len() {
@@ -1044,7 +1207,10 @@ pub fn run_denovo_matrix(options: DeNovoMatrixRunOptions) -> Result<Vec<DeNovoCo
                 condition,
                 agent: options.agent,
                 codex_bin: options.codex_bin.clone(),
+                omp_bin: options.omp_bin.clone(),
                 stateful_binary: options.stateful_binary.clone(),
+                agent_docker_image: options.agent_docker_image.clone(),
+                agent_docker_stateful_binary: options.agent_docker_stateful_binary.clone(),
                 benchmark_model: options.benchmark_model.clone(),
                 benchmark_reasoning_effort: options.benchmark_reasoning_effort.clone(),
                 benchmark_model_context_window: options.benchmark_model_context_window,
@@ -1174,7 +1340,9 @@ pub fn run_denovo_extract(options: DeNovoExtractOptions) -> Result<DeNovoExtract
     })?;
     let started_at_ms = unix_ms();
     let started = Instant::now();
-    execute_recipe_command(&command)?;
+    let stdout_log = options.output.join("command.stdout.log");
+    let stderr_log = options.output.join("command.stderr.log");
+    execute_recipe_command(&command, &stdout_log, &stderr_log)?;
     let running_time_ms = elapsed_ms(started);
     let finished_at_ms = unix_ms();
     let results_jsonl = find_results_jsonl(&options.output).with_context(|| {
@@ -1199,18 +1367,20 @@ pub fn run_denovo_extract(options: DeNovoExtractOptions) -> Result<DeNovoExtract
 
 pub fn render_denovo_report_markdown(reports: &[DeNovoConditionReport]) -> String {
     let mut output = String::from(
-        "# DeNovoSWE Report\n\n| Condition | Stateful | Subagent | Instances | Success rate | Average score | Running time ms |\n| --- | --- | --- | ---: | ---: | ---: | ---: |\n",
+        "# DeNovoSWE Report\n\n| Condition | Stateful | Subagent | Instances | Success rate | Average score | Running time ms | Input+output tokens | Uncached input+output tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n",
     );
     for report in reports {
         output.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             report.condition_id,
             axis_label(report.condition.stateful),
             axis_label(report.condition.subagent),
             report.total_instances,
             optional_float(report.success_rate),
             optional_float(report.average_score),
-            report.running_time_ms
+            report.running_time_ms,
+            report.token_input_plus_output_tokens,
+            report.token_uncached_input_plus_output_tokens
         ));
     }
     output
@@ -1235,6 +1405,14 @@ pub fn render_denovo_comparison_markdown(report: &DeNovoComparisonReport) -> Str
         "- Total running time ms: {}\n",
         report.total_running_time_ms
     ));
+    output.push_str(&format!(
+        "- Total input+output tokens: {}\n",
+        report.total_input_plus_output_tokens
+    ));
+    output.push_str(&format!(
+        "- Total uncached input+output tokens: {}\n",
+        report.total_uncached_input_plus_output_tokens
+    ));
     if !report.missing_axis_ids.is_empty() {
         output.push_str(&format!(
             "- Missing axes: {}\n",
@@ -1256,17 +1434,36 @@ pub fn render_denovo_comparison_markdown(report: &DeNovoComparisonReport) -> Str
     output
 }
 
-fn execute_recipe_command(command: &RecipeCommand) -> Result<()> {
+fn execute_recipe_command(
+    command: &RecipeCommand,
+    stdout_log: &Path,
+    stderr_log: &Path,
+) -> Result<()> {
+    let stdout = File::create(stdout_log)
+        .with_context(|| format!("failed to create stdout log {}", stdout_log.display()))?;
+    let stderr = File::create(stderr_log)
+        .with_context(|| format!("failed to create stderr log {}", stderr_log.display()))?;
     let status = ProcessCommand::new(&command.program)
         .args(&command.args)
         .current_dir(&command.cwd)
         .envs(&command.env)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
         .status()
-        .with_context(|| format!("failed to execute {}", command_line(command)))?;
+        .with_context(|| {
+            format!(
+                "failed to execute {}; stdout log: {}; stderr log: {}",
+                command_line(command),
+                stdout_log.display(),
+                stderr_log.display()
+            )
+        })?;
     if !status.success() {
         bail!(
-            "DeNovoSWE command failed with status {status}: {}",
-            command_line(command)
+            "DeNovoSWE command failed with status {status}: {}; stdout log: {}; stderr log: {}",
+            command_line(command),
+            stdout_log.display(),
+            stderr_log.display()
         );
     }
     Ok(())
@@ -1574,11 +1771,67 @@ pub struct DeNovoOfficialResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_used: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<DeNovoTokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval_result: Option<DeNovoEvalResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeNovoTokenUsage {
+    #[serde(default)]
+    pub turns: usize,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub cached_input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub reasoning_output_tokens: u64,
+    #[serde(default)]
+    pub input_plus_output_tokens: u64,
+    #[serde(default)]
+    pub uncached_input_tokens: u64,
+    #[serde(default)]
+    pub uncached_input_plus_output_tokens: u64,
+}
+
+impl DeNovoTokenUsage {
+    fn has_observed_tokens(&self) -> bool {
+        self.turns > 0
+            || self.input_tokens > 0
+            || self.cached_input_tokens > 0
+            || self.output_tokens > 0
+            || self.reasoning_output_tokens > 0
+    }
+
+    fn input_plus_output_tokens(&self) -> u64 {
+        if self.input_plus_output_tokens == 0 {
+            self.input_tokens + self.output_tokens
+        } else {
+            self.input_plus_output_tokens
+        }
+    }
+
+    fn uncached_input_tokens(&self) -> u64 {
+        if self.uncached_input_tokens == 0 {
+            self.input_tokens.saturating_sub(self.cached_input_tokens)
+        } else {
+            self.uncached_input_tokens
+        }
+    }
+
+    fn uncached_input_plus_output_tokens(&self) -> u64 {
+        if self.uncached_input_plus_output_tokens == 0 {
+            self.uncached_input_tokens() + self.output_tokens
+        } else {
+            self.uncached_input_plus_output_tokens
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1625,6 +1878,28 @@ pub struct DeNovoConditionReport {
     pub subagent_used_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_used_rate: Option<f64>,
+    #[serde(default)]
+    pub token_observed_instances: usize,
+    #[serde(default)]
+    pub token_usage_turns: usize,
+    #[serde(default)]
+    pub token_input_tokens: u64,
+    #[serde(default)]
+    pub token_cached_input_tokens: u64,
+    #[serde(default)]
+    pub token_output_tokens: u64,
+    #[serde(default)]
+    pub token_reasoning_output_tokens: u64,
+    #[serde(default)]
+    pub token_input_plus_output_tokens: u64,
+    #[serde(default)]
+    pub token_uncached_input_tokens: u64,
+    #[serde(default)]
+    pub token_uncached_input_plus_output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_input_plus_output_tokens: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_uncached_input_plus_output_tokens: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aweagent_commit: Option<String>,
 }
@@ -1642,6 +1917,10 @@ pub struct DeNovoComparisonReport {
     pub subagent_score_delta_without_stateful: Option<f64>,
     pub combined_interaction_score_delta: Option<f64>,
     pub total_running_time_ms: u64,
+    #[serde(default)]
+    pub total_input_plus_output_tokens: u64,
+    #[serde(default)]
+    pub total_uncached_input_plus_output_tokens: u64,
 }
 
 pub fn build_denovo_condition_report(
@@ -1693,6 +1972,41 @@ pub fn build_denovo_condition_report(
         .iter()
         .filter(|result| result.subagent_used == Some(true))
         .count();
+    let token_usages = results
+        .iter()
+        .filter_map(|result| result.token_usage.as_ref())
+        .filter(|usage| usage.has_observed_tokens())
+        .collect::<Vec<_>>();
+    let token_observed_instances = token_usages.len();
+    let token_usage_turns = token_usages.iter().map(|usage| usage.turns).sum::<usize>();
+    let token_input_tokens = token_usages
+        .iter()
+        .map(|usage| usage.input_tokens)
+        .sum::<u64>();
+    let token_cached_input_tokens = token_usages
+        .iter()
+        .map(|usage| usage.cached_input_tokens)
+        .sum::<u64>();
+    let token_output_tokens = token_usages
+        .iter()
+        .map(|usage| usage.output_tokens)
+        .sum::<u64>();
+    let token_reasoning_output_tokens = token_usages
+        .iter()
+        .map(|usage| usage.reasoning_output_tokens)
+        .sum::<u64>();
+    let token_input_plus_output_tokens = token_usages
+        .iter()
+        .map(|usage| usage.input_plus_output_tokens())
+        .sum::<u64>();
+    let token_uncached_input_tokens = token_usages
+        .iter()
+        .map(|usage| usage.uncached_input_tokens())
+        .sum::<u64>();
+    let token_uncached_input_plus_output_tokens = token_usages
+        .iter()
+        .map(|usage| usage.uncached_input_plus_output_tokens())
+        .sum::<u64>();
 
     let condition_id = condition.id();
 
@@ -1720,6 +2034,23 @@ pub fn build_denovo_condition_report(
         subagent_observed_instances,
         subagent_used_count,
         subagent_used_rate: ratio(subagent_used_count, subagent_observed_instances),
+        token_observed_instances,
+        token_usage_turns,
+        token_input_tokens,
+        token_cached_input_tokens,
+        token_output_tokens,
+        token_reasoning_output_tokens,
+        token_input_plus_output_tokens,
+        token_uncached_input_tokens,
+        token_uncached_input_plus_output_tokens,
+        average_input_plus_output_tokens: average_u64(
+            token_input_plus_output_tokens,
+            token_observed_instances,
+        ),
+        average_uncached_input_plus_output_tokens: average_u64(
+            token_uncached_input_plus_output_tokens,
+            token_observed_instances,
+        ),
         aweagent_commit,
     }
 }
@@ -1728,6 +2059,14 @@ pub fn compare_denovo_reports(reports: Vec<DeNovoConditionReport>) -> DeNovoComp
     let total_running_time_ms = reports
         .iter()
         .map(|report| report.running_time_ms)
+        .sum::<u64>();
+    let total_input_plus_output_tokens = reports
+        .iter()
+        .map(|report| report.token_input_plus_output_tokens)
+        .sum::<u64>();
+    let total_uncached_input_plus_output_tokens = reports
+        .iter()
+        .map(|report| report.token_uncached_input_plus_output_tokens)
         .sum::<u64>();
     let mut by_axes: BTreeMap<(bool, bool), Vec<&DeNovoConditionReport>> = BTreeMap::new();
     let mut condition_id_mismatches = Vec::new();
@@ -1774,6 +2113,8 @@ pub fn compare_denovo_reports(reports: Vec<DeNovoConditionReport>) -> DeNovoComp
             _ => None,
         },
         total_running_time_ms,
+        total_input_plus_output_tokens,
+        total_uncached_input_plus_output_tokens,
     }
 }
 
@@ -1812,6 +2153,14 @@ fn average(values: &[f64]) -> Option<f64> {
         Some(round_three(
             values.iter().sum::<f64>() / values.len() as f64,
         ))
+    }
+}
+
+fn average_u64(total: u64, count: usize) -> Option<f64> {
+    if count == 0 {
+        None
+    } else {
+        Some(round_three(total as f64 / count as f64))
     }
 }
 
