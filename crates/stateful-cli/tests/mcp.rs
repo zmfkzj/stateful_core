@@ -2801,7 +2801,13 @@ fn external_temp_root(name: &str) -> PathBuf {
 }
 
 fn macos_stateful_sandbox_is_active() -> bool {
-    cfg!(target_os = "macos") && std::env::var_os("STATEFUL_SANDBOX_RUN_ACTIVE").is_some()
+    if cfg!(target_os = "macos") && std::env::var_os("STATEFUL_SANDBOX_RUN_ACTIVE").is_some() {
+        return true;
+    }
+
+    cfg!(target_os = "linux")
+        && !Path::new("/usr/bin/bwrap").is_file()
+        && !Path::new("/bin/bwrap").is_file()
 }
 
 fn enable_test_repo(paths: &GlobalPaths, repo_root: &std::path::Path) {
