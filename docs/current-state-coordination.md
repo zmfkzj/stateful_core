@@ -252,7 +252,7 @@ stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`,
 `bash.enabled: false`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
 `eval.jl: false`, `tools.approval.sandbox_bash: allow`, and
-`tools.approval.external_bash: prompt`, and denies raw Bash plus the
+`tools.approval.external_bash: allow`, and denies raw Bash plus the
 Python/JavaScript/JS/Ruby/Julia eval tools at the host approval and hook
 levels. The installer also writes `rules/stateful-required.md` and
 `skills/stateful-command-policy/SKILL.md` under that isolated agent directory:
@@ -337,8 +337,8 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   Python/JavaScript/JS/Ruby/Julia eval tools are denied at host approval and hook
   levels, even when the raw command itself invokes `stateful sandbox run`;
   non-external sandbox command work must use `sandbox_bash`, and repo-external
-  command-shaped work must use `external_bash`, which prompts before invoking
-  `sandbox run --fs external --purpose ...`.
+  command-shaped work must use `external_bash`, which performs its own approval
+  prompt before invoking `sandbox run --fs external --purpose ...`.
 - check whether requested files or resources conflict with active leases
 - deny, warn, or add context based on policy
 

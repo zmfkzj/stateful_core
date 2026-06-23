@@ -1210,7 +1210,7 @@ fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow
         "tools",
         "approval",
         "external_bash",
-        "prompt",
+        "allow",
         update_existing,
     )?;
     ensure_omp_child_scalar(&mut lines, "eval", "py", "false", update_existing)?;

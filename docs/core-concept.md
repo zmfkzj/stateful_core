@@ -147,8 +147,8 @@ command itself invokes `stateful sandbox run`; OMP sessions use generated custom
 tools instead. `sandbox_bash` invokes the trusted stateful binary for read-only,
 write-targets, build, git, and github-pr sandbox profiles, including common
 sandbox flags, and rejects `--fs external` with guidance to use
-`external_bash`. `external_bash` prompts
-before invoking `stateful sandbox run --fs external --purpose ...`. Ordinary
+`external_bash`. `external_bash` performs its own approval prompt before invoking
+`stateful sandbox run --fs external --purpose ...`. Ordinary
 read work should use agent-native read, search, or diff tools when available.
 Read-only inspection that genuinely needs a shell must use the trusted absolute
 `stateful` wrapper: `<absolute-stateful-binary> sandbox run --fs read-only

@@ -119,7 +119,7 @@ stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`,
 `bash.enabled: false`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
 `eval.jl: false`, `tools.approval.sandbox_bash: allow`, and
-`tools.approval.external_bash: prompt`, and denies raw Bash plus the
+`tools.approval.external_bash: allow`, and denies raw Bash plus the
 Python/JavaScript/JS/Ruby/Julia eval tools at the host approval and hook
 levels. The installer also writes `rules/stateful-required.md` and
 `skills/stateful-command-policy/SKILL.md` under that isolated agent directory:

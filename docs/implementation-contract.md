@@ -669,11 +669,11 @@ always-apply `rules/stateful-required.md` rule,
 `tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
 `eval.js: false`, `eval.rb: false`, `eval.jl: false`,
 `tools.approval.sandbox_bash: allow`, and
-`tools.approval.external_bash: prompt`, so that profile carries the stateful
+`tools.approval.external_bash: allow`, so that profile carries the stateful
 approval context, denies raw Bash and Python/JavaScript/JS/Ruby/Julia
-eval-tool execution at host approval, allows non-external
-sandbox runs through `sandbox_bash`, and can prompt for trusted external
-sandbox requests through `external_bash`. `stateful enable`
+eval-tool execution at host approval, allows sandbox runs through
+`sandbox_bash` or `external_bash`, and keeps the trusted external sandbox
+approval prompt inside `external_bash`. `stateful enable`
 opts the current repo into enforcement. Repo-local packaging and managed hooks
 must reuse the same hook adapter library and HTTP protocol.
 

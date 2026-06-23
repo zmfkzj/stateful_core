@@ -209,7 +209,7 @@ of replacing it and rejects invalid YAML. Its target keys are
 `tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
 `eval.js: false`, `eval.rb: false`,
 `eval.jl: false`, `tools.approval.sandbox_bash: allow`, and
-`tools.approval.external_bash: prompt`; without `--update`, existing values are
+`tools.approval.external_bash: allow`; without `--update`, existing values are
 preserved and only missing keys are inserted. With `--update`
 (`stateful install --agent omp --yes --update`), existing values for those keys
 are updated.
@@ -350,7 +350,7 @@ installation health.
   `tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
   `eval.js: false`, `eval.rb: false`,
   `eval.jl: false`, `tools.approval.sandbox_bash: allow`, and
-  `tools.approval.external_bash: prompt`; without `--update`, existing values
+  `tools.approval.external_bash: allow`; without `--update`, existing values
   are preserved and only missing OMP keys are inserted. With `--update`, existing
   values for those keys are updated. Raw Bash and eval tool calls are denied by
   stateful hooks.
@@ -473,7 +473,7 @@ it; invalid YAML is
 rejected. Its target keys are `tools.approvalMode: write`,
 `bash.enabled: false`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
 `eval.jl: false`, `tools.approval.sandbox_bash: allow`, and
-`tools.approval.external_bash: prompt`; without `--update`, existing values are
+`tools.approval.external_bash: allow`; without `--update`, existing values are
 preserved and only missing OMP keys are inserted. With `--update`, existing
 values for those keys are updated, leaving the global/default OMP profile
 untouched. The generated OMP extension registers `sandbox_bash` for non-external
