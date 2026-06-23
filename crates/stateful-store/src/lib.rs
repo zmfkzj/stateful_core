@@ -36,6 +36,8 @@ pub enum StoreError {
     IntentRequestNotCancelable,
     #[error("active lease conflict")]
     LeaseConflict,
+    #[error("lease is already held by this session")]
+    LeaseAlreadyHeld,
     #[error("lease not found")]
     LeaseNotFound,
     #[error("lease owner mismatch")]
@@ -1137,6 +1139,14 @@ impl Store {
         if direct_tmp_lease_path(&relative_path) {
             return Err(StoreError::InvalidLeasePath(relative_path));
         }
+        if self.active_exact_lease_for_session(
+            session_id,
+            workspace_id,
+            &relative_path,
+            lease_action,
+        )? {
+            return Err(StoreError::LeaseAlreadyHeld);
+        }
         let Some(purpose) = self.active_intent_purpose_for_lease(
             session_id,
             workspace_id,
@@ -1191,6 +1201,29 @@ impl Store {
         )?;
 
         Ok(())
+    }
+
+    fn active_exact_lease_for_session(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        relative_path: &str,
+        lease_action: &str,
+    ) -> StoreResult<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM leases
+                    WHERE session_id = ?1
+                       AND workspace_id = ?2
+                       AND relative_path = ?3
+                       AND action = ?4
+                       AND status = 'active'
+                )",
+                params![session_id, workspace_id, relative_path, lease_action],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StoreError::from)
     }
 
     fn active_lease_conflicts_for_acquire(

@@ -574,6 +574,17 @@ fn lease_conflict_response() -> (StatusCode, Json<Value>) {
     )
 }
 
+fn lease_already_held_response() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "lease_state": "already_held",
+            "message": "Session already holds an active lease for this path."
+        })),
+    )
+}
+
 fn reservation_claim_required_response(reservation: WaitRecord) -> (StatusCode, Json<Value>) {
     (
         StatusCode::CONFLICT,
@@ -708,6 +719,7 @@ async fn lease_acquire(
         Err(StoreError::MissingPurpose) => missing_purpose_response(),
         Err(StoreError::MissingIntent) => missing_intent_response(),
         Err(StoreError::InvalidLeasePath(path)) => invalid_lease_path_response(path),
+        Err(StoreError::LeaseAlreadyHeld) => lease_already_held_response(),
         Err(StoreError::LeaseConflict) => lease_conflict_response(),
         Err(error) => status_response(Err(error.to_string())),
     }

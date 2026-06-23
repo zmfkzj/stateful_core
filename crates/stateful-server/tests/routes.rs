@@ -234,6 +234,49 @@ async fn lease_release_rejects_other_session_owner_with_actionable_error() {
 }
 
 #[tokio::test]
+async fn lease_acquire_returns_already_held_for_duplicate_same_session() {
+    let app = build_router(ServerConfig::new("secret-token"));
+    ensure_test_intent_via_http(&app, "s1", "w1", "src/auth.ts").await;
+
+    let first = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("first lease acquire should complete");
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = app
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("duplicate lease acquire should complete");
+
+    assert_eq!(second.status(), StatusCode::OK);
+    let json = response_json(second, 2048).await;
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["lease_state"], "already_held");
+    assert!(
+        json["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("already holds an active lease")),
+        "message should report the existing active lease: {json}"
+    );
+}
+
+#[tokio::test]
 async fn lease_release_rejects_missing_same_session_lease() {
     let app = build_router(ServerConfig::new("secret-token"));
 

@@ -1369,7 +1369,6 @@ fn acquire_lease_rejects_existing_active_file_lease_conflict() {
     assert!(matches!(error, StoreError::LeaseConflict));
     assert_eq!(store.lease_count().expect("lease count should load"), 1);
 }
-
 #[test]
 fn acquire_lease_allows_same_path_in_different_workspaces() {
     let store = Store::open_in_memory().expect("in-memory store should open");
@@ -1436,16 +1435,16 @@ fn same_session_can_acquire_exact_file_lease_under_directory_lease() {
 }
 
 #[test]
-fn acquire_lease_rejects_same_session_duplicate_exact_file_lease() {
+fn acquire_lease_reports_already_held_for_same_session_duplicate_exact_file_lease() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
 
     let error = store
         .acquire_lease("s1", "w1", "src/auth.ts")
-        .expect_err("duplicate exact file lease should reject");
+        .expect_err("duplicate exact file lease should report already held");
 
-    assert!(matches!(error, StoreError::LeaseConflict));
+    assert!(matches!(error, StoreError::LeaseAlreadyHeld));
     assert_eq!(store.lease_count().expect("lease count should load"), 1);
 }
 
