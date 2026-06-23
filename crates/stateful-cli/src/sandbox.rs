@@ -3766,11 +3766,18 @@ fn signal_sandbox_process_group(child: &std::process::Child, signal: i32) {
         _ => return,
     };
     let group = format!("-{}", child.id());
-    let _ = Command::new("/bin/kill")
-        .args([signal, group.as_str()])
+    let status = Command::new("/bin/kill")
+        .args([signal, "--", group.as_str()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+    if !status.as_ref().is_ok_and(std::process::ExitStatus::success) {
+        let _ = Command::new("/bin/kill")
+            .args([signal, group.as_str()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 #[cfg(test)]
