@@ -141,23 +141,26 @@ write transaction. Bash command text alone is never a repo-internal
 authorization source. Runtime tool names are classified by their leaf segment,
 so `functions.bash` follows Bash rules, `functions.python` follows Python
 rules, and `functions.read` / `functions.search` remain native read/search
-tools. Codex raw Bash is denied with sandbox guidance, and OMP
-raw Bash and native Python execution are blocked unless they use an allowed
-trusted sandbox-run wrapper; repo-external OMP shell or Python work must use
-`external_bash`, which prompts before invoking
-`stateful sandbox run --fs external --purpose ...`. Raw OMP Bash/Python external
-sandbox invocations are denied. Ordinary
-read work should use agent-native read,
-search, or diff tools when available. Read-only inspection that genuinely needs
-a shell must use the trusted absolute `stateful` wrapper:
-`<absolute-stateful-binary> sandbox run --fs read-only --network disabled
---command <cmd>`. Command-shaped repo writes must use the wrapper with
+tools. Codex raw Bash is denied with sandbox guidance. OMP raw Bash and native
+Python execution are denied at host approval and hook levels, even when the raw
+command itself invokes `stateful sandbox run`; OMP sessions use generated custom
+tools instead. `sandbox_bash` invokes the trusted stateful binary for read-only,
+write-targets, build, git, and github-pr sandbox profiles, including common
+sandbox flags, and rejects `--fs external` with guidance to use
+`external_bash`. `external_bash` prompts
+before invoking `stateful sandbox run --fs external --purpose ...`. Ordinary
+read work should use agent-native read, search, or diff tools when available.
+Read-only inspection that genuinely needs a shell must use the trusted absolute
+`stateful` wrapper: `<absolute-stateful-binary> sandbox run --fs read-only
+--network disabled --command <cmd>`; in OMP, use `sandbox_bash` for that
+profile. Command-shaped repo writes must use the wrapper with
 `--fs write-targets` and explicit repo-relative target flags after intent and
-same-session lease; repo-external writes use `--fs external` with absolute
-external targets and approval. Raw Bash test commands are not allowlisted; use
-`stateful sandbox run --fs build --network enabled
---write-dir <scratch-purpose> --command <cmd>` so build artifacts go under
-`/tmp/stateful/<session>/<scratch-purpose>/`.
+same-session lease; in OMP, use `sandbox_bash`. Repo-external writes use
+`--fs external` with absolute external targets and approval; in OMP, use
+`external_bash`. Raw Bash test commands are not allowlisted; use
+`stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
+--command <cmd>` so build artifacts go under
+`/tmp/stateful/<session>/<scratch-purpose>/`; in OMP, use `sandbox_bash`.
 
 ## Product Shape
 

@@ -22,7 +22,9 @@ The prototype supports user-level installation with repo allowlist gating.
 `stateful install --yes` installs stateful global files only. `stateful install
 --agent codex --yes` configures global Codex hooks and MCP. `stateful install
 --agent omp --yes` configures the isolated OMP `stateful` profile with stateful
-hooks and MCP. `stateful enable` opts the current repo into enforcement.
+hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `external_bash`
+for `--fs external`, and approval entries that deny raw Bash/Python. `stateful
+enable` opts the current repo into enforcement.
 For OMP, the extension prefers the actual OMP runtime session id from
 `event.sessionId` or `ctx.sessionManager.session.id`, stores it in
 `process.env.STATEFUL_SESSION_ID`, and `stateful hook omp session-start`
@@ -221,19 +223,22 @@ command-shaped inspection uses `<absolute-stateful-binary> sandbox run --fs
 read-only --network disabled --command <cmd>`; the read-only profile rejects
 `--network enabled`. Command-shaped repo writes use `--fs write-targets` with
 explicit `--write-target` / `--create-target` values and target authorization.
-OMP raw Bash and native Python execution follow the same block-unless-wrapper
-rule. Repo-external OMP Bash or Python execution must use the generated
-`external_bash` tool, which asks OMP UI confirmation before spawning the trusted
-stateful binary with `sandbox run --fs external --purpose ...`; raw OMP
-Bash/Python external sandbox invocations are blocked. The external sandbox
-profile validates absolute external write scopes, rejects repo-internal targets,
-runs through the sandbox after Codex approval or `external_bash` confirmation,
-and does not require repo intent or lease.
-Git operations use `--fs git` for one `git ...`
-command. GitHub pull request list/view/status/create commands use
-`<absolute-stateful-binary> sandbox run --fs github-pr --network enabled
---command 'gh pr <list|view|status|create> ...'`; use the GitHub connector
-instead when that connector is explicitly allowlisted for the repo.
+OMP raw Bash and native Python execution are denied at host approval and hook
+levels, even when the raw command itself invokes `stateful sandbox run`. OMP
+sandbox command execution uses generated custom tools: `sandbox_bash` invokes
+the trusted stateful binary for read-only, write-targets, build, git, and
+github-pr profiles, including common sandbox flags, and rejects `--fs external`
+with guidance to use `external_bash`; `external_bash` asks OMP UI confirmation
+before spawning the
+trusted stateful binary with `sandbox run --fs external --purpose ...`. The
+external sandbox profile validates absolute external write scopes, rejects
+repo-internal targets, runs through the sandbox after Codex approval or
+`external_bash` confirmation, and does not require repo intent or lease.
+Git operations use `--fs git` for one `git ...` command. GitHub pull request
+list/view/status/create commands use `<absolute-stateful-binary> sandbox run
+--fs github-pr --network enabled --command 'gh pr <list|view|status|create>
+...'`; in OMP, call `sandbox_bash`. Use the GitHub connector instead when that
+connector is explicitly allowlisted for the repo.
 
 ## Decision Output
 
@@ -540,9 +545,11 @@ tool approval policy, and external sandbox approval rules. Codex installs wire
 Stateful MCP tools default to automatic approval; `stateful sandbox run --fs
 external --purpose ...` is gated by a Codex execpolicy prompt before it validates
 the external write scope and runs the command through the sandbox. `stateful
-install --agent omp --yes` registers `external_bash`; that tool asks OMP UI
-confirmation before spawning the trusted stateful binary with the same external
-profile. Raw OMP Bash/Python external sandbox invocations are denied.
+install --agent omp --yes` registers `sandbox_bash` for read-only,
+write-targets, build, git, and github-pr sandbox profiles and `external_bash`
+for `--fs external`; `external_bash` asks OMP UI confirmation before spawning
+the trusted stateful binary with the external profile. Raw OMP Bash/Python
+sandbox invocations are denied.
 OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
 extension events to `stateful hook omp session-start`, `pre-tool-use`,
 `post-tool-use`, and `stop`; OMP does not expose a stateful
@@ -646,8 +653,13 @@ The prototype supports user-level installation with repo allowlist gating.
 --agent codex --yes` configures global Codex hooks and MCP. `stateful install
 --agent omp --yes` installs the OMP extension entry point, MCP config, and
 `tools.approvalMode: write` under the OMP `stateful` profile agent directory
-(`~/.omp/profiles/stateful/agent`) so that profile carries the stateful approval
-context and can prompt for trusted external sandbox requests. `stateful enable`
+(`~/.omp/profiles/stateful/agent`) with approval entries for
+`tools.approval.bash: deny`, `tools.approval.python: deny`,
+`tools.approval.sandbox_bash: allow`, `tools.approval.task: allow`, and
+`tools.approval.external_bash: prompt`, so that profile carries the stateful
+approval context, denies raw Bash/Python at host approval, allows non-external
+sandbox runs through `sandbox_bash`, and can prompt for trusted external
+sandbox requests through `external_bash`. `stateful enable`
 opts the current repo into enforcement. Repo-local packaging and managed hooks
 must reuse the same hook adapter library and HTTP protocol.
 
