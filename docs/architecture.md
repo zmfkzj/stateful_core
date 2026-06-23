@@ -117,13 +117,12 @@ The prototype supports user-level installation with repo allowlist gating.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) and ensures the target keys
-`tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
-`eval.js: false`, `eval.rb: false`, `eval.jl: false`,
-`tools.approval.task: allow`, `tools.approval.sandbox_bash: allow`,
-`tools.approval.ext_ro_bash: allow`, and
-`tools.approval.ext_rw_bash: allow`. Without `--update`, existing values are
-preserved and only missing keys are inserted; with `--update`, existing target
-values are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
+`tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
+`eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
+`tools.approval` from the stateful profile because yolo mode delegates safety to
+Stateful hooks. Without `--update`, existing scalar values are preserved and
+only missing keys are inserted; with `--update`, existing target scalar values
+are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
 tools are denied at the host approval and hook levels. The installer also writes
 `rules/stateful-required.md` and `skills/stateful-command-policy/SKILL.md` under
 that isolated agent directory:

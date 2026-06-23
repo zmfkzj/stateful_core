@@ -2059,7 +2059,7 @@ def fake_runner(command, text, check, env, stdout, stderr):
     extension = agent / "extensions" / "stateful-omp-extension.js"
     extension.parent.mkdir(parents=True, exist_ok=True)
     extension.write_text("extension")
-    (agent / "config.yml").write_text(f"extensions:\n  - {{extension}}\ntools:\n  approvalMode: write\n")
+    (agent / "config.yml").write_text(f"extensions:\n  - {{extension}}\ntools:\n  approvalMode: yolo\n")
     class Result:
         returncode = 0
         stdout = ""

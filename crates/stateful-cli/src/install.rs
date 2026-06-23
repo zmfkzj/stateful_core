@@ -1202,46 +1202,8 @@ fn ensure_omp_extension(mut contents: String, entry: &str) -> String {
 fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow::Result<String> {
     let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
 
-    ensure_omp_child_scalar(
-        &mut lines,
-        "tools",
-        "approvalMode",
-        "write",
-        update_existing,
-    )?;
-    ensure_omp_nested_child_scalar(
-        &mut lines,
-        "tools",
-        "approval",
-        "task",
-        "allow",
-        update_existing,
-    )?;
-    ensure_omp_nested_child_scalar(
-        &mut lines,
-        "tools",
-        "approval",
-        "sandbox_bash",
-        "allow",
-        update_existing,
-    )?;
-    ensure_omp_nested_child_scalar(
-        &mut lines,
-        "tools",
-        "approval",
-        "ext_ro_bash",
-        "allow",
-        update_existing,
-    )?;
-    ensure_omp_nested_child_scalar(
-        &mut lines,
-        "tools",
-        "approval",
-        "ext_rw_bash",
-        "allow",
-        update_existing,
-    )?;
-    remove_omp_nested_child_scalar(&mut lines, "tools", "approval", "external_bash")?;
+    ensure_omp_child_scalar(&mut lines, "tools", "approvalMode", "yolo", update_existing)?;
+    remove_omp_child_mapping(&mut lines, "tools", "approval")?;
     ensure_omp_child_scalar(&mut lines, "eval", "py", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "js", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "rb", "false", update_existing)?;
@@ -1270,35 +1232,22 @@ fn ensure_omp_child_scalar(
     Ok(())
 }
 
-fn ensure_omp_nested_child_scalar(
+fn remove_omp_child_mapping(
     lines: &mut Vec<String>,
     section: &str,
     child: &str,
-    key: &str,
-    value: &str,
-    update_existing: bool,
 ) -> anyhow::Result<()> {
-    let (child_offset, child_end) = ensure_omp_child_mapping(lines, section, child)?;
-    if let Some(offset) = find_omp_yaml_key(lines, child_offset + 1, child_end, 4, key) {
-        if update_existing {
-            lines[offset] = format!("    {key}: {value}");
+    let Some(section_offset) = find_omp_top_level_mapping(lines, section)? else {
+        return Ok(());
+    };
+    let section_end = find_omp_yaml_mapping_end(lines, section_offset, 0, lines.len());
+    if let Some(child_offset) = find_omp_yaml_key(lines, section_offset + 1, section_end, 2, child)
+    {
+        if !omp_yaml_key_is_block_mapping(&lines[child_offset], 2, child) {
+            anyhow::bail!("OMP config `{section}.{child}` must be a block mapping");
         }
-    } else {
-        lines.insert(child_end, format!("    {key}: {value}"));
-    }
-
-    Ok(())
-}
-
-fn remove_omp_nested_child_scalar(
-    lines: &mut Vec<String>,
-    section: &str,
-    child: &str,
-    key: &str,
-) -> anyhow::Result<()> {
-    let (child_offset, child_end) = ensure_omp_child_mapping(lines, section, child)?;
-    if let Some(offset) = find_omp_yaml_key(lines, child_offset + 1, child_end, 4, key) {
-        lines.remove(offset);
+        let child_end = find_omp_yaml_mapping_end(lines, child_offset, 2, section_end);
+        lines.drain(child_offset..child_end);
     }
 
     Ok(())
@@ -1316,24 +1265,6 @@ fn ensure_omp_top_level_mapping(
     lines.push(format!("{section}:"));
     let offset = lines.len() - 1;
     Ok((offset, lines.len()))
-}
-
-fn ensure_omp_child_mapping(
-    lines: &mut Vec<String>,
-    section: &str,
-    child: &str,
-) -> anyhow::Result<(usize, usize)> {
-    let (section_offset, section_end) = ensure_omp_top_level_mapping(lines, section)?;
-    if let Some(offset) = find_omp_yaml_key(lines, section_offset + 1, section_end, 2, child) {
-        if !omp_yaml_key_is_block_mapping(&lines[offset], 2, child) {
-            anyhow::bail!("OMP config `{section}.{child}` must be a block mapping");
-        }
-        let end = find_omp_yaml_mapping_end(lines, offset, 2, section_end);
-        return Ok((offset, end));
-    }
-
-    lines.insert(section_end, format!("  {child}:"));
-    Ok((section_end, section_end + 1))
 }
 
 fn find_omp_top_level_mapping(lines: &[String], section: &str) -> anyhow::Result<Option<usize>> {

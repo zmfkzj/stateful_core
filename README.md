@@ -206,13 +206,12 @@ Install the OMP integration when you want stateful OMP hooks, MCP, and
 generated sandbox command tools in the isolated `stateful` profile. This leaves
 the default/global OMP profile alone. The installer merges `config.yml` instead
 of replacing it and rejects invalid YAML. Its target keys are
-`tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
-`eval.js: false`, `eval.rb: false`, `eval.jl: false`,
-`tools.approval.task: allow`, `tools.approval.sandbox_bash: allow`,
-`tools.approval.ext_ro_bash: allow`, and
-`tools.approval.ext_rw_bash: allow`; without `--update`, existing values are
-preserved and only missing keys are inserted. With `--update`
-(`stateful install --agent omp --yes --update`), existing values for those keys
+`tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
+`eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
+`tools.approval` from the stateful profile because yolo mode delegates safety to
+Stateful hooks. Without `--update`, existing scalar values are preserved and
+only missing keys are inserted. With `--update`
+(`stateful install --agent omp --yes --update`), existing target scalar values
 are updated.
 It also installs `rules/stateful-required.md` and
 `skills/stateful-command-policy/SKILL.md` under that isolated agent directory:
@@ -354,14 +353,12 @@ installation health.
   `skills/stateful-command-policy/SKILL.md` into the OMP `stateful` profile
   agent directory (`~/.omp/profiles/stateful/agent`) and merges `config.yml`
   instead of replacing it, rejecting invalid YAML. Its target keys are
-  `tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
-  `eval.js: false`, `eval.rb: false`, `eval.jl: false`,
-  `tools.approval.task: allow`, `tools.approval.sandbox_bash: allow`,
-  `tools.approval.ext_ro_bash: allow`, and
-  `tools.approval.ext_rw_bash: allow`; without `--update`, existing values
-  are preserved and only missing OMP keys are inserted. With `--update`, existing
-  values for those keys are updated. Raw Bash and eval tool calls are denied by
-  stateful hooks.
+  `tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
+  `eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
+  `tools.approval` from the stateful profile because yolo mode delegates safety
+  to Stateful hooks. Without `--update`, existing scalar values are preserved
+  and only missing OMP keys are inserted. With `--update`, existing target scalar
+  values are updated. Raw Bash and eval tool calls are denied by stateful hooks.
 - `stateful enable [--repo <path>]`, `stateful disable`, and
   `stateful repos list` manage the repo allowlist used by global hooks.
 - `stateful tools list`, `stateful tools allow <tool>`, and
@@ -484,18 +481,17 @@ for hooks and MCP. `stateful install --agent omp [--yes] [--update]` installs
 the OMP extension, MCP config, always-apply `stateful-required` rule, and
 `stateful-command-policy` skill into the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) and merges `config.yml` instead of replacing
-it; invalid YAML is
-rejected. Its target keys are `tools.approvalMode: write`,
+it; invalid YAML is rejected. Its target keys are `tools.approvalMode: yolo`,
 `bash.enabled: false`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
-`eval.jl: false`, `tools.approval.task: allow`,
-`tools.approval.sandbox_bash: allow`, `tools.approval.ext_ro_bash: allow`, and
-`tools.approval.ext_rw_bash: allow`; without `--update`, existing values are
-preserved and only missing OMP keys are inserted. With `--update`, existing
-values for those keys are updated, leaving the global/default OMP profile
-untouched. The generated OMP extension registers `sandbox_bash` for non-external
-sandbox runs, `ext_ro_bash` for read-only `--fs external` shell work, and
-`ext_rw_bash` for external writes. In the default foreground mode, these tools
-stream stdout and stderr chunks to OMP while the command is still running, then
+and `eval.jl: false`; it removes `tools.approval` from the stateful profile
+because yolo mode delegates safety to Stateful hooks. Without `--update`,
+existing scalar values are preserved and only missing OMP keys are inserted.
+With `--update`, existing target scalar values are updated, leaving the
+global/default OMP profile untouched. The generated OMP extension registers
+`sandbox_bash` for non-external sandbox runs, `ext_ro_bash` for read-only
+`--fs external` shell work, and `ext_rw_bash` for external writes. In the default
+foreground mode, these tools stream stdout and stderr chunks to OMP while the
+command is still running, then
 return the final exit code and captured output. They also accept optional
 `async: true`: they return immediately with a background-job start message, keep
 the command process running, and deliver an automatic completion message back

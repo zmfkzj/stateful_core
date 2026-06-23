@@ -677,14 +677,13 @@ The prototype supports user-level installation with repo allowlist gating.
 always-apply `rules/stateful-required.md` rule,
 `skills/stateful-command-policy/SKILL.md` manual, and OMP config under the
 `stateful` profile agent directory (`~/.omp/profiles/stateful/agent`) with
-`tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
-`eval.js: false`, `eval.rb: false`, `eval.jl: false`,
-`tools.approval.sandbox_bash: allow`, `tools.approval.ext_ro_bash: allow`, and
-`tools.approval.ext_rw_bash: allow`, so that profile carries the stateful
-approval context, denies raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool
-execution at host approval, allows sandbox runs through `sandbox_bash`,
-`ext_ro_bash`, or `ext_rw_bash`, and keeps the trusted external write approval
-prompt inside `ext_rw_bash`. `stateful enable`
+`tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
+`eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
+`tools.approval` from the stateful profile because yolo mode delegates safety to
+Stateful hooks. Raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution
+is still denied at host approval and hook levels, sandbox runs still go through
+`sandbox_bash`, `ext_ro_bash`, or `ext_rw_bash`, and the trusted external write
+approval prompt stays inside `ext_rw_bash`. `stateful enable`
 opts the current repo into enforcement. Repo-local packaging and managed hooks
 must reuse the same hook adapter library and HTTP protocol.
 
