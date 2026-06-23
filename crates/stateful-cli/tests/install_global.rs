@@ -226,6 +226,14 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("details: { stream }"));
     assert!(extension.contains("emitSandboxToolOutput(onUpdate, \"stdout\", chunk)"));
     assert!(extension.contains("emitSandboxToolOutput(onUpdate, \"stderr\", chunk)"));
+    assert!(
+        extension.contains("function startSandboxBackgroundTool(pi, params, args, ctx, label)")
+    );
+    assert!(extension.contains("params.async === true"));
+    assert!(extension.contains("pi.sendMessage"));
+    assert!(extension.contains("display: true"));
+    assert!(extension.contains("triggerTurn: true"));
+    assert!(extension.contains("Result will be delivered automatically when complete."));
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", fs]"));
     assert!(extension.contains("ctx.ui.confirm"));
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", \"external\""));

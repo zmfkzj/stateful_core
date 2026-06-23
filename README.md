@@ -219,7 +219,12 @@ the always-apply rule owns activation, and the skill owns the detailed Stateful
 procedure.
 Raw Bash and eval tool calls are denied by stateful hooks; use `sandbox_bash`
 for non-external `stateful sandbox run` profiles and `external_bash` for
-`--fs external`:
+`--fs external`.
+Both generated tools accept optional `async: true`; async calls return
+immediately with a background-job start message and deliver completion back into
+OMP when the sandboxed command exits.
+
+Install with:
 
 ```bash
 stateful install --agent omp --yes
@@ -409,13 +414,16 @@ installation health.
   runs command-shaped repo file writes after exact file intent and a successful
   same-session file lease for that file. Use `--write-dir <repo-dir>` only after
   exact directory intent and a same-session directory lease for that directory.
-  In OMP, invoke `write-targets` through the generated `sandbox_bash` tool.
+  In OMP, invoke `write-targets` through the generated `sandbox_bash` tool;
+  optional `async: true` returns immediately and delivers completion later.
 - `stateful sandbox run --fs external --purpose <purpose> --command <cmd>`
   runs approved repo-external shell operations through the external sandbox
   profile. Purpose and command are required; write targets, create targets,
   write dirs, sockets, signal permission, and network are optional approval
   details. Codex prompts before direct use; OMP sessions must call the generated
-  `external_bash` tool, which prompts and then invokes this profile. Target
+  `external_bash` tool, which prompts before foreground or async execution and
+  then invokes this profile. Optional `async: true` returns immediately and
+  delivers completion later. Target
   paths supplied for external writes must be absolute, must resolve outside the
   repo, and do not require repo intent or a same-session lease.
 - `stateful sandbox run --fs git --network disabled --command 'git <args>'`
@@ -479,13 +487,17 @@ rejected. Its target keys are `tools.approvalMode: write`,
 preserved and only missing OMP keys are inserted. With `--update`, existing
 values for those keys are updated, leaving the global/default OMP profile
 untouched. The generated OMP extension registers `sandbox_bash` for non-external
-sandbox runs and `external_bash` for repo-external shell work. Both tools stream
-stdout and stderr chunks to OMP while the sandboxed command is still running, then
-return the final exit code and captured output. `sandbox_bash` invokes the
-trusted stateful binary as `stateful sandbox run --fs <profile> ... --command
-<cmd>` for read-only, write-targets, build, git, and github-pr profiles,
-including common sandbox flags; it rejects `--fs external` with guidance to use
-`external_bash`. `external_bash` asks for OMP UI confirmation, then invokes the
+sandbox runs and `external_bash` for repo-external shell work. In the default
+foreground mode, both tools stream stdout and stderr chunks to OMP while the
+sandboxed command is still running, then return the final exit code and captured
+output. Both tools also accept optional `async: true`: they return immediately
+with a background-job start message, keep the trusted stateful sandbox process
+running, and deliver an automatic completion message back into OMP when the
+command exits. `sandbox_bash` invokes the trusted stateful binary as `stateful
+sandbox run --fs <profile> ... --command <cmd>` for read-only, write-targets,
+build, git, and github-pr profiles, including common sandbox flags; it rejects
+`--fs external` with guidance to use `external_bash`. `external_bash` asks for
+OMP UI confirmation before foreground or async execution, then invokes the
 trusted stateful binary with `sandbox run --fs external` so the external sandbox
 profile can run purpose-and-command-only read-only operations or validate
 declared absolute scope for external writes. Other
@@ -652,10 +664,11 @@ for approved external operations. Repo-external writes do not require repo inten
 or a same-session lease. Codex prompts on
 `stateful sandbox run --fs external --purpose ...` before execution. OMP uses the
 generated `external_bash` tool for the same profile; that tool asks for UI
-confirmation before spawning the trusted stateful binary and reports no declared
-write scope when no external target, socket, or signal scope is supplied. After
-approval, the command runs through the sandbox and prints the sandbox command
-result as JSON.
+confirmation before foreground or async execution and reports no declared write
+scope when no external target, socket, or signal scope is supplied. After
+approval, foreground execution runs through the sandbox and prints the sandbox
+command result as JSON; with optional `async: true`, the tool returns immediately
+with a background-job start message and later delivers completion back into OMP.
 
 ## HTTP And MCP Surface
 
