@@ -264,9 +264,6 @@ fn handle_omp_pre_tool_use_with_identity(
     match omp_pre_tool_action(&input, repo_root, cwd, global_paths.as_ref())? {
         OmpPreToolAction::Allow => Ok(OmpHookOutcome::Allow),
         OmpPreToolAction::Block { reason } => Ok(OmpHookOutcome::Block { reason }),
-        OmpPreToolAction::Prompt { title, message } => {
-            Ok(OmpHookOutcome::Prompt { title, message })
-        }
         OmpPreToolAction::Targets(targets) => {
             authorize_omp_targets(&input, runtime, repo_root, cwd, identity, targets)
         }
@@ -275,7 +272,6 @@ fn handle_omp_pre_tool_use_with_identity(
 
 enum OmpPreToolAction {
     Targets(Vec<PatchTarget>),
-    Prompt { title: String, message: String },
     Allow,
     Block { reason: String },
 }
@@ -312,6 +308,7 @@ fn omp_pre_tool_action(
             }
             Ok(OmpPreToolAction::Targets(targets))
         }
+        tool_name if tool_name.eq_ignore_ascii_case("external_bash") => Ok(OmpPreToolAction::Allow),
         tool_name
             if tool_name.eq_ignore_ascii_case("bash")
                 || tool_name.eq_ignore_ascii_case("python") =>
@@ -406,11 +403,8 @@ fn omp_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {
         return Some(OmpPreToolAction::Targets(targets));
     }
     if invocation.request.fs == SandboxFsProfile::External {
-        return Some(OmpPreToolAction::Prompt {
-            title: "Approve external sandbox command".to_string(),
-            message: format!(
-                "Stateful is requesting a repo-external sandbox operation.\n\nCommand:\n{command}\n\nThe external sandbox profile will still validate the declared absolute external scope before execution."
-            ),
+        return Some(OmpPreToolAction::Block {
+            reason: "OMP raw Bash cannot run stateful sandbox run --fs external; use the external_bash tool so OMP can ask for approval before execution".to_string(),
         });
     }
     Some(OmpPreToolAction::Allow)
@@ -2554,6 +2548,7 @@ impl OmpPreToolUseInput {
             "runtime": "omp",
             "parent_session_id": self.parent_session_id,
             "omp_agent_id": self.omp_agent_id,
+            "yolo": self.yolo,
             "commit_id": self.commit_id,
             "cwd": self.cwd,
         })

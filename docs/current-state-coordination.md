@@ -251,8 +251,10 @@ For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`, and allows
 the Bash/Python OMP approval gate so stateful sandbox wrappers can decide. The
-generated extension asks for OMP UI confirmation before trusted `--fs external`
-tool calls proceed. The OMP global/default profile is not modified.
+generated extension registers `external_bash` for repo-external shell work; that
+tool asks for OMP UI confirmation before spawning `sandbox run --fs external`.
+Raw OMP Bash/Python external sandbox invocations are blocked. The OMP
+global/default profile is not modified.
 `stateful enable` opts the current repo into enforcement. Repo-local
 hooks remain available through `stateful enable --repo-local-codex` as a
 compatibility fallback.
@@ -294,9 +296,10 @@ paths. OMP `SessionStart`, `PostToolUse`, and `Stop` lifecycle posts use flat
 session-event bodies with `metadata` and `source`, while OMP `PreToolUse`
 authorization still uses the v1 envelope.
 
-OMP adapters preserve stateful hard blocks: stateful external-sandbox prompts
-map to OMP UI confirmation, stateful allow maps to allow, and stateful denial or
-unavailable state maps to block even when OMP yolo metadata is present.
+OMP adapters preserve stateful hard blocks: `external_bash` owns OMP UI
+confirmation for external sandbox requests, stateful allow maps to allow, and
+stateful denial or unavailable state maps to block even when OMP yolo metadata
+is present.
 
 ### Hook Responsibilities
 
@@ -320,9 +323,10 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 - intercept supported tool calls before execution
 - deny supported write calls when the session has no active intent
 - deny Codex raw Bash with sandbox guidance. For OMP, block raw Bash and native
-  Python execution unless they use the trusted sandbox-run wrapper; repo-external
-  shell or Python work must use `sandbox run --fs external --purpose ...`, which
-  prompts for OMP UI confirmation before sandbox validation.
+  Python execution unless they use an allowed trusted sandbox-run wrapper;
+  repo-external shell or Python work must use `external_bash`, which prompts
+  before invoking `sandbox run --fs external --purpose ...`. Raw OMP Bash/Python
+  external sandbox invocations are blocked.
 - check whether requested files or resources conflict with active leases
 - deny, warn, or add context based on policy
 
@@ -449,8 +453,8 @@ Bash command-shaped repo writes -> require the trusted wrapper with
   --fs write-targets plus explicit --write-target/--create-target values
 test execution -> run through sandbox run --fs build with
   --write-dir <scratch-purpose>; scratch lives under /tmp/stateful/<session>/
-Codex raw Bash, OMP raw Bash, or OMP native Python without wrapper -> deny
-repo-external shell or Python work -> require external sandbox profile
+Codex raw Bash, OMP raw Bash, or OMP native Python without an allowed wrapper -> deny
+repo-external OMP shell or Python work -> require `external_bash`
 ```
 
 Bash denial should tell the agent to use native read/search/diff tools for
@@ -459,8 +463,9 @@ ordinary read work,
 --command <cmd>` for shell-based read-only inspection,
 `<absolute-stateful-binary> sandbox run --fs write-targets ... --command <cmd>`
 for command-shaped repo writes after intent and same-session lease,
-`<absolute-stateful-binary> sandbox run --fs external --purpose ... --command
-<cmd>` for approved repo-external writes, native edit tools for repo file edits,
+Codex `<absolute-stateful-binary> sandbox run --fs external --purpose ...
+--command <cmd>` or OMP `external_bash` for approved repo-external writes,
+native edit tools for repo file edits,
 and `sandbox run --fs build --write-dir <scratch-purpose>` wrappers for tests.
 
 The read-only sandbox profile is a write-confinement profile. It does not
@@ -673,8 +678,8 @@ non-Bash read/search/diff path: allow
 
 At the OMP adapter boundary, a stateful hook deny or unavailable result is
 returned as block, not warning, regardless of OMP yolo metadata. Repo-external
-shell or Python work must use the external sandbox profile; yolo metadata does
-not override that block.
+shell or Python work must use `external_bash`; yolo metadata does not override
+that block, and raw OMP Bash/Python external sandbox invocations are denied.
 
 When the state server is unavailable:
 

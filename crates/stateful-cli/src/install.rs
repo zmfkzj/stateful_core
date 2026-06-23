@@ -1158,7 +1158,7 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
             contents.push('\n');
         }
         contents.push_str(
-            "tools:\n  approvalMode: write\n  approval:\n    bash: allow\n    python: allow\n    task: allow\n",
+            "tools:\n  approvalMode: write\n  approval:\n    bash: allow\n    python: allow\n    task: allow\n    external_bash: allow\n",
         );
         return contents;
     }
@@ -1196,6 +1196,8 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
     ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "python");
     tools_end = find_omp_top_level_section_end(&lines, tools_offset);
     ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "task");
+    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
+    ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "external_bash");
 
     contents = lines.join("\n");
     contents.push('\n');
@@ -1250,6 +1252,7 @@ fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Resu
     let binary_json = serde_json::to_string(binary_path)?;
     let contents = format!(
         r#"import {{ spawnSync }} from "node:child_process";
+import {{ Type }} from "@sinclair/typebox";
 
 const STATEFUL = {binary_json};
 
@@ -1290,8 +1293,153 @@ function sessionId(event, ctx) {{
   return id;
 }}
 
+const MAX_EXTERNAL_BASH_OUTPUT_BYTES = 50 * 1024;
+
+function stringList(value) {{
+  if (Array.isArray(value)) {{
+    return value.filter((item) => typeof item === "string" && item.trim().length > 0);
+  }}
+  if (typeof value === "string" && value.trim().length > 0) {{
+    return [value];
+  }}
+  return [];
+}}
+
+function truncateExternalBashText(value) {{
+  const text = value || "";
+  if (Buffer.byteLength(text, "utf8") <= MAX_EXTERNAL_BASH_OUTPUT_BYTES) {{
+    return text;
+  }}
+  return Buffer
+    .from(text, "utf8")
+    .subarray(0, MAX_EXTERNAL_BASH_OUTPUT_BYTES)
+    .toString("utf8") + "\n\n[external_bash output truncated to 51200 bytes]";
+}}
+
+function externalBashArgs(params) {{
+  if (typeof params?.purpose !== "string" || params.purpose.trim().length === 0) {{
+    throw new Error("external_bash requires a non-empty purpose");
+  }}
+  if (typeof params?.command !== "string" || params.command.trim().length === 0) {{
+    throw new Error("external_bash requires a non-empty command");
+  }}
+  const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
+  for (const target of stringList(params.write_targets)) args.push("--write-target", target);
+  for (const target of stringList(params.create_targets)) args.push("--create-target", target);
+  for (const dir of stringList(params.write_dirs)) args.push("--write-dir", dir);
+  for (const socket of stringList(params.connect_sockets)) args.push("--connect-socket", socket);
+  if (params.allow_signal === true) args.push("--allow-signal");
+  if (params.network !== undefined) {{
+    if (params.network !== "enabled" && params.network !== "disabled") {{
+      throw new Error("external_bash network must be 'enabled' or 'disabled'");
+    }}
+    args.push("--network", params.network);
+  }}
+  args.push("--command", params.command);
+  return args;
+}}
+
+function externalBashApprovalMessage(params, args) {{
+  const scope = [
+    ...stringList(params.write_targets).map((path) => "write-target: " + path),
+    ...stringList(params.create_targets).map((path) => "create-target: " + path),
+    ...stringList(params.write_dirs).map((path) => "write-dir: " + path),
+    ...stringList(params.connect_sockets).map((path) => "connect-socket: " + path),
+  ];
+  return [
+    "Stateful is requesting a repo-external sandbox operation.",
+    "",
+    "Purpose:",
+    params.purpose,
+    "",
+    "Declared external scope:",
+    scope.length ? scope.join("\n") : "(none)",
+    "",
+    "Command:",
+    params.command,
+    "",
+    "Sandbox invocation:",
+    STATEFUL + " " + args.join(" "),
+  ].join("\n");
+}}
+
+function externalBashResultText(exitCode, stdout, stderr, error) {{
+  const sections = ["exit_code: " + exitCode];
+  if (stdout) sections.push("stdout:\n" + stdout);
+  if (stderr) sections.push("stderr:\n" + stderr);
+  if (error) sections.push("error:\n" + error);
+  return sections.join("\n\n");
+}}
+
 export default function statefulOmpExtension(pi) {{
   pi.setLabel("Stateful");
+  pi.registerTool({{
+    name: "external_bash",
+    label: "External Bash",
+    description: "Run a repo-external command through stateful sandbox run --fs external after explicit OMP UI approval. Targets must be absolute external paths.",
+    parameters: Type.Object({{
+      purpose: Type.String({{ description: "Human-readable purpose for the external operation." }}),
+      command: Type.String({{ description: "Shell command to run inside the external sandbox." }}),
+      write_targets: Type.Optional(Type.Array(Type.String({{ description: "Existing absolute external file paths the command may write." }}))),
+      create_targets: Type.Optional(Type.Array(Type.String({{ description: "New absolute external file paths the command may create." }}))),
+      write_dirs: Type.Optional(Type.Array(Type.String({{ description: "Absolute external directories the command may write under." }}))),
+      connect_sockets: Type.Optional(Type.Array(Type.String({{ description: "Absolute Unix socket paths the command may connect to." }}))),
+      allow_signal: Type.Optional(Type.Boolean({{ description: "Allow the sandboxed command to signal approved external processes." }})),
+      network: Type.Optional(Type.String({{ description: "Network mode: enabled or disabled." }})),
+    }}),
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+      let args;
+      try {{
+        args = externalBashArgs(params);
+      }} catch (error) {{
+        return {{
+          isError: true,
+          content: [{{ type: "text", text: error instanceof Error ? error.message : String(error) }}],
+          details: {{ error: error instanceof Error ? error.message : String(error) }},
+        }};
+      }}
+      if (typeof ctx?.ui?.confirm !== "function") {{
+        return {{
+          isError: true,
+          content: [{{ type: "text", text: "external_bash requires OMP UI confirmation, but ctx.ui.confirm is unavailable." }}],
+          details: {{ error: "confirmation_unavailable" }},
+        }};
+      }}
+      const approved = await ctx.ui.confirm(
+        "Approve external sandbox command",
+        externalBashApprovalMessage(params, args)
+      );
+      if (!approved) {{
+        return {{
+          isError: true,
+          content: [{{ type: "text", text: "external_bash blocked by user" }}],
+          details: {{ blocked: true }},
+        }};
+      }}
+      const result = spawnSync(STATEFUL, args, {{
+        cwd: ctx.cwd,
+        encoding: "utf8",
+        signal,
+      }});
+      const exitCode = typeof result.status === "number" ? result.status : 1;
+      const error = result.error ? String(result.error.message || result.error) : "";
+      const stdout = truncateExternalBashText(result.stdout || "");
+      const stderr = truncateExternalBashText(result.stderr || "");
+      const text = externalBashResultText(exitCode, stdout, stderr, error);
+      return {{
+        isError: Boolean(error) || exitCode !== 0,
+        content: [{{ type: "text", text }}],
+        details: {{
+          exitCode,
+          stdout,
+          stderr,
+          error,
+          command: params.command,
+          sandboxArgs: args,
+        }},
+      }};
+    }},
+  }});
   pi.on("session_start", async (event, ctx) => {{
     runStatefulHook("session-start", {{
       session_id: sessionId(event, ctx),

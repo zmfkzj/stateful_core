@@ -2835,6 +2835,61 @@ fn omp_bash_with_explicit_write_dir_authorizes_directory_target() {
 }
 
 #[test]
+fn omp_raw_bash_denies_sandbox_external_and_points_to_external_bash() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs external --purpose 'write external artifact' --write-target /tmp/stateful-outside.txt --command 'printf ok > /tmp/stateful-outside.txt'")
+        }
+    })
+    .to_string();
+
+    let OmpHookOutcome::Block { reason } = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        None,
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .unwrap() else {
+        panic!("raw OMP bash must not run external sandbox commands directly");
+    };
+
+    assert!(reason.contains("external_bash"));
+    assert!(reason.contains("sandbox run --fs external"));
+}
+
+#[test]
+fn omp_external_bash_tool_is_allowed_for_internal_approval_prompt() {
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "external_bash",
+        "tool_input": {
+            "purpose": "write external artifact",
+            "write_targets": ["/tmp/stateful-outside.txt"],
+            "command": "printf ok > /tmp/stateful-outside.txt"
+        }
+    })
+    .to_string();
+
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Allow
+    );
+}
+
+#[test]
 fn omp_repo_internal_raw_bash_rejects_shell_writes_and_unsafe_find_actions() {
     for command in ["ls > docs/a.md", "find . -delete"] {
         let input = serde_json::json!({
@@ -3097,7 +3152,7 @@ fn omp_repo_external_raw_bash_blocks_without_external_sandbox_profile() {
 }
 
 #[test]
-fn omp_prompts_for_sandbox_external_profile_without_repo_authorization() {
+fn omp_denies_sandbox_external_profile_without_external_bash_tool() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "omp-parent",
@@ -3117,12 +3172,11 @@ fn omp_prompts_for_sandbox_external_profile_without_repo_authorization() {
         Some(Path::new("/repo")),
     )
     .unwrap();
-    let OmpHookOutcome::Prompt { title, message } = outcome else {
-        panic!("OMP external sandbox profile should request user approval");
+    let OmpHookOutcome::Block { reason } = outcome else {
+        panic!("OMP raw bash external sandbox profile should be blocked");
     };
-    assert_eq!(title, "Approve external sandbox command");
-    assert!(message.contains("repo-external sandbox operation"));
-    assert!(message.contains("sandbox run --fs external"));
+    assert!(reason.contains("external_bash"));
+    assert!(reason.contains("sandbox run --fs external"));
 }
 
 #[test]

@@ -224,12 +224,13 @@ read-only --network disabled --command <cmd>`; the read-only profile rejects
 `--network enabled`. Command-shaped repo writes use `--fs write-targets` with
 explicit `--write-target` / `--create-target` values and target authorization.
 OMP raw Bash and native Python execution follow the same block-unless-wrapper
-rule. Repo-external OMP Bash or Python execution is also blocked unless it uses
-the trusted wrapper:
-`<absolute-stateful-binary> sandbox run --fs external --purpose ...`; the
-external sandbox profile validates absolute external write scopes, rejects
-repo-internal targets, runs through the sandbox after Codex approval or OMP UI
-confirmation, and does not require repo intent or lease.
+rule. Repo-external OMP Bash or Python execution must use the generated
+`external_bash` tool, which asks OMP UI confirmation before spawning the trusted
+stateful binary with `sandbox run --fs external --purpose ...`; raw OMP
+Bash/Python external sandbox invocations are blocked. The external sandbox
+profile validates absolute external write scopes, rejects repo-internal targets,
+runs through the sandbox after Codex approval or `external_bash` confirmation,
+and does not require repo intent or lease.
 Git operations use `--fs git` for one `git ...`
 command. GitHub pull request list/view/status/create commands use
 `<absolute-stateful-binary> sandbox run --fs github-pr --network enabled
@@ -544,8 +545,9 @@ tool approval policy, and external sandbox approval rules. Codex installs wire
 Stateful MCP tools default to automatic approval; `stateful sandbox run --fs
 external --purpose ...` is gated by a Codex execpolicy prompt before it validates
 the external write scope and runs the command through the sandbox. `stateful
-install --agent omp --yes` wires an OMP UI confirmation prompt for the same
-external profile before sandbox validation.
+install --agent omp --yes` registers `external_bash`; that tool asks OMP UI
+confirmation before spawning the trusted stateful binary with the same external
+profile. Raw OMP Bash/Python external sandbox invocations are denied.
 OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
 extension events to `stateful hook omp session-start`, `pre-tool-use`,
 `post-tool-use`, and `stop`; OMP does not expose a stateful

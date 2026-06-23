@@ -142,9 +142,11 @@ authorization source. Runtime tool names are classified by their leaf segment,
 so `functions.bash` follows Bash rules, `functions.python` follows Python
 rules, and `functions.read` / `functions.search` remain native read/search
 tools. Codex raw Bash is denied with sandbox guidance, and OMP
-raw Bash and native Python execution are blocked unless they use the trusted
-sandbox-run wrapper; repo-external shell or Python work must use
-`stateful sandbox run --fs external --purpose ...`. Ordinary
+raw Bash and native Python execution are blocked unless they use an allowed
+trusted sandbox-run wrapper; repo-external OMP shell or Python work must use
+`external_bash`, which prompts before invoking
+`stateful sandbox run --fs external --purpose ...`. Raw OMP Bash/Python external
+sandbox invocations are denied. Ordinary
 read work should use agent-native read,
 search, or diff tools when available. Read-only inspection that genuinely needs
 a shell must use the trusted absolute `stateful` wrapper:
