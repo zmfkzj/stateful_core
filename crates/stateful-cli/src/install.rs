@@ -1284,7 +1284,6 @@ fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Resu
     let binary_json = serde_json::to_string(binary_path)?;
     let contents = format!(
         r#"import {{ spawnSync }} from "node:child_process";
-import {{ Type }} from "@sinclair/typebox";
 
 const STATEFUL = {binary_json};
 
@@ -1474,17 +1473,21 @@ export default function statefulOmpExtension(pi) {{
     name: "sandbox_bash",
     label: "Sandbox Bash",
     description: "Run a command through stateful sandbox run. Supports all sandbox run --fs profiles except external; use external_bash for external operations.",
-    parameters: Type.Object({{
-      fs: Type.String({{ description: "Sandbox filesystem profile: read-only, write-targets, build, git, or github-pr. external is not supported here." }}),
-      command: Type.String({{ description: "Shell command to run inside the stateful sandbox." }}),
-      write_targets: Type.Optional(Type.Array(Type.String({{ description: "Existing repo-relative file paths the command may write." }}))),
-      create_targets: Type.Optional(Type.Array(Type.String({{ description: "New repo-relative file paths the command may create." }}))),
-      write_dirs: Type.Optional(Type.Array(Type.String({{ description: "Repo-relative directories or build scratch purpose the command may write under." }}))),
-      connect_sockets: Type.Optional(Type.Array(Type.String({{ description: "Unix socket paths the sandbox may connect to when the selected profile supports sockets." }}))),
-      allow_signal: Type.Optional(Type.Boolean({{ description: "Allow the sandboxed command to signal approved processes when the selected profile supports signaling." }})),
-      network: Type.Optional(Type.String({{ description: "Network mode: enabled or disabled." }})),
-      timeout_seconds: Type.Optional(Type.Number({{ description: "Positive integer timeout in seconds." }})),
-    }}),
+    parameters: {{
+      type: "object",
+      properties: {{
+        fs: {{ type: "string", description: "Sandbox filesystem profile: read-only, write-targets, build, git, or github-pr. external is not supported here." }},
+        command: {{ type: "string", description: "Shell command to run inside the stateful sandbox." }},
+        write_targets: {{ type: "array", items: {{ type: "string" }}, description: "Existing repo-relative file paths the command may write." }},
+        create_targets: {{ type: "array", items: {{ type: "string" }}, description: "New repo-relative file paths the command may create." }},
+        write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Repo-relative directories or build scratch purpose the command may write under." }},
+        connect_sockets: {{ type: "array", items: {{ type: "string" }}, description: "Unix socket paths the sandbox may connect to when the selected profile supports sockets." }},
+        allow_signal: {{ type: "boolean", description: "Allow the sandboxed command to signal approved processes when the selected profile supports signaling." }},
+        network: {{ type: "string", description: "Network mode: enabled or disabled." }},
+        timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
+      }},
+      required: ["fs", "command"],
+    }},
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
       let args;
       try {{
@@ -1499,17 +1502,21 @@ export default function statefulOmpExtension(pi) {{
     name: "external_bash",
     label: "External Bash",
     description: "Run a repo-external command through stateful sandbox run --fs external after explicit OMP UI approval. Targets must be absolute external paths.",
-    parameters: Type.Object({{
-      purpose: Type.String({{ description: "Human-readable purpose for the external operation." }}),
-      command: Type.String({{ description: "Shell command to run inside the external sandbox." }}),
-      write_targets: Type.Optional(Type.Array(Type.String({{ description: "Existing absolute external file paths the command may write." }}))),
-      create_targets: Type.Optional(Type.Array(Type.String({{ description: "New absolute external file paths the command may create." }}))),
-      write_dirs: Type.Optional(Type.Array(Type.String({{ description: "Absolute external directories the command may write under." }}))),
-      connect_sockets: Type.Optional(Type.Array(Type.String({{ description: "Absolute Unix socket paths the command may connect to." }}))),
-      allow_signal: Type.Optional(Type.Boolean({{ description: "Allow the sandboxed command to signal approved external processes." }})),
-      network: Type.Optional(Type.String({{ description: "Network mode: enabled or disabled." }})),
-      timeout_seconds: Type.Optional(Type.Number({{ description: "Positive integer timeout in seconds." }})),
-    }}),
+    parameters: {{
+      type: "object",
+      properties: {{
+        purpose: {{ type: "string", description: "Human-readable purpose for the external operation." }},
+        command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
+        write_targets: {{ type: "array", items: {{ type: "string" }}, description: "Existing absolute external file paths the command may write." }},
+        create_targets: {{ type: "array", items: {{ type: "string" }}, description: "New absolute external file paths the command may create." }},
+        write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Absolute external directories the command may write under." }},
+        connect_sockets: {{ type: "array", items: {{ type: "string" }}, description: "Absolute Unix socket paths the command may connect to." }},
+        allow_signal: {{ type: "boolean", description: "Allow the sandboxed command to signal approved external processes." }},
+        network: {{ type: "string", description: "Network mode: enabled or disabled." }},
+        timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
+      }},
+      required: ["purpose", "command"],
+    }},
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
       let args;
       try {{

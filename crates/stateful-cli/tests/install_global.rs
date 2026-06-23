@@ -205,6 +205,8 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
             .contains("\"mcpServers\"")
     );
     let extension = fs::read_to_string(&omp_extension).expect("omp extension should read");
+    assert!(!extension.contains("@sinclair/typebox"));
+    assert!(!extension.contains("Type.Object"));
     assert!(extension.contains("export default function statefulOmpExtension"));
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
     assert!(extension.contains("event?.sessionId || ctx?.sessionManager?.session?.id"));
