@@ -4963,9 +4963,9 @@ fn denovo_overlay_instances_path_json() -> String {
 }
 
 fn codex_synthetic_agent_path_json() -> String {
-    serde_json::to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../.stateful_bench/agent_synthetic/codex_synthetic_agent.py"
+    serde_json::to_string(&format!(
+        "{}/scripts/codex_synthetic_agent.py",
+        env!("CARGO_MANIFEST_DIR")
     ))
     .expect("agent path should encode as json")
 }
