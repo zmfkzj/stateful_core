@@ -1504,6 +1504,7 @@ function externalBashApprovalMessage(params, args) {{
     ...stringList(params.create_targets).map((path) => "create-target: " + path),
     ...stringList(params.write_dirs).map((path) => "write-dir: " + path),
     ...stringList(params.connect_sockets).map((path) => "connect-socket: " + path),
+    ...(params.allow_signal === true ? ["allow-signal"] : []),
   ];
   return [
     "Stateful is requesting a repo-external sandbox operation.",
@@ -1511,8 +1512,8 @@ function externalBashApprovalMessage(params, args) {{
     "Purpose:",
     params.purpose,
     "",
-    "Declared external scope:",
-    scope.length ? scope.join("\n") : "(none)",
+    "Declared external write/socket/signal scope:",
+    scope.length ? scope.join("\n") : "No declared external write/socket/signal scope; this approval is for a read-only external command.",
     "",
     "Command:",
     params.command,
@@ -1597,17 +1598,17 @@ export default function statefulOmpExtension(pi) {{
   pi.registerTool({{
     name: "external_bash",
     label: "External Bash",
-    description: "Run a repo-external command through stateful sandbox run --fs external after explicit OMP UI approval. Targets must be absolute external paths.",
+    description: "Run a repo-external command through stateful sandbox run --fs external after explicit OMP UI approval. Read-only external commands may omit targets; supplied targets and sockets must be absolute external paths.",
     parameters: {{
       type: "object",
       properties: {{
         purpose: {{ type: "string", description: "Human-readable purpose for the external operation." }},
         command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
-        write_targets: {{ type: "array", items: {{ type: "string" }}, description: "Existing absolute external file paths the command may write." }},
-        create_targets: {{ type: "array", items: {{ type: "string" }}, description: "New absolute external file paths the command may create." }},
-        write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Absolute external directories the command may write under." }},
-        connect_sockets: {{ type: "array", items: {{ type: "string" }}, description: "Absolute Unix socket paths the command may connect to." }},
-        allow_signal: {{ type: "boolean", description: "Allow the sandboxed command to signal approved external processes." }},
+        write_targets: {{ type: "array", items: {{ type: "string" }}, description: "Optional existing absolute external file paths the command may write." }},
+        create_targets: {{ type: "array", items: {{ type: "string" }}, description: "Optional new absolute external file paths the command may create." }},
+        write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Optional absolute external directories the command may write under." }},
+        connect_sockets: {{ type: "array", items: {{ type: "string" }}, description: "Optional absolute Unix socket paths the sandbox may connect to." }},
+        allow_signal: {{ type: "boolean", description: "Optionally allow the sandboxed command to signal approved external processes." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
       }},

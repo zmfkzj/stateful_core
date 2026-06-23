@@ -155,9 +155,11 @@ Read-only inspection that genuinely needs a shell must use the trusted absolute
 --network disabled --command <cmd>`; in OMP, use `sandbox_bash` for that
 profile. Command-shaped repo writes must use the wrapper with
 `--fs write-targets` and explicit repo-relative target flags after intent and
-same-session lease; in OMP, use `sandbox_bash`. Repo-external writes use
-`--fs external` with absolute external targets and approval; in OMP, use
-`external_bash`. Raw Bash test commands are not allowlisted; use
+same-session lease; in OMP, use `sandbox_bash`. Repo-external operations use
+`--fs external` with purpose and command; read-only external commands may omit
+targets, while supplied write/create/dir/socket/signal scopes must be absolute
+external paths and approved. In OMP, use `external_bash`. Raw Bash test commands
+are not allowlisted; use
 `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
 --command <cmd>` so build artifacts go under
 `/tmp/stateful/<session>/<scratch-purpose>/`; in OMP, use `sandbox_bash`.

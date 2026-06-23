@@ -409,12 +409,14 @@ installation health.
   runs command-shaped repo directory writes after exact directory intent and a
   successful same-session directory lease for that directory. In OMP, invoke
   `write-targets` through the generated `sandbox_bash` tool.
-- `stateful sandbox run --fs external --purpose <purpose> --write-target <absolute-external-path> --command <cmd>`
-  runs command-shaped repo-external writes through the external sandbox profile.
-  Codex prompts before direct use; OMP sessions must call the generated
-  `external_bash` tool, which prompts and then invokes this profile. External
-  targets must be absolute, must resolve outside the repo, and do not require
-  repo intent or a same-session lease.
+- `stateful sandbox run --fs external --purpose <purpose> --command <cmd>`
+  runs approved repo-external shell operations through the external sandbox
+  profile. Purpose and command are required; write targets, create targets,
+  write dirs, sockets, signal permission, and network are optional approval
+  details. Codex prompts before direct use; OMP sessions must call the generated
+  `external_bash` tool, which prompts and then invokes this profile. Target
+  paths supplied for external writes must be absolute, must resolve outside the
+  repo, and do not require repo intent or a same-session lease.
 - `stateful sandbox run --fs git --network enabled --command 'git <args>'`
   runs a single git command with the repo worktree and Git internals writable
   inside the OS sandbox. The wrapper rejects shell-dispatching git options and
@@ -457,11 +459,11 @@ Run `stateful <command> --help` for command-specific options.
 
 Codex installation merges stateful MCP, MCP tool approval policy, external
 sandbox approval rules, and hook configuration into the Codex config. Stateful
-MCP tools default to automatic approval. Repo-external writes are gated by a
+MCP tools default to automatic approval. Repo-external operations are gated by a
 Codex execpolicy prompt for `stateful sandbox run --fs external --purpose ...`;
-after that approval, the external sandbox profile validates the normalized
-external write scope, rejects repo-internal targets, and runs the command in the
-sandbox.
+after that approval, the external sandbox profile runs the command, treating an
+operation with no declared external scope as read-only/no declared write scope
+and validating any supplied external write scope against repo-internal targets.
 `stateful enable` opts a repo into enforcement, while disabled repos are no-ops
 for hooks and MCP. `stateful install --agent omp [--yes] [--update]` installs
 the OMP extension, MCP config, always-apply `stateful-required` rule, and
@@ -481,7 +483,8 @@ invokes the trusted stateful binary as `stateful sandbox run --fs <profile> ...
 profiles, including common sandbox flags; it rejects `--fs external` with
 guidance to use `external_bash`. `external_bash` asks for OMP UI confirmation,
 then invokes the trusted stateful binary with `sandbox run --fs external` so the
-external sandbox profile can validate the declared absolute scope. Other
+external sandbox profile can run purpose-and-command-only read-only operations or
+validate declared absolute scope for external writes. Other
 stateful hook allows become OMP allows; denials or unavailable authorization
 remain hard OMP blocks even if OMP yolo metadata is present.
 OMP built-ins that do not write repo files, including `ask`, `ast_grep`, `job`,
@@ -493,7 +496,8 @@ bypass hard-denied write or execution classifications.
 OMP raw Bash and eval tools are denied by OMP config and hard-blocked by
 stateful hooks, even when the raw tool itself invokes `stateful sandbox run`.
 Use `sandbox_bash` for read-only, write-targets, build, git, and github-pr
-sandbox runs; use `external_bash` for repo-external execution.
+sandbox runs; use `external_bash` for external execution, including read-only
+purpose-and-command-only operations.
 
 The generated Codex hook configuration covers:
 
@@ -616,7 +620,17 @@ response includes both allowed and denied target lists. When all targets are
 allowed, the command runs through an OS sandbox with only the listed files or
 directory subtrees writable.
 
-Repo-external command-shaped writes use the external sandbox profile:
+Repo-external shell operations use the external sandbox profile. Read-only
+external operations need only a purpose and command:
+
+```bash
+stateful sandbox run --fs external \
+  --purpose "inspect external tool version" \
+  --command 'some-external-tool --version'
+```
+
+External writes add approval scope such as `--write-target`, `--create-target`,
+or `--write-dir`:
 
 ```bash
 stateful sandbox run --fs external \
@@ -626,14 +640,15 @@ stateful sandbox run --fs external \
 ```
 
 External sandbox targets must be absolute paths that resolve outside the repo.
-They may be listed with `--write-target`, `--create-target`, or `--write-dir`;
-the profile also supports `--connect-socket`, `--allow-signal`, and `--network`
+The profile also supports `--connect-socket`, `--allow-signal`, and `--network`
 for approved external operations. Repo-external writes do not require repo intent
 or a same-session lease. Codex prompts on
 `stateful sandbox run --fs external --purpose ...` before execution. OMP uses the
 generated `external_bash` tool for the same profile; that tool asks for UI
-confirmation before spawning the trusted stateful binary. After approval, the
-command runs through the sandbox and prints the sandbox command result as JSON.
+confirmation before spawning the trusted stateful binary and reports no declared
+write scope when no external target, socket, or signal scope is supplied. After
+approval, the command runs through the sandbox and prints the sandbox command
+result as JSON.
 
 ## HTTP And MCP Surface
 

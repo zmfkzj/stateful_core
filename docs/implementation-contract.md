@@ -238,9 +238,11 @@ github-pr profiles, including common sandbox flags, and rejects `--fs external`
 with guidance to use `external_bash`; `external_bash` asks OMP UI confirmation
 before spawning the
 trusted stateful binary with `sandbox run --fs external --purpose ...`. The
-external sandbox profile validates absolute external write scopes, rejects
-repo-internal targets, runs through the sandbox after Codex approval or
-`external_bash` confirmation, and does not require repo intent or lease.
+external sandbox profile requires purpose and command; read-only/no-declared-scope
+operations may omit targets, while supplied external write scopes are validated
+as absolute paths outside the repo. It runs through the sandbox after Codex
+approval or `external_bash` confirmation and does not require repo intent or
+lease.
 Git operations use `--fs git` for one `git ...` command. GitHub pull request
 list/view/status/create commands use `<absolute-stateful-binary> sandbox run
 --fs github-pr --network enabled --command 'gh pr <list|view|status|create>
@@ -550,8 +552,10 @@ stateful sync-outbox
 tool approval policy, and external sandbox approval rules. Codex installs wire
 `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`.
 Stateful MCP tools default to automatic approval; `stateful sandbox run --fs
-external --purpose ...` is gated by a Codex execpolicy prompt before it validates
-the external write scope and runs the command through the sandbox. `stateful
+external --purpose ... --command ...` is gated by a Codex execpolicy prompt
+before it runs the external sandbox command. Purpose-and-command-only operations
+are allowed for read-only/no-declared-scope use; supplied external write scopes
+are validated before the sandbox starts. `stateful
 install --agent omp --yes` registers `sandbox_bash` for read-only,
 write-targets, build, git, and github-pr sandbox profiles and `external_bash`
 for `--fs external`; `external_bash` asks OMP UI confirmation before spawning

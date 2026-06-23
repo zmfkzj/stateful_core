@@ -241,9 +241,8 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 - deny Codex raw Bash with sandbox guidance. For OMP, raw Bash and the
   Python/JavaScript/JS/Ruby/Julia eval tools are denied at host approval and hook
   levels, even when the raw command invokes `stateful sandbox run`; non-external
-  sandbox command work must use `sandbox_bash`, and repo-external
-  command-shaped work must use `external_bash`, which prompts before invoking
-  `sandbox run --fs external`.
+  sandbox command work must use `sandbox_bash`, and repo-external shell work must
+  use `external_bash`, which prompts before invoking `sandbox run --fs external`.
   Hook-mediated command execution outside OMP custom tools must be a single
   strict invocation of the trusted absolute `stateful` binary running
   `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
@@ -251,8 +250,10 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   rejects `--fs read-only --network enabled`. Command-shaped repo writes use
   `--fs write-targets` with explicit write/create targets and repo intent plus
   same-session leases. Git uses `--fs git`, GitHub PR operations use
-  `--fs github-pr`, and repo-external writes use `--fs external` with absolute
-  external targets and Codex approval or OMP `external_bash` confirmation.
+  `--fs github-pr`, and external operations use `--fs external` with Codex
+  approval or OMP `external_bash` confirmation. A purpose and command are
+  sufficient for read-only/no-declared-scope external operations; absolute
+  external targets remain required when declaring external write scope.
 - check leases and planned edits for likely conflicts
 - return allow, warning context, or deny based on policy
 
@@ -333,9 +334,10 @@ classification, so `functions.bash` is Bash,
   that genuinely needs a shell uses `--fs read-only --network disabled`; the
   read-only profile cannot enable network. Command-shaped repo writes use
   `--fs write-targets` with explicit `--write-target` / `--create-target` values
-  and target authorization. Repo-external writes use `--fs external` with
-  absolute external targets, no repo intent or lease, and Codex approval or OMP
-  `external_bash` confirmation.
+  and target authorization. External operations use `--fs external` with no repo
+  intent or lease, and Codex approval or OMP `external_bash` confirmation.
+  Purpose and command are sufficient for read-only/no-declared-scope use; any
+  supplied external write targets must be absolute and outside the repo.
 - Test execution: run only through sandboxed test actions such as
   `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`.
   Build artifacts live under `/tmp/stateful/<session>/<purpose>/`.

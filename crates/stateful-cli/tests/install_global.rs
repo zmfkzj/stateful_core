@@ -197,7 +197,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("stateful-omp-extension.js"));
     assert!(config.contains(
-        "tools:\n  approvalMode: write\n  approval:\n    bash: deny\n    python: false\n    javascript: false\n    js: false\n    ruby: false\n    julia: false\n    sandbox_bash: allow\n    task: allow\n    external_bash: prompt\n",
+        "tools:\n  approvalMode: write\n  approval:\n    sandbox_bash: allow\n    external_bash: prompt\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: false\n",
     ));
     assert!(
         fs::read_to_string(&omp_mcp)
@@ -218,6 +218,11 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", fs]"));
     assert!(extension.contains("ctx.ui.confirm"));
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", \"external\""));
+    assert!(extension.contains("Read-only external commands may omit targets"));
+    assert!(extension.contains("supplied targets and sockets must be absolute external paths"));
+    assert!(extension.contains("No declared external write/socket/signal scope"));
+    assert!(extension.contains("allow-signal"));
+    assert!(extension.contains("required: [\"purpose\", \"command\"]"));
     assert!(extension.contains("process.env.STATEFUL_SESSION_ID = id"));
     assert!(extension.contains("pre-tool-use"));
     assert!(extension.contains("decision: \"block\""));
@@ -252,6 +257,7 @@ fn install_omp_yes_can_target_user_omp_profile_separate_from_stateful_home() {
         binary_path: "/opt/stateful/bin/stateful".to_string(),
         project_config_path: None,
         omp_agent_dir: Some(omp_agent_dir.clone()),
+        update: false,
     })
     .expect("omp install should apply");
 
@@ -291,15 +297,13 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert_eq!(count(&config, "stateful-omp-extension.js"), 1);
     assert_eq!(count(&config, "approvalMode: write"), 1);
-    assert_eq!(count(&config, "\n    bash: deny"), 1);
-    assert_eq!(count(&config, "python: false"), 1);
-    assert_eq!(count(&config, "javascript: false"), 1);
-    assert_eq!(count(&config, "js: false"), 1);
-    assert_eq!(count(&config, "ruby: false"), 1);
-    assert_eq!(count(&config, "julia: false"), 1);
-    assert_eq!(count(&config, "sandbox_bash: allow"), 1);
-    assert_eq!(count(&config, "task: allow"), 1);
+    assert_eq!(count(&config, "\n    sandbox_bash: allow"), 1);
     assert_eq!(count(&config, "external_bash: prompt"), 1);
+    assert_eq!(count(&config, "\n  py: false"), 1);
+    assert_eq!(count(&config, "\n  js: false"), 1);
+    assert_eq!(count(&config, "\n  rb: false"), 1);
+    assert_eq!(count(&config, "\n  jl: false"), 1);
+    assert_eq!(count(&config, "\n  enabled: false"), 1);
     assert!(
         fs::read_to_string(&omp_mcp)
             .expect("omp mcp should read")
@@ -331,15 +335,10 @@ fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
     assert!(config.contains("existing-extension.js"));
     assert!(config.contains("stateful-omp-extension.js"));
     assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n"));
-    assert!(config.contains("bash: deny"));
-    assert!(config.contains("python: false"));
-    assert!(config.contains("javascript: false"));
-    assert!(config.contains("js: false"));
-    assert!(config.contains("ruby: false"));
-    assert!(config.contains("julia: false"));
     assert!(config.contains("sandbox_bash: allow"));
-    assert!(config.contains("task: allow"));
     assert!(config.contains("external_bash: prompt"));
+    assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
+    assert!(config.contains("bash:\n  enabled: false\n"));
     let extension = fs::read_to_string(
         omp_agent_dir
             .join("extensions")
@@ -351,8 +350,8 @@ fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
 }
 
 #[test]
-fn install_omp_yes_merges_approval_mode_into_existing_tools_config() {
-    let fixture = TestFixture::new("omp-install-tools");
+fn install_omp_yes_preserves_existing_tool_values_without_update() {
+    let fixture = TestFixture::new("omp-install-tools-preserve");
     let omp_agent_dir = fixture.omp_agent_dir();
     fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
     let omp_config = omp_agent_dir.join("config.yml");
@@ -365,26 +364,63 @@ fn install_omp_yes_merges_approval_mode_into_existing_tools_config() {
     apply_omp_install(fixture.omp_options(true)).expect("omp install should apply");
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
-    assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n"));
-    assert!(config.contains("bash: deny"));
-    assert!(config.contains("python: false"));
-    assert!(config.contains("javascript: false"));
-    assert!(config.contains("js: false"));
-    assert!(config.contains("ruby: false"));
-    assert!(config.contains("julia: false"));
-    assert!(config.contains("sandbox_bash: allow"));
-    assert!(config.contains("task: allow"));
+    assert!(config.contains("tools:\n  approvalMode: yolo\n  approval:\n"));
+    assert!(config.contains("bash: prompt"));
     assert!(config.contains("edit: prompt"));
-    assert_eq!(count(&config, "approvalMode: write"), 1);
-    assert_eq!(count(&config, "\n    bash: deny"), 1);
-    assert_eq!(count(&config, "python: false"), 1);
-    assert_eq!(count(&config, "javascript: false"), 1);
-    assert_eq!(count(&config, "js: false"), 1);
-    assert_eq!(count(&config, "ruby: false"), 1);
-    assert_eq!(count(&config, "julia: false"), 1);
-    assert_eq!(count(&config, "sandbox_bash: allow"), 1);
-    assert_eq!(count(&config, "task: allow"), 1);
+    assert!(config.contains("sandbox_bash: allow"));
+    assert!(config.contains("external_bash: prompt"));
+    assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
+    assert!(config.contains("bash:\n  enabled: false\n"));
+    assert_eq!(count(&config, "approvalMode:"), 1);
+    assert_eq!(count(&config, "\n    sandbox_bash: allow"), 1);
     assert_eq!(count(&config, "external_bash: prompt"), 1);
+}
+
+#[test]
+fn install_omp_update_replaces_existing_stateful_tool_values() {
+    let fixture = TestFixture::new("omp-install-tools-update");
+    let omp_agent_dir = fixture.omp_agent_dir();
+    fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
+    let omp_config = omp_agent_dir.join("config.yml");
+    fs::write(
+        &omp_config,
+        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    sandbox_bash: prompt\n    external_bash: allow\n    edit: prompt\neval:\n  py: true\n  js: true\n  rb: true\n  jl: true\nbash:\n  enabled: true\n",
+    )
+    .expect("existing config should write");
+
+    let mut options = fixture.omp_options(true);
+    options.update = true;
+    apply_omp_install(options).expect("omp install with --update should apply");
+
+    let config = fs::read_to_string(&omp_config).expect("omp config should read");
+    assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n"));
+    assert!(config.contains("sandbox_bash: allow"));
+    assert!(config.contains("external_bash: prompt"));
+    assert!(config.contains("edit: prompt"));
+    assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
+    assert!(config.contains("bash:\n  enabled: false\n"));
+    assert_eq!(count(&config, "approvalMode: write"), 1);
+    assert_eq!(count(&config, "sandbox_bash: allow"), 1);
+    assert_eq!(count(&config, "external_bash: prompt"), 1);
+}
+
+#[test]
+fn install_omp_rejects_invalid_existing_yaml_without_writing() {
+    let fixture = TestFixture::new("omp-install-invalid-yaml");
+    let omp_agent_dir = fixture.omp_agent_dir();
+    fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
+    let omp_config = omp_agent_dir.join("config.yml");
+    let existing = "model: [unterminated\n";
+    fs::write(&omp_config, existing).expect("existing config should write");
+
+    let error =
+        apply_omp_install(fixture.omp_options(true)).expect_err("invalid YAML should fail");
+
+    assert!(error.to_string().contains("invalid OMP config YAML"));
+    assert_eq!(
+        fs::read_to_string(&omp_config).expect("config should remain readable"),
+        existing
+    );
 }
 
 #[test]
@@ -805,6 +841,7 @@ impl TestFixture {
             binary_path: "/opt/stateful/bin/stateful".to_string(),
             project_config_path: None,
             omp_agent_dir: Some(self.omp_agent_dir()),
+            update: false,
         }
     }
 

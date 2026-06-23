@@ -1084,6 +1084,63 @@ fn sandbox_run_read_only_does_not_require_reachable_runtime() {
 }
 
 #[test]
+fn sandbox_run_external_profile_allows_read_only_scope_without_runtime() {
+    let temp_root = temp_root("stateful-sandbox-run-external-read-only");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+
+    let output = run_stateful_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[
+            ("STATEFUL_SERVER_URL", "http://127.0.0.1:9"),
+            ("STATEFUL_SERVER_TOKEN", "unreachable-token"),
+        ],
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "external",
+            "--network",
+            "enabled",
+            "--purpose",
+            "inspect external environment",
+            "--command",
+            "printf external-read-only",
+        ],
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout.contains("Connection refused") && !stderr.contains("Connection refused"),
+        "external read-only sandbox must not contact runtime: stdout={stdout} stderr={stderr}"
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("sandbox output should be json");
+    if macos_stateful_sandbox_is_active()
+        && body["stderr"]
+            .as_str()
+            .is_some_and(|stderr| stderr.contains("sandbox-exec: sandbox_apply"))
+    {
+        assert_eq!(body["status"], "exited");
+        fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+        return;
+    }
+    assert!(
+        output.status.success(),
+        "external read-only sandbox should run without runtime: stdout={stdout} stderr={stderr}"
+    );
+    assert_eq!(body["status"], "exited");
+    assert_eq!(body["stdout"], "external-read-only");
+    assert_eq!(body["allowed_write_targets"], serde_json::json!([]));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn sandbox_run_external_profile_writes_absolute_external_targets_without_runtime() {
     if macos_stateful_sandbox_is_active() {
         return;

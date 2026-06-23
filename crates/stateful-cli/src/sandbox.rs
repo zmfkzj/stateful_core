@@ -1718,18 +1718,7 @@ fn validate_profile_targets(
                 );
             }
         }
-        SandboxFsProfile::External => {
-            if write_targets.is_empty()
-                && create_targets.is_empty()
-                && write_dirs.is_empty()
-                && connect_sockets.is_empty()
-                && !allow_signal
-            {
-                anyhow::bail!(
-                    "external sandbox profile requires at least one write target, create target, write dir, connect socket, or signal scope"
-                );
-            }
-        }
+        SandboxFsProfile::External => {}
         SandboxFsProfile::Build => {
             if !write_targets.is_empty()
                 || !create_targets.is_empty()
@@ -4785,7 +4774,7 @@ mod tests {
     }
 
     #[test]
-    fn external_profile_requires_purpose_scope_and_absolute_targets() {
+    fn external_profile_requires_purpose_and_absolute_targets() {
         let mut request = SandboxRunRequest {
             fs: SandboxFsProfile::External,
             network: SandboxNetworkPolicy::Enabled,
@@ -4806,21 +4795,14 @@ mod tests {
             "unexpected error: {error}"
         );
 
-        request.purpose = Some("write external artifact".to_string());
+        request.purpose = Some("inspect external environment".to_string());
         request.write_targets.clear();
-        let error = validate_sandbox_run_request_shape(&request)
-            .expect_err("external profile should require a scope");
-        assert!(
-            error
-                .to_string()
-                .contains("requires at least one write target"),
-            "unexpected error: {error}"
-        );
+        validate_sandbox_run_request_shape(&request)
+            .expect("external profile should allow read-only scope");
 
         request.allow_signal = true;
         validate_sandbox_run_request_shape(&request)
             .expect("external profile should accept signal-only scope");
-
         request.allow_signal = false;
         request.write_targets = vec!["relative/path".to_string()];
         let error = validate_sandbox_run_request_shape(&request)
