@@ -236,17 +236,21 @@ at host approval and hook levels, even when the raw command itself invokes
 sandbox command execution uses generated custom tools: `sandbox_bash` invokes
 the trusted stateful binary for read-only, write-targets, build, git, and
 github-pr profiles, including common sandbox flags, and rejects `--fs external`
-with guidance to use `ext_ro_bash` or `ext_rw_bash`; `ext_ro_bash` runs
+with guidance to use `ext_ro_bash` or `ext_rw_bash`; `ext_ro_bash` starts
 purpose-and-command-only external reads without OMP UI confirmation; `ext_rw_bash`
-asks OMP UI confirmation before spawning the trusted stateful binary with
+asks OMP UI confirmation before starting the trusted stateful binary with
 `sandbox run --fs external --purpose ...` for external writes that declare at
-least one write target, create target, or write dir. The external sandbox
-profile requires purpose and command; read-only/no-declared-scope operations may
+least one write target, create target, or write dir. All generated `*_bash` tools
+start sandbox commands in the background, immediately return a background-job
+start result, capture stdout/stderr in memory, and deliver final status/output
+automatically through OMP; their `async` input is a deprecated compatibility
+no-op that does not select execution mode. The external sandbox profile requires
+purpose and command; read-only/no-declared-scope operations may
 omit targets, while supplied external write scopes are validated as absolute
 paths outside the repo. On macOS, external profile runs also allow
 trust/identity Mach lookups for `trustd` and DirectoryService so Go TLS clients
-such as `gh` can verify certificates. It runs through the sandbox after Codex
-approval, `ext_ro_bash` execution, or `ext_rw_bash` confirmation and does not
+such as `gh` can verify certificates. It starts through the sandbox after Codex
+approval, `ext_ro_bash` invocation, or `ext_rw_bash` confirmation and does not
 require repo intent or lease unless repo-relative write scope is supplied.
 Local git operations use `<absolute-stateful-binary> sandbox run --fs git
 --network disabled --command 'git <args>'`; use `--network enabled` only for
@@ -568,9 +572,13 @@ verification.
 `stateful
 install --agent omp --yes` registers `sandbox_bash` for read-only,
 write-targets, build, git, and github-pr sandbox profiles, `ext_ro_bash` for
-read-only external commands, and `ext_rw_bash` for external writes. `ext_ro_bash`
-does not ask OMP UI confirmation; `ext_rw_bash` asks before spawning the trusted
-stateful binary with the external profile. Raw OMP Bash and
+read-only external commands, and `ext_rw_bash` for external writes. All three
+generated `*_bash` tools start sandbox commands in the background, immediately
+return a background-job start result, capture stdout/stderr in memory, and
+deliver final status/output automatically through OMP; the compatibility
+`async` input is a no-op.
+`ext_ro_bash` does not ask OMP UI confirmation; `ext_rw_bash` asks before
+starting the trusted stateful binary with the external profile. Raw OMP Bash and
 Python/JavaScript/JS/Ruby/Julia eval-tool sandbox invocations are denied.
 OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
 extension events to `stateful hook omp session-start`, `pre-tool-use`,

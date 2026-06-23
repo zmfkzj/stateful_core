@@ -148,14 +148,14 @@ tools instead. `sandbox_bash` invokes the trusted stateful binary for read-only,
 write-targets, build, git, and github-pr sandbox profiles, including common
 sandbox flags, and rejects `--fs external` with guidance to use `ext_ro_bash` or
 `ext_rw_bash`. `ext_ro_bash` runs purpose-and-command-only external reads
-without OMP UI confirmation. `ext_rw_bash` asks OMP UI confirmation before
-foreground or async execution for external writes that declare at least one
-write target, create target, or write dir. In foreground mode, generated command
-tools stream stdout/stderr chunks to OMP while the command runs and return the
-final result. With optional `async: true`, they return immediately with a
-background-job start message while the trusted stateful sandbox process
-continues, then deliver an automatic completion message back into OMP when it
-exits. The generated extension also subscribes to Stateful SSE reservation
+without OMP UI confirmation. `ext_rw_bash` asks for OMP UI confirmation before
+starting the background command for external writes that declare at least one
+write target, create target, or write dir. Generated OMP `*_bash` tools always
+start sandbox commands in the background, return a background-job start result
+immediately, capture stdout/stderr, and deliver an automatic completion message
+back into OMP with the exit status and captured output when the command exits.
+The deprecated `async` parameter is accepted only as a compatibility no-op. The
+generated extension also subscribes to Stateful SSE reservation
 notifications and injects a next-turn OMP message when a queued `wait_id`
 becomes claimable; the claim and write still use the normal Stateful tools.
 Ordinary read work should use agent-native read, search, or diff tools when

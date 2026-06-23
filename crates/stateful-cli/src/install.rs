@@ -1702,30 +1702,8 @@ function sandboxToolError(error) {{
   }};
 }}
 
-function emitSandboxToolOutput(onUpdate, stream, chunk) {{
-  if (typeof onUpdate !== "function" || !chunk) {{
-    return;
-  }}
-  const update = {{
-    content: [{{ type: "text", text: chunk }}],
-    details: {{ stream }},
-  }};
-  const emitRawFallback = () => {{
-    try {{
-      const fallback = onUpdate(String(chunk));
-      if (fallback && typeof fallback.catch === "function") {{
-        fallback.catch(() => {{}});
-      }}
-    }} catch (_) {{}}
-  }};
-  try {{
-    const result = onUpdate(update);
-    if (result && typeof result.catch === "function") {{
-      result.catch(emitRawFallback);
-    }}
-  }} catch (_) {{
-    emitRawFallback();
-  }}
+function sandboxBackgroundToolOutputState(result) {{
+  return result.isError ? "failed" : "completed";
 }}
 
 
@@ -1749,8 +1727,8 @@ function buildSandboxBackgroundStartResult(jobId, label) {{
   return {{
     content: [{{ type: "text", text: [
       "Background job " + jobId + " started: " + label,
-      "Result will be delivered automatically when complete.",
-      "Continue with another task while this command runs unless its output is blocking.",
+      "The command is running outside the tool call so OMP can continue.",
+      "Captured stdout/stderr will be delivered automatically when complete.",
     ].join("\n") }}],
     details: {{ async: {{ state: "running", jobId, type: "bash" }} }},
   }};
@@ -1760,7 +1738,7 @@ function deliverSandboxBackgroundResult(pi, jobId, label, result) {{
   if (typeof pi?.sendMessage !== "function") {{
     return;
   }}
-  const state = result.isError ? "failed" : "completed";
+  const state = sandboxBackgroundToolOutputState(result);
   const text = [
     "Background job " + jobId + " " + state + ": " + label,
     "",
@@ -1779,7 +1757,7 @@ function deliverSandboxBackgroundResult(pi, jobId, label, result) {{
   }} catch (_) {{}}
 }}
 
-function runSandboxToolProcess(params, args, signal, ctx, label, onUpdate, onComplete) {{
+function runSandboxToolProcess(params, args, ctx, label, onComplete) {{
   let stdout = "";
   let stderr = "";
   let processError = "";
@@ -1795,7 +1773,7 @@ function runSandboxToolProcess(params, args, signal, ctx, label, onUpdate, onCom
     child = spawn(STATEFUL, args, {{
       cwd: ctx.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      ...(signal ? {{ signal }} : {{}}),
+      detached: false,
     }});
   }} catch (error) {{
     finish(1, error instanceof Error ? error.message : String(error));
@@ -1804,12 +1782,10 @@ function runSandboxToolProcess(params, args, signal, ctx, label, onUpdate, onCom
   child.stdout?.setEncoding("utf8");
   child.stderr?.setEncoding("utf8");
   child.stdout?.on("data", (chunk) => {{
-    emitSandboxToolOutput(onUpdate, "stdout", chunk);
     stdout = truncateSandboxToolText(stdout + chunk, label);
   }});
   child.stderr?.on("data", (chunk) => {{
     stderr = truncateSandboxToolText(stderr + chunk, label);
-    emitSandboxToolOutput(onUpdate, "stderr", chunk);
   }});
   child.on("error", (error) => {{
     processError = error instanceof Error ? error.message : String(error);
@@ -1821,16 +1797,10 @@ function runSandboxToolProcess(params, args, signal, ctx, label, onUpdate, onCom
   }});
 }}
 
-function runSandboxTool(params, args, signal, ctx, label, onUpdate) {{
-  return new Promise((resolve) => {{
-    runSandboxToolProcess(params, args, signal, ctx, label, onUpdate, resolve);
-  }});
-}}
-
 function startSandboxBackgroundTool(pi, params, args, ctx, label) {{
   const jobId = nextSandboxJobId(label);
   const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
-  runSandboxToolProcess(params, args, undefined, ctx, label, undefined, (result) => {{
+  runSandboxToolProcess(params, args, ctx, label, (result) => {{
     deliverSandboxBackgroundResult(pi, jobId, commandLabel, result);
   }});
   return buildSandboxBackgroundStartResult(jobId, commandLabel);
@@ -1854,7 +1824,7 @@ export default function statefulOmpExtension(pi) {{
         allow_signal: {{ type: "boolean", description: "Allow the sandboxed command to signal approved processes when the selected profile supports signaling." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Return immediately and deliver the sandbox command result automatically when complete." }},
+        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and deliver captured output automatically." }},
       }},
       required: ["fs", "command"],
     }},
@@ -1865,10 +1835,7 @@ export default function statefulOmpExtension(pi) {{
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      if (params.async === true) {{
-        return startSandboxBackgroundTool(pi, params, args, ctx, "sandbox_bash");
-      }}
-      return runSandboxTool(params, args, signal, ctx, "sandbox_bash", _onUpdate);
+      return startSandboxBackgroundTool(pi, params, args, ctx, "sandbox_bash");
     }},
   }});
   pi.registerTool({{
@@ -1882,7 +1849,7 @@ export default function statefulOmpExtension(pi) {{
         command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Return immediately and deliver the external sandbox command result automatically when complete." }},
+        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and deliver captured output automatically." }},
       }},
       required: ["purpose", "command"],
     }},
@@ -1893,10 +1860,7 @@ export default function statefulOmpExtension(pi) {{
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      if (params.async === true) {{
-        return startSandboxBackgroundTool(pi, params, args, ctx, "ext_ro_bash");
-      }}
-      return runSandboxTool(params, args, signal, ctx, "ext_ro_bash", _onUpdate);
+      return startSandboxBackgroundTool(pi, params, args, ctx, "ext_ro_bash");
     }},
   }});
   pi.registerTool({{
@@ -1915,7 +1879,7 @@ export default function statefulOmpExtension(pi) {{
         allow_signal: {{ type: "boolean", description: "Optionally allow the sandboxed command to signal approved external processes." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Return immediately and deliver the external sandbox command result automatically when complete." }},
+        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and deliver captured output automatically." }},
       }},
       required: ["purpose", "command"],
     }},
@@ -1944,10 +1908,7 @@ export default function statefulOmpExtension(pi) {{
           details: {{ blocked: true }},
         }};
       }}
-      if (params.async === true) {{
-        return startSandboxBackgroundTool(pi, params, args, ctx, "ext_rw_bash");
-      }}
-      return runSandboxTool(params, args, signal, ctx, "ext_rw_bash", _onUpdate);
+      return startSandboxBackgroundTool(pi, params, args, ctx, "ext_rw_bash");
     }},
   }});
   pi.on("session_start", async (event, ctx) => {{

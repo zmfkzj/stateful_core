@@ -220,10 +220,11 @@ procedure.
 Raw Bash and eval tool calls are denied by stateful hooks; use `sandbox_bash`
 for non-external `stateful sandbox run` profiles, `ext_ro_bash` for read-only
 `--fs external` purpose-and-command operations without OMP UI confirmation, and
-`ext_rw_bash` for external writes that declare write/create/dir scope and ask
-OMP UI confirmation. Generated command tools accept optional `async: true`;
-async calls return immediately with a background-job start message and deliver
-completion back into OMP when the sandboxed command exits.
+`ext_rw_bash` for external writes that declare write/create/dir scope and ask for
+OMP UI confirmation. Generated OMP `*_bash` tools start sandbox commands in
+the background, return a background-job start result immediately, capture
+stdout/stderr, and deliver completion back into OMP when the sandboxed command
+exits; the deprecated `async` parameter is accepted as a compatibility no-op.
 
 Install with:
 
@@ -414,20 +415,23 @@ installation health.
   runs command-shaped repo file writes after exact file intent and a successful
   same-session file lease for that file. Use `--write-dir <repo-dir>` only after
   exact directory intent and a same-session directory lease for that directory.
-  In OMP, invoke `write-targets` through the generated `sandbox_bash` tool;
-  optional `async: true` returns immediately and delivers completion later.
+  In OMP, invoke `write-targets` through the generated `sandbox_bash` tool; it
+  starts the sandbox command in the background, returns a background-job start
+  result immediately, captures stdout/stderr, and delivers completion
+  automatically when the command exits.
 - `stateful sandbox run --fs external --purpose <purpose> --command <cmd>`
   runs repo-external shell operations through the external sandbox profile.
   Purpose and command are required. Codex prompts before direct use. In OMP,
   read-only/no-write-scope external commands use `ext_ro_bash` without OMP UI
   confirmation; external writes use `ext_rw_bash`, require at least one
-  write target, create target, or write dir scope, and ask OMP UI confirmation
-  before foreground or async execution. Optional `async: true` returns
-  immediately and delivers completion later. Absolute target paths supplied for
-  external writes must resolve outside the repo and do not require repo intent
-  or a same-session lease. Repo-relative write targets, create targets, and
-  write dirs are authorized through the normal Stateful intent and lease flow
-  for repo writes.
+  write target, create target, or write dir scope, and ask for OMP UI
+  confirmation before the background sandbox command is started. Generated OMP
+  tools return a background-job start result immediately, capture stdout/stderr,
+  and deliver completion automatically when the sandboxed command exits.
+  Absolute target paths supplied for external writes must resolve outside the repo
+  and do not require repo intent or a same-session lease. Repo-relative write
+  targets, create targets, and write dirs are authorized through the normal
+  Stateful intent and lease flow for repo writes.
 - `stateful sandbox run --fs git --network disabled --command 'git <args>'`
   runs a single local git command with the repo worktree and Git internals
   writable inside the OS sandbox. The wrapper rejects shell-dispatching git
@@ -489,19 +493,19 @@ existing scalar values are preserved and only missing OMP keys are inserted.
 With `--update`, existing target scalar values are updated, leaving the
 global/default OMP profile untouched. The generated OMP extension registers
 `sandbox_bash` for non-external sandbox runs, `ext_ro_bash` for read-only
-`--fs external` shell work, and `ext_rw_bash` for external writes. In the default
-foreground mode, these tools stream stdout and stderr chunks to OMP while the
-command is still running, then
-return the final exit code and captured output. They also accept optional
-`async: true`: they return immediately with a background-job start message, keep
-the command process running, and deliver an automatic completion message back
-into OMP when the command exits. `sandbox_bash` invokes the trusted stateful
-binary as `stateful sandbox run --fs <profile> ... --command <cmd>` for
-read-only, write-targets, build, git, and github-pr profiles, including common
-sandbox flags; it rejects `--fs external` with guidance to use `ext_ro_bash` or
+`--fs external` shell work, and `ext_rw_bash` for external writes. These
+generated OMP `*_bash` tools always start the sandbox command in the background,
+return a background-job start result immediately, capture stdout/stderr while it
+runs, and deliver an automatic completion message back into OMP with the exit
+status and captured output when the command exits. The deprecated `async`
+parameter is accepted only as a compatibility no-op; it no longer selects
+background execution. `sandbox_bash` invokes the trusted stateful binary as
+`stateful sandbox run --fs <profile> ... --command <cmd>` for read-only,
+write-targets, build, git, and github-pr profiles, including common sandbox
+flags; it rejects `--fs external` with guidance to use `ext_ro_bash` or
 `ext_rw_bash`. `ext_ro_bash` runs purpose-and-command-only external reads
 without OMP UI confirmation. `ext_rw_bash` asks for OMP UI confirmation before
-foreground or async execution, then invokes the trusted stateful binary with
+starting the background command, then invokes the trusted stateful binary with
 `sandbox run --fs external` so the external sandbox profile can validate
 absolute scope for external writes or authorize repo-relative write scopes
 through Stateful intent and leases.
@@ -677,10 +681,12 @@ lease. Codex prompts on
 `stateful sandbox run --fs external --purpose ...` before execution. In OMP,
 `ext_ro_bash` runs read-only purpose-and-command-only external operations without
 UI confirmation. `ext_rw_bash` requires at least one write target, create target,
-or write dir scope, asks for UI confirmation before foreground or async
-execution, then runs through the sandbox and prints the sandbox command result
-as JSON; with optional `async: true`, the tool returns immediately with a
-background-job start message and later delivers completion back into OMP.
+or write dir scope, asks for UI confirmation before the background external
+sandbox command is started, and returns a background-job start result
+immediately. Generated OMP `*_bash` tools capture stdout/stderr and deliver an
+automatic completion message back into OMP with the exit status and captured
+output when the command exits; the deprecated `async` parameter is accepted only
+as a compatibility no-op.
 
 ## HTTP And MCP Surface
 
