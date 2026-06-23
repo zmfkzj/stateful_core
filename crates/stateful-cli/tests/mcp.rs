@@ -1225,6 +1225,72 @@ fn sandbox_run_external_profile_writes_absolute_external_targets_without_runtime
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
+#[test]
+fn sandbox_run_external_profile_authorizes_repo_relative_targets() {
+    if macos_stateful_sandbox_is_active() {
+        return;
+    }
+
+    let temp_root = temp_root("stateful-sandbox-run-external-repo-target");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file(&repo_root, &CurrentSession::new("s-current", "w1"))
+        .expect("current session should write");
+    fs::write(repo_root.join("src/allowed.ts"), "old\n").expect("allowed file should seed");
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        r#"{"status":"ok"}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let output = run_stateful_in_repo(
+        &repo_root,
+        &paths,
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "external",
+            "--purpose",
+            "update generated repo file through external sandbox",
+            "--write-target",
+            "src/allowed.ts",
+            "--command",
+            "printf changed > src/allowed.ts",
+        ],
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "external repo-relative sandbox run failed: stdout={stdout} stderr={stderr}"
+    );
+    let authorize = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("authorize request should arrive");
+    assert_eq!(
+        request_json_body(&authorize)["payload"]["action"],
+        "write_file"
+    );
+    assert_eq!(
+        request_json_body(&authorize)["payload"]["path"],
+        "src/allowed.ts"
+    );
+    let release = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("release request should arrive after command completes");
+    assert!(release.contains("POST /v1/lease/release HTTP/1.1"));
+    assert_eq!(
+        fs::read_to_string(repo_root.join("src/allowed.ts")).expect("allowed file should read"),
+        "changed"
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
 #[cfg(unix)]
 #[test]
 fn sandbox_run_external_profile_accepts_connect_socket_scope_without_runtime() {
@@ -1464,7 +1530,7 @@ fn mcp_stale_bash_write_call_returns_removed_guidance() {
                 .as_str()
                 .unwrap_or_default()
                 .contains(
-                    "state_bash_write was removed; use stateful sandbox run --fs write-targets --write-target <repo-path> ... --command <cmd> after repo intent/lease, or stateful sandbox run --fs external --purpose <purpose> --write-target <absolute-path> [--create-target <absolute-path>] [--write-dir <absolute-dir>] [--connect-socket <absolute-socket>] [--allow-signal] [--network disabled|enabled] --command <cmd> for repo-external writes."
+                    "state_bash_write was removed; use stateful sandbox run --fs write-targets --write-target <repo-path> ... --command <cmd> after repo intent/lease, or stateful sandbox run --fs external --purpose <purpose> [--write-target <repo-path-or-absolute-external-path>] [--create-target <repo-path-or-absolute-external-path>] [--write-dir <repo-path-or-absolute-external-dir>] [--connect-socket <absolute-socket>] [--allow-signal] [--network disabled|enabled] --command <cmd> for approved external commands; repo-relative scopes still require repo intent/lease."
                 ),
             "{tool_name}"
         );

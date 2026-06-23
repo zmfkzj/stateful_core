@@ -219,8 +219,8 @@ the always-apply rule owns activation, and the skill owns the detailed Stateful
 procedure.
 Raw Bash and eval tool calls are denied by stateful hooks; use `sandbox_bash`
 for non-external `stateful sandbox run` profiles and `external_bash` for
-`--fs external`.
-Both generated tools accept optional `async: true`; async calls return
+`--fs external`, including read-only purpose-and-command-only operations.
+Both generated command tools accept optional `async: true`; async calls return
 immediately with a background-job start message and deliver completion back into
 OMP when the sandboxed command exits.
 
@@ -423,9 +423,10 @@ installation health.
   details. Codex prompts before direct use; OMP sessions must call the generated
   `external_bash` tool, which prompts before foreground or async execution and
   then invokes this profile. Optional `async: true` returns immediately and
-  delivers completion later. Target
-  paths supplied for external writes must be absolute, must resolve outside the
-  repo, and do not require repo intent or a same-session lease.
+  delivers completion later. Absolute target paths supplied for external writes
+  must resolve outside the repo and do not require repo intent or a same-session
+  lease. Repo-relative write targets, create targets, and write dirs are
+  authorized through the normal Stateful intent and lease flow for repo writes.
 - `stateful sandbox run --fs git --network disabled --command 'git <args>'`
   runs a single local git command with the repo worktree and Git internals
   writable inside the OS sandbox. The wrapper rejects shell-dispatching git
@@ -488,21 +489,22 @@ rejected. Its target keys are `tools.approvalMode: write`,
 preserved and only missing OMP keys are inserted. With `--update`, existing
 values for those keys are updated, leaving the global/default OMP profile
 untouched. The generated OMP extension registers `sandbox_bash` for non-external
-sandbox runs and `external_bash` for repo-external shell work. In the default
-foreground mode, both tools stream stdout and stderr chunks to OMP while the
-sandboxed command is still running, then return the final exit code and captured
-output. Both tools also accept optional `async: true`: they return immediately
-with a background-job start message, keep the trusted stateful sandbox process
-running, and deliver an automatic completion message back into OMP when the
-command exits. `sandbox_bash` invokes the trusted stateful binary as `stateful
-sandbox run --fs <profile> ... --command <cmd>` for read-only, write-targets,
-build, git, and github-pr profiles, including common sandbox flags; it rejects
-`--fs external` with guidance to use `external_bash`. `external_bash` asks for
-OMP UI confirmation before foreground or async execution, then invokes the
-trusted stateful binary with `sandbox run --fs external` so the external sandbox
-profile can run purpose-and-command-only read-only operations or validate
-declared absolute scope for external writes. Other
-stateful hook allows become OMP allows; denials or unavailable authorization
+sandbox runs and `external_bash` for `--fs external` shell work. In the default
+foreground mode, these tools stream stdout and stderr chunks to OMP while the
+command is still running, then return the final exit code and captured output.
+They also accept optional `async: true`: they return immediately with a
+background-job start message, keep the command process running, and deliver an
+automatic completion message back into OMP when the command exits.
+`sandbox_bash` invokes the trusted stateful binary as
+`stateful sandbox run --fs <profile> ... --command <cmd>` for read-only,
+write-targets, build, git, and github-pr profiles, including common sandbox
+flags; it rejects `--fs external` with guidance to use `external_bash`.
+`external_bash` asks for OMP UI confirmation before foreground or async
+execution, then invokes the trusted stateful binary with `sandbox run --fs
+external` so the external sandbox profile can run purpose-and-command-only
+read-only operations, validate absolute scope for external writes, or authorize
+repo-relative write scopes through Stateful intent and leases.
+Other stateful hook allows become OMP allows; denials or unavailable authorization
 remain hard OMP blocks even if OMP yolo metadata is present.
 When a queued Stateful reservation becomes claimable, the generated extension
 subscribes to the server's SSE notification stream and injects a next-turn OMP
@@ -515,9 +517,8 @@ are recorded in `stateful tools list` and can be explicitly permitted with
 bypass hard-denied write or execution classifications.
 OMP raw Bash and eval tools are denied by OMP config and hard-blocked by
 stateful hooks, even when the raw tool itself invokes `stateful sandbox run`.
-Use `sandbox_bash` for read-only, write-targets, build, git, and github-pr
-sandbox runs; use `external_bash` for external execution, including read-only
-purpose-and-command-only operations.
+Use `sandbox_bash` for non-external stateful sandbox runs and `external_bash`
+for external execution, including read-only purpose-and-command-only operations.
 
 The generated Codex hook configuration covers:
 
@@ -662,10 +663,12 @@ stateful sandbox run --fs external \
   --command 'install -m 755 target/release/stateful "$HOME/.cargo/bin/stateful"'
 ```
 
-External sandbox targets must be absolute paths that resolve outside the repo.
-The profile also supports `--connect-socket`, `--allow-signal`, and `--network`
-for approved external operations. Repo-external writes do not require repo intent
-or a same-session lease. Codex prompts on
+External sandbox absolute targets must resolve outside the repo; repo-relative
+write targets, create targets, and write dirs use the same Stateful
+authorization flow as other repo writes. The profile also supports
+`--connect-socket`, `--allow-signal`, and `--network` for approved external
+operations. Repo-external writes do not require repo intent or a same-session
+lease. Codex prompts on
 `stateful sandbox run --fs external --purpose ...` before execution. OMP uses the
 generated `external_bash` tool for the same profile; that tool asks for UI
 confirmation before foreground or async execution and reports no declared write
@@ -716,8 +719,9 @@ local git operations; config-mutating `git remote` commands such as `remote add`
 git profile. Use
 `stateful sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`
 for GitHub pull request listing, viewing, PR status (`gh pr status`), and
-creation, or the GitHub connector when it is explicitly allowlisted for the
-repo. The profile rejects explicit write targets and write dirs.
+creation. The `github-pr` profile rejects explicit write targets and write dirs.
+Use `stateful sandbox run --fs external --network enabled --purpose <purpose> --command <cmd>`
+for other read-only `gh` inspection such as Actions logs, with no declared write scope.
 
 The `/v1/authorize` endpoint and the intent declare/request/claim/cancel
 endpoints require the `stateful.v1` request envelope with `payload`. Flat

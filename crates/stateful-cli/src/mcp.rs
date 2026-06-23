@@ -30,7 +30,7 @@ pub fn call_mcp_tool_in_repo(
     if matches!(tool_name.as_str(), "state_bash_write" | "state.bash.write") {
         return Ok(error_response(
             410,
-            "state_bash_write was removed; use stateful sandbox run --fs write-targets --write-target <repo-path> ... --command <cmd> after repo intent/lease, or stateful sandbox run --fs external --purpose <purpose> --write-target <absolute-path> [--create-target <absolute-path>] [--write-dir <absolute-dir>] [--connect-socket <absolute-socket>] [--allow-signal] [--network disabled|enabled] --command <cmd> for repo-external writes.",
+            "state_bash_write was removed; use stateful sandbox run --fs write-targets --write-target <repo-path> ... --command <cmd> after repo intent/lease, or stateful sandbox run --fs external --purpose <purpose> [--write-target <repo-path-or-absolute-external-path>] [--create-target <repo-path-or-absolute-external-path>] [--write-dir <repo-path-or-absolute-external-dir>] [--connect-socket <absolute-socket>] [--allow-signal] [--network disabled|enabled] --command <cmd> for approved external commands; repo-relative scopes still require repo intent/lease.",
         ));
     }
     if matches!(tool_name.as_str(), "state_file_write" | "state.file.write") {

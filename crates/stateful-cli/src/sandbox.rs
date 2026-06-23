@@ -177,6 +177,9 @@ struct PreparedExternalSandboxScope {
     writable_paths: Vec<SandboxWritablePath>,
     connect_sockets: Vec<PathBuf>,
     allowed_write_targets: Vec<String>,
+    repo_write_targets: Vec<String>,
+    repo_create_targets: Vec<String>,
+    repo_write_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,7 +268,13 @@ pub fn run_sandbox_in_repo(
             create_targets.iter().map(String::as_str),
         )?;
     }
-    let runtime = if sandbox_profile_requires_runtime(request.fs) {
+    let external_has_repo_targets = request.fs == SandboxFsProfile::External
+        && write_targets
+            .iter()
+            .chain(create_targets.iter())
+            .chain(write_dirs.iter())
+            .any(|path| !Path::new(path).is_absolute());
+    let runtime = if sandbox_profile_requires_runtime(request.fs) || external_has_repo_targets {
         if !runtime_env_override_is_configured() {
             ensure_server(paths)?;
         }
@@ -289,7 +298,106 @@ pub fn run_sandbox_in_repo(
             )?;
             allowed_write_targets.extend(external_scope.allowed_write_targets);
             connect_sockets = external_scope.connect_sockets;
-            external_scope.writable_paths
+
+            let mut writable_paths = external_scope.writable_paths;
+            if !external_scope.repo_write_targets.is_empty()
+                || !external_scope.repo_create_targets.is_empty()
+                || !external_scope.repo_write_dirs.is_empty()
+            {
+                let runtime = runtime
+                    .as_ref()
+                    .expect("external sandbox repo targets require runtime");
+                let current_session = current_session_for_sandbox_profile(
+                    &repo_root,
+                    paths,
+                    runtime,
+                    "sandbox external repo targets require a current stateful session",
+                )?;
+                let authorize_context = SandboxAuthorizeContext {
+                    runtime,
+                    repo_root: &repo_root,
+                    paths,
+                    session_id: &current_session.session_id,
+                    workspace_id: &current_session.workspace_id,
+                    network: request.network,
+                    fs_profile: sandbox_fs_profile_name(request.fs),
+                };
+
+                for path in external_scope
+                    .repo_write_targets
+                    .iter()
+                    .chain(external_scope.repo_create_targets.iter())
+                {
+                    let response = authorize_sandbox_write(&authorize_context, "write_file", path)?;
+                    match classify_sandbox_authorize_response(path, response)? {
+                        SandboxAuthorizeDecision::Allow => allowed_write_targets.push(path.clone()),
+                        SandboxAuthorizeDecision::Deny(body) => {
+                            denied_write_targets.push(serde_json::json!({
+                                "path": path,
+                                "authorization": body,
+                            }));
+                        }
+                    }
+                }
+                for path in &external_scope.repo_write_dirs {
+                    let authorization_path = sandbox_write_dir_display_path(path);
+                    let response = authorize_sandbox_write(
+                        &authorize_context,
+                        "write_directory",
+                        &authorization_path,
+                    )?;
+                    match classify_sandbox_authorize_response(path, response)? {
+                        SandboxAuthorizeDecision::Allow => {
+                            allowed_write_targets.push(sandbox_write_dir_display_path(path));
+                        }
+                        SandboxAuthorizeDecision::Deny(body) => {
+                            let body = enrich_sandbox_write_dir_denial(body);
+                            denied_write_targets.push(serde_json::json!({
+                                "path": sandbox_write_dir_display_path(path),
+                                "authorization": body,
+                            }));
+                        }
+                    }
+                }
+
+                release_after_run = Some(SandboxLeaseReleaseContext {
+                    session_id: current_session.session_id.clone(),
+                    workspace_id: current_session.workspace_id.clone(),
+                    paths: external_scope
+                        .repo_write_targets
+                        .iter()
+                        .chain(external_scope.repo_create_targets.iter())
+                        .cloned()
+                        .chain(
+                            external_scope
+                                .repo_write_dirs
+                                .iter()
+                                .map(|path| sandbox_write_dir_display_path(path)),
+                        )
+                        .collect(),
+                });
+
+                if !denied_write_targets.is_empty() {
+                    let body = sandbox_authorization_denied_body(
+                        &authorize_context,
+                        allowed_write_targets,
+                        denied_write_targets,
+                    )
+                    .to_string();
+                    if let Some(release_context) = &release_after_run {
+                        release_sandbox_write_leases(runtime, release_context);
+                    }
+                    return Err(SandboxAuthorizationDenied::new(body).into());
+                }
+
+                writable_paths.extend(prepare_sandbox_writable_paths(
+                    &repo_root,
+                    &external_scope.repo_write_targets,
+                    &external_scope.repo_create_targets,
+                    &external_scope.repo_write_dirs,
+                )?);
+            }
+            writable_paths
         }
         SandboxFsProfile::WriteTargets => {
             let runtime = runtime
@@ -681,9 +789,9 @@ pub(crate) fn validate_sandbox_run_request_shape(
         == SandboxFsProfile::External
     {
         (
-            normalize_external_sandbox_target_paths("write_targets", &request.write_targets)?,
-            normalize_external_sandbox_target_paths("create_targets", &request.create_targets)?,
-            normalize_external_sandbox_target_paths("write_dirs", &request.write_dirs)?,
+            normalize_external_sandbox_write_paths("write_targets", &request.write_targets)?,
+            normalize_external_sandbox_write_paths("create_targets", &request.create_targets)?,
+            normalize_external_sandbox_write_paths("write_dirs", &request.write_dirs)?,
             normalize_external_sandbox_target_paths("connect_sockets", &request.connect_sockets)?,
         )
     } else {
@@ -1035,29 +1143,26 @@ fn prepare_external_sandbox_scope(
     let canonical_repo = repo_root.canonicalize().map_err(|error| {
         anyhow::anyhow!("stateful sandbox external repo root must exist: {error}")
     })?;
-    let write_target_paths = paths_from_strings(write_targets);
-    let create_target_paths = paths_from_strings(create_targets);
-    let write_dir_paths = paths_from_strings(write_dirs);
-    let connect_socket_paths = paths_from_strings(connect_sockets);
-
-    ensure_external_targets_outside_repo(
+    let (repo_write_targets, write_target_paths) = split_external_sandbox_targets(
         &canonical_repo,
         "write target",
-        &write_target_paths,
+        write_targets,
         ExternalSandboxTargetKind::ExistingFile,
     )?;
-    ensure_external_targets_outside_repo(
+    let (repo_create_targets, create_target_paths) = split_external_sandbox_targets(
         &canonical_repo,
         "create target",
-        &create_target_paths,
+        create_targets,
         ExternalSandboxTargetKind::CreatableFile,
     )?;
-    ensure_external_targets_outside_repo(
+    let (repo_write_dirs, write_dir_paths) = split_external_sandbox_targets(
         &canonical_repo,
         "write dir",
-        &write_dir_paths,
+        write_dirs,
         ExternalSandboxTargetKind::ExistingDirectory,
     )?;
+    let connect_socket_paths = paths_from_strings(connect_sockets);
+
     ensure_external_targets_outside_repo(
         &canonical_repo,
         "connect socket",
@@ -1071,14 +1176,14 @@ fn prepare_external_sandbox_scope(
         &write_dir_paths,
     )?;
     let connect_sockets = prepare_external_connect_sockets(&connect_socket_paths)?;
-    let allowed_write_targets = write_targets
+    let allowed_write_targets = write_target_paths
         .iter()
-        .chain(create_targets.iter())
-        .cloned()
+        .chain(create_target_paths.iter())
+        .map(|path| path.to_string_lossy().into_owned())
         .chain(
-            write_dirs
+            write_dir_paths
                 .iter()
-                .map(|path| sandbox_write_dir_display_path(path)),
+                .map(|path| sandbox_write_dir_display_path(&path.to_string_lossy())),
         )
         .collect();
 
@@ -1086,7 +1191,37 @@ fn prepare_external_sandbox_scope(
         writable_paths,
         connect_sockets,
         allowed_write_targets,
+        repo_write_targets,
+        repo_create_targets,
+        repo_write_dirs,
     })
+}
+
+fn split_external_sandbox_targets(
+    repo_root: &Path,
+    label: &str,
+    paths: &[String],
+    kind: ExternalSandboxTargetKind,
+) -> anyhow::Result<(Vec<String>, Vec<PathBuf>)> {
+    let mut repo_targets = Vec::new();
+    let mut external_targets = Vec::new();
+    for path in paths {
+        if Path::new(path).is_absolute() {
+            let external_path = PathBuf::from(path);
+            let normalized = external_target_resolved_path(label, &external_path, kind)?;
+            if normalized.starts_with(repo_root) {
+                anyhow::bail!(
+                    "stateful sandbox external {label} `{}` resolves inside the repo; use a repo-relative target so Stateful authorization can apply",
+                    external_path.display()
+                );
+            }
+            external_targets.push(external_path);
+        } else {
+            repo_targets.push(path.clone());
+        }
+    }
+
+    Ok((repo_targets, external_targets))
 }
 
 fn ensure_external_targets_outside_repo(
@@ -1294,6 +1429,27 @@ fn normalize_external_optionless_paths(
         anyhow::bail!("stateful sandbox run --{field} is supported only with --fs external");
     }
     Ok(Vec::new())
+}
+
+fn normalize_external_sandbox_write_paths(
+    field: &str,
+    paths: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for path in paths {
+        let trimmed = path.trim();
+        let path = if Path::new(trimmed).is_absolute() {
+            normalize_external_sandbox_target_path(field, path)?
+        } else {
+            normalize_sandbox_target_path(field, path)?
+        };
+        if seen.insert(path.clone()) {
+            normalized.push(path);
+        }
+    }
+
+    Ok(normalized)
 }
 
 fn normalize_external_sandbox_target_paths(
@@ -4781,7 +4937,7 @@ mod tests {
     }
 
     #[test]
-    fn external_profile_requires_purpose_and_absolute_targets() {
+    fn external_profile_requires_purpose_and_valid_target_forms() {
         let mut request = SandboxRunRequest {
             fs: SandboxFsProfile::External,
             network: SandboxNetworkPolicy::Enabled,
@@ -4812,8 +4968,13 @@ mod tests {
             .expect("external profile should accept signal-only scope");
         request.allow_signal = false;
         request.write_targets = vec!["relative/path".to_string()];
+        validate_sandbox_run_request_shape(&request)
+            .expect("external profile should allow repo-relative write targets");
+
+        request.write_targets.clear();
+        request.connect_sockets = vec!["relative.sock".to_string()];
         let error = validate_sandbox_run_request_shape(&request)
-            .expect_err("external profile should reject relative paths");
+            .expect_err("external profile should reject relative socket paths");
         assert!(
             error.to_string().contains("absolute paths"),
             "unexpected error: {error}"
@@ -4844,6 +5005,33 @@ mod tests {
             error.to_string().contains("resolves inside the repo"),
             "unexpected error: {error}"
         );
+
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn external_profile_splits_repo_relative_targets_for_authorization() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "stateful-sandbox-external-repo-target-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&repo_root);
+        fs::create_dir_all(&repo_root).expect("repo root should be created");
+
+        let scope = prepare_external_sandbox_scope(
+            &repo_root,
+            &["README.md".to_string()],
+            &["generated.txt".to_string()],
+            &["reports".to_string()],
+            &[],
+        )
+        .expect("repo-relative external targets should be deferred to Stateful authorization");
+
+        assert_eq!(scope.repo_write_targets, vec!["README.md"]);
+        assert_eq!(scope.repo_create_targets, vec!["generated.txt"]);
+        assert_eq!(scope.repo_write_dirs, vec!["reports"]);
+        assert!(scope.writable_paths.is_empty());
+        assert!(scope.allowed_write_targets.is_empty());
 
         let _ = fs::remove_dir_all(&repo_root);
     }

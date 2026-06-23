@@ -242,8 +242,8 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", fs]"));
     assert!(extension.contains("ctx.ui.confirm"));
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", \"external\""));
-    assert!(extension.contains("Read-only external commands may omit targets"));
-    assert!(extension.contains("supplied targets and sockets must be absolute external paths"));
+    assert!(extension.contains("Read-only commands may omit targets"));
+    assert!(extension.contains("repo-relative write scopes require Stateful authorization"));
     assert!(extension.contains("No declared external write/socket/signal scope"));
     assert!(extension.contains("allow-signal"));
     assert!(extension.contains("required: [\"purpose\", \"command\"]"));

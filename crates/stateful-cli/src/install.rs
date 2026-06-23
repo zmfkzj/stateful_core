@@ -1896,15 +1896,15 @@ export default function statefulOmpExtension(pi) {{
   pi.registerTool({{
     name: "external_bash",
     label: "External Bash",
-    description: "Run a repo-external command through stateful sandbox run --fs external after explicit OMP UI approval. Read-only external commands may omit targets; supplied targets and sockets must be absolute external paths.",
+    description: "Run a command through stateful sandbox run --fs external after explicit OMP UI approval. Read-only commands may omit targets; repo-relative write scopes require Stateful authorization and absolute scopes are treated as repo-external approval details.",
     parameters: {{
       type: "object",
       properties: {{
         purpose: {{ type: "string", description: "Human-readable purpose for the external operation." }},
         command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
-        write_targets: {{ type: "array", items: {{ type: "string" }}, description: "Optional existing absolute external file paths the command may write." }},
-        create_targets: {{ type: "array", items: {{ type: "string" }}, description: "Optional new absolute external file paths the command may create." }},
-        write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Optional absolute external directories the command may write under." }},
+        write_targets: {{ type: "array", items: {{ type: "string" }}, description: "Optional existing repo-relative or absolute external file paths the command may write." }},
+        create_targets: {{ type: "array", items: {{ type: "string" }}, description: "Optional new repo-relative or absolute external file paths the command may create." }},
+        write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Optional repo-relative directories or absolute external directories the command may write under." }},
         connect_sockets: {{ type: "array", items: {{ type: "string" }}, description: "Optional absolute Unix socket paths the sandbox may connect to." }},
         allow_signal: {{ type: "boolean", description: "Optionally allow the sandboxed command to signal approved external processes." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
