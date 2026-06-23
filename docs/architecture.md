@@ -18,9 +18,9 @@ structured way to read and update coordination state. The state server owns
 policy, persistence, TTLs, and conflict checks.
 
 The v1 MVP includes sandboxed test execution through
-`sandbox run --fs build --write-dir <scratch-purpose>`, which writes disposable
-artifacts under `/tmp/stateful/<session>/<purpose>/`, plus explicit
-reconciliation acknowledgements through
+`sandbox run --fs build --network enabled --write-dir <scratch-purpose>`, which
+writes disposable artifacts under `/tmp/stateful/<session>/<scratch-purpose>/`,
+plus explicit reconciliation acknowledgements through
 `state.reconcile.ack`. Automatic human-write observation and reconciliation
 blocks remain target behavior.
 
@@ -246,12 +246,13 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   Hook-mediated command execution outside OMP custom tools must be a single
   strict invocation of the trusted absolute `stateful` binary running
   `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
-  command-shaped inspection uses `--fs read-only --network disabled`; the hook
-  rejects `--fs read-only --network enabled`. Command-shaped repo writes use
-  `--fs write-targets` with explicit write/create targets and repo intent plus
-  same-session leases. Git uses `--fs git`, GitHub PR operations use
-  `--fs github-pr`, and external operations use `--fs external` with Codex
-  approval or OMP `external_bash` confirmation. A purpose and command are
+  command-shaped inspection uses `--fs read-only --network disabled`; process
+  inspection uses `sandbox process find <selector>`. Command-shaped repo writes
+  use `--fs write-targets` with explicit `--write-target <file>` /
+  `--create-target <file>` values and repo intent plus same-session leases. Local
+  Git uses `--fs git --network disabled`, GitHub PR operations use
+  `--fs github-pr --network enabled`, and external operations use `--fs external`
+  with Codex approval or OMP `external_bash` confirmation. A purpose and command are
   sufficient for read-only/no-declared-scope external operations; absolute
   external targets remain required when declaring external write scope.
 - check leases and planned edits for likely conflicts
@@ -331,16 +332,17 @@ classification, so `functions.bash` is Bash,
   profiles, and `external_bash` for
   `--fs external` with UI confirmation. Ordinary read work should use native
   read/search/diff tools when available. Read-only command-shaped inspection
-  that genuinely needs a shell uses `--fs read-only --network disabled`; the
-  read-only profile cannot enable network. Command-shaped repo writes use
-  `--fs write-targets` with explicit `--write-target` / `--create-target` values
-  and target authorization. External operations use `--fs external` with no repo
+  that genuinely needs a shell uses `--fs read-only --network disabled`; process
+  inspection uses `sandbox process find <selector>`, not raw `ps` or `pgrep`.
+  Command-shaped repo writes use `--fs write-targets` with explicit
+  `--write-target <file>` / `--create-target <file>` values and target
+  authorization. External operations use `--fs external` with no repo
   intent or lease, and Codex approval or OMP `external_bash` confirmation.
   Purpose and command are sufficient for read-only/no-declared-scope use; any
   supplied external write targets must be absolute and outside the repo.
 - Test execution: run only through sandboxed test actions such as
   `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`.
-  Build artifacts live under `/tmp/stateful/<session>/<purpose>/`.
+  Build artifacts live under `/tmp/stateful/<session>/<scratch-purpose>/`.
 - Bash command text alone never authorizes repo-internal tool use, even when it
   appears read-only.
 
@@ -480,7 +482,7 @@ During this blocked state, the agent may still:
 - read the affected file
 - search the repository
 - inspect diffs
-- run sandboxed tests with an external `/tmp/stateful/<session>/<purpose>/`
+- run sandboxed tests with an external `/tmp/stateful/<session>/<scratch-purpose>/`
   artifact tree
 
 To resume writing, the agent must call:

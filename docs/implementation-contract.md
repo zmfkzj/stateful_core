@@ -228,7 +228,7 @@ should use agent-native read/search/diff tools when available. Read-only
 command-shaped inspection uses `<absolute-stateful-binary> sandbox run --fs
 read-only --network disabled --command <cmd>`; the read-only profile rejects
 `--network enabled`. Command-shaped repo writes use `--fs write-targets` with
-explicit `--write-target` / `--create-target` values and target authorization.
+explicit `--write-target <file>` / `--create-target <file>` values and target authorization.
 OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution are denied
 at host approval and hook levels, even when the raw command itself invokes
 `stateful sandbox run`. OMP
@@ -243,11 +243,12 @@ operations may omit targets, while supplied external write scopes are validated
 as absolute paths outside the repo. It runs through the sandbox after Codex
 approval or `external_bash` confirmation and does not require repo intent or
 lease.
-Git operations use `--fs git` for one `git ...` command. GitHub pull request
-list/view/status/create commands use `<absolute-stateful-binary> sandbox run
---fs github-pr --network enabled --command 'gh pr <list|view|status|create>
-...'`; in OMP, call `sandbox_bash`. Use the GitHub connector instead when that
-connector is explicitly allowlisted for the repo.
+Local git operations use `<absolute-stateful-binary> sandbox run --fs git
+--network disabled --command 'git <args>'`; use `--network enabled` only for
+remote git operations. GitHub pull request list/view/status/create commands use
+`<absolute-stateful-binary> sandbox run --fs github-pr --network enabled --command
+'gh pr <list|view|status|create> ...'`; in OMP, call `sandbox_bash`. Use the
+GitHub connector instead when that connector is explicitly allowlisted for the repo.
 
 ## Decision Output
 
@@ -539,6 +540,7 @@ stateful current
 stateful events
 stateful doctor
 stateful sandbox run --fs read-only|write-targets|build|git|github-pr ...
+stateful sandbox process find <selector>
 stateful intent declare [--session-id <id>] [--workspace-id <id>] --purpose <purpose> <paths...>
 stateful notifications poll [--session-id <id>] [--workspace-id <id>]
 stateful resume next [--session-id <id>] [--workspace-id <id>]
@@ -617,10 +619,10 @@ the built-in 14-day retention window for historical pruning; configurable
 runtime loading is future hardening work.
 
 Command-shaped tests and checks run through the trusted `stateful sandbox run`
-wrapper. Build and test artifact writes are scoped with `--fs build` after
-`--write-dir <scratch-purpose>`. The profile writes disposable artifacts under
-`/tmp/stateful/<session>/<scratch-purpose>/`, sets standard temp variables under
-that scratch root, and sets `CARGO_TARGET_DIR` to its `target` child.
+wrapper. Build and test artifact writes are scoped with
+`--fs build --network enabled --write-dir <scratch-purpose>`. The profile writes
+disposable artifacts under `/tmp/stateful/<session>/<scratch-purpose>/`, sets
+standard temp variables under that scratch root, and sets `CARGO_TARGET_DIR` to its `target` child.
 
 Glob semantics should use gitignore-style path matching relative to the
 workspace root. Identity and policy checks still use normalized canonical paths

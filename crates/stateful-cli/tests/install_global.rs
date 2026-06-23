@@ -216,7 +216,9 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
     assert!(extension.contains("sandbox_bash does not support --fs external; use external_bash"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
-    assert!(extension.contains("function runSandboxTool(params, args, signal, ctx, label, onUpdate)"));
+    assert!(
+        extension.contains("function runSandboxTool(params, args, signal, ctx, label, onUpdate)")
+    );
     assert!(extension.contains("return new Promise((resolve) =>"));
     assert!(extension.contains("spawn(STATEFUL, args"));
     assert!(extension.contains("function emitSandboxToolOutput(onUpdate, stream, chunk)"));
@@ -422,8 +424,7 @@ fn install_omp_rejects_invalid_existing_yaml_without_writing() {
     let existing = "model: [unterminated\n";
     fs::write(&omp_config, existing).expect("existing config should write");
 
-    let error =
-        apply_omp_install(fixture.omp_options(true)).expect_err("invalid YAML should fail");
+    let error = apply_omp_install(fixture.omp_options(true)).expect_err("invalid YAML should fail");
 
     assert!(error.to_string().contains("invalid OMP config YAML"));
     assert_eq!(

@@ -1161,8 +1161,14 @@ fn validate_omp_config_yml(config_path: &Path, contents: &str) -> anyhow::Result
 
     let value: serde_yaml::Value = serde_yaml::from_str(contents)
         .with_context(|| format!("invalid OMP config YAML {}", config_path.display()))?;
-    if !matches!(value, serde_yaml::Value::Mapping(_) | serde_yaml::Value::Null) {
-        anyhow::bail!("OMP config {} must be a YAML mapping", config_path.display());
+    if !matches!(
+        value,
+        serde_yaml::Value::Mapping(_) | serde_yaml::Value::Null
+    ) {
+        anyhow::bail!(
+            "OMP config {} must be a YAML mapping",
+            config_path.display()
+        );
     }
 
     Ok(())
@@ -1196,7 +1202,13 @@ fn ensure_omp_extension(mut contents: String, entry: &str) -> String {
 fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow::Result<String> {
     let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
 
-    ensure_omp_child_scalar(&mut lines, "tools", "approvalMode", "write", update_existing)?;
+    ensure_omp_child_scalar(
+        &mut lines,
+        "tools",
+        "approvalMode",
+        "write",
+        update_existing,
+    )?;
     ensure_omp_nested_child_scalar(
         &mut lines,
         "tools",
@@ -1293,10 +1305,7 @@ fn ensure_omp_child_mapping(
     Ok((section_end, section_end + 1))
 }
 
-fn find_omp_top_level_mapping(
-    lines: &[String],
-    section: &str,
-) -> anyhow::Result<Option<usize>> {
+fn find_omp_top_level_mapping(lines: &[String], section: &str) -> anyhow::Result<Option<usize>> {
     for (offset, line) in lines.iter().enumerate() {
         if omp_yaml_line_is_blank_or_comment(line) || omp_yaml_indent(line) != 0 {
             continue;
@@ -1330,12 +1339,7 @@ fn find_omp_yaml_key(
         .map(|offset| start + offset)
 }
 
-fn find_omp_yaml_mapping_end(
-    lines: &[String],
-    start: usize,
-    indent: usize,
-    limit: usize,
-) -> usize {
+fn find_omp_yaml_mapping_end(lines: &[String], start: usize, indent: usize, limit: usize) -> usize {
     lines[start + 1..limit]
         .iter()
         .position(|line| {
@@ -1346,7 +1350,10 @@ fn find_omp_yaml_mapping_end(
 
 fn omp_yaml_key_matches(line: &str, indent: usize, key: &str) -> bool {
     let prefix = format!("{key}:");
-    line.chars().take_while(|character| character.is_whitespace()).count() == indent
+    line.chars()
+        .take_while(|character| character.is_whitespace())
+        .count()
+        == indent
         && line.trim_start().starts_with(&prefix)
 }
 

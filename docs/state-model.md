@@ -469,7 +469,7 @@ stateful sandbox run --fs build --network enabled --write-dir test-run --command
 ```
 
 The build profile sets standard temp variables under
-`/tmp/stateful/<session>/<purpose>/.stateful-tmp` and sets `CARGO_TARGET_DIR` to
+`/tmp/stateful/<session>/<scratch-purpose>/.stateful-tmp` and sets `CARGO_TARGET_DIR` to
 the scratch `target` child. Other tool-specific build directories should be
 configured under the same external scratch root.
 

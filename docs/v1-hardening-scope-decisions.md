@@ -60,11 +60,11 @@ stateful sandbox run --fs build --network enabled --write-dir test-run --command
 Hook-mediated Bash must be a single strict invocation of the trusted absolute
 `stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
 <cmd>`. The build profile writes disposable artifacts under
-`/tmp/stateful/<session>/<purpose>/`; source-tree edits use native edit tools
+`/tmp/stateful/<session>/<scratch-purpose>/`; source-tree edits use native edit tools
 with hook-visible targets, such as Codex `apply_patch` or Edit, after exact
 intent declaration and a successful same-session file lease. The completed write
 transaction releases the authorizing lease. Command-shaped source writes require
-exact `--write-target` or `--create-target` entries.
+exact `--write-target <file>` or `--create-target <file>` entries.
 
 ## Protocol Envelope
 
@@ -163,10 +163,10 @@ record activity after successful edits, and release the authorizing lease after
 the completed write transaction.
 
 Command-shaped writes remain outside MCP and must use
-`stateful sandbox run --fs write-targets` with exact `--write-target` or
-`--create-target` entries. Artifact-producing tests use
-`--fs build --write-dir <scratch-purpose>`, which writes disposable artifacts
-under `/tmp/stateful/<session>/<purpose>/`.
+`stateful sandbox run --fs write-targets` with exact `--write-target <file>` or
+`--create-target <file>` entries. Artifact-producing tests use
+`--fs build --network enabled --write-dir <scratch-purpose>`, which writes
+disposable artifacts under `/tmp/stateful/<session>/<scratch-purpose>/`.
 
 Structured git writes should remain narrower than arbitrary git. `stateful
 commit` remains the default local wrapper, while MCP git tools can expose

@@ -463,9 +463,10 @@ Codex Bash read-only inspection that genuinely needs a shell -> require a strict
   --command <cmd>
 OMP read-only/write-targets/build/git/github-pr sandbox runs -> require
   `sandbox_bash`
+process inspection -> use sandbox process find <selector>, not raw ps/pgrep
 Codex Bash command-shaped repo writes -> require the trusted wrapper with
-  --fs write-targets plus explicit --write-target/--create-target values
-test execution -> run through sandbox run --fs build with
+  --fs write-targets plus explicit --write-target <file>/--create-target <file> values
+test execution -> run through sandbox run --fs build --network enabled with
   --write-dir <scratch-purpose>; scratch lives under /tmp/stateful/<session>/
 Codex raw Bash, OMP raw Bash, or OMP Python/JavaScript/JS/Ruby/Julia eval tools
   -> deny
@@ -476,7 +477,7 @@ Bash denial should tell the agent to use native read/search/diff tools for
 ordinary read work,
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
 --command <cmd>` for Codex shell-based read-only inspection,
-`<absolute-stateful-binary> sandbox run --fs write-targets ... --command <cmd>`
+`<absolute-stateful-binary> sandbox run --fs write-targets --write-target <file> ... --command <cmd>`
 for Codex command-shaped repo writes after intent and same-session lease,
 OMP `sandbox_bash` for read-only, write-targets, build, git, and github-pr
 sandbox runs,
@@ -503,11 +504,11 @@ stateful sandbox run --fs build --network enabled --write-dir test-run --command
 ```
 
 The build profile writes disposable artifacts under
-`/tmp/stateful/<session>/<purpose>/`. Source-tree edits use native edit tools
+`/tmp/stateful/<session>/<scratch-purpose>/`. Source-tree edits use native edit tools
 with hook-visible targets, such as Codex `apply_patch` or Edit, after exact
 intent declaration and a successful same-session file lease; the completed write
 transaction releases the authorizing lease. Command-shaped source writes must
-use exact `--write-target` or `--create-target` entries.
+use exact `--write-target <file>` or `--create-target <file>` entries.
 
 ## Conflict Policy
 

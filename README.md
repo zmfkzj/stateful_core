@@ -325,7 +325,7 @@ declaring an arbitrary `--session-id` in a plain terminal is not enough for
 `--fs write-targets`.
 
 Use a scratch purpose name, not a repo path. The build profile writes disposable
-artifacts under `/tmp/stateful/<session>/<purpose>/`, sets standard temp
+artifacts under `/tmp/stateful/<session>/<scratch-purpose>/`, sets standard temp
 variables below that directory, and points Cargo output there:
 
 ```bash
@@ -398,17 +398,18 @@ installation health.
 - `stateful notifications poll` reads pending coordination notifications.
 - `stateful resume next` reads the next reservation available to the active
   session.
-- `stateful sandbox run --fs build --network enabled --write-dir <purpose> --command <cmd>`
+- `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`
   runs build or test commands with disposable artifact writes under
-  `/tmp/stateful/<session>/<purpose>/`. The profile is language-independent for
+  `/tmp/stateful/<session>/<scratch-purpose>/`. The profile is language-independent for
   filesystem access and sets `CARGO_TARGET_DIR` to that scratch target for Cargo
   commands; configure other tool-specific build caches under the same external
   scratch root when they do not use standard temp variables. In OMP, invoke this
   non-external sandbox profile through the generated `sandbox_bash` tool.
-- `stateful sandbox run --fs write-targets --write-dir <repo-dir> --command <cmd>`
-  runs command-shaped repo directory writes after exact directory intent and a
-  successful same-session directory lease for that directory. In OMP, invoke
-  `write-targets` through the generated `sandbox_bash` tool.
+- `stateful sandbox run --fs write-targets --write-target <file> --command <cmd>`
+  runs command-shaped repo file writes after exact file intent and a successful
+  same-session file lease for that file. Use `--write-dir <repo-dir>` only after
+  exact directory intent and a same-session directory lease for that directory.
+  In OMP, invoke `write-targets` through the generated `sandbox_bash` tool.
 - `stateful sandbox run --fs external --purpose <purpose> --command <cmd>`
   runs approved repo-external shell operations through the external sandbox
   profile. Purpose and command are required; write targets, create targets,
@@ -417,14 +418,15 @@ installation health.
   `external_bash` tool, which prompts and then invokes this profile. Target
   paths supplied for external writes must be absolute, must resolve outside the
   repo, and do not require repo intent or a same-session lease.
-- `stateful sandbox run --fs git --network enabled --command 'git <args>'`
-  runs a single git command with the repo worktree and Git internals writable
-  inside the OS sandbox. The wrapper rejects shell-dispatching git options and
-  local config persistence surfaces such as `git init`, branch upstream/tracking
-  setters, `push -u`, and config-mutating `git remote` subcommands such as
-  `add`, `set-url`, `rename`, and `remove`. Use `--network disabled` for
-  local-only git operations. In OMP, invoke the git profile through the generated
-  `sandbox_bash` tool.
+- `stateful sandbox run --fs git --network disabled --command 'git <args>'`
+  runs a single local git command with the repo worktree and Git internals
+  writable inside the OS sandbox. The wrapper rejects shell-dispatching git
+  options and local config persistence surfaces such as `git init`, branch
+  upstream/tracking setters, `push -u`, and config-mutating `git remote`
+  subcommands such as `add`, `set-url`, `rename`, and `remove`. Use
+  `--network enabled` only for remote git operations such as `fetch`, `pull`, or
+  `push`. In OMP, invoke the git profile through the generated `sandbox_bash`
+  tool.
 - `stateful sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`
   runs a single non-interactive GitHub pull request command. Use this for PR
   listing, viewing, PR status (`gh pr status`), and creation after git work has
@@ -583,13 +585,16 @@ the outer command is a single strict invocation of the trusted absolute
 when they are available.
 When read-only inspection genuinely needs a shell through a Bash hook, use
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
---command <cmd>`; in OMP, call `sandbox_bash` with that profile instead. Use
-`--fs write-targets` with explicit targets for command-shaped repo writes; in
-OMP, call `sandbox_bash`. Git operations use `--fs git`, which accepts a single
-`git ...` command, rejects explicit write targets, and opens the repo worktree
-and Git internals as the writable sandbox scope while filtering
-shell-dispatching options, branch upstream/tracking persistence, `git init`,
-`push -u`, and config-mutating `git remote` subcommands.
+--command <cmd>`; in OMP, call `sandbox_bash` with that profile instead.
+Process inspection uses `<absolute-stateful-binary> sandbox process find
+<selector>`, not raw `ps` or `pgrep`. Use `--fs write-targets` with explicit
+targets for command-shaped repo writes; in OMP, call `sandbox_bash`. Local git
+operations use `--fs git --network disabled`, which accepts a single `git ...`
+command, rejects explicit write targets, and opens the repo worktree and Git
+internals as the writable sandbox scope while filtering shell-dispatching
+options, branch upstream/tracking persistence, `git init`, `push -u`, and
+config-mutating `git remote` subcommands. Use `--network enabled` only for
+remote git operations.
 GitHub pull request list/view/status/create commands use
 `<absolute-stateful-binary> sandbox run --fs github-pr --network enabled
 --command 'gh pr <list|view|status|create> ...'`; in OMP, call `sandbox_bash`.
@@ -597,17 +602,17 @@ Use the GitHub connector instead when that connector is explicitly allowlisted
 for the repo. The profile rejects explicit write targets and write dirs.
 
 Build and test commands should use
-`stateful sandbox run --fs build --network enabled --write-dir <purpose> --command <cmd>`;
+`stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`;
 in OMP, call `sandbox_bash` for the build profile.
 The build profile grants writable access to
-`/tmp/stateful/<session>/<purpose>/`, sets standard temp variables under that
+`/tmp/stateful/<session>/<scratch-purpose>/`, sets standard temp variables under that
 external scratch root, and points `CARGO_TARGET_DIR` at its `target` child;
 tools with other language-specific build directories should be configured to
 place those directories under the same scratch root.
 
 Repo-internal command-shaped writes should use
-`stateful sandbox run --fs write-targets --write-target <path> ... --command <cmd>`,
-optionally with `--create-target` for files that should be pre-created before
+`stateful sandbox run --fs write-targets --write-target <file> ... --command <cmd>`,
+optionally with `--create-target <file>` for files that should be pre-created before
 sandboxing. `--fs write-targets` targets are repo-relative and repo-internal;
 they require matching intent and a same-session lease. Artifact-producing
 commands that are not build/test commands should declare a scoped directory
@@ -685,11 +690,11 @@ Most MCP tools map directly to HTTP routes. `state_file_write` /
 `state.file.write` and `state_bash_write` / `state.bash.write` were removed.
 Use native edit tools with hook-visible targets for file edits after exact
 intent declaration and a successful same-session file lease, and use
-`stateful sandbox run --fs write-targets ... --command ...` for command-shaped
-writes. Native edit and `write-targets` hooks release the authorizing lease
-after the completed write transaction. Use
-`stateful sandbox run --fs git ... --command 'git <args>'` for git operations;
-config-mutating `git remote` commands such as `remote add` and `remote set-url`,
+`stateful sandbox run --fs write-targets --write-target <file> ... --command ...`
+for command-shaped writes. Native edit and `write-targets` hooks release the
+authorizing lease after the completed write transaction. Use
+`stateful sandbox run --fs git --network disabled --command 'git <args>'` for
+local git operations; config-mutating `git remote` commands such as `remote add` and `remote set-url`,
 `git init`, branch upstream/tracking setters, and `push -u` are rejected by the
 git profile. Use
 `stateful sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`
@@ -716,8 +721,8 @@ run` wrapper with a scratch purpose before commands that write build output:
 <absolute-stateful-binary> sandbox run --fs build --network enabled --write-dir test-run --command 'cargo test --workspace'
 ```
 
-Use `--network enabled` when tests bind or connect loopback sockets. The build
-profile writes only under `/tmp/stateful/<session>/<purpose>/`; source file
+Build/test commands use `--network enabled` with the build profile. The build
+profile writes only under `/tmp/stateful/<session>/<scratch-purpose>/`; source file
 edits should use native edit tools with hook-visible targets after exact intent
 and a successful same-session file lease; the authorizing lease is released
 after the completed write transaction.
