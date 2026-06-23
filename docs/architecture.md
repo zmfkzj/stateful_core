@@ -117,14 +117,18 @@ The prototype supports user-level installation with repo allowlist gating.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`,
-`tools.approval.bash: deny`, `tools.approval.python: deny`,
+`tools.approval.bash: deny`, `tools.approval.python: false`,
+`tools.approval.javascript: false`, `tools.approval.js: false`,
+`tools.approval.ruby: false`, `tools.approval.julia: false`,
 `tools.approval.sandbox_bash: allow`, `tools.approval.task: allow`, and
-`tools.approval.external_bash: prompt`, and denies raw Bash/Python
-at the host approval and hook levels. The generated extension registers
+`tools.approval.external_bash: prompt`, and denies raw Bash plus the
+Python/JavaScript/JS/Ruby/Julia eval tools at the host approval and hook
+levels. The generated extension registers
 `sandbox_bash` for read-only, write-targets, build, git, and github-pr sandbox
 runs, including common sandbox flags, and registers `external_bash` for
 `--fs external`; `sandbox_bash` rejects `--fs external` with guidance to use
-`external_bash`. Raw Bash/Python calls are blocked even if their command text
+`external_bash`. Raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool calls
+are blocked even if their command text
 invokes `stateful sandbox run`. The OMP
 global/default profile is not modified.
 `stateful enable` opts the current repo into enforcement through the user-level
@@ -232,11 +236,12 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 `PreToolUse`:
 
 - deny supported write calls when the session has no active intent
-- deny Codex raw Bash with sandbox guidance. For OMP, raw Bash and native Python
-  execution are denied at host approval and hook levels, even when the raw
-  command itself invokes `stateful sandbox run`; non-external sandbox command
-  work must use `sandbox_bash`, and repo-external shell or Python work must use
-  `external_bash`, which prompts before invoking `sandbox run --fs external`.
+- deny Codex raw Bash with sandbox guidance. For OMP, raw Bash and the
+  Python/JavaScript/JS/Ruby/Julia eval tools are denied at host approval and hook
+  levels, even when the raw command invokes `stateful sandbox run`; non-external
+  sandbox command work must use `sandbox_bash`, and repo-external
+  command-shaped work must use `external_bash`, which prompts before invoking
+  `sandbox run --fs external`.
   Hook-mediated command execution outside OMP custom tools must be a single
   strict invocation of the trusted absolute `stateful` binary running
   `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
@@ -306,18 +311,21 @@ paths fail with `missing_scope`. Intent request also requires a non-empty
 
 V1 enforcement is strict about write target extraction:
 Runtime adapters normalize namespaced tool names to their leaf before
-classification, so `functions.bash` is Bash, `functions.python` is Python, and
-`functions.read` / `functions.search` remain native read/search tools.
+classification, so `functions.bash` is Bash,
+`functions.python` / `functions.javascript` / `functions.js` /
+`functions.ruby` / `functions.julia` are eval tools, and `functions.read` /
+`functions.search` remain native read/search tools.
 
 - Native edit tools such as Codex `apply_patch`, `Edit`, and `Write` or OMP
   `edit` and `write`: enforce by inspecting hook-exposed targets after exact
   intent declaration and a successful same-session file lease. The completed
   write transaction releases the lease that authorized it.
 - Command execution: Codex raw Bash is denied with sandbox guidance. OMP raw Bash
-  and native Python execution are denied at host approval and hook levels, even
-  when the raw command itself invokes `stateful sandbox run`. OMP command-shaped
-  sandbox work uses generated tools: `sandbox_bash` for read-only,
-  write-targets, build, git, and github-pr profiles, and `external_bash` for
+  and Python/JavaScript/JS/Ruby/Julia eval-tool execution are denied at host
+  approval and hook levels, even when the raw command itself invokes
+  `stateful sandbox run`. OMP command-shaped sandbox work uses generated tools:
+  `sandbox_bash` for read-only, write-targets, build, git, and github-pr
+  profiles, and `external_bash` for
   `--fs external` with UI confirmation. Ordinary read work should use native
   read/search/diff tools when available. Read-only command-shaped inspection
   that genuinely needs a shell uses `--fs read-only --network disabled`; the
@@ -350,9 +358,10 @@ other Bash command.
 
 ## Sandboxed Tests
 
-Agents cannot run raw Bash or native Python test commands through hooks. They
-call the trusted build-profile wrapper with a scratch purpose; in OMP they call
-the generated `sandbox_bash` tool for this build profile:
+Agents cannot run raw Bash or Python/JavaScript/JS/Ruby/Julia eval-tool test
+commands through hooks. They call the trusted build-profile wrapper with a
+scratch purpose; in OMP they call the generated `sandbox_bash` tool for this
+build profile:
 
 ```text
 stateful sandbox run --fs build --network enabled --write-dir test-run --command <cmd>
@@ -623,13 +632,14 @@ The system should prefer explicit uncertainty:
 - interrupted session -> keep last state until TTL expires
 - hook failure -> warn and fail closed only for high-risk writes
 - OMP stateful hook deny or unavailable result -> block, never warn because of
-  yolo metadata; repo-external shell or Python work must still use
-  `external_bash`, not raw Bash or raw Python
+  yolo metadata; repo-external command-shaped work must still use
+  `external_bash`, not raw Bash or eval tools
 - state server unavailable -> deny supported writes that cannot prove active
   intent
 - state server unavailable -> deny Codex raw Bash, repo-internal Bash, and all
-  OMP raw Bash/native Python execution. OMP non-external sandbox runs must use
-  `sandbox_bash`, and command-shaped writes through `--fs write-targets` fail
+  OMP raw Bash plus Python/JavaScript/JS/Ruby/Julia eval-tool execution. OMP
+  non-external sandbox runs must use `sandbox_bash`, and command-shaped writes
+  through `--fs write-targets` fail
   closed when target authorization cannot be proven.
 - state server unavailable -> write-target sandbox authorization fails closed
   and does not run the command

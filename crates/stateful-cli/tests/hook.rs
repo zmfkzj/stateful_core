@@ -2971,12 +2971,34 @@ fn omp_namespaced_bash_is_denied_even_for_sandbox_run_requests() {
 }
 
 #[test]
-fn omp_python_execution_is_denied_even_for_sandbox_run_requests() {
+fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
+    for tool_name in ["python", "javascript", "js", "ruby", "julia"] {
+        let input = serde_json::json!({
+            "session_id": "omp-parent",
+            "cwd": "/repo",
+            "yolo": false,
+            "tool_name": tool_name,
+            "tool_input": { "code": "print('hello')" }
+        })
+        .to_string();
+        let OmpHookOutcome::Block { reason } = handle_omp_pre_tool_use_with_runtime(
+            &input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo")),
+        )
+        .unwrap() else {
+            panic!("raw OMP eval tool should block");
+        };
+        assert!(reason.contains(&format!("OMP eval tool {tool_name} is denied")));
+        assert!(reason.contains("sandbox_bash"));
+    }
+
     let raw_python_input = serde_json::json!({
         "session_id": "omp-parent",
         "cwd": "/repo",
         "yolo": false,
-        "tool_name": "python",
+        "tool_name": "functions.python",
         "tool_input": { "code": "print('hello')" }
     })
     .to_string();
@@ -2989,7 +3011,7 @@ fn omp_python_execution_is_denied_even_for_sandbox_run_requests() {
     .unwrap() else {
         panic!("raw OMP python should block");
     };
-    assert!(reason.contains("OMP raw python is denied"));
+    assert!(reason.contains("OMP eval tool functions.python is denied"));
     assert!(reason.contains("sandbox_bash"));
 
     let stateful = trusted_stateful_path();
@@ -3012,7 +3034,7 @@ fn omp_python_execution_is_denied_even_for_sandbox_run_requests() {
     .unwrap() else {
         panic!("sandbox-run through raw OMP python should still block");
     };
-    assert!(reason.contains("OMP raw python is denied"));
+    assert!(reason.contains("OMP eval tool python is denied"));
     assert!(reason.contains("sandbox_bash"));
 
     let repo_external_python_input = serde_json::json!({
@@ -3032,7 +3054,7 @@ fn omp_python_execution_is_denied_even_for_sandbox_run_requests() {
     .unwrap() else {
         panic!("repo-external OMP python should block");
     };
-    assert!(reason.contains("OMP raw python is denied"));
+    assert!(reason.contains("OMP eval tool python is denied"));
     assert!(reason.contains("external_bash"));
 }
 

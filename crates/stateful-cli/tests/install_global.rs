@@ -197,7 +197,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("stateful-omp-extension.js"));
     assert!(config.contains(
-        "tools:\n  approvalMode: write\n  approval:\n    bash: deny\n    python: deny\n    sandbox_bash: allow\n    task: allow\n    external_bash: prompt\n",
+        "tools:\n  approvalMode: write\n  approval:\n    bash: deny\n    python: false\n    javascript: false\n    js: false\n    ruby: false\n    julia: false\n    sandbox_bash: allow\n    task: allow\n    external_bash: prompt\n",
     ));
     assert!(
         fs::read_to_string(&omp_mcp)
@@ -290,7 +290,11 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
     assert_eq!(count(&config, "stateful-omp-extension.js"), 1);
     assert_eq!(count(&config, "approvalMode: write"), 1);
     assert_eq!(count(&config, "\n    bash: deny"), 1);
-    assert_eq!(count(&config, "python: deny"), 1);
+    assert_eq!(count(&config, "python: false"), 1);
+    assert_eq!(count(&config, "javascript: false"), 1);
+    assert_eq!(count(&config, "js: false"), 1);
+    assert_eq!(count(&config, "ruby: false"), 1);
+    assert_eq!(count(&config, "julia: false"), 1);
     assert_eq!(count(&config, "sandbox_bash: allow"), 1);
     assert_eq!(count(&config, "task: allow"), 1);
     assert_eq!(count(&config, "external_bash: prompt"), 1);
@@ -326,7 +330,11 @@ fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
     assert!(config.contains("stateful-omp-extension.js"));
     assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n"));
     assert!(config.contains("bash: deny"));
-    assert!(config.contains("python: deny"));
+    assert!(config.contains("python: false"));
+    assert!(config.contains("javascript: false"));
+    assert!(config.contains("js: false"));
+    assert!(config.contains("ruby: false"));
+    assert!(config.contains("julia: false"));
     assert!(config.contains("sandbox_bash: allow"));
     assert!(config.contains("task: allow"));
     assert!(config.contains("external_bash: prompt"));
@@ -357,13 +365,21 @@ fn install_omp_yes_merges_approval_mode_into_existing_tools_config() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n"));
     assert!(config.contains("bash: deny"));
-    assert!(config.contains("python: deny"));
+    assert!(config.contains("python: false"));
+    assert!(config.contains("javascript: false"));
+    assert!(config.contains("js: false"));
+    assert!(config.contains("ruby: false"));
+    assert!(config.contains("julia: false"));
     assert!(config.contains("sandbox_bash: allow"));
     assert!(config.contains("task: allow"));
     assert!(config.contains("edit: prompt"));
     assert_eq!(count(&config, "approvalMode: write"), 1);
     assert_eq!(count(&config, "\n    bash: deny"), 1);
-    assert_eq!(count(&config, "python: deny"), 1);
+    assert_eq!(count(&config, "python: false"), 1);
+    assert_eq!(count(&config, "javascript: false"), 1);
+    assert_eq!(count(&config, "js: false"), 1);
+    assert_eq!(count(&config, "ruby: false"), 1);
+    assert_eq!(count(&config, "julia: false"), 1);
     assert_eq!(count(&config, "sandbox_bash: allow"), 1);
     assert_eq!(count(&config, "task: allow"), 1);
     assert_eq!(count(&config, "external_bash: prompt"), 1);

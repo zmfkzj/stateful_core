@@ -1158,7 +1158,7 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
             contents.push('\n');
         }
         contents.push_str(
-            "tools:\n  approvalMode: write\n  approval:\n    bash: deny\n    python: deny\n    sandbox_bash: allow\n    task: allow\n    external_bash: prompt\n",
+            "tools:\n  approvalMode: write\n  approval:\n    bash: deny\n    python: false\n    javascript: false\n    js: false\n    ruby: false\n    julia: false\n    sandbox_bash: allow\n    task: allow\n    external_bash: prompt\n",
         );
         return contents;
     }
@@ -1193,7 +1193,21 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
 
     ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "bash", "deny");
     tools_end = find_omp_top_level_section_end(&lines, tools_offset);
-    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "python", "deny");
+    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "python", "false");
+    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
+    ensure_omp_tool_approval_value(
+        &mut lines,
+        approval_offset,
+        tools_end,
+        "javascript",
+        "false",
+    );
+    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
+    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "js", "false");
+    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
+    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "ruby", "false");
+    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
+    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "julia", "false");
     tools_end = find_omp_top_level_section_end(&lines, tools_offset);
     ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "sandbox_bash");
     tools_end = find_omp_top_level_section_end(&lines, tools_offset);

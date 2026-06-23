@@ -23,7 +23,8 @@ The prototype supports user-level installation with repo allowlist gating.
 --agent codex --yes` configures global Codex hooks and MCP. `stateful install
 --agent omp --yes` configures the isolated OMP `stateful` profile with stateful
 hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `external_bash`
-for `--fs external`, and approval entries that deny raw Bash/Python. `stateful
+for `--fs external`, and approval entries that deny raw Bash while setting
+Python/JavaScript/JS/Ruby/Julia eval tools to false. `stateful
 enable` opts the current repo into enforcement.
 For OMP, the extension prefers the actual OMP runtime session id from
 `event.sessionId` or `ctx.sessionManager.session.id`, stores it in
@@ -211,9 +212,10 @@ workspace file state under `workspace.root`; existence or `content_hash` changes
 for an affected target return `deny` with `reason_code:
 stale_target_observation` and require the caller to reread before retrying.
 Hook adapters normalize namespaced runtime tool names to their leaf before
-policy classification: `functions.bash` follows Bash rules, `functions.python`
-follows Python rules, and `functions.read` / `functions.search` follow native
-read/search rules.
+policy classification: `functions.bash` follows Bash rules,
+`functions.python` / `functions.javascript` / `functions.js` /
+`functions.ruby` / `functions.julia` follow eval-tool rules, and
+`functions.read` / `functions.search` follow native read/search rules.
 Codex raw Bash is denied by stateful hooks with sandbox guidance. Bash hook
 calls for repo-internal shell work are allowed only when the outer command is a
 single strict invocation of the trusted absolute `stateful` binary running
@@ -223,8 +225,9 @@ command-shaped inspection uses `<absolute-stateful-binary> sandbox run --fs
 read-only --network disabled --command <cmd>`; the read-only profile rejects
 `--network enabled`. Command-shaped repo writes use `--fs write-targets` with
 explicit `--write-target` / `--create-target` values and target authorization.
-OMP raw Bash and native Python execution are denied at host approval and hook
-levels, even when the raw command itself invokes `stateful sandbox run`. OMP
+OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution are denied
+at host approval and hook levels, even when the raw command itself invokes
+`stateful sandbox run`. OMP
 sandbox command execution uses generated custom tools: `sandbox_bash` invokes
 the trusted stateful binary for read-only, write-targets, build, git, and
 github-pr profiles, including common sandbox flags, and rejects `--fs external`
@@ -548,8 +551,8 @@ the external write scope and runs the command through the sandbox. `stateful
 install --agent omp --yes` registers `sandbox_bash` for read-only,
 write-targets, build, git, and github-pr sandbox profiles and `external_bash`
 for `--fs external`; `external_bash` asks OMP UI confirmation before spawning
-the trusted stateful binary with the external profile. Raw OMP Bash/Python
-sandbox invocations are denied.
+the trusted stateful binary with the external profile. Raw OMP Bash and
+Python/JavaScript/JS/Ruby/Julia eval-tool sandbox invocations are denied.
 OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
 extension events to `stateful hook omp session-start`, `pre-tool-use`,
 `post-tool-use`, and `stop`; OMP does not expose a stateful
@@ -654,10 +657,13 @@ The prototype supports user-level installation with repo allowlist gating.
 --agent omp --yes` installs the OMP extension entry point, MCP config, and
 `tools.approvalMode: write` under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) with approval entries for
-`tools.approval.bash: deny`, `tools.approval.python: deny`,
+`tools.approval.bash: deny`, `tools.approval.python: false`,
+`tools.approval.javascript: false`, `tools.approval.js: false`,
+`tools.approval.ruby: false`, `tools.approval.julia: false`,
 `tools.approval.sandbox_bash: allow`, `tools.approval.task: allow`, and
 `tools.approval.external_bash: prompt`, so that profile carries the stateful
-approval context, denies raw Bash/Python at host approval, allows non-external
+approval context, denies raw Bash and Python/JavaScript/JS/Ruby/Julia
+eval-tool execution at host approval, allows non-external
 sandbox runs through `sandbox_bash`, and can prompt for trusted external
 sandbox requests through `external_bash`. `stateful enable`
 opts the current repo into enforcement. Repo-local packaging and managed hooks
