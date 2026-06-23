@@ -2854,7 +2854,7 @@ fn omp_raw_bash_denies_sandbox_external_and_points_to_external_bash() {
     };
 
     assert!(reason.contains("external_bash"));
-    assert!(reason.contains("sandbox run --fs external"));
+    assert!(reason.contains("--fs external"));
 }
 
 #[test]

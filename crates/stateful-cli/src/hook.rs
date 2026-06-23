@@ -279,7 +279,7 @@ enum OmpPreToolAction {
 fn omp_pre_tool_action(
     input: &OmpPreToolUseInput,
     repo_root: Option<&Path>,
-    cwd: Option<&Path>,
+    _cwd: Option<&Path>,
     global_paths: Option<&GlobalPaths>,
 ) -> anyhow::Result<OmpPreToolAction> {
     let tool_name = runtime_tool_name_leaf(&input.tool_name);
@@ -500,19 +500,6 @@ fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {
         .collect()
 }
 
-fn cwd_is_inside_repo(repo_root: Option<&Path>, cwd: Option<&Path>) -> bool {
-    let Some(repo_root) = repo_root else {
-        return true;
-    };
-    let base = cwd.unwrap_or(repo_root);
-    let repo_root = normalize_path(
-        repo_root
-            .canonicalize()
-            .unwrap_or_else(|_| repo_root.to_path_buf()),
-    );
-    let base = normalize_path(base.canonicalize().unwrap_or_else(|_| base.to_path_buf()));
-    base.starts_with(repo_root)
-}
 
 pub fn handle_omp_session_start_with_runtime(
     input: &str,
@@ -2624,10 +2611,6 @@ impl OmpPreToolUseInput {
             "commit_id": self.commit_id,
             "cwd": self.cwd,
         })
-    }
-
-    fn command(&self) -> Option<&str> {
-        self.tool_input.get("command")?.as_str()
     }
 }
 
