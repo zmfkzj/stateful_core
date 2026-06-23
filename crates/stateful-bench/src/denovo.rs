@@ -1112,6 +1112,87 @@ pub fn run_denovo_matrix(options: DeNovoMatrixRunOptions) -> Result<Vec<DeNovoCo
         })
         .collect::<Vec<_>>();
 
+    let batch_cli_instances = matches!(
+        options.agent,
+        DeNovoAgentKind::CodexCli | DeNovoAgentKind::OmpCli
+    ) && options.max_concurrent.unwrap_or(1) > 1;
+    if batch_cli_instances {
+        let last_condition_index = aggregates.len().saturating_sub(1);
+        for condition_index in 0..aggregates.len() {
+            let condition = aggregates[condition_index].condition.clone();
+            let metadata = match run_denovo_condition(DeNovoConditionRunOptions {
+                run_id: options.run_id.clone(),
+                aweagent_root: options.aweagent_root.clone(),
+                python: options.python.clone(),
+                data_file: options.data_file.clone(),
+                run_dir: options.run_dir.clone(),
+                base_config: options.base_config.clone(),
+                condition,
+                agent: options.agent,
+                codex_bin: options.codex_bin.clone(),
+                omp_bin: options.omp_bin.clone(),
+                stateful_binary: options.stateful_binary.clone(),
+                agent_docker_image: options.agent_docker_image.clone(),
+                agent_docker_stateful_binary: options.agent_docker_stateful_binary.clone(),
+                benchmark_model: options.benchmark_model.clone(),
+                benchmark_reasoning_effort: options.benchmark_reasoning_effort.clone(),
+                benchmark_model_context_window: options.benchmark_model_context_window,
+                benchmark_temperature: options.benchmark_temperature.clone(),
+                benchmark_max_turns: options.benchmark_max_turns,
+                subagent_min_count: options.subagent_min_count,
+                max_resumes: options.max_resumes,
+                codex_timeout_seconds: options.codex_timeout_seconds,
+                codex_adapter_script: options.codex_adapter_script.clone(),
+                mode: options.mode,
+                instance_ids: matrix_instance_ids.clone(),
+                llm_config: options.llm_config.clone(),
+                model: options.model.clone(),
+                max_steps: options.max_steps,
+                max_concurrent: options.max_concurrent,
+                search_override: options.search_override,
+                skip_eval: options.skip_eval,
+                validate_run: options.validate_run,
+                eval_iters: options.eval_iters,
+                del_done_images: options.del_done_images && condition_index == last_condition_index,
+                dump_clean_snapshot: options.dump_clean_snapshot.clone(),
+                prompt_version: options.prompt_version.clone(),
+                verbose: options.verbose,
+            }) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    flush_denovo_matrix_checkpoint(
+                        &options,
+                        &aggregates,
+                        started_at_ms,
+                        started,
+                        false,
+                    )?;
+                    return Err(error);
+                }
+            };
+            let aggregate = &mut aggregates[condition_index];
+            if let Some(results_jsonl) = metadata.results_jsonl.as_ref() {
+                aggregate
+                    .results
+                    .extend(crate::read_jsonl::<DeNovoOfficialResult>(results_jsonl)?);
+            }
+            aggregate.started_at_ms = Some(metadata.started_at_ms);
+            aggregate.finished_at_ms = Some(metadata.finished_at_ms);
+            aggregate.running_time_ms += metadata.running_time_ms;
+            if aggregate.aweagent_commit.is_none() {
+                aggregate.aweagent_commit = metadata.aweagent_commit.clone();
+            }
+            aggregate.command = Some(metadata.command);
+            aggregate.official_dir = Some(metadata.official_dir);
+            flush_denovo_condition_aggregate(&options, aggregate, started_at_ms, true)?;
+            flush_denovo_matrix_checkpoint(&options, &aggregates, started_at_ms, started, true)?;
+        }
+
+        let reports =
+            flush_denovo_matrix_checkpoint(&options, &aggregates, started_at_ms, started, true)?;
+        return Ok(reports);
+    }
+
     let last_condition_index = aggregates.len().saturating_sub(1);
     for instance_id in &matrix_instance_ids {
         for condition_index in 0..aggregates.len() {

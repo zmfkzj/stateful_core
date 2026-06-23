@@ -466,6 +466,127 @@ with results.open("w", encoding="utf-8") as handle:
 }
 
 #[test]
+fn denovo_matrix_batches_cli_instances_when_max_concurrent_is_set() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-matrix-cli-batch");
+    let aweagent_root = temp_dir.join("AweAgent");
+    fs::create_dir_all(&aweagent_root).expect("fake AweAgent root should be created");
+    let data_file = temp_dir.join("denovo.jsonl");
+    fs::write(
+        &data_file,
+        [
+            r#"{"instance_id":"case-a"}"#,
+            r#"{"instance_id":"case-b"}"#,
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("data file should be written");
+    let log_path = temp_dir.join("order.log");
+    let adapter_script = temp_dir.join("fake_denovo_adapter.py");
+    fs::write(
+        &adapter_script,
+        format!(
+            r#"
+import argparse
+import json
+import os
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--output", required=True)
+parser.add_argument("--agent-mode", required=True)
+parser.add_argument("--subagent", required=True)
+parser.add_argument("--instance-id", action="append", default=[])
+parser.add_argument("--del-done-images", dest="del_done_images", action="store_true", default=True)
+parser.add_argument("--keep-done-images", dest="del_done_images", action="store_false")
+args, _ = parser.parse_known_args()
+
+log_path = Path(os.environ["DENOVO_ORDER_LOG"])
+image_action = "delete" if args.del_done_images else "keep"
+with log_path.open("a", encoding="utf-8") as log:
+    log.write(f"{{args.agent_mode}}/{{args.subagent}}/{{','.join(args.instance_id)}}/{{image_action}}\n")
+
+output = Path(args.output)
+results = output / "_" / "results.jsonl"
+results.parent.mkdir(parents=True, exist_ok=True)
+with results.open("w", encoding="utf-8") as handle:
+    for instance_id in args.instance_id:
+        handle.write(json.dumps({{
+            "instance_id": instance_id,
+            "success": True,
+            "score": 1.0,
+            "eval_result": {{"details": {{"pass_rate": 1.0}}}},
+        }}) + "\n")
+"#
+        ),
+    )
+    .expect("fake adapter should be written");
+
+    let order_env = log_path.to_string_lossy();
+    let reports = run_denovo_matrix(DeNovoMatrixRunOptions {
+        run_id: "dev-denovo-cli-batch".to_string(),
+        aweagent_root,
+        python: "python3".to_string(),
+        data_file,
+        run_dir: temp_dir.join("runs"),
+        base_config: PathBuf::from("configs/tasks/denovoswe.yaml"),
+        conditions: vec![
+            parse_denovo_condition(&format!(
+                "stateful:off,subagent:on,env:DENOVO_ORDER_LOG={order_env}"
+            ))
+            .expect("off condition should parse"),
+            parse_denovo_condition(&format!(
+                "stateful:on,subagent:on,env:DENOVO_ORDER_LOG={order_env}"
+            ))
+            .expect("on condition should parse"),
+        ],
+        agent: DeNovoAgentKind::CodexCli,
+        codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
+        stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        benchmark_model: "gpt-5.4-mini".to_string(),
+        benchmark_reasoning_effort: "low".to_string(),
+        benchmark_model_context_window: 256000,
+        benchmark_temperature: "1".to_string(),
+        benchmark_max_turns: 500,
+        subagent_min_count: 3,
+        max_resumes: 1,
+        codex_timeout_seconds: 7200,
+        codex_adapter_script: Some(adapter_script),
+        mode: DeNovoRunMode::Batch,
+        instance_ids: vec!["case-a".to_string(), "case-b".to_string()],
+        llm_config: None,
+        model: None,
+        max_steps: None,
+        max_concurrent: Some(2),
+        search_override: None,
+        skip_eval: false,
+        validate_run: false,
+        eval_iters: 1,
+        del_done_images: true,
+        dump_clean_snapshot: None,
+        prompt_version: "v1".to_string(),
+        verbose: false,
+    })
+    .expect("matrix run should complete");
+
+    let order = fs::read_to_string(&log_path).expect("order log should be readable");
+    assert_eq!(
+        order.lines().collect::<Vec<_>>(),
+        vec![
+            "no-state/on/case-a,case-b/keep",
+            "stateful/on/case-a,case-b/delete",
+        ]
+    );
+    assert_eq!(reports.len(), 2);
+    assert!(reports.iter().all(|report| report.total_instances == 2));
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
 fn denovo_matrix_preserves_aggregate_results_when_later_instance_fails() {
     let temp_dir = target_temp_dir("stateful-bench-denovo-matrix-error-preserves-results");
     let aweagent_root = temp_dir.join("AweAgent");
