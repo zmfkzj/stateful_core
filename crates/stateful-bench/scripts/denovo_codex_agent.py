@@ -722,8 +722,6 @@ def omp_command_for_profile(
     if enable_native_subagent:
         command.extend(
             [
-                "-c",
-                "features.multi_agent=true",
                 "--append-system-prompt",
                 native_subagent_prompt_instruction("on", subagent_min_count),
             ]

@@ -1728,7 +1728,7 @@ print(json.dumps({{"command": command, "native_command": native_command, "comman
         "--dangerously-bypass-hook-trust"
     ));
     assert!(!command_contains(command, "features.multi_agent=true"));
-    assert!(command_contains(
+    assert!(!command_contains(
         native_command,
         "features.multi_agent=true"
     ));
@@ -1820,7 +1820,7 @@ print(json.dumps({{
     assert!(command_contains(command, "@/prompt.txt"));
     assert!(command_contains(command, "--approval-mode"));
     assert!(command_contains(command, "yolo"));
-    assert!(command_contains(command, "features.multi_agent=true"));
+    assert!(!command_contains(command, "features.multi_agent=true"));
     assert!(
         command_arg_after(command, "--append-system-prompt")
             .expect("docker system prompt should exist")
