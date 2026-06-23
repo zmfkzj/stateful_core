@@ -1031,6 +1031,10 @@ fn sandbox_run_read_only_rejects_write_targets() {
 
 #[test]
 fn sandbox_run_read_only_does_not_require_reachable_runtime() {
+    if macos_stateful_sandbox_is_active() {
+        return;
+    }
+
     let temp_root = temp_root("stateful-sandbox-run-readonly-no-runtime");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
@@ -1085,6 +1089,10 @@ fn sandbox_run_read_only_does_not_require_reachable_runtime() {
 
 #[test]
 fn sandbox_run_external_profile_allows_read_only_scope_without_runtime() {
+    if macos_stateful_sandbox_is_active() {
+        return;
+    }
+
     let temp_root = temp_root("stateful-sandbox-run-external-read-only");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
