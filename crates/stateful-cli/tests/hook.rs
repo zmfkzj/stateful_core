@@ -2972,7 +2972,7 @@ fn omp_namespaced_bash_is_denied_even_for_sandbox_run_requests() {
 
 #[test]
 fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
-    for tool_name in ["python", "javascript", "js", "ruby", "julia"] {
+    for tool_name in ["eval", "py", "python", "javascript", "js", "rb", "ruby", "jl", "julia"] {
         let input = serde_json::json!({
             "session_id": "omp-parent",
             "cwd": "/repo",
@@ -3073,6 +3073,7 @@ fn omp_allows_classified_read_only_and_non_file_writing_tools() {
         "report_tool_issue",
         "search",
         "search_tool_bm25",
+        "task",
         "todo",
         "web_search",
         "mcp__stateful_state_current_read",

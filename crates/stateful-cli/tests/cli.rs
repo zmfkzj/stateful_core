@@ -577,6 +577,7 @@ fn parses_install_yes_command() {
             ref agents,
             codex_config: None,
             binary: None,
+            update: false,
         }
         if agents.is_empty()
     ));
@@ -604,6 +605,7 @@ fn parses_install_agent_codex_command() {
             ref agents,
             ref codex_config,
             ref binary,
+            update: false,
         } if codex_config == &Some(PathBuf::from("/home/me/.codex/config.toml"))
             && binary.as_deref() == Some("/opt/stateful/bin/stateful")
             && agents == &vec![InstallAgent::Codex]
@@ -612,7 +614,7 @@ fn parses_install_agent_codex_command() {
 
 #[test]
 fn parses_install_agent_omp_command() {
-    let cli = Cli::try_parse_from(["stateful", "install", "--agent", "omp", "--yes"])
+    let cli = Cli::try_parse_from(["stateful", "install", "--agent", "omp", "--yes", "--update"])
         .expect("install --agent omp command should parse");
 
     assert!(matches!(
@@ -620,6 +622,7 @@ fn parses_install_agent_omp_command() {
         Command::Install {
             yes: true,
             ref agents,
+            update: true,
             ..
         } if agents == &vec![InstallAgent::Omp]
     ));
@@ -708,7 +711,6 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
     assert_eq!(
         json["allowed_tools"],
         serde_json::json!([
-            "task",
             "multi_agent_v1spawn_agent",
             "multi_agent_v1wait_agent",
             "multi_agent_v1close_agent",
@@ -716,6 +718,7 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
             "mcp__openaiDeveloperDocs__fetch_openai_doc",
             "mcp__openaiDeveloperDocs__search_openai_docs",
             "multi_agent_v1send_input",
+            "task",
             "KnownTool"
         ])
     );

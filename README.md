@@ -358,9 +358,9 @@ installation health.
   `stateful repos list` manage the repo allowlist used by global hooks.
 - `stateful tools list`, `stateful tools allow <tool>`, and
   `stateful tools deny <tool>` manage repo-scoped exceptions for unclassified
-  tools. Both Codex and OMP hooks record unknown tool names into this list; hard
-  denied write/execute paths still require the normal stateful authorization
-  flow.
+  tools. The default allowlist is assembled from Codex-specific and OMP-specific
+  entries; both hooks record unknown tool names into this list. Hard denied
+  write/execute paths still require the normal stateful authorization flow.
 - `stateful server start` starts the HTTP state server detached by default and
   always prints `stateful server join ...` commands. Commands for LAN-reachable
   hosts target loopback and are intended to be used after creating an SSH
@@ -485,9 +485,9 @@ external sandbox profile can validate the declared absolute scope. Other
 stateful hook allows become OMP allows; denials or unavailable authorization
 remain hard OMP blocks even if OMP yolo metadata is present.
 OMP built-ins that do not write repo files, including `ask`, `ast_grep`, `job`,
-`irc`, `todo`, `report_tool_issue`, `generate_image`, and native read/search
-tools, are allowed by default. Other unclassified OMP-origin tools are recorded
-in `stateful tools list` and can be explicitly permitted with
+`irc`, `task`, `todo`, `report_tool_issue`, `generate_image`, and native
+read/search tools, are allowed by default. Other unclassified OMP-origin tools
+are recorded in `stateful tools list` and can be explicitly permitted with
 `stateful tools allow <tool>` when they are safe for that repo; this does not
 bypass hard-denied write or execution classifications.
 OMP raw Bash and eval tools are denied by OMP config and hard-blocked by

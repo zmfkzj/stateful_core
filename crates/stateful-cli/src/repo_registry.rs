@@ -9,8 +9,7 @@ use anyhow::Context;
 
 use crate::{GlobalPaths, default_config_yml};
 
-const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
-    "task",
+const DEFAULT_CODEX_ALLOWED_TOOLS: &[&str] = &[
     "multi_agent_v1spawn_agent",
     "multi_agent_v1wait_agent",
     "multi_agent_v1close_agent",
@@ -19,6 +18,8 @@ const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "mcp__openaiDeveloperDocs__search_openai_docs",
     "multi_agent_v1send_input",
 ];
+
+const DEFAULT_OMP_ALLOWED_TOOLS: &[&str] = &["task"];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RepoRegistry {
@@ -421,8 +422,9 @@ fn update_tool_allowlist(
 }
 
 fn default_allowed_tools_with_existing(existing_tools: Vec<String>) -> Vec<String> {
-    let mut allowed_tools: Vec<String> = DEFAULT_ALLOWED_TOOLS
+    let mut allowed_tools: Vec<String> = DEFAULT_CODEX_ALLOWED_TOOLS
         .iter()
+        .chain(DEFAULT_OMP_ALLOWED_TOOLS.iter())
         .map(|tool| (*tool).to_string())
         .collect();
     for tool in existing_tools {

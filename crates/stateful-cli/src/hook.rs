@@ -346,7 +346,7 @@ fn omp_pre_tool_action(
 }
 
 fn is_omp_eval_tool(tool_name: &str) -> bool {
-    ["python", "javascript", "js", "ruby", "julia"]
+    ["eval", "py", "python", "javascript", "js", "rb", "ruby", "jl", "julia"]
         .iter()
         .any(|eval_tool| tool_name.eq_ignore_ascii_case(eval_tool))
 }
@@ -365,6 +365,7 @@ fn is_omp_safe_without_repo_write_authorization(tool_name: &str) -> bool {
         "report_tool_issue",
         "search",
         "search_tool_bm25",
+        "task",
         "todo",
         "web_search",
     ]
