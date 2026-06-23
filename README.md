@@ -477,14 +477,16 @@ rejected. Its target keys are `tools.approvalMode: write`,
 preserved and only missing OMP keys are inserted. With `--update`, existing
 values for those keys are updated, leaving the global/default OMP profile
 untouched. The generated OMP extension registers `sandbox_bash` for non-external
-sandbox runs and `external_bash` for repo-external shell work. `sandbox_bash`
-invokes the trusted stateful binary as `stateful sandbox run --fs <profile> ...
---command <cmd>` for read-only, write-targets, build, git, and github-pr
-profiles, including common sandbox flags; it rejects `--fs external` with
-guidance to use `external_bash`. `external_bash` asks for OMP UI confirmation,
-then invokes the trusted stateful binary with `sandbox run --fs external` so the
-external sandbox profile can run purpose-and-command-only read-only operations or
-validate declared absolute scope for external writes. Other
+sandbox runs and `external_bash` for repo-external shell work. Both tools stream
+stdout and stderr chunks to OMP while the sandboxed command is still running, then
+return the final exit code and captured output. `sandbox_bash` invokes the
+trusted stateful binary as `stateful sandbox run --fs <profile> ... --command
+<cmd>` for read-only, write-targets, build, git, and github-pr profiles,
+including common sandbox flags; it rejects `--fs external` with guidance to use
+`external_bash`. `external_bash` asks for OMP UI confirmation, then invokes the
+trusted stateful binary with `sandbox run --fs external` so the external sandbox
+profile can run purpose-and-command-only read-only operations or validate
+declared absolute scope for external writes. Other
 stateful hook allows become OMP allows; denials or unavailable authorization
 remain hard OMP blocks even if OMP yolo metadata is present.
 OMP built-ins that do not write repo files, including `ask`, `ast_grep`, `job`,

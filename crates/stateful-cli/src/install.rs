@@ -1539,7 +1539,34 @@ function sandboxToolError(error) {{
   }};
 }}
 
-function runSandboxTool(params, args, signal, ctx, label) {{
+function emitSandboxToolOutput(onUpdate, stream, chunk) {{
+  if (typeof onUpdate !== "function" || !chunk) {{
+    return;
+  }}
+  const update = {{
+    content: [{{ type: "text", text: chunk }}],
+    details: {{ stream }},
+  }};
+  const emitRawFallback = () => {{
+    try {{
+      const fallback = onUpdate(String(chunk));
+      if (fallback && typeof fallback.catch === "function") {{
+        fallback.catch(() => {{}});
+      }}
+    }} catch (_) {{}}
+  }};
+  try {{
+    const result = onUpdate(update);
+    if (result && typeof result.catch === "function") {{
+      result.catch(emitRawFallback);
+    }}
+  }} catch (_) {{
+    emitRawFallback();
+  }}
+}}
+
+
+function runSandboxTool(params, args, signal, ctx, label, onUpdate) {{
   return new Promise((resolve) => {{
     let stdout = "";
     let stderr = "";
@@ -1576,10 +1603,12 @@ function runSandboxTool(params, args, signal, ctx, label) {{
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk) => {{
+      emitSandboxToolOutput(onUpdate, "stdout", chunk);
       stdout = truncateSandboxToolText(stdout + chunk, label);
     }});
     child.stderr?.on("data", (chunk) => {{
       stderr = truncateSandboxToolText(stderr + chunk, label);
+      emitSandboxToolOutput(onUpdate, "stderr", chunk);
     }});
     child.on("error", (error) => {{
       processError = error instanceof Error ? error.message : String(error);
@@ -1620,7 +1649,7 @@ export default function statefulOmpExtension(pi) {{
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      return runSandboxTool(params, args, signal, ctx, "sandbox_bash");
+      return runSandboxTool(params, args, signal, ctx, "sandbox_bash", _onUpdate);
     }},
   }});
   pi.registerTool({{
@@ -1667,7 +1696,7 @@ export default function statefulOmpExtension(pi) {{
           details: {{ blocked: true }},
         }};
       }}
-      return runSandboxTool(params, args, signal, ctx, "external_bash");
+      return runSandboxTool(params, args, signal, ctx, "external_bash", _onUpdate);
     }},
   }});
   pi.on("session_start", async (event, ctx) => {{
