@@ -864,9 +864,10 @@ events; the verified smoke run
 For DeNovo `subagent:on`, the generated benchmark prompt explicitly requires
 native Codex/OMP subagents, names OMP's `multi_agent_v1spawn_agent` tool when
 available, requires every counted subagent to edit an implementation slice, and
-requires blocker reporting when subagent tools are unavailable. That injected
-instruction is a declared behavior-test condition axis; do not add other prompt
-hints to normal scored comparisons.
+requires blocker reporting when subagent tools are unavailable. The adapter
+enforces the minimum native subagent spawn count for both Codex and OMP
+`subagent:on` runs. That injected instruction is a declared behavior-test
+condition axis; do not add other prompt hints to normal scored comparisons.
 
 Generate reports:
 

@@ -3475,7 +3475,7 @@ print(json.dumps(module.profile_metadata("stateful", "on"), sort_keys=True))
 }
 
 #[test]
-fn denovo_codex_agent_metadata_marks_omp_subagent_axis_as_not_enforced() {
+fn denovo_codex_agent_metadata_requires_omp_subagent_axis() {
     let script = format!(
         r#"
 import importlib.util
@@ -3495,9 +3495,9 @@ print(json.dumps(module.profile_metadata("stateful", "on", cli_runtime="omp"), s
 
     assert_eq!(output["agent_kind"], "omp-cli");
     assert_eq!(output["subagent"], "on");
-    assert_eq!(output["subagent_mode"], "off");
-    assert_eq!(output["native_subagent_required"], false);
-    assert_eq!(output["subagent_required"], false);
+    assert_eq!(output["subagent_mode"], "native_omp_subagents");
+    assert_eq!(output["native_subagent_required"], true);
+    assert_eq!(output["subagent_required"], true);
 }
 
 #[test]
@@ -3588,9 +3588,10 @@ with tempfile.TemporaryDirectory() as tmp:
     db.close()
 
     used = module.detect_native_subagent_usage(codex_home)
+    omp_usage = module.native_subagent_usage("on", 1, codex_home, cli_runtime="omp")
     empty = module.detect_native_subagent_usage(Path(tmp) / "empty" / ".codex")
 
-print(json.dumps({{"used": used, "empty": empty}}, sort_keys=True))
+print(json.dumps({{"used": used, "omp_usage": omp_usage, "empty": empty}}, sort_keys=True))
 "#,
         agent_path = denovo_codex_agent_path_json(),
     );
@@ -3601,6 +3602,8 @@ print(json.dumps({{"used": used, "empty": empty}}, sort_keys=True))
     assert_eq!(output["used"]["counts"]["wait_agent_calls"], 1);
     assert_eq!(output["used"]["counts"]["agent_jobs"], 1);
     assert_eq!(output["used"]["counts"]["thread_spawn_edges"], 1);
+    assert_eq!(output["omp_usage"]["mode"], "native_omp_subagents");
+    assert_eq!(output["omp_usage"]["subagent_requirement_met"], true);
     assert_eq!(output["empty"]["subagent_used"], false);
 }
 

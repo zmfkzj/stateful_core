@@ -242,9 +242,10 @@ For `subagent:on`, the generated DeNovo prompt requires native Codex/OMP
 subagents, tells OMP to use available multi-agent tools such as
 `multi_agent_v1spawn_agent`, requires every counted subagent to inspect, edit,
 and verify a distinct implementation slice, and requires explicit blocker
-reporting if the runtime does not expose subagent tools. This prompt addition is
-a declared behavior-test condition axis, not a general prompt policy for normal
-scored comparisons.
+reporting if the runtime does not expose subagent tools. The adapter enforces
+the minimum native subagent spawn count for both Codex and OMP `subagent:on`
+runs. This prompt addition is a declared behavior-test condition axis, not a
+general prompt policy for normal scored comparisons.
 
 Shard launch scripts are expected at:
 

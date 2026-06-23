@@ -134,9 +134,11 @@ For `subagent:on`, the generated DeNovo prompt explicitly requires native
 Codex/OMP subagents, tells OMP to use available multi-agent tools such as
 `multi_agent_v1spawn_agent`, requires every counted subagent to inspect, edit,
 and verify a distinct implementation slice, and requires explicit blocker
-reporting if the runtime does not expose subagent tools. Treat that injected
-instruction as a declared behavior-test condition axis; do not reuse it as
-normal scored comparison policy or as general patch-quality guidance.
+reporting if the runtime does not expose subagent tools. The adapter enforces
+the minimum native subagent spawn count for both Codex and OMP `subagent:on`
+runs. Treat that injected instruction as a declared behavior-test condition
+axis; do not reuse it as normal scored comparison policy or as general
+patch-quality guidance.
 
 ## Docker OMP Stateful Lifecycle
 

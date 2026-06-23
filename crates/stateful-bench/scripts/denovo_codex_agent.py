@@ -910,17 +910,18 @@ def denovo_stateful_session_id(
 def native_subagent_usage(
     subagent: str,
     subagent_min_count: int,
-    codex_home: Path,
+    native_home: Path,
+    cli_runtime: str = "codex",
 ) -> dict[str, Any]:
     native_usage = annotate_native_subagent_usage(
-        detect_native_subagent_usage(codex_home),
+        detect_native_subagent_usage(native_home),
         subagent_min_count,
     )
     spawn_count = native_usage["subagent_spawn_count"]
     requirement_met = subagent != "on" or spawn_count >= subagent_min_count
+    mode = f"native_{cli_runtime}_subagents" if subagent == "on" else "off"
     return {
-        "mode": "native_codex_subagents" if subagent == "on" else "off",
-        "subagent_min_count": subagent_min_count,
+        "mode": mode,
         "subagent_used": bool(native_usage["subagent_used"]),
         "subagent_requirement_met": requirement_met,
         "native_subagent": native_usage,
@@ -1055,17 +1056,17 @@ def profile_metadata(
     subagent_min_count: int = DEFAULT_SUBAGENT_MIN_COUNT,
     cli_runtime: str = "codex",
 ) -> dict[str, Any]:
-    codex_subagents = cli_runtime == "codex" and subagent == "on"
+    native_subagents = subagent == "on"
     return {
         "agent_kind": "omp-cli" if cli_runtime == "omp" else "codex-cli",
         "agent_mode": agent_mode,
         "subagent": subagent,
-        "subagent_required": codex_subagents,
+        "subagent_required": native_subagents,
         "subagent_min_count": subagent_min_count,
-        "subagent_mode": "native_codex_subagents" if codex_subagents else "off",
+        "subagent_mode": f"native_{cli_runtime}_subagents" if native_subagents else "off",
         "official_benchmark_protocol": OFFICIAL_BENCHMARK_PROTOCOL,
         "agent_rollouts_per_instance": 1,
-        "native_subagent_required": codex_subagents,
+        "native_subagent_required": native_subagents,
         "eval_feedback_loop": False,
         "eval_feedback_attempts": 0,
         "resume_policy": RESUME_POLICY_CONTEXT_OR_TOKEN_ONLY,
@@ -1616,7 +1617,7 @@ async def run_one_instance_async(
             benchmark_max_turns=args.benchmark_max_turns,
             max_steps=args.max_steps,
             prompt_version=args.prompt_version,
-            subagent=args.subagent if args.cli_runtime == "codex" else "off",
+            subagent=args.subagent,
             subagent_min_count=args.subagent_min_count,
             stateful_binary=args.stateful_binary if args.agent_mode == "stateful" else None,
         )
@@ -1800,14 +1801,11 @@ async def run_one_instance_async(
             else None
         )
         duration = time.monotonic() - started_at
-        subagent_usage = (
-            native_subagent_usage(
-                args.subagent,
-                args.subagent_min_count,
-                codex_home,
-            )
-            if args.cli_runtime == "codex"
-            else empty_native_subagent_usage(args.subagent_min_count)
+        subagent_usage = native_subagent_usage(
+            args.subagent,
+            args.subagent_min_count,
+            codex_home,
+            cli_runtime=args.cli_runtime,
         )
         command_record = {
             "command": command,
@@ -1859,7 +1857,7 @@ async def run_one_instance_async(
                 orchestration_trace=orchestration_trace,
             )
 
-        if args.cli_runtime == "codex" and args.subagent == "on" and not subagent_usage["subagent_requirement_met"]:
+        if args.subagent == "on" and not subagent_usage["subagent_requirement_met"]:
             patch_path.write_text("", encoding="utf-8")
             orchestration_trace = capture_trace()
             finish_command_record(orchestration_trace)
@@ -1872,8 +1870,8 @@ async def run_one_instance_async(
                 None,
                 "subagent-requirement-failed",
                 (
-                    f"subagent:on requires at least {args.subagent_min_count} native Codex "
-                    f"subagent spawns; observed {spawn_count}"
+                    f"subagent:on requires at least {args.subagent_min_count} native "
+                    f"{args.cli_runtime.upper()} subagent spawns; observed {spawn_count}"
                 ),
                 None,
                 subagent_used=subagent_usage["subagent_used"],
