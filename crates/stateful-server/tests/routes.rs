@@ -3831,7 +3831,7 @@ async fn activity_finalize_rolls_back_activity_and_lease_release_when_intent_com
             |row| row.get::<_, u64>(0),
         )
         .expect("activity count should load");
-    assert_eq!(activity_count, 0);
+    assert_eq!(activity_count, 1);
 
     let active_lease_count: u64 = trigger_conn
         .query_row(

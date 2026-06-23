@@ -2807,25 +2807,28 @@ impl Store {
         &self,
         session_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
-        phase: ActivityPhase,
+        _phase: ActivityPhase,
     ) -> StoreResult<(u64, u64)> {
         let session_id = session_id.as_ref().to_string();
         let workspace_id = workspace_id.as_ref().to_string();
-        if !self.conn.is_autocommit() {
-            return self.finalize_session_activity_inner(&session_id, &workspace_id, phase);
-        }
+        self.conn
+            .execute_batch("SAVEPOINT stateful_finalize_activity")?;
 
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-
-        let result = (|| -> StoreResult<(u64, u64)> {
-            let finalized =
-                self.finalize_session_activity_inner(&session_id, &workspace_id, phase)?;
-            self.conn.execute_batch("COMMIT")?;
-            Ok(finalized)
-        })();
+        let result = self
+            .finalize_session_activity_inner(&session_id, &workspace_id)
+            .and_then(|finalized| {
+                self.conn
+                    .execute_batch("RELEASE SAVEPOINT stateful_finalize_activity")?;
+                Ok(finalized)
+            });
 
         if result.is_err() {
-            let _ = self.conn.execute_batch("ROLLBACK");
+            let _ = self
+                .conn
+                .execute_batch("ROLLBACK TO SAVEPOINT stateful_finalize_activity");
+            let _ = self
+                .conn
+                .execute_batch("RELEASE SAVEPOINT stateful_finalize_activity");
         }
 
         result
@@ -2835,9 +2838,7 @@ impl Store {
         &self,
         session_id: &str,
         workspace_id: &str,
-        phase: ActivityPhase,
     ) -> StoreResult<(u64, u64)> {
-        self.append_activity_inner(session_id, workspace_id, phase)?;
         self.cancel_session_waiters_inner(session_id, workspace_id)?;
         let released = self.release_session_leases_inner(session_id, workspace_id)?;
         let completed = self.complete_session_intents_inner(session_id, workspace_id)?;

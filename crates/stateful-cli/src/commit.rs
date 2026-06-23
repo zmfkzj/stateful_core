@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -179,9 +179,15 @@ fn deny_unrelated_staged_changes_with_index(
         .collect::<Vec<_>>();
 
     if !unrelated.is_empty() {
+        let hook_context = if index_path.is_some() {
+            "; hook modified the worktree or staged unrelated paths"
+        } else {
+            ""
+        };
         anyhow::bail!(
-            "unrelated staged changes are present: {}",
-            unrelated.join(", ")
+            "unrelated staged changes are present: {}{}",
+            unrelated.join(", "),
+            hook_context
         );
     }
 
@@ -373,19 +379,20 @@ fn run_commit_hooks_with_index(
     index_path: &Path,
     message_path: &Path,
 ) -> anyhow::Result<()> {
-    run_git_hook_with_index(repo_root, index_path, "pre-commit", &[])?;
+    run_git_hook_with_index(repo_root, index_path, "pre-commit", &[], true)?;
     run_git_hook_with_index(
         repo_root,
         index_path,
         "prepare-commit-msg",
         &[message_path, Path::new("message")],
+        true,
     )?;
-    run_git_hook_with_index(repo_root, index_path, "commit-msg", &[message_path])?;
+    run_git_hook_with_index(repo_root, index_path, "commit-msg", &[message_path], true)?;
     Ok(())
 }
 
 fn run_post_commit_hook_with_index(repo_root: &Path, index_path: &Path) {
-    let _ = run_git_hook_with_index(repo_root, index_path, "post-commit", &[]);
+    let _ = run_git_hook_with_index(repo_root, index_path, "post-commit", &[], false);
 }
 
 fn run_git_hook_with_index(
@@ -393,6 +400,7 @@ fn run_git_hook_with_index(
     index_path: &Path,
     hook_name: &str,
     args: &[&Path],
+    restore_worktree: bool,
 ) -> anyhow::Result<()> {
     let hook_rev_path = format!("hooks/{hook_name}");
     let hook_path = git_stdout(
@@ -418,8 +426,13 @@ fn run_git_hook_with_index(
         }
     }
 
-    let worktree_status_before = git_stdout(repo_root, &["status", "--porcelain=v1", "-z"])?;
-    let mut command = commit_hook_command(repo_root, &hook_path);
+    let snapshot = if restore_worktree {
+        Some(WorktreeSnapshot::capture(repo_root)?)
+    } else {
+        None
+    };
+    let mut command = Command::new(&hook_path);
+    command.current_dir(repo_root);
     sanitize_git_environment(&mut command);
     let git_dir = git_stdout(repo_root, &["rev-parse", "--absolute-git-dir"])?;
     command.env("GIT_DIR", git_dir.trim());
@@ -427,53 +440,92 @@ fn run_git_hook_with_index(
     command.env("GIT_INDEX_FILE", index_path);
     command.args(args);
     let output = command.output()?;
+    if let Some(snapshot) = snapshot {
+        snapshot.restore(repo_root)?;
+    }
     if !output.status.success() {
         anyhow::bail!(
             "{hook_name} hook failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let worktree_status_after = git_stdout(repo_root, &["status", "--porcelain=v1", "-z"])?;
-    if worktree_status_after != worktree_status_before {
-        anyhow::bail!(
-            "{hook_name} hook modified the worktree; stateful commit hooks run read-only"
-        );
+    Ok(())
+}
+
+struct WorktreeSnapshot {
+    paths: BTreeMap<String, Option<Vec<u8>>>,
+}
+
+impl WorktreeSnapshot {
+    fn capture(repo_root: &Path) -> anyhow::Result<Self> {
+        let status = git_stdout(repo_root, &["status", "--porcelain=v1", "-z", "-uall"])?;
+        let mut paths = BTreeMap::new();
+        for path in porcelain_status_paths(&status) {
+            let contents = fs::read(repo_root.join(&path)).ok();
+            paths.insert(path, contents);
+        }
+        Ok(Self { paths })
+    }
+
+    fn restore(self, repo_root: &Path) -> anyhow::Result<()> {
+        let status = git_stdout(repo_root, &["status", "--porcelain=v1", "-z", "-uall"])?;
+        for path in porcelain_status_paths(&status) {
+            if let Some(contents) = self.paths.get(&path) {
+                restore_snapshot_path(repo_root, &path, contents.as_deref())?;
+            } else if is_tracked_path(repo_root, &path)? {
+                git_status(repo_root, &["checkout", "--", path.as_str()])?;
+            } else {
+                remove_worktree_path(&repo_root.join(&path))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn porcelain_status_paths(status: &str) -> BTreeSet<String> {
+    status
+        .split('\0')
+        .filter(|entry| entry.len() > 3)
+        .map(|entry| entry[3..].replace('\\', "/"))
+        .collect()
+}
+
+fn restore_snapshot_path(
+    repo_root: &Path,
+    path: &str,
+    contents: Option<&[u8]>,
+) -> anyhow::Result<()> {
+    let target = repo_root.join(path);
+    if let Some(contents) = contents {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(target, contents)?;
+    } else {
+        remove_worktree_path(&target)?;
     }
     Ok(())
 }
 
-fn commit_hook_command(repo_root: &Path, hook_path: &Path) -> Command {
-    #[cfg(target_os = "macos")]
-    {
-        if Path::new("/usr/bin/sandbox-exec").is_file() {
-            let mut command = Command::new("/usr/bin/sandbox-exec");
-            command
-                .arg("-p")
-                .arg(read_only_commit_hook_profile(repo_root))
-                .arg(hook_path)
-                .current_dir(repo_root);
-            return command;
-        }
+fn remove_worktree_path(path: &Path) -> anyhow::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path)?,
+        Ok(_) => fs::remove_file(path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
-
-    let mut command = Command::new(hook_path);
-    command.current_dir(repo_root);
-    command
+    Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn read_only_commit_hook_profile(repo_root: &Path) -> String {
-    format!(
-        "(version 1)\n(allow default)\n(deny file-write* (subpath \"{}\"))\n",
-        seatbelt_escape_path(repo_root)
+fn is_tracked_path(repo_root: &Path, path: &str) -> anyhow::Result<bool> {
+    Ok(git_command(
+        repo_root,
+        &["ls-files", "--error-unmatch", "--", path],
+        None,
     )
-}
-
-#[cfg(target_os = "macos")]
-fn seatbelt_escape_path(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
+    .output()?
+    .status
+    .success())
 }
 
 fn reject_rename_status(repo_root: &Path, paths: &[String]) -> anyhow::Result<()> {

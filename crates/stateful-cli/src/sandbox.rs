@@ -360,15 +360,15 @@ pub fn run_sandbox_in_repo(
             });
 
             if !denied_write_targets.is_empty() {
-                if let Some(release_context) = &release_after_run {
-                    release_sandbox_write_leases(runtime, release_context);
-                }
                 let body = sandbox_authorization_denied_body(
                     &authorize_context,
                     allowed_write_targets,
                     denied_write_targets,
                 )
                 .to_string();
+                if let Some(release_context) = &release_after_run {
+                    release_sandbox_write_leases(runtime, release_context);
+                }
                 return Err(SandboxAuthorizationDenied::new(body).into());
             }
 
