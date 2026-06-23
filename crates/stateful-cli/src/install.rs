@@ -1213,6 +1213,14 @@ fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow
         &mut lines,
         "tools",
         "approval",
+        "task",
+        "allow",
+        update_existing,
+    )?;
+    ensure_omp_nested_child_scalar(
+        &mut lines,
+        "tools",
+        "approval",
         "sandbox_bash",
         "allow",
         update_existing,

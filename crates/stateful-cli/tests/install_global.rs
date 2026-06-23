@@ -197,7 +197,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("stateful-omp-extension.js"));
     assert!(config.contains(
-        "tools:\n  approvalMode: write\n  approval:\n    sandbox_bash: allow\n    external_bash: allow\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: false\n",
+        "tools:\n  approvalMode: write\n  approval:\n    task: allow\n    sandbox_bash: allow\n    external_bash: allow\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: false\n",
     ));
     assert!(
         fs::read_to_string(&omp_mcp)
@@ -316,6 +316,7 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert_eq!(count(&config, "stateful-omp-extension.js"), 1);
     assert_eq!(count(&config, "approvalMode: write"), 1);
+    assert_eq!(count(&config, "\n    task: allow"), 1);
     assert_eq!(count(&config, "\n    sandbox_bash: allow"), 1);
     assert_eq!(count(&config, "external_bash: allow"), 1);
     assert_eq!(count(&config, "\n  py: false"), 1);
@@ -353,7 +354,8 @@ fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
     assert!(config.contains("model: gpt-5.5"));
     assert!(config.contains("existing-extension.js"));
     assert!(config.contains("stateful-omp-extension.js"));
-    assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n"));
+    assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n    task: allow\n"));
+    assert!(config.contains("task: allow"));
     assert!(config.contains("sandbox_bash: allow"));
     assert!(config.contains("external_bash: allow"));
     assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
@@ -376,16 +378,17 @@ fn install_omp_yes_preserves_existing_tool_values_without_update() {
     let omp_config = omp_agent_dir.join("config.yml");
     fs::write(
         &omp_config,
-        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    bash: prompt\n    edit: prompt\n",
+        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    bash: prompt\n    edit: prompt\n",
     )
     .expect("existing config should write");
 
     apply_omp_install(fixture.omp_options(true)).expect("omp install should apply");
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
-    assert!(config.contains("tools:\n  approvalMode: yolo\n  approval:\n"));
+    assert!(config.contains("tools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n"));
     assert!(config.contains("bash: prompt"));
     assert!(config.contains("edit: prompt"));
+    assert!(!config.contains("task: allow"));
     assert!(config.contains("sandbox_bash: allow"));
     assert!(config.contains("external_bash: allow"));
     assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
@@ -403,7 +406,7 @@ fn install_omp_update_replaces_existing_stateful_tool_values() {
     let omp_config = omp_agent_dir.join("config.yml");
     fs::write(
         &omp_config,
-        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    sandbox_bash: prompt\n    external_bash: prompt\n    edit: prompt\neval:\n  py: true\n  js: true\n  rb: true\n  jl: true\nbash:\n  enabled: true\n",
+        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    sandbox_bash: prompt\n    external_bash: prompt\n    edit: prompt\neval:\n  py: true\n  js: true\n  rb: true\n  jl: true\nbash:\n  enabled: true\n",
     )
     .expect("existing config should write");
 
@@ -412,13 +415,15 @@ fn install_omp_update_replaces_existing_stateful_tool_values() {
     apply_omp_install(options).expect("omp install with --update should apply");
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
-    assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n"));
+    assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n    task: allow\n"));
+    assert!(config.contains("task: allow"));
     assert!(config.contains("sandbox_bash: allow"));
     assert!(config.contains("external_bash: allow"));
     assert!(config.contains("edit: prompt"));
     assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
     assert!(config.contains("bash:\n  enabled: false\n"));
     assert_eq!(count(&config, "approvalMode: write"), 1);
+    assert_eq!(count(&config, "task: allow"), 1);
     assert_eq!(count(&config, "sandbox_bash: allow"), 1);
     assert_eq!(count(&config, "external_bash: allow"), 1);
 }

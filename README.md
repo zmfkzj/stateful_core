@@ -207,8 +207,8 @@ generated sandbox command tools in the isolated `stateful` profile. This leaves
 the default/global OMP profile alone. The installer merges `config.yml` instead
 of replacing it and rejects invalid YAML. Its target keys are
 `tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
-`eval.js: false`, `eval.rb: false`,
-`eval.jl: false`, `tools.approval.sandbox_bash: allow`, and
+`eval.js: false`, `eval.rb: false`, `eval.jl: false`,
+`tools.approval.task: allow`, `tools.approval.sandbox_bash: allow`, and
 `tools.approval.external_bash: allow`; without `--update`, existing values are
 preserved and only missing keys are inserted. With `--update`
 (`stateful install --agent omp --yes --update`), existing values for those keys
@@ -353,8 +353,8 @@ installation health.
   agent directory (`~/.omp/profiles/stateful/agent`) and merges `config.yml`
   instead of replacing it, rejecting invalid YAML. Its target keys are
   `tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
-  `eval.js: false`, `eval.rb: false`,
-  `eval.jl: false`, `tools.approval.sandbox_bash: allow`, and
+  `eval.js: false`, `eval.rb: false`, `eval.jl: false`,
+  `tools.approval.task: allow`, `tools.approval.sandbox_bash: allow`, and
   `tools.approval.external_bash: allow`; without `--update`, existing values
   are preserved and only missing OMP keys are inserted. With `--update`, existing
   values for those keys are updated. Raw Bash and eval tool calls are denied by
@@ -482,7 +482,8 @@ the OMP extension, MCP config, always-apply `stateful-required` rule, and
 it; invalid YAML is
 rejected. Its target keys are `tools.approvalMode: write`,
 `bash.enabled: false`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
-`eval.jl: false`, `tools.approval.sandbox_bash: allow`, and
+`eval.jl: false`, `tools.approval.task: allow`,
+`tools.approval.sandbox_bash: allow`, and
 `tools.approval.external_bash: allow`; without `--update`, existing values are
 preserved and only missing OMP keys are inserted. With `--update`, existing
 values for those keys are updated, leaving the global/default OMP profile

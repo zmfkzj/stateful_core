@@ -249,13 +249,16 @@ The prototype supports user-level installation with repo allowlist gating.
 `stateful install --agent codex --yes` configures global Codex hooks and MCP.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
-(`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`,
-`bash.enabled: false`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
-`eval.jl: false`, `tools.approval.sandbox_bash: allow`, and
-`tools.approval.external_bash: allow`, and denies raw Bash plus the
-Python/JavaScript/JS/Ruby/Julia eval tools at the host approval and hook
-levels. The installer also writes `rules/stateful-required.md` and
-`skills/stateful-command-policy/SKILL.md` under that isolated agent directory:
+(`~/.omp/profiles/stateful/agent`) and ensures the target keys
+`tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
+`eval.js: false`, `eval.rb: false`, `eval.jl: false`,
+`tools.approval.task: allow`, `tools.approval.sandbox_bash: allow`, and
+`tools.approval.external_bash: allow`. Without `--update`, existing values are
+preserved and only missing keys are inserted; with `--update`, existing target
+values are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
+tools are denied at the host approval and hook levels. The installer also writes
+`rules/stateful-required.md` and `skills/stateful-command-policy/SKILL.md` under
+that isolated agent directory:
 the always-apply rule tells the model when Stateful policy applies, the skill
 keeps the detailed procedure, and hooks remain the enforcement boundary. The
 generated extension registers `sandbox_bash` for read-only, write-targets,
