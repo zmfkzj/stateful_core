@@ -243,9 +243,11 @@ asks OMP UI confirmation before spawning the trusted stateful binary with
 least one write target, create target, or write dir. The external sandbox
 profile requires purpose and command; read-only/no-declared-scope operations may
 omit targets, while supplied external write scopes are validated as absolute
-paths outside the repo. It runs through the sandbox after Codex approval,
-`ext_ro_bash` execution, or `ext_rw_bash` confirmation and does not require repo
-intent or lease unless repo-relative write scope is supplied.
+paths outside the repo. On macOS, external profile runs also allow
+trust/identity Mach lookups for `trustd` and DirectoryService so Go TLS clients
+such as `gh` can verify certificates. It runs through the sandbox after Codex
+approval, `ext_ro_bash` execution, or `ext_rw_bash` confirmation and does not
+require repo intent or lease unless repo-relative write scope is supplied.
 Local git operations use `<absolute-stateful-binary> sandbox run --fs git
 --network disabled --command 'git <args>'`; use `--network enabled` only for
 remote git operations. GitHub pull request list/view/status/create commands use
@@ -560,7 +562,10 @@ Stateful MCP tools default to automatic approval; `stateful sandbox run --fs
 external --purpose ... --command ...` is gated by a Codex execpolicy prompt
 before it runs the external sandbox command. Purpose-and-command-only operations
 are allowed for read-only/no-declared-scope use; supplied external write scopes
-are validated before the sandbox starts. `stateful
+are validated before the sandbox starts. On macOS, that external profile also
+permits `trustd` and DirectoryService Mach lookups needed by Go TLS certificate
+verification.
+`stateful
 install --agent omp --yes` registers `sandbox_bash` for read-only,
 write-targets, build, git, and github-pr sandbox profiles, `ext_ro_bash` for
 read-only external commands, and `ext_rw_bash` for external writes. `ext_ro_bash`

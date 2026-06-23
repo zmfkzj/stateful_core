@@ -554,6 +554,7 @@ pub fn run_sandbox_in_repo(
                 &writable_paths,
                 &connect_sockets,
                 request.fs == SandboxFsProfile::External && request.allow_signal,
+                request.fs == SandboxFsProfile::External,
                 request.network,
                 timeout,
             ),
@@ -947,6 +948,7 @@ fn run_sandboxed_command(
     writable_paths: &[SandboxWritablePath],
     connect_sockets: &[PathBuf],
     allow_signal: bool,
+    allow_macos_identity_and_trust_services: bool,
     network: SandboxNetworkPolicy,
     timeout: Duration,
 ) -> anyhow::Result<SandboxCommandResult> {
@@ -965,6 +967,7 @@ fn run_sandboxed_command(
                 writable_paths,
                 connect_sockets,
                 allow_signal,
+                allow_macos_identity_and_trust_services,
                 temp_dir.as_deref(),
                 network,
             ),
@@ -996,6 +999,7 @@ fn run_sandboxed_command(
             writable_paths,
             connect_sockets,
             allow_signal,
+            allow_macos_identity_and_trust_services,
             temp_dir,
             network,
             timeout,
@@ -3304,15 +3308,19 @@ fn seatbelt_command(
     writable_paths: &[SandboxWritablePath],
     connect_sockets: &[PathBuf],
     allow_signal: bool,
+    allow_macos_identity_and_trust_services: bool,
     temp_dir: Option<&Path>,
     network: SandboxNetworkPolicy,
 ) -> Command {
-    let profile = seatbelt_profile_with_connect_sockets(
+    let mut profile = seatbelt_profile_with_connect_sockets(
         writable_paths,
         connect_sockets,
         allow_signal,
         network,
     );
+    if allow_macos_identity_and_trust_services {
+        push_seatbelt_macos_identity_and_trust_services(&mut profile);
+    }
     let mut sandbox = Command::new("/usr/bin/sandbox-exec");
     sandbox
         .arg("-p")
@@ -4889,6 +4897,37 @@ mod tests {
             .expect("seatbelt git command should pass a profile after -p");
 
         assert_profile_allows_macos_identity_and_trust_services(&profile, "git");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_external_command_profile_allows_macos_identity_and_trust_services() {
+        let command = seatbelt_command(
+            "gh api rate_limit",
+            Path::new("/repo"),
+            &[],
+            &[],
+            false,
+            true,
+            None,
+            SandboxNetworkPolicy::Enabled,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let profile = args
+            .windows(2)
+            .find_map(|window| {
+                if window[0] == "-p" {
+                    Some(window[1].clone())
+                } else {
+                    None
+                }
+            })
+            .expect("seatbelt external command should pass a profile after -p");
+
+        assert_profile_allows_macos_identity_and_trust_services(&profile, "external");
     }
 
     #[cfg(target_os = "macos")]

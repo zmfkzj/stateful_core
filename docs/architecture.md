@@ -263,7 +263,9 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   with Codex approval, OMP `ext_ro_bash` for read-only/no-write-scope commands,
   or OMP `ext_rw_bash` for writes. A purpose and command are sufficient for
   read-only/no-declared-scope external operations; absolute external targets
-  remain required when declaring external write scope.
+  remain required when declaring external write scope. On macOS, external runs
+  allow `trustd` and DirectoryService Mach lookups for TLS certificate
+  verification by Go tools.
 - check leases and planned edits for likely conflicts
 - return allow, warning context, or deny based on policy
 
@@ -348,7 +350,9 @@ classification, so `functions.bash` is Bash,
   `--create-target <file>` values and target authorization. External operations
   use `--fs external` with no repo intent or lease, and Codex approval or OMP
   `ext_ro_bash` for read-only/no-write-scope commands; OMP external writes use
-  `ext_rw_bash` with at least one write target, create target, or write dir.
+  `ext_rw_bash` with at least one write target, create target, or write dir. On
+  macOS, the external profile permits `trustd` and DirectoryService Mach lookups
+  so Go TLS clients such as `gh` can verify certificates.
 - Test execution: run only through sandboxed test actions such as
   `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`.
   Build artifacts live under `/tmp/stateful/<session>/<scratch-purpose>/`.

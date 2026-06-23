@@ -674,7 +674,9 @@ External sandbox absolute targets must resolve outside the repo; repo-relative
 write targets, create targets, and write dirs use the same Stateful
 authorization flow as other repo writes. The profile also supports
 `--connect-socket`, `--allow-signal`, and `--network` for approved external
-operations. Repo-external writes do not require repo intent or a same-session
+operations. On macOS, it also permits system trust lookups needed by Go-based
+HTTPS CLIs such as `gh api` to verify certificates without disabling the
+sandbox. Repo-external writes do not require repo intent or a same-session
 lease. Codex prompts on
 `stateful sandbox run --fs external --purpose ...` before execution. In OMP,
 `ext_ro_bash` runs read-only purpose-and-command-only external operations without

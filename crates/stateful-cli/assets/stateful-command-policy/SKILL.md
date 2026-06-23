@@ -96,6 +96,8 @@ Choose the narrowest existing entry point before writing the command. In Codex, 
 
 PR workflows still use the git profile for git work: `status`, `diff`, `log`, `add`, `commit`, `switch`/`checkout`, `merge`, `rebase`, `tag`, and `push`. Do not use `--fs write-targets` just because git mutates the worktree or `.git`; the git profile owns that scope. GitHub pull request listing, viewing, status checks, and creation use the `github-pr` profile for `gh pr <list|view|status|create>`. Use `ext_ro_bash`/`--fs external` for read-only `gh` commands outside that narrow profile, such as Actions log inspection. If no listed profile matches the needed command, stop and report the exact unsupported command instead of trying raw Bash or a near-miss profile.
 
+On macOS, read-only Go-based GitHub API commands such as `gh api` belong in that external path with `--network enabled` (OMP: `ext_ro_bash`) because the external Seatbelt profile permits the system identity/trust Mach lookups Go's TLS verifier needs for certificate validation. Do not use raw `gh`; add external write scopes only when the command actually writes.
+
 ## Tmp Retention Rule
 
 `tmp/` means temporary. Store only cache files, test/build outputs, throwaway logs, and other artifacts that can disappear between commands. Do not put plans, notes, generated fixtures needed by later tasks, benchmark baselines, installable binaries, review evidence, or user-requested deliverables in `tmp/`.
