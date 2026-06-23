@@ -3783,7 +3783,7 @@ print(json.dumps({{
 }
 
 #[test]
-fn denovo_codex_agent_max_concurrent_over_one_yields_reportable_error_row() {
+fn denovo_codex_agent_accepts_max_concurrent_over_one() {
     let script = format!(
         r#"
 import importlib.util
@@ -3796,24 +3796,19 @@ module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
-result = module.max_concurrent_error_result(Namespace(max_concurrent=2))
 print(json.dumps({{
-    "exit_code": module.adapter_exit_code_after_results([result]),
-    "row": module.instance_result_row(result),
+    "default": module.max_concurrent_limit(Namespace(max_concurrent=None)),
+    "zero": module.max_concurrent_limit(Namespace(max_concurrent=0)),
+    "six": module.max_concurrent_limit(Namespace(max_concurrent=6)),
 }}, sort_keys=True))
 "#,
         agent_path = denovo_codex_agent_path_json(),
     );
     let output = run_python_json(&script);
 
-    assert_eq!(output["exit_code"], 0);
-    assert_eq!(output["row"]["finish_reason"], "setup-error");
-    assert!(
-        output["row"]["error"]
-            .as_str()
-            .expect("error should be text")
-            .contains("Codex DeNovo adapter currently supports --max-concurrent 1 only")
-    );
+    assert_eq!(output["default"], 1);
+    assert_eq!(output["zero"], 1);
+    assert_eq!(output["six"], 6);
 }
 
 #[test]

@@ -1584,17 +1584,10 @@ def stateful_runtime_env_error(env: dict[str, str]) -> str | None:
     return "stateful Codex benchmark requires STATEFUL_SERVER_URL and STATEFUL_SERVER_TOKEN"
 
 
-def max_concurrent_error_result(args: argparse.Namespace) -> InstanceResult | None:
-    if args.max_concurrent is None or args.max_concurrent <= 1:
-        return None
-    return InstanceResult(
-        "adapter-setup",
-        False,
-        None,
-        "setup-error",
-        "Codex DeNovo adapter currently supports --max-concurrent 1 only",
-        None,
-    )
+def max_concurrent_limit(args: argparse.Namespace) -> int:
+    if args.max_concurrent is None:
+        return 1
+    return max(1, args.max_concurrent)
 
 
 def write_adapter_metadata(output: Path, metadata: dict[str, Any]) -> None:
@@ -2032,23 +2025,8 @@ async def run_one_instance_async(
 
 
 async def run_real_instances_async(args: argparse.Namespace) -> int:
+    max_concurrent = max_concurrent_limit(args)
     output = Path(args.output)
-    max_concurrent_error = max_concurrent_error_result(args)
-    if max_concurrent_error is not None:
-        results = [max_concurrent_error]
-        write_jsonl(output / "_" / "results.jsonl", [instance_result_row(result) for result in results])
-        write_adapter_metadata(
-            output,
-            {
-                **profile_metadata(args.agent_mode, args.subagent, args.subagent_min_count, args.cli_runtime),
-                **subagent_usage_metadata(results, args.subagent_min_count),
-                "fake": False,
-                "results": len(results),
-                "max_concurrent": args.max_concurrent,
-                "error": max_concurrent_error.error,
-            },
-        )
-        return adapter_exit_code_after_results(results)
 
     add_aweagent_to_path(Path(args.aweagent_root))
     from recipes.denovo_swe.run import _build_task, _load_config
@@ -2079,11 +2057,24 @@ async def run_real_instances_async(args: argparse.Namespace) -> int:
 
     results_path = output / "_" / "results.jsonl"
     write_jsonl(results_path, [])
-    results = []
-    for inst in instances:
-        result = await run_one_instance_async(args, config, task, inst, output)
-        results.append(result)
+    semaphore = asyncio.Semaphore(max_concurrent)
+    results_by_index: list[InstanceResult | None] = [None] * len(instances)
+
+    async def run_limited(index: int, inst: Any) -> tuple[int, InstanceResult]:
+        async with semaphore:
+            result = await run_one_instance_async(args, config, task, inst, output)
+            return index, result
+
+    tasks = [
+        asyncio.create_task(run_limited(index, inst))
+        for index, inst in enumerate(instances)
+    ]
+    for task_result in asyncio.as_completed(tasks):
+        index, result = await task_result
+        results_by_index[index] = result
         append_result_jsonl(results_path, result)
+
+    results = [result for result in results_by_index if result is not None]
 
     write_jsonl(results_path, [instance_result_row(result) for result in results])
     write_adapter_metadata(
@@ -2100,6 +2091,7 @@ async def run_real_instances_async(args: argparse.Namespace) -> int:
             "benchmark_max_turns": args.benchmark_max_turns,
             "max_resumes": args.max_resumes,
             "eval_iters": args.eval_iters,
+            "max_concurrent": max_concurrent,
             "agent_docker_image": args.agent_docker_image,
             "agent_docker_stateful_binary": (
                 args.agent_docker_stateful_binary if args.agent_docker_image else None
