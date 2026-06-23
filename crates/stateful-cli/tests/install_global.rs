@@ -197,7 +197,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("stateful-omp-extension.js"));
     assert!(config.contains(
-        "tools:\n  approvalMode: write\n  approval:\n    bash: allow\n    python: allow\n    task: allow\n    external_bash: allow\n",
+        "tools:\n  approvalMode: write\n  approval:\n    bash: allow\n    python: allow\n    task: allow\n    external_bash: prompt\n",
     ));
     assert!(
         fs::read_to_string(&omp_mcp)
@@ -288,7 +288,7 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
     assert_eq!(count(&config, "\n    bash: allow"), 1);
     assert_eq!(count(&config, "python: allow"), 1);
     assert_eq!(count(&config, "task: allow"), 1);
-    assert_eq!(count(&config, "external_bash: allow"), 1);
+    assert_eq!(count(&config, "external_bash: prompt"), 1);
     assert!(
         fs::read_to_string(&omp_mcp)
             .expect("omp mcp should read")
@@ -323,7 +323,7 @@ fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
     assert!(config.contains("bash: allow"));
     assert!(config.contains("python: allow"));
     assert!(config.contains("task: allow"));
-    assert!(config.contains("external_bash: allow"));
+    assert!(config.contains("external_bash: prompt"));
     let extension = fs::read_to_string(
         omp_agent_dir
             .join("extensions")
@@ -354,12 +354,12 @@ fn install_omp_yes_merges_approval_mode_into_existing_tools_config() {
     assert!(config.contains("python: allow"));
     assert!(config.contains("task: allow"));
     assert!(config.contains("edit: prompt"));
-    assert!(!config.contains("bash: prompt"));
+    assert!(!config.contains("\n    bash: prompt"));
     assert_eq!(count(&config, "approvalMode: write"), 1);
     assert_eq!(count(&config, "\n    bash: allow"), 1);
     assert_eq!(count(&config, "python: allow"), 1);
     assert_eq!(count(&config, "task: allow"), 1);
-    assert_eq!(count(&config, "external_bash: allow"), 1);
+    assert_eq!(count(&config, "external_bash: prompt"), 1);
 }
 
 #[test]

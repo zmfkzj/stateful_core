@@ -1158,7 +1158,7 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
             contents.push('\n');
         }
         contents.push_str(
-            "tools:\n  approvalMode: write\n  approval:\n    bash: allow\n    python: allow\n    task: allow\n    external_bash: allow\n",
+            "tools:\n  approvalMode: write\n  approval:\n    bash: allow\n    python: allow\n    task: allow\n    external_bash: prompt\n",
         );
         return contents;
     }
@@ -1197,7 +1197,13 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
     tools_end = find_omp_top_level_section_end(&lines, tools_offset);
     ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "task");
     tools_end = find_omp_top_level_section_end(&lines, tools_offset);
-    ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "external_bash");
+    ensure_omp_tool_approval_value(
+        &mut lines,
+        approval_offset,
+        tools_end,
+        "external_bash",
+        "prompt",
+    );
 
     contents = lines.join("\n");
     contents.push('\n');
@@ -1222,11 +1228,12 @@ fn find_omp_top_level_section_end(lines: &[String], section_offset: usize) -> us
         .map_or(lines.len(), |offset| section_offset + 1 + offset)
 }
 
-fn ensure_omp_tool_approval(
+fn ensure_omp_tool_approval_value(
     lines: &mut Vec<String>,
     approval_offset: usize,
     tools_end: usize,
     tool: &str,
+    value: &str,
 ) {
     let approval_end = lines[approval_offset + 1..tools_end]
         .iter()
@@ -1242,10 +1249,19 @@ fn ensure_omp_tool_approval(
         .position(|line| line.trim_start().starts_with(&prefix))
         .map(|offset| approval_offset + 1 + offset)
     {
-        lines[offset] = format!("    {tool}: allow");
+        lines[offset] = format!("    {tool}: {value}");
     } else {
-        lines.insert(approval_offset + 1, format!("    {tool}: allow"));
+        lines.insert(approval_offset + 1, format!("    {tool}: {value}"));
     }
+}
+
+fn ensure_omp_tool_approval(
+    lines: &mut Vec<String>,
+    approval_offset: usize,
+    tools_end: usize,
+    tool: &str,
+) {
+    ensure_omp_tool_approval_value(lines, approval_offset, tools_end, tool, "allow");
 }
 
 fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Result<()> {
