@@ -91,6 +91,8 @@ pub enum Command {
         codex_config: Option<PathBuf>,
         #[arg(long)]
         binary: Option<String>,
+        #[arg(long)]
+        update: bool,
     },
     Server {
         #[command(subcommand)]
@@ -370,6 +372,7 @@ pub fn run() -> anyhow::Result<()> {
             agents,
             codex_config,
             binary,
+            update,
         } => {
             let paths = GlobalPaths::from_env()?;
             let binary_path = match binary {
@@ -384,8 +387,14 @@ pub fn run() -> anyhow::Result<()> {
                 if binary_path.is_some() {
                     anyhow::bail!("--binary requires --agent codex or --agent omp");
                 }
+                if update {
+                    anyhow::bail!("--update requires --agent omp");
+                }
                 apply_global_install(InstallOptions { yes, paths })?
             } else if agents.contains(&InstallAgent::Codex) {
+                if update {
+                    anyhow::bail!("--update requires --agent omp");
+                }
                 let codex_config_path = match codex_config {
                     Some(path) => path,
                     None => default_codex_config_path()?,
@@ -406,6 +415,7 @@ pub fn run() -> anyhow::Result<()> {
                     binary_path: binary_path.expect("agent install should resolve binary"),
                     project_config_path: None,
                     omp_agent_dir: None,
+                    update,
                 })?
             } else {
                 anyhow::bail!("no supported install agents selected");
