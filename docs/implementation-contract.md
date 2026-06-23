@@ -28,8 +28,6 @@ For OMP, the extension prefers the actual OMP runtime session id from
 `process.env.STATEFUL_SESSION_ID`, and `stateful hook omp session-start`
 persists current-session files so session-aware MCP tools resolve the same
 session.
-Repo-local hooks remain available through `stateful enable --repo-local-codex`
-as a compatibility fallback.
 
 Hook adapters should invoke the compiled `stateful` binary instead of embedding
 policy or adapter logic in separate scripts. Hook configuration may reference
@@ -395,12 +393,12 @@ $STATEFUL_HOME/state.db
 ```
 
 When `STATEFUL_HOME` is not set, the default global home is
-`$HOME/.stateful_core/`. Repo-local compatibility runtime state lives under:
+`$HOME/.stateful_core/`. Repo-local compatibility runtime state keeps only
+runtime discovery and legacy database artifacts:
 
 ```text
 .stateful_core/
 .stateful_core/runtime/server.json
-.stateful_core/outbox/
 .stateful_core/state.db
 ```
 
@@ -481,10 +479,10 @@ denied. A timed-out observation is queued to the local outbox when possible. A
 timed-out context render should show a concise state-unavailable warning rather
 than raw error output.
 
-## Local Outbox
+## Global Outbox
 
 When the state server is unavailable, hook and observer events that are allowed
-to be queued are appended under `.stateful_core/outbox/`.
+to be queued are appended under `$STATEFUL_HOME/outbox/`.
 
 The file format is newline-delimited JSON. Each line carries:
 
@@ -512,9 +510,8 @@ leases while the state server is unavailable.
 The implementation should include a small CLI for setup and debugging:
 
 ```text
-stateful init
 stateful install [--yes]
-stateful enable [--repo <path>] [--repo-local-codex]
+stateful enable [--repo <path>]
 stateful disable [--repo <path>]
 stateful repos list
 stateful server
@@ -535,8 +532,6 @@ stateful mcp call <tool> [arguments-json]
 stateful mcp serve
 stateful hook <codex|omp> <event>
 stateful sync-outbox
-stateful commit -m <message> -- <paths...>
-stateful push [remote branch]
 ```
 
 `stateful install --agent codex --yes` configures global Codex hooks, MCP, MCP
@@ -551,9 +546,8 @@ profile. Raw OMP Bash/Python external sandbox invocations are denied.
 OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
 extension events to `stateful hook omp session-start`, `pre-tool-use`,
 `post-tool-use`, and `stop`; OMP does not expose a stateful
-`user-prompt-submit` hook. `stateful enable` opts a repo into enforcement and
-can install repo-local Codex hooks with `--repo-local-codex` as a compatibility
-fallback. `stateful server start`
+`user-prompt-submit` hook. `stateful enable` opts a repo into enforcement.
+`stateful server start`
 without `--foreground` uses the detached lazy lifecycle. Bare legacy
 `stateful server` and `stateful server start --foreground` run in the
 foreground and write runtime discovery. `stateful doctor` checks current Codex
@@ -562,12 +556,6 @@ global path or registry errors. Legacy `.codex/hooks.json` and repo-local
 `.stateful_core/state.db` artifacts are reported as legacy artifacts, not as
 installed-state evidence. Active server reachability, config schema validation
 and SQLite migration inspection are future doctor extensions.
-`stateful commit -m <message> -- <paths...>` is the structured commit wrapper.
-`stateful push [remote branch]` is the structured push wrapper. It requires a
-clean working tree, an attached current branch, either the current branch's
-configured upstream or an explicit `<remote> <branch>` pair matching the current
-branch, and rejects force-like target values. Raw `git add`, `git commit`, and
-`git push` through Bash remain denied.
 
 ## Verification
 
@@ -576,7 +564,6 @@ Before publishing or releasing a build, run:
 ```text
 cargo fmt --all --check
 env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo test --workspace
-env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Unset `STATEFUL_CODEX_RUN_ID` and `CODEX_THREAD_ID` when running workspace tests

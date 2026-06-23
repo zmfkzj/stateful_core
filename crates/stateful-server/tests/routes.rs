@@ -831,6 +831,56 @@ async fn lease_activity_and_conflict_routes_are_available() {
 }
 
 #[tokio::test]
+async fn blocked_activity_phase_denies_authorized_write() {
+    let app = build_router(ServerConfig::new("secret-token"));
+    ensure_test_intent_via_http(&app, "s1", "w1", "src/auth.ts").await;
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let activity = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/activity/observe",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "phase": "blocked"
+            }),
+        ))
+        .await
+        .expect("activity observe should complete");
+    assert_eq!(activity.status(), StatusCode::OK);
+
+    let blocked = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(blocked.status(), StatusCode::OK);
+    let json = response_json(blocked, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "inactive_session_phase");
+}
+
+#[tokio::test]
 async fn declared_intent_without_same_session_lease_denies_matching_authorize_request() {
     let app = build_router(ServerConfig::new("secret-token"));
 

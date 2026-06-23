@@ -5,7 +5,7 @@ use std::{
     collections::BTreeSet,
     error::Error as StdError,
     ffi::OsString,
-    fmt, fs,
+    fmt, fs, io,
     io::Read,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -360,6 +360,9 @@ pub fn run_sandbox_in_repo(
             });
 
             if !denied_write_targets.is_empty() {
+                if let Some(release_context) = &release_after_run {
+                    release_sandbox_write_leases(runtime, release_context);
+                }
                 let body = sandbox_authorization_denied_body(
                     &authorize_context,
                     allowed_write_targets,
@@ -2924,6 +2927,23 @@ pub(crate) fn sandbox_temp_dir(writable_paths: &[SandboxWritablePath]) -> Option
 }
 
 pub(crate) fn apply_sandbox_temp_env(command: &mut Command, temp_dir: Option<&Path>) {
+    command.env_clear();
+    for key in [
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NIX_SSL_CERT_FILE",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
     command.env(STATEFUL_SANDBOX_RUN_ACTIVE_ENV, "1");
     let Some(temp_dir) = temp_dir else {
         return;
@@ -2959,6 +2979,22 @@ pub(crate) fn authorize_sandbox_write(
     action: &str,
     path: &str,
 ) -> anyhow::Result<HttpResponse> {
+    let mut payload = serde_json::json!({
+        "action": action,
+        "path": path,
+        "purpose": sandbox_authorize_purpose(action, path),
+        "queue_on_conflict": true,
+        "fs_profile": context.fs_profile,
+        "network_policy": match context.network {
+            SandboxNetworkPolicy::Disabled => "disabled",
+            SandboxNetworkPolicy::Enabled => "enabled",
+        },
+    });
+    if action == "write_file"
+        && let Some(observation) = base_observation_for_sandbox_target(context.repo_root, path)
+    {
+        payload["base_observations"] = serde_json::json!([observation]);
+    }
     let body = protocol_envelope(ProtocolEnvelopeArgs {
         runtime: context.runtime,
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -2969,20 +3005,39 @@ pub(crate) fn authorize_sandbox_write(
         event: "sandbox_run",
         source_ref: "stateful.sandbox.run",
         source_tool_name: None,
-        payload: serde_json::json!({
-            "action": action,
-            "path": path,
-            "purpose": sandbox_authorize_purpose(action, path),
-            "queue_on_conflict": true,
-            "fs_profile": context.fs_profile,
-            "network_policy": match context.network {
-                SandboxNetworkPolicy::Disabled => "disabled",
-                SandboxNetworkPolicy::Enabled => "enabled",
-            },
-        }),
+        payload,
     });
 
     post_json(context.runtime, "/v1/authorize", &body)
+}
+
+fn base_observation_for_sandbox_target(
+    repo_root: &Path,
+    relative_path: &str,
+) -> Option<serde_json::Value> {
+    let path = repo_root.join(relative_path);
+    match fs::read(&path) {
+        Ok(bytes) => Some(serde_json::json!({
+            "path": relative_path,
+            "exists": true,
+            "content_hash": sandbox_content_hash(&bytes),
+        })),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(serde_json::json!({
+            "path": relative_path,
+            "exists": false,
+            "content_hash": null,
+        })),
+        Err(_) => None,
+    }
+}
+
+fn sandbox_content_hash(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
 }
 
 fn release_sandbox_write_leases(runtime: &ServerRuntime, context: &SandboxLeaseReleaseContext) {
@@ -3567,6 +3622,11 @@ fn apply_github_pr_profile_env(command: &mut Command, temp_dir: &Path) {
         "GH_FORCE_TTY",
     ] {
         command.env_remove(key);
+    }
+    for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
     }
     command
         .env("GH_PROMPT_DISABLED", "1")

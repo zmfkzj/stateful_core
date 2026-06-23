@@ -204,8 +204,9 @@ stateful install --agent codex --yes
 Install the OMP integration when you want stateful OMP hooks, MCP, and
 repo-external sandbox approval prompts in the isolated `stateful` profile. This
 leaves the default/global OMP profile alone, uses `tools.approvalMode: write`,
-and explicitly allows OMP's Bash/Python approval gate so stateful sandbox
-wrappers can make the policy decision:
+and sets `tools.approval.{bash,python}: prompt` as a host-level backstop while
+stateful hooks keep blocking raw Bash/Python unless a valid stateful sandbox
+path is used:
 
 ```bash
 stateful install --agent omp --yes
@@ -331,8 +332,9 @@ installation health.
 - `stateful install --agent omp [--yes]` installs the stateful OMP extension
   into the OMP `stateful` profile agent directory
   (`~/.omp/profiles/stateful/agent`) with `tools.approvalMode: write` and
-  `tools.approval.{bash,python}: allow`, leaving the default/global OMP profile
-  untouched.
+  `tools.approval.{bash,python}: prompt` as a host-level backstop, leaving the
+  default/global OMP profile untouched. Stateful hooks still block raw
+  Bash/Python unless a valid stateful sandbox path is used.
 - `stateful enable [--repo <path>]`, `stateful disable`, and
   `stateful repos list` manage the repo allowlist used by global hooks.
 - `stateful tools list`, `stateful tools allow <tool>`, and
@@ -440,8 +442,9 @@ sandbox.
 `stateful enable` opts a repo into enforcement, while disabled repos are no-ops
 for hooks and MCP. `stateful install --agent omp --yes` installs the OMP
 extension and MCP config into the OMP `stateful` profile agent directory
-(`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`, and leaves
-the global/default OMP profile untouched. The generated OMP extension registers
+(`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write` plus
+`tools.approval.{bash,python}: prompt` as a host-level backstop, and leaves the
+global/default OMP profile untouched. The generated OMP extension registers
 an `external_bash` tool for repo-external shell work. `external_bash` asks for
 OMP UI confirmation, then invokes the trusted stateful binary with
 `sandbox run --fs external` so the external sandbox profile can validate the
@@ -454,9 +457,9 @@ tools, are allowed by default. Other unclassified OMP-origin tools are recorded
 in `stateful tools list` and can be explicitly permitted with
 `stateful tools allow <tool>` when they are safe for that repo; this does not
 bypass hard-denied write or execution classifications.
-OMP raw Bash and native Python execution are blocked unless the tool input is a
-trusted `stateful sandbox run ... --command ...` wrapper. Raw Bash/Python calls
-that try `sandbox run --fs external` are blocked; use `external_bash` for
+OMP raw Bash and native Python execution are blocked unless the tool input uses a
+valid trusted `stateful sandbox run ... --command ...` wrapper. Raw Bash/Python
+calls that try `sandbox run --fs external` are blocked; use `external_bash` for
 repo-external execution.
 
 The generated Codex hook configuration covers:
@@ -530,9 +533,9 @@ Codex raw Bash commands are denied by stateful hooks with sandbox guidance. Hook
 policy classifies namespaced runtime tool names by their leaf, so
 `functions.bash` follows Bash handling and `functions.python` follows Python
 handling. For OMP, raw Bash and native Python execution are blocked unless they
-use an allowed trusted sandbox-run wrapper. Repo-external OMP shell or Python
-work must use `external_bash`, not raw Bash/Python with
-`stateful sandbox run --fs external --purpose ...`.
+use a valid stateful sandbox path through a trusted sandbox-run wrapper.
+Repo-external OMP shell or Python work must use `external_bash`, not raw
+Bash/Python with `stateful sandbox run --fs external --purpose ...`.
 Hook-mediated command execution is authorized only when the outer command is a
 single strict invocation of the trusted absolute `stateful` binary running
 `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Use
@@ -906,11 +909,11 @@ fixtures when they are present. The local fixture validation is skipped when
 those files are absent; regenerate the benchmark fixtures before changing or
 evaluating chaos manifest coverage.
 
-Run formatting and lint checks:
+Run formatting and tests:
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo test --workspace
 ```
 
 ## Versioning And Releases

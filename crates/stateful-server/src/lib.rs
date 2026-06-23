@@ -15,8 +15,8 @@ use policy_service::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stateful_core::{
-    ContextPackage, ReconciliationDecision, RenderMode, normalized_relative_path_is_empty,
-    render_prompt_text,
+    ActivityPhase, ContextPackage, ReconciliationDecision, RenderMode,
+    normalized_relative_path_is_empty, render_prompt_text,
 };
 use stateful_store::{
     CurrentStateIdentityFilter, Event, OutboxEntry, Store, StoreError, WaitRecord,
@@ -637,7 +637,8 @@ fn require_files_planned(
     if files_planned.is_empty()
         || files_planned
             .iter()
-            .any(|path| normalized_relative_path_is_empty(path))
+            .map(String::as_str)
+            .any(normalized_relative_path_is_empty)
     {
         return Err(missing_scope_response());
     }
@@ -814,7 +815,11 @@ async fn activity_finalize(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .finalize_session_activity(&input.session_id, &input.workspace_id)
+                .finalize_session_activity_with_phase(
+                    &input.session_id,
+                    &input.workspace_id,
+                    input.phase.unwrap_or(ActivityPhase::Done),
+                )
                 .map_err(|error| error.to_string())
         });
 
@@ -1063,7 +1068,7 @@ async fn notifications_poll(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .pending_notifications(&input.session_id)
+                .pending_notifications(&input.session_id, &input.workspace_id)
                 .map_err(|error| error.to_string())
         });
 
@@ -1278,7 +1283,11 @@ fn append_activity_response(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .append_activity(input.session_id, input.workspace_id)
+                .append_activity_with_phase(
+                    input.session_id,
+                    input.workspace_id,
+                    input.phase.unwrap_or(ActivityPhase::Exploring),
+                )
                 .map_err(|error| error.to_string())
         });
 
@@ -1625,6 +1634,8 @@ struct LeaseRequest {
 struct ActivityRequest {
     session_id: String,
     workspace_id: String,
+    #[serde(default)]
+    phase: Option<ActivityPhase>,
 }
 
 #[derive(Debug, Default, Deserialize)]

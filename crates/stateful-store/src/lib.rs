@@ -1,11 +1,12 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use stateful_core::{
-    CURRENT_SESSION_SCOPE_SOURCE_REF, CurrentEvidenceKind, CurrentFreshness, CurrentItem,
-    CurrentItemKind, CurrentSeverity, IntentScope, PolicyState, normalize_relative_path,
+    ActivityPhase, CURRENT_SESSION_SCOPE_SOURCE_REF, CurrentEvidenceKind, CurrentFreshness,
+    CurrentItem, CurrentItemKind, CurrentSeverity, IntentScope, PolicyState,
+    normalize_relative_path,
 };
-use std::path::Path;
 use std::time::Duration as StdDuration;
+use std::{fs, path::Path};
 use thiserror::Error;
 use time::{Date, Duration, Month, OffsetDateTime, Time};
 use uuid::Uuid;
@@ -103,12 +104,11 @@ pub struct Store {
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        prepare_private_database_path(path)?;
 
         let conn = Connection::open(path)?;
         configure_file_connection(&conn)?;
+        restrict_database_file_permissions(path)?;
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
@@ -2666,6 +2666,7 @@ impl Store {
     pub fn pending_notifications(
         &self,
         target_session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
     ) -> StoreResult<Vec<NotificationRecord>> {
         self.expire_stale()?;
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -2681,10 +2682,15 @@ impl Store {
                     created_at,
                     expires_at
                  FROM notifications
-                 WHERE target_session_id = ?1 AND status = 'pending'
+                 WHERE target_session_id = ?1
+                    AND workspace_id = ?2
+                    AND status = 'pending'
                  ORDER BY rowid ASC",
             )?;
-            let rows = statement.query_map([target_session_id.as_ref()], notification_from_row)?;
+            let rows = statement.query_map(
+                params![target_session_id.as_ref(), workspace_id.as_ref()],
+                notification_from_row,
+            )?;
             let notifications = rows
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(StoreError::from)?;
@@ -2749,10 +2755,24 @@ impl Store {
         session_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<()> {
-        self.append_activity_inner(session_id.as_ref(), workspace_id.as_ref())
+        self.append_activity_with_phase(session_id, workspace_id, ActivityPhase::Exploring)
     }
 
-    fn append_activity_inner(&self, session_id: &str, workspace_id: &str) -> StoreResult<()> {
+    pub fn append_activity_with_phase(
+        &self,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        phase: ActivityPhase,
+    ) -> StoreResult<()> {
+        self.append_activity_inner(session_id.as_ref(), workspace_id.as_ref(), phase)
+    }
+
+    fn append_activity_inner(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        phase: ActivityPhase,
+    ) -> StoreResult<()> {
         let now = now_timestamp();
         let expires_at = timestamp_after(&now, ACTIVITY_TTL_SECONDS)?;
         self.conn.execute(
@@ -2760,12 +2780,14 @@ impl Store {
                 activity_id,
                 session_id,
                 workspace_id,
+                phase,
                 expires_at
-            ) VALUES (?1, ?2, ?3, ?4)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 Uuid::new_v4().to_string(),
                 session_id,
                 workspace_id,
+                phase.as_str(),
                 expires_at,
             ],
         )?;
@@ -2778,16 +2800,26 @@ impl Store {
         session_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<(u64, u64)> {
+        self.finalize_session_activity_with_phase(session_id, workspace_id, ActivityPhase::Done)
+    }
+
+    pub fn finalize_session_activity_with_phase(
+        &self,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        phase: ActivityPhase,
+    ) -> StoreResult<(u64, u64)> {
         let session_id = session_id.as_ref().to_string();
         let workspace_id = workspace_id.as_ref().to_string();
         if !self.conn.is_autocommit() {
-            return self.finalize_session_activity_inner(&session_id, &workspace_id);
+            return self.finalize_session_activity_inner(&session_id, &workspace_id, phase);
         }
 
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
 
         let result = (|| -> StoreResult<(u64, u64)> {
-            let finalized = self.finalize_session_activity_inner(&session_id, &workspace_id)?;
+            let finalized =
+                self.finalize_session_activity_inner(&session_id, &workspace_id, phase)?;
             self.conn.execute_batch("COMMIT")?;
             Ok(finalized)
         })();
@@ -2803,8 +2835,9 @@ impl Store {
         &self,
         session_id: &str,
         workspace_id: &str,
+        phase: ActivityPhase,
     ) -> StoreResult<(u64, u64)> {
-        self.append_activity_inner(session_id, workspace_id)?;
+        self.append_activity_inner(session_id, workspace_id, phase)?;
         self.cancel_session_waiters_inner(session_id, workspace_id)?;
         let released = self.release_session_leases_inner(session_id, workspace_id)?;
         let completed = self.complete_session_intents_inner(session_id, workspace_id)?;
@@ -2845,12 +2878,36 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    fn active_session_phase(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+    ) -> StoreResult<Option<ActivityPhase>> {
+        let now = now_timestamp();
+        self.conn
+            .query_row(
+                "SELECT phase
+                 FROM activities
+                 WHERE session_id = ?1
+                    AND workspace_id = ?2
+                    AND (expires_at IS NULL OR expires_at > ?3)
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                params![session_id, workspace_id, now],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map(|phase| phase.and_then(|phase| parse_activity_phase(&phase)))
+            .map_err(StoreError::from)
+    }
+
     pub fn policy_state_for_session(
         &self,
         session_id: &str,
         workspace_id: &str,
     ) -> StoreResult<PolicyState> {
         self.expire_stale()?;
+        let phase = self.active_session_phase(session_id, workspace_id)?;
         let scopes = self
             .active_intent_scope_rows(session_id, workspace_id)?
             .into_iter()
@@ -2860,7 +2917,12 @@ impl Store {
             return Ok(PolicyState::default());
         }
 
-        Ok(PolicyState::default().with_active_intent_scopes(scopes))
+        let mut state = PolicyState::default().with_active_intent_scopes(scopes);
+        if let Some(phase) = phase {
+            state = state.with_activity_phase(phase);
+        }
+
+        Ok(state)
     }
 
     pub fn active_exact_file_intent_by_session(
@@ -3092,11 +3154,15 @@ impl Store {
                 activity_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
+                phase TEXT NOT NULL DEFAULT 'exploring',
                 expires_at TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_activities_workspace_expires_at
                 ON activities(workspace_id, expires_at);
+
+            CREATE INDEX IF NOT EXISTS idx_activities_session_workspace_expires_at
+                ON activities(session_id, workspace_id, expires_at);
 
             CREATE TABLE IF NOT EXISTS intents (
                 intent_id TEXT PRIMARY KEY,
@@ -3292,6 +3358,11 @@ impl Store {
             "ALTER TABLE leases ADD COLUMN observed_content_hash TEXT;",
         )?;
         self.add_column_if_missing(
+            "activities",
+            "phase",
+            "ALTER TABLE activities ADD COLUMN phase TEXT NOT NULL DEFAULT 'exploring';",
+        )?;
+        self.add_column_if_missing(
             "outbox",
             "workspace_id",
             "ALTER TABLE outbox ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '';",
@@ -3368,7 +3439,8 @@ impl Store {
                 && matches!(
                     column,
                     "request_id" | "purpose" | "repo_id" | "worktree_id" | "root" | "branch"
-                ));
+                ))
+            || (table == "activities" && column == "phase");
         if !supported {
             return Ok(());
         }
@@ -3443,6 +3515,7 @@ impl Store {
              SET expires_at = ?1
              WHERE session_id = ?2
                 AND workspace_id = ?3
+                AND phase IN ('exploring', 'editing', 'testing')
                 AND (expires_at IS NULL OR expires_at < ?1)",
             params![activity_expires_at, session_id, workspace_id],
         )?;
@@ -3543,6 +3616,11 @@ impl Store {
                         event.created_at,
                         expires_at,
                     ],
+                )?;
+                self.append_activity_inner(
+                    &event.session_id,
+                    &event.workspace_id,
+                    ActivityPhase::Exploring,
                 )?;
             }
             EventType::LeaseAcquired
@@ -3915,6 +3993,94 @@ fn identity_filter_matches(
     true
 }
 
+fn prepare_private_database_path(path: &Path) -> StoreResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+        restrict_directory_permissions(parent)?;
+    }
+    reject_linked_database_path(path)?;
+    if !path.exists() {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+    }
+    restrict_database_file_permissions(path)
+}
+
+fn reject_linked_database_path(path: &Path) -> StoreResult<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StoreError::Io(
+            std::io::Error::other("state database path must not be a symlink"),
+        )),
+        Ok(metadata) if database_metadata_is_hard_linked(&metadata) => Err(StoreError::Io(
+            std::io::Error::other("state database path must not be hard-linked"),
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StoreError::Io(error)),
+    }
+}
+
+fn restrict_database_file_permissions(path: &Path) -> StoreResult<()> {
+    restrict_file_permissions(path)?;
+    restrict_file_permissions(&path.with_extension("db-wal"))?;
+    restrict_file_permissions(&path.with_extension("db-shm"))?;
+    restrict_file_permissions(&path.with_extension("wal"))?;
+    restrict_file_permissions(&path.with_extension("shm"))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_directory_permissions(path: &Path) -> StoreResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_directory_permissions(_path: &Path) -> StoreResult<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_file_permissions(path: &Path) -> StoreResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(StoreError::Io(
+            std::io::Error::other("state database file must not be a symlink"),
+        )),
+        Ok(metadata) if database_metadata_is_hard_linked(&metadata) => Err(StoreError::Io(
+            std::io::Error::other("state database file must not be hard-linked"),
+        )),
+        Ok(metadata) if metadata.is_file() => {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            Ok(())
+        }
+        Ok(_) => Err(StoreError::Io(std::io::Error::other(
+            "state database path must be a regular file",
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StoreError::Io(error)),
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_file_permissions(path: &Path) -> StoreResult<()> {
+    reject_linked_database_path(path)
+}
+
+#[cfg(unix)]
+fn database_metadata_is_hard_linked(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.is_file() && metadata.nlink() > 1
+}
+
+#[cfg(not(unix))]
+fn database_metadata_is_hard_linked(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
 fn configure_file_connection(conn: &Connection) -> StoreResult<()> {
     configure_connection(conn)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -3928,6 +4094,18 @@ fn configure_connection(conn: &Connection) -> StoreResult<()> {
 
 fn now_timestamp() -> String {
     format_timestamp(OffsetDateTime::now_utc())
+}
+
+fn parse_activity_phase(phase: &str) -> Option<ActivityPhase> {
+    match phase {
+        "exploring" => Some(ActivityPhase::Exploring),
+        "editing" => Some(ActivityPhase::Editing),
+        "testing" => Some(ActivityPhase::Testing),
+        "blocked" => Some(ActivityPhase::Blocked),
+        "done" => Some(ActivityPhase::Done),
+        "failed" => Some(ActivityPhase::Failed),
+        _ => None,
+    }
 }
 
 fn timestamp_after(timestamp: &str, seconds: i64) -> StoreResult<String> {
@@ -4192,6 +4370,7 @@ impl Event {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn intent_requested(
         session_id: impl Into<String>,
         workspace_id: impl Into<String>,
@@ -4372,6 +4551,7 @@ impl Event {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn authorization_denied(
         session_id: impl Into<String>,
         workspace_id: impl Into<String>,

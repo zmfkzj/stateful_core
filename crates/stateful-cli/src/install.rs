@@ -1158,7 +1158,7 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
             contents.push('\n');
         }
         contents.push_str(
-            "tools:\n  approvalMode: write\n  approval:\n    bash: allow\n    python: allow\n    task: allow\n    external_bash: prompt\n",
+            "tools:\n  approvalMode: write\n  approval:\n    bash: prompt\n    python: prompt\n    task: allow\n    external_bash: prompt\n",
         );
         return contents;
     }
@@ -1191,9 +1191,9 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
         insert_offset
     };
 
-    ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "bash");
+    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "bash", "prompt");
     tools_end = find_omp_top_level_section_end(&lines, tools_offset);
-    ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "python");
+    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "python", "prompt");
     tools_end = find_omp_top_level_section_end(&lines, tools_offset);
     ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "task");
     tools_end = find_omp_top_level_section_end(&lines, tools_offset);

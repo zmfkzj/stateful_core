@@ -1,6 +1,33 @@
 use crate::{Decision, normalize_directory_path, normalize_relative_path};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityPhase {
+    Exploring,
+    Editing,
+    Testing,
+    Blocked,
+    Done,
+    Failed,
+}
+
+impl ActivityPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exploring => "exploring",
+            Self::Editing => "editing",
+            Self::Testing => "testing",
+            Self::Blocked => "blocked",
+            Self::Done => "done",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn authorizes_writes(self) -> bool {
+        matches!(self, Self::Exploring | Self::Editing | Self::Testing)
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "path", rename_all = "snake_case")]
 pub enum IntentScope {
@@ -65,15 +92,10 @@ impl ScopeSet {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PolicyState {
     scopes: Option<ScopeSet>,
-}
-
-impl Default for PolicyState {
-    fn default() -> Self {
-        Self { scopes: None }
-    }
+    phase: Option<ActivityPhase>,
 }
 
 impl PolicyState {
@@ -89,6 +111,11 @@ impl PolicyState {
 
     pub fn with_active_intent_scopes(mut self, scopes: Vec<IntentScope>) -> Self {
         self.scopes = Some(ScopeSet::new(scopes));
+        self
+    }
+
+    pub fn with_activity_phase(mut self, phase: ActivityPhase) -> Self {
+        self.phase = Some(phase);
         self
     }
 }
@@ -144,6 +171,16 @@ pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decis
             "Call state.intent.declare with file or directory scope before writing.",
         );
     };
+
+    if let Some(phase) = state.phase
+        && !phase.authorizes_writes()
+    {
+        return Decision::deny(
+            "inactive_session_phase",
+            "Session phase does not authorize writes.",
+            "Move the session back to exploring, editing, or testing before writing.",
+        );
+    }
 
     match input {
         AuthorizationInput::WriteFile { path } if scopes.allows_write(&path) => {

@@ -706,10 +706,7 @@ fn omp_post_tool_refresh_targets(
             if tool_name.eq_ignore_ascii_case("bash")
                 || tool_name.eq_ignore_ascii_case("python") =>
         {
-            match input
-                .command()
-                .and_then(|command| omp_sandbox_run_action(command))
-            {
+            match input.command().and_then(omp_sandbox_run_action) {
                 Some(OmpPreToolAction::Targets(targets)) => targets,
                 _ => Vec::new(),
             }
@@ -731,7 +728,7 @@ fn post_omp_session_event(
         .workspace_id
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, identity));
-    let body = json!({
+    let mut body = json!({
         "session_id": &input.session_id,
         "workspace_id": workspace_id,
         "source": {
@@ -742,6 +739,12 @@ fn post_omp_session_event(
         },
         "metadata": input.audit_metadata(),
     });
+    if let Some(identity) = identity {
+        body["repo_id"] = json!(identity.repo_id);
+        body["worktree_id"] = json!(identity.worktree_id);
+        body["root"] = json!(identity.root);
+        body["branch"] = json!(identity.branch);
+    }
 
     let response = post_json(runtime, path, &body)?;
     if !(200..300).contains(&response.status_code) {
@@ -812,7 +815,7 @@ pub fn handle_post_tool_use_in_repo(
         let input: SessionEventInput = serde_json::from_str(input)?;
         let workspace_id = effective_workspace_id(&runtime, Some(&identity));
         queue_session_heartbeat_outbox(
-            &repo_root,
+            &paths,
             &workspace_id,
             input.stateful_session_id(),
             &error.to_string(),
@@ -1170,7 +1173,7 @@ fn handle_pre_tool_use_with_runtime(
     let identity = repo_root.and_then(|repo_root| {
         global_paths
             .as_ref()
-            .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok())
+            .and_then(|paths| repo_identity_for_enabled_repo(paths, repo_root).ok())
     });
 
     let tool_name = runtime_tool_name_leaf(&input.tool_name);
@@ -1219,7 +1222,7 @@ fn handle_pre_tool_use_with_runtime(
 
 fn runtime_tool_name_leaf(tool_name: &str) -> &str {
     tool_name
-        .rsplit(|character| matches!(character, '.' | '/'))
+        .rsplit(['.', '/'])
         .next()
         .unwrap_or(tool_name)
         .trim_start_matches('_')
@@ -2161,6 +2164,8 @@ fn authorize_targets(
     }
 
     let workspace_id = effective_workspace_id(runtime, identity);
+    let session_id = input.stateful_session_id().to_string();
+    let mut allowed_paths = BTreeSet::new();
     for target in targets {
         let purpose = hook_authorize_purpose(input, runtime, &target, &workspace_id);
         let mut payload = json!({
@@ -2181,7 +2186,7 @@ fn authorize_targets(
         let body = protocol_envelope(ProtocolEnvelopeArgs {
             runtime,
             request_id: uuid::Uuid::new_v4().to_string(),
-            session_id: input.stateful_session_id().to_string(),
+            session_id: session_id.clone(),
             workspace_id: workspace_id.clone(),
             identity: identity.cloned(),
             source_kind: "hook",
@@ -2193,6 +2198,12 @@ fn authorize_targets(
         let response = match post_json(runtime, "/v1/authorize", &body) {
             Ok(response) => response,
             Err(error) => {
+                release_pre_tool_authorized_leases(
+                    runtime,
+                    &session_id,
+                    &workspace_id,
+                    &allowed_paths,
+                );
                 return Ok(HookOutcome::Deny {
                     reason: authorization_unavailable_reason(&error),
                 });
@@ -2200,6 +2211,7 @@ fn authorize_targets(
         };
 
         if !(200..300).contains(&response.status_code) {
+            release_pre_tool_authorized_leases(runtime, &session_id, &workspace_id, &allowed_paths);
             return Ok(HookOutcome::Deny {
                 reason: format!(
                     "stateful authorization failed with HTTP {}: {}",
@@ -2211,19 +2223,51 @@ fn authorize_targets(
         let decision: AuthorizeDecision = match serde_json::from_str(&response.body) {
             Ok(decision) => decision,
             Err(error) => {
+                release_pre_tool_authorized_leases(
+                    runtime,
+                    &session_id,
+                    &workspace_id,
+                    &allowed_paths,
+                );
                 return Ok(HookOutcome::Deny {
                     reason: authorization_unavailable_reason(&error),
                 });
             }
         };
         if decision.decision != "allow" {
+            release_pre_tool_authorized_leases(runtime, &session_id, &workspace_id, &allowed_paths);
             return Ok(HookOutcome::Deny {
                 reason: authorization_denial_reason(decision),
             });
         }
+        allowed_paths.insert(target.path.clone());
+        if let Some(new_path) = &target.new_path {
+            allowed_paths.insert(new_path.clone());
+        }
     }
 
     Ok(HookOutcome::Allow)
+}
+
+fn release_pre_tool_authorized_leases(
+    runtime: &ServerRuntime,
+    session_id: &str,
+    workspace_id: &str,
+    paths: &BTreeSet<String>,
+) {
+    for path in paths {
+        let body = json!({
+            "session_id": session_id,
+            "workspace_id": workspace_id,
+            "path": path,
+        });
+        let Ok(response) = post_json(runtime, "/v1/lease/release", &body) else {
+            continue;
+        };
+        if !(200..300).contains(&response.status_code) {
+            continue;
+        }
+    }
 }
 
 fn shadow_write_paths(targets: &[PatchTarget]) -> impl Iterator<Item = &str> {
@@ -2319,6 +2363,13 @@ fn normalize_file_tool_target(
         .unwrap_or_else(|_| repo_root.to_path_buf());
 
     if candidate.is_absolute() {
+        let raw_candidate = normalize_path(candidate.to_path_buf());
+        if let Ok(relative) = raw_candidate.strip_prefix(&repo_root) {
+            reject_symlinked_target_components(&repo_root, relative)?;
+        }
+    }
+
+    if candidate.is_absolute() {
         let canonical = candidate
             .canonicalize()
             .unwrap_or_else(|_| candidate.to_path_buf());
@@ -2326,6 +2377,7 @@ fn normalize_file_tool_target(
         let Ok(relative) = candidate.strip_prefix(&repo_root) else {
             return Ok(None);
         };
+        reject_symlinked_target_components(&repo_root, relative)?;
         return Ok(Some(normalize_relative_path(relative.to_string_lossy())));
     }
 
@@ -2336,7 +2388,34 @@ fn normalize_file_tool_target(
         return Ok(None);
     };
 
+    reject_symlinked_target_components(&repo_root, relative)?;
     Ok(Some(normalize_relative_path(relative.to_string_lossy())))
+}
+
+fn reject_symlinked_target_components(
+    repo_root: &Path,
+    relative_path: &Path,
+) -> anyhow::Result<()> {
+    let mut current = repo_root.to_path_buf();
+    for component in relative_path.components() {
+        let Component::Normal(part) = component else {
+            continue;
+        };
+        current.push(part);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!(
+                    "stateful native file target `{}` includes symlinked component `{}`",
+                    relative_path.display(),
+                    current.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn extract_apply_patch_write_targets(patch: &str) -> Vec<PatchTarget> {
@@ -2762,8 +2841,8 @@ mod tests {
     fn hook_session_extraction_does_not_keep_fake_runtime_adapter() {
         let source = include_str!("hook.rs");
 
-        assert!(!source.contains(&concat!("Claude", "CodeRuntimeAdapter")));
-        assert!(!source.contains(&concat!("trait ", "RuntimeAdapter")));
+        assert!(!source.contains(concat!("Claude", "CodeRuntimeAdapter")));
+        assert!(!source.contains(concat!("trait ", "RuntimeAdapter")));
     }
 
     #[test]

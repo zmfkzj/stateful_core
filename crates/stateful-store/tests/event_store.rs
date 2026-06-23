@@ -2396,7 +2396,7 @@ fn released_child_lease_promotes_directory_waiter_to_reservation() {
     assert_eq!(reservation.relative_path, "target");
 
     let notifications = store
-        .pending_notifications("s2")
+        .pending_notifications("s2", "w1")
         .expect("notifications should load");
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].kind, "reservation_granted");
@@ -2657,7 +2657,7 @@ fn released_directory_lease_promotes_child_file_waiter_to_reservation() {
     assert_eq!(reservation.session_id, "s2");
 
     let notifications = store
-        .pending_notifications("s2")
+        .pending_notifications("s2", "w1")
         .expect("notifications should load");
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].payload["relative_path"], "target/out.txt");
@@ -2892,13 +2892,46 @@ fn reservation_promotion_creates_pending_notification_for_waiter() {
         .expect("waiter should promote");
 
     let notifications = store
-        .pending_notifications("s2")
+        .pending_notifications("s2", "w1")
         .expect("notifications should load");
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].target_session_id, "s2");
     assert_eq!(notifications[0].workspace_id, "w1");
     assert_eq!(notifications[0].kind, "reservation_granted");
     assert_eq!(notifications[0].payload["relative_path"], "src/auth.ts");
+}
+
+#[test]
+fn pending_notifications_are_scoped_to_workspace() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    for workspace_id in ["w1", "w2"] {
+        store
+            .enqueue_waiter(
+                "s2",
+                workspace_id,
+                "src/auth.ts",
+                "write_file",
+                "Queue requested file write after blocker clears.",
+                Some("s1"),
+            )
+            .expect("waiter should enqueue");
+        store
+            .promote_next_waiter(workspace_id, "src/auth.ts")
+            .expect("waiter should promote");
+    }
+
+    let w1_notifications = store
+        .pending_notifications("s2", "w1")
+        .expect("w1 notifications should load");
+    let w2_notifications = store
+        .pending_notifications("s2", "w2")
+        .expect("w2 notifications should load");
+
+    assert_eq!(w1_notifications.len(), 1);
+    assert_eq!(w1_notifications[0].workspace_id, "w1");
+    assert_eq!(w2_notifications.len(), 1);
+    assert_eq!(w2_notifications[0].workspace_id, "w2");
 }
 
 #[test]
@@ -2920,10 +2953,10 @@ fn pending_notifications_are_delivered_once() {
         .expect("waiter should promote");
 
     let first_poll = store
-        .pending_notifications("s2")
+        .pending_notifications("s2", "w1")
         .expect("first poll should load notification");
     let second_poll = store
-        .pending_notifications("s2")
+        .pending_notifications("s2", "w1")
         .expect("second poll should not redeliver notification");
 
     assert_eq!(first_poll.len(), 1);

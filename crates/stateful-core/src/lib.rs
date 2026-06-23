@@ -11,7 +11,9 @@ pub use context::{
 pub use path::{
     normalize_directory_path, normalize_relative_path, normalized_relative_path_is_empty,
 };
-pub use policy::{AuthorizationInput, IntentScope, PolicyState, ScopeSet, authorize_action};
+pub use policy::{
+    ActivityPhase, AuthorizationInput, IntentScope, PolicyState, ScopeSet, authorize_action,
+};
 pub use reconcile::ReconciliationDecision;
 pub use types::{
     ActorType, Decision, DecisionKind, ProtocolVersion, RequestEnvelope, SessionIdentity,

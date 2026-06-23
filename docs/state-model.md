@@ -266,9 +266,10 @@ explicit; the server does not generate a fallback purpose. Abstract resources in
 `task`, `test`, `port`, or `migration`, can provide context but cannot authorize
 writes.
 
-`phase`, `goal`, `resources_planned`, `next_intent`, and `max_expires_at` are
-target model fields. Shipped authorization is based on active, unexpired scope
-rows and same-session leases.
+`phase` is shipped for activity records and write authorization. `goal`,
+`resources_planned`, `next_intent`, and `max_expires_at` remain target model
+fields. Shipped authorization is based on active, unexpired scope rows,
+same-session leases, and active phases.
 
 Intent declarations add to the session's active scope in that workspace. This
 lets a session keep an edit scope and add a `tmp/` build/test scope without
@@ -584,9 +585,9 @@ Freshness is required for all active coordination records.
   `declared_at`.
 - Shipped intent authorization is based on active, unexpired scope rows. Expired
   rows are removed from the active policy state and deny as `missing_intent`.
-- Target phase-aware authorization also requires the session to not be finalized
-  and `phase` to be `exploring`, `editing`, or `testing`.
-- Target `phase = blocked` keeps the activity visible but stops write
+- Phase-aware authorization requires the latest activity phase to be
+  `exploring`, `editing`, or `testing` when a phase is present.
+- `phase = blocked`, `done`, or `failed` keeps activity visible but stops write
   authorization.
 - Directory intent scope authorizes `write_directory` only for the exact
   directory resource.
@@ -597,9 +598,8 @@ Freshness is required for all active coordination records.
   implementation also refreshes active intent expiry during `SessionHeartbeat`
   materialization, capped at 60 minutes from `declared_at`.
 - Missing heartbeats do not imply success.
-- Shipped finalization completes active intents. Target finalization as `done`,
-  `failed`, or `blocked` also drives phase-aware authorization and historical
-  context.
+- Shipped finalization completes active intents and appends a terminal activity
+  phase, defaulting to `done` unless the request supplies another phase.
 - Turn end expires unused overrides.
 - Expired records remain historical evidence but stop blocking new work.
 - Reads should distinguish fresh, stale, and expired state.

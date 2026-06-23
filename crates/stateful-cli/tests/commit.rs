@@ -963,7 +963,7 @@ fn structured_commit_clears_index_after_initial_commit_hook_failure() {
     assert_eq!(worktree, "plan\n");
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn structured_commit_rejects_unrelated_index_entries_added_by_successful_hook() {
     let root = git_repo("stateful-commit-hook-success-adds-unrelated");
@@ -997,11 +997,12 @@ fn structured_commit_rejects_unrelated_index_entries_added_by_successful_hook() 
         })),
     });
 
+    let error = result
+        .expect_err("hook worktree mutation should fail commit")
+        .to_string();
     assert!(
-        result
-            .expect_err("hook staging unrelated file should fail commit")
-            .to_string()
-            .contains("unrelated staged changes")
+        error.contains("pre-commit hook failed") || error.contains("modified the worktree"),
+        "unexpected error: {error}"
     );
     assert_eq!(
         git_output(root.path(), &["rev-list", "--count", "HEAD"]),
@@ -1013,14 +1014,13 @@ fn structured_commit_rejects_unrelated_index_entries_added_by_successful_hook() 
         staged.is_empty(),
         "rejected hook should not leave unrelated staged files"
     );
-    let status = git_output(root.path(), &["status", "--short", "--", "generated.txt"]);
     assert!(
-        status.lines().any(|line| line == "?? generated.txt"),
-        "generated hook output should remain as an untracked worktree file"
+        !root.path().join("generated.txt").exists(),
+        "read-only hook execution should not leave generated worktree files"
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn structured_commit_restores_unrelated_index_entries_added_by_failed_hook() {
     let root = git_repo("stateful-commit-hook-adds-unrelated");
@@ -1065,7 +1065,7 @@ fn structured_commit_restores_unrelated_index_entries_added_by_failed_hook() {
         staged.is_empty(),
         "failed hook should not leave unrelated staged files"
     );
-    assert!(root.path().join("generated.txt").exists());
+    assert!(!root.path().join("generated.txt").exists());
 }
 
 fn git_repo(name: &str) -> tempfile_root::TempRoot {

@@ -116,15 +116,16 @@ The prototype supports user-level installation with repo allowlist gating.
 `stateful install --agent codex --yes` configures global Codex hooks and MCP.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
-(`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`, and allows
-the Bash/Python OMP approval gate so stateful sandbox wrappers can decide. The
-generated extension registers `external_bash` for repo-external shell work; that
-tool asks for OMP UI confirmation before spawning `sandbox run --fs external`.
-Raw OMP Bash/Python external sandbox invocations are blocked. The OMP
+(`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write` plus
+`tools.approval.{bash,python}: prompt` as a host-level backstop, and keeps
+stateful hooks responsible for blocking raw Bash/Python unless a valid stateful
+sandbox path is used. The generated extension registers `external_bash` for
+repo-external shell work; that tool asks for OMP UI confirmation before spawning
+`sandbox run --fs external`. Raw OMP Bash/Python external sandbox invocations
+are blocked. The OMP
 global/default profile is not modified.
-`stateful enable` opts the current repo into enforcement. Repo-local
-hooks remain available through `stateful enable --repo-local-codex` as a
-compatibility fallback.
+`stateful enable` opts the current repo into enforcement through the user-level
+install and repo allowlist.
 
 ```text
 global Codex hooks and MCP config
@@ -228,10 +229,11 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 - deny supported write calls when the session has no active intent
 - deny Codex raw Bash with sandbox guidance. For OMP, block raw Bash and native
-  Python execution unless they use an allowed trusted `stateful sandbox run`
-  wrapper; repo-external shell or Python work must use `external_bash`, which
-  prompts before invoking `sandbox run --fs external`. Raw OMP Bash/Python
-  external sandbox invocations are blocked. Hook-mediated command execution must
+  Python execution unless they use a valid stateful sandbox path through a
+  trusted `stateful sandbox run` wrapper; repo-external shell or Python work
+  must use `external_bash`, which prompts before invoking
+  `sandbox run --fs external`. Raw OMP Bash/Python external sandbox invocations
+  are blocked. Hook-mediated command execution must
   be a single strict invocation of the trusted absolute `stateful` binary running
   `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
   command-shaped inspection uses `--fs read-only --network disabled`; the hook
@@ -307,11 +309,12 @@ classification, so `functions.bash` is Bash, `functions.python` is Python, and
   intent declaration and a successful same-session file lease. The completed
   write transaction releases the lease that authorized it.
 - Command execution: Codex raw Bash is denied with sandbox guidance. OMP raw Bash
-  and native Python execution are blocked unless they use an allowed trusted
-  sandbox wrapper; repo-external shell or Python work must use `external_bash`,
-  which prompts before invoking `stateful sandbox run --fs external --purpose
-  ...`. Ordinary read work should use native read/search/diff tools when
-  available. Read-only command-shaped inspection that genuinely needs a shell
+  and native Python execution are blocked unless they use a valid stateful
+  sandbox path through a trusted wrapper; repo-external shell or Python work
+  must use `external_bash`, which prompts before invoking
+  `stateful sandbox run --fs external --purpose ...`. Ordinary read work should
+  use native read/search/diff tools when available. Read-only command-shaped
+  inspection that genuinely needs a shell
   uses `--fs read-only --network disabled`; the read-only profile cannot enable
   network. Command-shaped repo writes use `--fs write-targets` with explicit
   `--write-target` / `--create-target` values and target authorization.
@@ -330,9 +333,10 @@ shell execution, and sandbox-run wrappers for tests.
 MCP does not perform local command-shaped file writes. Hook-mediated shell
 execution uses `<absolute-stateful-binary> sandbox run ... --command <cmd>`;
 plain CLI-context usage outside hooks can use `stateful sandbox run`. The MVP
-ships `read-only`, `write-targets`, `build`, and `git` profiles; `workspace`
-profiles are deferred and fail closed. `/dev/null` is writable in every sandbox
-profile so common shell and Git behavior works. Command text alone does not
+ships `read-only`, `write-targets`, `build`, `git`, `external`, and `github-pr`
+profiles; `workspace` profiles are deferred and fail closed. `/dev/null` is
+writable in every sandbox profile so common shell and Git behavior works.
+Command text alone does not
 authorize `rg`, `git diff`, test runners, stateful operational commands, or any
 other Bash command.
 
@@ -615,8 +619,8 @@ The system should prefer explicit uncertainty:
 - state server unavailable -> deny supported writes that cannot prove active
   intent
 - state server unavailable -> deny Codex raw Bash, repo-internal Bash, and OMP
-  native Python execution that is not a strict
-  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper;
+  raw Bash/native Python execution without a valid stateful sandbox path through
+  a trusted `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper;
   command-shaped writes through `--fs write-targets` fail closed when
   target authorization cannot be proven
 - state server unavailable -> write-target sandbox authorization fails closed

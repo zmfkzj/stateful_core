@@ -4785,7 +4785,7 @@ fn post_tool_use_outbox_fallback_records_current_created_at() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let outbox_file = repo_root.join(".stateful_core/outbox/s1.jsonl");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
     let outbox = fs::read_to_string(&outbox_file).expect("outbox fallback should write");
     let record: serde_json::Value =
         serde_json::from_str(outbox.trim()).expect("outbox record should be json");

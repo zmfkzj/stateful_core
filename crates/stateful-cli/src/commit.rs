@@ -418,8 +418,8 @@ fn run_git_hook_with_index(
         }
     }
 
-    let mut command = Command::new(&hook_path);
-    command.current_dir(repo_root);
+    let worktree_status_before = git_stdout(repo_root, &["status", "--porcelain=v1", "-z"])?;
+    let mut command = commit_hook_command(repo_root, &hook_path);
     sanitize_git_environment(&mut command);
     let git_dir = git_stdout(repo_root, &["rev-parse", "--absolute-git-dir"])?;
     command.env("GIT_DIR", git_dir.trim());
@@ -433,8 +433,47 @@ fn run_git_hook_with_index(
             String::from_utf8_lossy(&output.stderr)
         );
     }
-
+    let worktree_status_after = git_stdout(repo_root, &["status", "--porcelain=v1", "-z"])?;
+    if worktree_status_after != worktree_status_before {
+        anyhow::bail!(
+            "{hook_name} hook modified the worktree; stateful commit hooks run read-only"
+        );
+    }
     Ok(())
+}
+
+fn commit_hook_command(repo_root: &Path, hook_path: &Path) -> Command {
+    #[cfg(target_os = "macos")]
+    {
+        if Path::new("/usr/bin/sandbox-exec").is_file() {
+            let mut command = Command::new("/usr/bin/sandbox-exec");
+            command
+                .arg("-p")
+                .arg(read_only_commit_hook_profile(repo_root))
+                .arg(hook_path)
+                .current_dir(repo_root);
+            return command;
+        }
+    }
+
+    let mut command = Command::new(hook_path);
+    command.current_dir(repo_root);
+    command
+}
+
+#[cfg(target_os = "macos")]
+fn read_only_commit_hook_profile(repo_root: &Path) -> String {
+    format!(
+        "(version 1)\n(allow default)\n(deny file-write* (subpath \"{}\"))\n",
+        seatbelt_escape_path(repo_root)
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn seatbelt_escape_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 fn reject_rename_status(repo_root: &Path, paths: &[String]) -> anyhow::Result<()> {

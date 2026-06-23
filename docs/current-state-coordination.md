@@ -249,15 +249,16 @@ The prototype supports user-level installation with repo allowlist gating.
 `stateful install --agent codex --yes` configures global Codex hooks and MCP.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
-(`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`, and allows
-the Bash/Python OMP approval gate so stateful sandbox wrappers can decide. The
-generated extension registers `external_bash` for repo-external shell work; that
-tool asks for OMP UI confirmation before spawning `sandbox run --fs external`.
-Raw OMP Bash/Python external sandbox invocations are blocked. The OMP
+(`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write` plus
+`tools.approval.{bash,python}: prompt` as a host-level backstop, and keeps
+stateful hooks responsible for blocking raw Bash/Python unless a valid stateful
+sandbox path is used. The generated extension registers `external_bash` for
+repo-external shell work; that tool asks for OMP UI confirmation before spawning
+`sandbox run --fs external`. Raw OMP Bash/Python external sandbox invocations
+are blocked. The OMP
 global/default profile is not modified.
-`stateful enable` opts the current repo into enforcement. Repo-local
-hooks remain available through `stateful enable --repo-local-codex` as a
-compatibility fallback.
+`stateful enable` opts the current repo into enforcement through the user-level
+install and repo allowlist.
 
 ```text
 global Codex hooks and MCP config
@@ -323,10 +324,11 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 - intercept supported tool calls before execution
 - deny supported write calls when the session has no active intent
 - deny Codex raw Bash with sandbox guidance. For OMP, block raw Bash and native
-  Python execution unless they use an allowed trusted sandbox-run wrapper;
-  repo-external shell or Python work must use `external_bash`, which prompts
-  before invoking `sandbox run --fs external --purpose ...`. Raw OMP Bash/Python
-  external sandbox invocations are blocked.
+  Python execution unless they use a valid stateful sandbox path through a
+  trusted sandbox-run wrapper; repo-external shell or Python work must use
+  `external_bash`, which prompts before invoking
+  `sandbox run --fs external --purpose ...`. Raw OMP Bash/Python external
+  sandbox invocations are blocked.
 - check whether requested files or resources conflict with active leases
 - deny, warn, or add context based on policy
 
@@ -453,7 +455,7 @@ Bash command-shaped repo writes -> require the trusted wrapper with
   --fs write-targets plus explicit --write-target/--create-target values
 test execution -> run through sandbox run --fs build with
   --write-dir <scratch-purpose>; scratch lives under /tmp/stateful/<session>/
-Codex raw Bash, OMP raw Bash, or OMP native Python without an allowed wrapper -> deny
+Codex raw Bash, OMP raw Bash, or OMP native Python without a valid stateful sandbox path -> deny
 repo-external OMP shell or Python work -> require `external_bash`
 ```
 
@@ -504,9 +506,10 @@ Initial policy should prefer advisory leases:
 - supported write after session finalization: deny
 - supported write outside matching exact file scope or exact directory
   `write_directory` scope: deny
-- Codex raw Bash, non-wrapper Bash, or OMP native Python execution that is not a
-  strict trusted `<absolute-stateful-binary> sandbox run ... --command <cmd>`
-  wrapper: deny, including repo-external shell or Python work
+- Codex raw Bash, non-wrapper Bash, or OMP raw Bash/native Python execution
+  without a valid stateful sandbox path through a strict trusted
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper: deny,
+  including repo-external shell or Python work
 - directory intent and directory lease authorize only `write_directory` for the
   exact directory resource; they do not authorize `write_file`, delete, rename,
   or move actions on child paths
@@ -685,9 +688,9 @@ When the state server is unavailable:
 
 - supported writes are denied because active intent, lease conflict, and
   reconciliation state cannot be proven
-- Codex raw Bash, repo-internal Bash calls, and OMP native Python execution that
-  are not strict trusted `<absolute-stateful-binary> sandbox run ... --command
-  <cmd>` wrappers remain denied
+- Codex raw Bash, repo-internal Bash calls, and OMP raw Bash/native Python
+  execution without a valid stateful sandbox path through a strict trusted
+  `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper remain denied
 - sandbox-run wrappers that need authorization fail closed and do not run the
   command
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block
@@ -780,7 +783,8 @@ supported write action + no active intent -> deny
 supported write action + expired intent -> deny as missing active intent
 supported write action + intent without file/directory scope -> deny
 supported write action + target outside intent scope -> deny
-Codex raw Bash, non-wrapper Bash, or OMP native Python without wrapper -> deny, including repo-external shell or Python work
+Codex raw Bash, non-wrapper Bash, or OMP native Python without a valid
+  stateful sandbox path -> deny, including repo-external shell or Python work
 delete action + non-exact file scope -> deny
 rename/move action + non-exact source or destination scope -> deny
 active write lease in hard conflict domain -> deny

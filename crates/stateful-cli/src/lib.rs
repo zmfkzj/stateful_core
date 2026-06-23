@@ -43,7 +43,7 @@ pub use lan::{
     server_start_runtime_result, start_server_runtime,
 };
 pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio_in_repo};
-pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime};
+pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime, sync_outbox_with_runtime};
 pub use push::{PushRequest, PushResult, run_structured_push};
 pub use repo_registry::{
     RepoEntry, RepoGate, RepoIdentity, RepoRegistry, RepoToolList, allow_tool_for_repo,
@@ -512,6 +512,14 @@ pub fn run() -> anyhow::Result<()> {
                 let paths = GlobalPaths::from_env()?;
                 let runtime =
                     discover_runtime_with_global(current_repo_root_or_current_dir()?, &paths).ok();
+                let runtime = runtime.map(|runtime| {
+                    serde_json::json!({
+                        "base_url": runtime.base_url,
+                        "workspace_id": runtime.workspace_id,
+                        "pid": runtime.pid,
+                        "token": "<redacted>",
+                    })
+                });
                 println!("{}", serde_json::to_string_pretty(&runtime)?);
             }
             ServerCommand::Stop => {

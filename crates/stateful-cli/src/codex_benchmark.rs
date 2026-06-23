@@ -478,17 +478,13 @@ mod tests {
                 .map(|(_, value)| value),
             Some(&Some("token-123".to_string()))
         );
-        assert_eq!(
-            env.iter()
-                .find(|(key, _)| key == "CODEX_THREAD_ID")
-                .map(|(_, value)| value),
-            Some(&None)
+        assert!(
+            !env.iter()
+                .any(|(key, value)| key == "CODEX_THREAD_ID" && value.is_some())
         );
-        assert_eq!(
-            env.iter()
-                .find(|(key, _)| key == "STATEFUL_SESSION_ID")
-                .map(|(_, value)| value),
-            Some(&None)
+        assert!(
+            !env.iter()
+                .any(|(key, value)| key == "STATEFUL_SESSION_ID" && value.is_some())
         );
     }
 

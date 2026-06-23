@@ -30,17 +30,19 @@ COMMAND_POLICY_SKILL_PATH = Path("skills") / COMMAND_POLICY_SKILL / "SKILL.md"
 STATEFUL_BENCH_CONFIG_MARKER = "# stateful-bench nested Codex integration"
 FALLBACK_COMMAND_POLICY_SKILL = """---
 name: stateful-command-policy
-description: Use before Bash, file writes, sandboxed tests, commits, pushes, or stateful hook denials in repos with stateful Codex hooks
+description: Use before Bash, file writes, sandboxed tests, commits, pushes, OMP yolo/write approval, nested benchmarks, subagent write recovery, same-session file lease denials, missing_intent, missing_lease, lease_conflict, stateful-on source-tree reconstruction, or stateful hook denials in a repo with stateful Codex hooks
 ---
 
 # Stateful Command Policy
 
-Stateful hooks are authoritative. In Codex sessions with Stateful MCP exposed
-under the `mcp__stateful__` namespace, use the exact qualified tools shown in
-the active tool list, including `mcp__stateful__state_intent_declare` and
-`mcp__stateful__state_lease_acquire`. Do not call namespace-less short names
-such as `state_lease_acquire`, and do not run `stateful mcp call` through Bash.
-Use the sandbox-run wrappers printed by hook denials for shell commands.
+Stateful hooks are authoritative. First inspect current state with the active
+Stateful MCP tool names, then declare exact file intent and acquire matching
+same-session leases before native edits. Use canonical names in guidance
+(`state_current_read`, `state_intent_declare`, `state_lease_acquire`) and switch
+to runtime-specific aliases only when those are the active tool names, such as
+Codex `mcp__stateful__state_intent_declare` or OMP
+`mcp__stateful_state_intent_declare`. Do not run stateful MCP calls through
+Bash. Use the sandbox-run wrappers printed by hook denials for shell commands.
 """
 RESUME_PROMPT = """\
 The previous Codex exec turn stopped because of a token/context limit.
@@ -724,7 +726,20 @@ def file_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def canonical_system_temp_prefix(path: Path) -> Path:
+    if sys.platform != "darwin" or not path.is_absolute():
+        return path
+    raw = str(path)
+    for public, canonical in (("/tmp", "/private/tmp"), ("/var", "/private/var")):
+        if raw == public:
+            return Path(canonical)
+        if raw.startswith(f"{public}/"):
+            return Path(canonical) / raw[len(public) + 1 :]
+    return path
+
+
 def ensure_safe_directory(path: Path) -> bool:
+    path = canonical_system_temp_prefix(path)
     cursor = Path(path.anchor) if path.is_absolute() else Path()
     parts = path.parts[1:] if path.is_absolute() else path.parts
     for part in parts:

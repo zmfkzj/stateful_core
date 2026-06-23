@@ -1728,14 +1728,19 @@ print(json.dumps({{"command": command, "native_command": native_command, "comman
         "--dangerously-bypass-hook-trust"
     ));
     assert!(!command_contains(command, "features.multi_agent=true"));
-    assert!(command_contains(native_command, "features.multi_agent=true"));
+    assert!(command_contains(
+        native_command,
+        "features.multi_agent=true"
+    ));
     assert!(
         command_arg_after(native_command, "--append-system-prompt")
             .expect("native system prompt should exist")
             .contains("Before implementation or broad repository exploration")
     );
-    assert!(command_contains(native_command, "@/tmp/instance/prompt.txt")
-        || command_contains(native_command, "@/private/tmp/instance/prompt.txt"));
+    assert!(
+        command_contains(native_command, "@/tmp/instance/prompt.txt")
+            || command_contains(native_command, "@/private/tmp/instance/prompt.txt")
+    );
 }
 
 #[test]
@@ -3705,7 +3710,10 @@ print(json.dumps({{"off": off, "on": on}}, sort_keys=True))
     assert!(on.contains("tasks` array containing at least 3 implementation subagents"));
     assert!(on.contains("multi_agent_v1spawn_agent"));
     assert!(on.contains("Use all 3 native subagents for repository editing"));
-    assert!(on.find("Native Codex/OMP subagent requirements").unwrap() < on.find("Repository specification:").unwrap());
+    assert!(
+        on.find("Native Codex/OMP subagent requirements").unwrap()
+            < on.find("Repository specification:").unwrap()
+    );
     assert!(on.contains("Do not leave any native subagent as analysis-only"));
     assert!(on.contains("Wait for each spawned subagent"));
     assert!(on.contains("explicitly report that blocker"));
@@ -3778,8 +3786,14 @@ print(json.dumps({{"used": used, "omp_usage": omp_usage, "empty": empty}}, sort_
     assert_eq!(output["used"]["counts"]["agent_jobs"], 1);
     assert_eq!(output["used"]["counts"]["thread_spawn_edges"], 1);
     assert_eq!(output["omp_usage"]["mode"], "native_omp_subagents");
-    assert_eq!(output["omp_usage"]["native_subagent"]["subagent_spawn_count"], 3);
-    assert_eq!(output["omp_usage"]["native_subagent"]["counts"]["spawn_agent_calls"], 3);
+    assert_eq!(
+        output["omp_usage"]["native_subagent"]["subagent_spawn_count"],
+        3
+    );
+    assert_eq!(
+        output["omp_usage"]["native_subagent"]["counts"]["spawn_agent_calls"],
+        3
+    );
     assert_eq!(output["omp_usage"]["subagent_requirement_met"], true);
     assert_eq!(output["empty"]["subagent_used"], false);
 }
