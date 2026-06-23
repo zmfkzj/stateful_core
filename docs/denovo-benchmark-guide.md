@@ -131,10 +131,12 @@ runs, compare only the common completed instance set and clearly mark the result
 as exploratory.
 
 For `subagent:on`, the generated DeNovo prompt explicitly requires native
-Codex/OMP subagents, tells OMP to use the current `task` tool or older
-multi-agent tools such as `multi_agent_v1spawn_agent`, requires every counted
-subagent to inspect, edit, and verify a distinct implementation slice, and
-requires explicit blocker reporting if the runtime does not expose subagent
+Codex/OMP subagents before implementation or broad repository exploration,
+while allowing narrow preflight to read the prompt, inspect tool availability,
+or initialize stateful coordination. It tells OMP to use the current `task` tool
+or older multi-agent tools such as `multi_agent_v1spawn_agent`, requires every
+counted subagent to inspect, edit, and verify a distinct implementation slice,
+and requires explicit blocker reporting if the runtime does not expose subagent
 tools. OMP runs also unpack bundled task agents into the isolated runtime home,
 append the requirement to the system prompt, and enable `features.multi_agent=true`.
 The adapter enforces the minimum native subagent spawn count for both Codex and

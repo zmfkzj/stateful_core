@@ -1611,7 +1611,7 @@ print(json.dumps({{"command": command, "native_command": native_command, "comman
     assert!(
         command_arg_after(native_command, "--append-system-prompt")
             .expect("native system prompt should exist")
-            .contains("FIRST ACTION")
+            .contains("Before implementation or broad repository exploration")
     );
     assert!(command_contains(native_command, "@/tmp/instance/prompt.txt")
         || command_contains(native_command, "@/private/tmp/instance/prompt.txt"));
@@ -1698,7 +1698,7 @@ print(json.dumps({{
     assert!(
         command_arg_after(command, "--append-system-prompt")
             .expect("docker system prompt should exist")
-            .contains("FIRST ACTION")
+            .contains("Before implementation or broad repository exploration")
     );
 
     assert!(
@@ -3577,9 +3577,9 @@ print(json.dumps({{"off": off, "on": on}}, sort_keys=True))
     assert!(!off.contains("Native Codex/OMP subagent requirements"));
     assert!(on.contains("Native Codex/OMP subagent requirements"));
     assert!(on.contains("MUST use native subagents"));
-    assert!(on.contains("Spawn at least 3 native subagents before repository exploration"));
-    assert!(on.contains("FIRST ACTION"));
-    assert!(on.contains("before `todo`, `read`, `find`, `search`, `bash`, `eval`"));
+    assert!(on.contains("Before implementation or broad repository exploration"));
+    assert!(on.contains("after any narrow setup needed"));
+    assert!(!on.contains("FIRST ACTION"));
     assert!(on.contains("the current native subagent tool is `task`"));
     assert!(on.contains("tasks` array containing at least 3 implementation subagents"));
     assert!(on.contains("multi_agent_v1spawn_agent"));

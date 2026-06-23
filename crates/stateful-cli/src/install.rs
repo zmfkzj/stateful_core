@@ -1158,7 +1158,7 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
             contents.push('\n');
         }
         contents.push_str(
-            "tools:\n  approvalMode: write\n  approval:\n    bash: allow\n    python: allow\n",
+            "tools:\n  approvalMode: write\n  approval:\n    bash: allow\n    python: allow\n    task: allow\n",
         );
         return contents;
     }
@@ -1194,6 +1194,8 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
     ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "bash");
     tools_end = find_omp_top_level_section_end(&lines, tools_offset);
     ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "python");
+    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
+    ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "task");
 
     contents = lines.join("\n");
     contents.push('\n');
