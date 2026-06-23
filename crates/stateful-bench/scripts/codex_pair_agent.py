@@ -30,17 +30,18 @@ COMMAND_POLICY_SKILL_PATH = Path("skills") / COMMAND_POLICY_SKILL / "SKILL.md"
 STATEFUL_BENCH_CONFIG_MARKER = "# stateful-bench nested Codex integration"
 FALLBACK_COMMAND_POLICY_SKILL = """---
 name: stateful-command-policy
-description: Use before Bash, file writes, sandboxed tests, commits, pushes, OMP yolo/write approval, nested benchmarks, subagent write recovery, same-session file lease denials, missing_intent, missing_lease, lease_conflict, stateful-on source-tree reconstruction, or stateful hook denials in a repo with stateful Codex hooks
+description: Detailed procedure for using Stateful MCP coordination, leases, sandbox profiles, and hook-denial recovery after a Stateful rule or denial says this policy applies
 ---
 
 # Stateful Command Policy
 
-Stateful hooks are authoritative. First inspect current state with the active
-Stateful MCP tool names, then declare exact file intent and acquire matching
-same-session leases before native edits. Use canonical names in guidance
-(`state_current_read`, `state_intent_declare`, `state_lease_acquire`) and switch
-to runtime-specific aliases only when those are the active tool names, such as
-Codex `mcp__stateful__state_intent_declare` or OMP
+This skill is the procedural manual. Rules and hook denials decide when Stateful
+policy applies. First inspect current state with the active Stateful MCP tool
+names, then declare exact file intent and acquire matching same-session leases
+before native edits. Use canonical names in guidance (`state_current_read`,
+`state_intent_declare`, `state_lease_acquire`) and switch to runtime-specific
+aliases only when those are the active tool names, such as Codex
+`mcp__stateful__state_intent_declare` or OMP
 `mcp__stateful_state_intent_declare`. Do not run stateful MCP calls through
 Bash. Use the sandbox-run wrappers printed by hook denials for shell commands.
 """

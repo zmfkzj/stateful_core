@@ -41,6 +41,7 @@ pub struct OmpInstallOptions {
     pub binary_path: String,
     pub project_config_path: Option<PathBuf>,
     pub omp_agent_dir: Option<PathBuf>,
+    pub update: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +183,7 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
         .join("stateful-omp-extension.js");
     let mcp_path = agent_dir.join("mcp.json");
     let skill_path = omp_command_policy_skill_path(&agent_dir);
+    let rule_path = omp_required_rule_path(&agent_dir);
     plan.summary = format!(
         "{mode}: install stateful files under {} and configure the OMP stateful profile under {}",
         options.paths.home.display(),
@@ -191,6 +193,7 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
     plan.files.push(extension_path);
     plan.files.push(mcp_path);
     plan.files.push(skill_path);
+    plan.files.push(rule_path);
     Ok(plan)
 }
 
@@ -225,10 +228,11 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
     if let Some(parent) = mcp_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    write_omp_config(&config_path, &extension_path)?;
+    write_omp_config(&config_path, &extension_path, options.update)?;
     write_omp_extension(&extension_path, &options.binary_path)?;
     write_omp_mcp_config(&mcp_path, &options.binary_path)?;
     write_omp_command_policy_skill(&agent_dir)?;
+    write_omp_required_rule(&agent_dir)?;
     plan.summary = format!(
         "apply: installed stateful files under {} and configured the OMP stateful profile under {}",
         options.paths.home.display(),
@@ -366,6 +370,19 @@ fn omp_command_policy_skill_path(agent_dir: &Path) -> PathBuf {
         .join("skills")
         .join("stateful-command-policy")
         .join("SKILL.md")
+}
+
+fn write_omp_required_rule(agent_dir: &Path) -> anyhow::Result<()> {
+    let path = omp_required_rule_path(agent_dir);
+    let parent = containing_dir(&path);
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create OMP rules directory {}", parent.display()))?;
+    fs::write(&path, omp_stateful_required_rule())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn omp_required_rule_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("rules").join("stateful-required.md")
 }
 
 fn write_global_external_sandbox_rules(
@@ -1112,7 +1129,11 @@ fn write_or_create_text_file(config_path: &Path, contents: &str) -> anyhow::Resu
     }
 }
 
-fn write_omp_config(config_path: &Path, extension_path: &Path) -> anyhow::Result<()> {
+fn write_omp_config(
+    config_path: &Path,
+    extension_path: &Path,
+    update_existing: bool,
+) -> anyhow::Result<()> {
     let extension = extension_path.to_string_lossy();
     let entry = format!("  - {extension}");
     let mut contents = if config_path.exists() {
@@ -1126,158 +1147,233 @@ fn write_omp_config(config_path: &Path, extension_path: &Path) -> anyhow::Result
         String::new()
     };
 
-    if !contents.lines().any(|line| line.trim() == entry.trim()) {
-        if let Some(offset) = contents
-            .lines()
-            .position(|line| line.trim() == "extensions:")
-        {
-            let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
-            lines.insert(offset + 1, entry);
-            contents = lines.join("\n");
-            contents.push('\n');
-        } else {
-            if !contents.is_empty() && !contents.ends_with('\n') {
-                contents.push('\n');
-            }
-            contents.push_str("extensions:\n");
-            contents.push_str(&entry);
-            contents.push('\n');
-        }
-    }
-
-    let contents = ensure_omp_approval_mode(contents);
+    validate_omp_config_yml(config_path, &contents)?;
+    contents = ensure_omp_extension(contents, &entry);
+    contents = ensure_omp_required_config(contents, update_existing)?;
+    validate_omp_config_yml(config_path, &contents)?;
     write_or_create_text_file(config_path, &contents)
 }
 
-fn ensure_omp_approval_mode(mut contents: String) -> String {
-    let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
-    let tools_offset = find_omp_top_level_section(&lines, "tools");
+fn validate_omp_config_yml(config_path: &Path, contents: &str) -> anyhow::Result<()> {
+    if contents.trim().is_empty() {
+        return Ok(());
+    }
 
-    if tools_offset.is_none() {
-        if !contents.is_empty() && !contents.ends_with('\n') {
-            contents.push('\n');
-        }
-        contents.push_str(
-            "tools:\n  approvalMode: write\n  approval:\n    bash: deny\n    python: false\n    javascript: false\n    js: false\n    ruby: false\n    julia: false\n    sandbox_bash: allow\n    task: allow\n    external_bash: prompt\n",
-        );
+    let value: serde_yaml::Value = serde_yaml::from_str(contents)
+        .with_context(|| format!("invalid OMP config YAML {}", config_path.display()))?;
+    if !matches!(value, serde_yaml::Value::Mapping(_) | serde_yaml::Value::Null) {
+        anyhow::bail!("OMP config {} must be a YAML mapping", config_path.display());
+    }
+
+    Ok(())
+}
+
+fn ensure_omp_extension(mut contents: String, entry: &str) -> String {
+    if contents.lines().any(|line| line.trim() == entry.trim()) {
         return contents;
     }
 
-    let tools_offset = tools_offset.expect("tools section was just found");
-    let mut tools_end = find_omp_top_level_section_end(&lines, tools_offset);
-    let approval_mode_offset = lines[tools_offset + 1..tools_end]
-        .iter()
-        .position(|line| line.trim_start().starts_with("approvalMode:"))
-        .map(|offset| tools_offset + 1 + offset);
-
-    if let Some(offset) = approval_mode_offset {
-        lines[offset] = "  approvalMode: write".to_string();
+    if let Some(offset) = contents
+        .lines()
+        .position(|line| line.trim() == "extensions:")
+    {
+        let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
+        lines.insert(offset + 1, entry.to_string());
+        contents = lines.join("\n");
+        contents.push('\n');
     } else {
-        lines.insert(tools_offset + 1, "  approvalMode: write".to_string());
-        tools_end += 1;
+        if !contents.is_empty() && !contents.ends_with('\n') {
+            contents.push('\n');
+        }
+        contents.push_str("extensions:\n");
+        contents.push_str(entry);
+        contents.push('\n');
     }
 
-    let approval_offset = lines[tools_offset + 1..tools_end]
-        .iter()
-        .position(|line| line.trim_start() == "approval:")
-        .map(|offset| tools_offset + 1 + offset);
-
-    let approval_offset = if let Some(offset) = approval_offset {
-        offset
-    } else {
-        let insert_offset = tools_offset + 2;
-        lines.insert(insert_offset, "  approval:".to_string());
-        tools_end += 1;
-        insert_offset
-    };
-
-    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "bash", "deny");
-    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
-    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "python", "false");
-    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
-    ensure_omp_tool_approval_value(
-        &mut lines,
-        approval_offset,
-        tools_end,
-        "javascript",
-        "false",
-    );
-    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
-    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "js", "false");
-    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
-    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "ruby", "false");
-    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
-    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "julia", "false");
-    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
-    ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "sandbox_bash");
-    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
-    ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "task");
-    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
-    ensure_omp_tool_approval_value(
-        &mut lines,
-        approval_offset,
-        tools_end,
-        "external_bash",
-        "prompt",
-    );
-
-    contents = lines.join("\n");
-    contents.push('\n');
     contents
 }
 
-fn find_omp_top_level_section(lines: &[String], section: &str) -> Option<usize> {
-    let header = format!("{section}:");
-    lines
-        .iter()
-        .position(|line| !line.starts_with(char::is_whitespace) && line.trim() == header)
+fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow::Result<String> {
+    let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
+
+    ensure_omp_child_scalar(&mut lines, "tools", "approvalMode", "write", update_existing)?;
+    ensure_omp_nested_child_scalar(
+        &mut lines,
+        "tools",
+        "approval",
+        "sandbox_bash",
+        "allow",
+        update_existing,
+    )?;
+    ensure_omp_nested_child_scalar(
+        &mut lines,
+        "tools",
+        "approval",
+        "external_bash",
+        "prompt",
+        update_existing,
+    )?;
+    ensure_omp_child_scalar(&mut lines, "eval", "py", "false", update_existing)?;
+    ensure_omp_child_scalar(&mut lines, "eval", "js", "false", update_existing)?;
+    ensure_omp_child_scalar(&mut lines, "eval", "rb", "false", update_existing)?;
+    ensure_omp_child_scalar(&mut lines, "eval", "jl", "false", update_existing)?;
+    ensure_omp_child_scalar(&mut lines, "bash", "enabled", "false", update_existing)?;
+
+    Ok(finish_omp_yaml_lines(lines))
 }
 
-fn find_omp_top_level_section_end(lines: &[String], section_offset: usize) -> usize {
-    lines[section_offset + 1..]
-        .iter()
-        .position(|line| {
-            !line.starts_with(char::is_whitespace)
-                && !line.trim().is_empty()
-                && !line.trim_start().starts_with('#')
-        })
-        .map_or(lines.len(), |offset| section_offset + 1 + offset)
-}
-
-fn ensure_omp_tool_approval_value(
+fn ensure_omp_child_scalar(
     lines: &mut Vec<String>,
-    approval_offset: usize,
-    tools_end: usize,
-    tool: &str,
+    section: &str,
+    key: &str,
     value: &str,
-) {
-    let approval_end = lines[approval_offset + 1..tools_end]
-        .iter()
-        .position(|line| {
-            !line.trim().is_empty()
-                && !line.trim_start().starts_with('#')
-                && line.chars().take_while(|ch| ch.is_whitespace()).count() <= 2
-        })
-        .map_or(tools_end, |offset| approval_offset + 1 + offset);
-    let prefix = format!("{tool}:");
-    if let Some(offset) = lines[approval_offset + 1..approval_end]
-        .iter()
-        .position(|line| line.trim_start().starts_with(&prefix))
-        .map(|offset| approval_offset + 1 + offset)
-    {
-        lines[offset] = format!("    {tool}: {value}");
+    update_existing: bool,
+) -> anyhow::Result<()> {
+    let (section_offset, section_end) = ensure_omp_top_level_mapping(lines, section)?;
+    if let Some(offset) = find_omp_yaml_key(lines, section_offset + 1, section_end, 2, key) {
+        if update_existing {
+            lines[offset] = format!("  {key}: {value}");
+        }
     } else {
-        lines.insert(approval_offset + 1, format!("    {tool}: {value}"));
+        lines.insert(section_end, format!("  {key}: {value}"));
     }
+
+    Ok(())
 }
 
-fn ensure_omp_tool_approval(
+fn ensure_omp_nested_child_scalar(
     lines: &mut Vec<String>,
-    approval_offset: usize,
-    tools_end: usize,
-    tool: &str,
-) {
-    ensure_omp_tool_approval_value(lines, approval_offset, tools_end, tool, "allow");
+    section: &str,
+    child: &str,
+    key: &str,
+    value: &str,
+    update_existing: bool,
+) -> anyhow::Result<()> {
+    let (child_offset, child_end) = ensure_omp_child_mapping(lines, section, child)?;
+    if let Some(offset) = find_omp_yaml_key(lines, child_offset + 1, child_end, 4, key) {
+        if update_existing {
+            lines[offset] = format!("    {key}: {value}");
+        }
+    } else {
+        lines.insert(child_end, format!("    {key}: {value}"));
+    }
+
+    Ok(())
+}
+
+fn ensure_omp_top_level_mapping(
+    lines: &mut Vec<String>,
+    section: &str,
+) -> anyhow::Result<(usize, usize)> {
+    if let Some(offset) = find_omp_top_level_mapping(lines, section)? {
+        let end = find_omp_yaml_mapping_end(lines, offset, 0, lines.len());
+        return Ok((offset, end));
+    }
+
+    lines.push(format!("{section}:"));
+    let offset = lines.len() - 1;
+    Ok((offset, lines.len()))
+}
+
+fn ensure_omp_child_mapping(
+    lines: &mut Vec<String>,
+    section: &str,
+    child: &str,
+) -> anyhow::Result<(usize, usize)> {
+    let (section_offset, section_end) = ensure_omp_top_level_mapping(lines, section)?;
+    if let Some(offset) = find_omp_yaml_key(lines, section_offset + 1, section_end, 2, child) {
+        if !omp_yaml_key_is_block_mapping(&lines[offset], 2, child) {
+            anyhow::bail!("OMP config `{section}.{child}` must be a block mapping");
+        }
+        let end = find_omp_yaml_mapping_end(lines, offset, 2, section_end);
+        return Ok((offset, end));
+    }
+
+    lines.insert(section_end, format!("  {child}:"));
+    Ok((section_end, section_end + 1))
+}
+
+fn find_omp_top_level_mapping(
+    lines: &[String],
+    section: &str,
+) -> anyhow::Result<Option<usize>> {
+    for (offset, line) in lines.iter().enumerate() {
+        if omp_yaml_line_is_blank_or_comment(line) || omp_yaml_indent(line) != 0 {
+            continue;
+        }
+        if !omp_yaml_key_matches(line, 0, section) {
+            continue;
+        }
+        if !omp_yaml_key_is_block_mapping(line, 0, section) {
+            anyhow::bail!("OMP config top-level `{section}` must be a block mapping");
+        }
+        return Ok(Some(offset));
+    }
+
+    Ok(None)
+}
+
+fn find_omp_yaml_key(
+    lines: &[String],
+    start: usize,
+    end: usize,
+    indent: usize,
+    key: &str,
+) -> Option<usize> {
+    lines[start..end]
+        .iter()
+        .position(|line| {
+            !omp_yaml_line_is_blank_or_comment(line)
+                && omp_yaml_indent(line) == indent
+                && omp_yaml_key_matches(line, indent, key)
+        })
+        .map(|offset| start + offset)
+}
+
+fn find_omp_yaml_mapping_end(
+    lines: &[String],
+    start: usize,
+    indent: usize,
+    limit: usize,
+) -> usize {
+    lines[start + 1..limit]
+        .iter()
+        .position(|line| {
+            !omp_yaml_line_is_blank_or_comment(line) && omp_yaml_indent(line) <= indent
+        })
+        .map_or(limit, |offset| start + 1 + offset)
+}
+
+fn omp_yaml_key_matches(line: &str, indent: usize, key: &str) -> bool {
+    let prefix = format!("{key}:");
+    line.chars().take_while(|character| character.is_whitespace()).count() == indent
+        && line.trim_start().starts_with(&prefix)
+}
+
+fn omp_yaml_key_is_block_mapping(line: &str, indent: usize, key: &str) -> bool {
+    let prefix = format!("{key}:");
+    if !omp_yaml_key_matches(line, indent, key) {
+        return false;
+    }
+    let tail = line.trim_start()[prefix.len()..].trim_start();
+    tail.is_empty() || tail.starts_with('#')
+}
+
+fn omp_yaml_indent(line: &str) -> usize {
+    line.chars()
+        .take_while(|character| character.is_whitespace())
+        .count()
+}
+
+fn omp_yaml_line_is_blank_or_comment(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.is_empty() || trimmed.starts_with('#')
+}
+
+fn finish_omp_yaml_lines(lines: Vec<String>) -> String {
+    let mut contents = lines.join("\n");
+    contents.push('\n');
+    contents
 }
 
 fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Result<()> {
@@ -1639,6 +1735,10 @@ fn stateful_command_policy_skill() -> &'static str {
     include_str!("../assets/stateful-command-policy/SKILL.md")
 }
 
+fn omp_stateful_required_rule() -> &'static str {
+    include_str!("../assets/omp-stateful-required-rule.md")
+}
+
 fn toml_string(value: &str) -> String {
     let mut escaped = String::from("\"");
     for character in value.chars() {
@@ -1670,5 +1770,20 @@ mod tests {
             default_omp_agent_dir_from_home("/tmp/home"),
             PathBuf::from("/tmp/home/.omp/profiles/stateful/agent")
         );
+    }
+
+    #[test]
+    fn omp_install_places_stateful_rule_in_agent_rules_dir() {
+        assert_eq!(
+            omp_required_rule_path(Path::new("/tmp/home/.omp/profiles/stateful/agent")),
+            PathBuf::from("/tmp/home/.omp/profiles/stateful/agent/rules/stateful-required.md")
+        );
+    }
+
+    #[test]
+    fn omp_stateful_required_rule_is_always_apply() {
+        let rule = omp_stateful_required_rule();
+        assert!(rule.contains("alwaysApply: true"));
+        assert!(rule.contains("skill://stateful-command-policy"));
     }
 }

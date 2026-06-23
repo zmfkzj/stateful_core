@@ -117,15 +117,17 @@ The prototype supports user-level installation with repo allowlist gating.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`,
-`tools.approval.bash: deny`, `tools.approval.python: false`,
-`tools.approval.javascript: false`, `tools.approval.js: false`,
-`tools.approval.ruby: false`, `tools.approval.julia: false`,
-`tools.approval.sandbox_bash: allow`, `tools.approval.task: allow`, and
+`bash.enabled: false`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
+`eval.jl: false`, `tools.approval.sandbox_bash: allow`, and
 `tools.approval.external_bash: prompt`, and denies raw Bash plus the
 Python/JavaScript/JS/Ruby/Julia eval tools at the host approval and hook
-levels. The generated extension registers
-`sandbox_bash` for read-only, write-targets, build, git, and github-pr sandbox
-runs, including common sandbox flags, and registers `external_bash` for
+levels. The installer also writes `rules/stateful-required.md` and
+`skills/stateful-command-policy/SKILL.md` under that isolated agent directory:
+the always-apply rule tells the model when Stateful policy applies, the skill
+keeps the detailed procedure, and hooks remain the enforcement boundary. The
+generated extension registers `sandbox_bash` for read-only, write-targets,
+build, git, and github-pr sandbox runs, including common sandbox flags, and
+registers `external_bash` for
 `--fs external`; `sandbox_bash` rejects `--fs external` with guidance to use
 `external_bash`. Raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool calls
 are blocked even if their command text

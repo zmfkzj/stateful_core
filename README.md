@@ -204,14 +204,20 @@ stateful install --agent codex --yes
 
 Install the OMP integration when you want stateful OMP hooks, MCP, and
 generated sandbox command tools in the isolated `stateful` profile. This leaves
-the default/global OMP profile alone, uses `tools.approvalMode: write`, sets
-`tools.approval.bash: deny`, `tools.approval.python: false`,
-`tools.approval.javascript: false`, `tools.approval.js: false`,
-`tools.approval.ruby: false`, `tools.approval.julia: false`,
-`tools.approval.sandbox_bash: allow`, `tools.approval.task: allow`, and
-`tools.approval.external_bash: prompt`. Raw Bash and
-Python/JavaScript/JS/Ruby/Julia eval tools are denied by profile config and
-stateful hooks; use `sandbox_bash`
+the default/global OMP profile alone. The installer merges `config.yml` instead
+of replacing it and rejects invalid YAML. Its target keys are
+`tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
+`eval.js: false`, `eval.rb: false`,
+`eval.jl: false`, `tools.approval.sandbox_bash: allow`, and
+`tools.approval.external_bash: prompt`; without `--update`, existing values are
+preserved and only missing keys are inserted. With `--update`
+(`stateful install --agent omp --yes --update`), existing values for those keys
+are updated.
+It also installs `rules/stateful-required.md` and
+`skills/stateful-command-policy/SKILL.md` under that isolated agent directory:
+the always-apply rule owns activation, and the skill owns the detailed Stateful
+procedure.
+Raw Bash and eval tool calls are denied by stateful hooks; use `sandbox_bash`
 for non-external `stateful sandbox run` profiles and `external_bash` for
 `--fs external`:
 
@@ -336,16 +342,17 @@ installation health.
 - `stateful install --agent codex [--yes] [--codex-config <path>] [--binary <path>]`
   installs global stateful files, installs the global
   `stateful-command-policy` skill, and merges Codex config.
-- `stateful install --agent omp [--yes]` installs the stateful OMP extension
-  into the OMP `stateful` profile agent directory
-  (`~/.omp/profiles/stateful/agent`) with `tools.approvalMode: write`,
-  `tools.approval.bash: deny`, `tools.approval.python: false`,
-  `tools.approval.javascript: false`, `tools.approval.js: false`,
-  `tools.approval.ruby: false`, `tools.approval.julia: false`,
-  `tools.approval.sandbox_bash: allow`, `tools.approval.task: allow`, and
-  `tools.approval.external_bash: prompt`,
-  leaving the default/global OMP profile untouched. Raw Bash and
-  Python/JavaScript/JS/Ruby/Julia eval tools are denied by profile config and
+- `stateful install --agent omp [--yes] [--update]` installs the stateful OMP
+  extension, `rules/stateful-required.md`, and
+  `skills/stateful-command-policy/SKILL.md` into the OMP `stateful` profile
+  agent directory (`~/.omp/profiles/stateful/agent`) and merges `config.yml`
+  instead of replacing it, rejecting invalid YAML. Its target keys are
+  `tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
+  `eval.js: false`, `eval.rb: false`,
+  `eval.jl: false`, `tools.approval.sandbox_bash: allow`, and
+  `tools.approval.external_bash: prompt`; without `--update`, existing values
+  are preserved and only missing OMP keys are inserted. With `--update`, existing
+  values for those keys are updated. Raw Bash and eval tool calls are denied by
   stateful hooks.
 - `stateful enable [--repo <path>]`, `stateful disable`, and
   `stateful repos list` manage the repo allowlist used by global hooks.
@@ -456,37 +463,37 @@ after that approval, the external sandbox profile validates the normalized
 external write scope, rejects repo-internal targets, and runs the command in the
 sandbox.
 `stateful enable` opts a repo into enforcement, while disabled repos are no-ops
-for hooks and MCP. `stateful install --agent omp --yes` installs the OMP
-extension and MCP config into the OMP `stateful` profile agent directory
-(`~/.omp/profiles/stateful/agent`), sets `tools.approvalMode: write`,
-`tools.approval.bash: deny`, `tools.approval.python: false`,
-`tools.approval.javascript: false`, `tools.approval.js: false`,
-`tools.approval.ruby: false`, `tools.approval.julia: false`,
-`tools.approval.sandbox_bash: allow`, `tools.approval.task: allow`, and
-`tools.approval.external_bash: prompt`, and leaves the
-global/default OMP profile untouched. The generated OMP extension registers
-`sandbox_bash` for non-external sandbox runs and `external_bash` for
-repo-external shell work. `sandbox_bash` invokes the trusted stateful binary as
-`stateful sandbox run --fs <profile> ... --command <cmd>` for read-only,
-write-targets, build, git, and github-pr profiles, including common sandbox
-flags; it rejects `--fs external`
-with guidance to use `external_bash`. `external_bash` asks for OMP UI
-confirmation, then invokes the trusted stateful binary with
-`sandbox run --fs external` so the external sandbox profile can validate the
-declared absolute scope. Other stateful hook allows become OMP allows; denials
-or unavailable authorization remain hard OMP blocks even if OMP yolo metadata is
-present.
+for hooks and MCP. `stateful install --agent omp [--yes] [--update]` installs
+the OMP extension, MCP config, always-apply `stateful-required` rule, and
+`stateful-command-policy` skill into the OMP `stateful` profile agent directory
+(`~/.omp/profiles/stateful/agent`) and merges `config.yml` instead of replacing
+it; invalid YAML is
+rejected. Its target keys are `tools.approvalMode: write`,
+`bash.enabled: false`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
+`eval.jl: false`, `tools.approval.sandbox_bash: allow`, and
+`tools.approval.external_bash: prompt`; without `--update`, existing values are
+preserved and only missing OMP keys are inserted. With `--update`, existing
+values for those keys are updated, leaving the global/default OMP profile
+untouched. The generated OMP extension registers `sandbox_bash` for non-external
+sandbox runs and `external_bash` for repo-external shell work. `sandbox_bash`
+invokes the trusted stateful binary as `stateful sandbox run --fs <profile> ...
+--command <cmd>` for read-only, write-targets, build, git, and github-pr
+profiles, including common sandbox flags; it rejects `--fs external` with
+guidance to use `external_bash`. `external_bash` asks for OMP UI confirmation,
+then invokes the trusted stateful binary with `sandbox run --fs external` so the
+external sandbox profile can validate the declared absolute scope. Other
+stateful hook allows become OMP allows; denials or unavailable authorization
+remain hard OMP blocks even if OMP yolo metadata is present.
 OMP built-ins that do not write repo files, including `ask`, `ast_grep`, `job`,
 `irc`, `todo`, `report_tool_issue`, `generate_image`, and native read/search
 tools, are allowed by default. Other unclassified OMP-origin tools are recorded
 in `stateful tools list` and can be explicitly permitted with
 `stateful tools allow <tool>` when they are safe for that repo; this does not
 bypass hard-denied write or execution classifications.
-OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied by
-profile config and hard-blocked by stateful hooks, even when the raw tool itself
-invokes `stateful sandbox run`. Use `sandbox_bash` for read-only, write-targets,
-build, git, and github-pr sandbox runs; use `external_bash` for repo-external
-execution.
+OMP raw Bash and eval tools are denied by OMP config and hard-blocked by
+stateful hooks, even when the raw tool itself invokes `stateful sandbox run`.
+Use `sandbox_bash` for read-only, write-targets, build, git, and github-pr
+sandbox runs; use `external_bash` for repo-external execution.
 
 The generated Codex hook configuration covers:
 
@@ -558,10 +565,9 @@ authorizing lease after the completed write transaction.
 Codex raw Bash commands are denied by stateful hooks with sandbox guidance. Hook
 policy classifies namespaced runtime tool names by their leaf, so
 `functions.bash` follows Bash handling and `functions.python` follows Python
-handling. For OMP, raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are
-denied by profile config and hook policy; this remains true even when the raw
-tool itself invokes `stateful sandbox run`. OMP sessions must use generated
-custom tools:
+handling. For OMP, raw Bash and eval tools are denied by OMP config and hook
+policy; this remains true even when the raw tool itself invokes
+`stateful sandbox run`. OMP sessions must use generated custom tools:
 `sandbox_bash` for read-only, write-targets, build, git, and github-pr profiles,
 and `external_bash` for `--fs external`.
 Hook-mediated command execution outside OMP custom tools is authorized only when
