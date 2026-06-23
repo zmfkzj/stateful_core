@@ -1379,7 +1379,7 @@ fn finish_omp_yaml_lines(lines: Vec<String>) -> String {
 fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Result<()> {
     let binary_json = serde_json::to_string(binary_path)?;
     let contents = format!(
-        r#"import {{ spawnSync }} from "node:child_process";
+        r#"import {{ spawn, spawnSync }} from "node:child_process";
 
 const STATEFUL = {binary_json};
 
@@ -1540,28 +1540,56 @@ function sandboxToolError(error) {{
 }}
 
 function runSandboxTool(params, args, signal, ctx, label) {{
-  const result = spawnSync(STATEFUL, args, {{
-    cwd: ctx.cwd,
-    encoding: "utf8",
-    signal,
+  return new Promise((resolve) => {{
+    let stdout = "";
+    let stderr = "";
+    let processError = "";
+    let settled = false;
+    const finish = (exitCode, error) => {{
+      if (settled) return;
+      settled = true;
+      const text = sandboxToolResultText(exitCode, stdout, stderr, error);
+      resolve({{
+        isError: Boolean(error) || exitCode !== 0,
+        content: [{{ type: "text", text }}],
+        details: {{
+          exitCode,
+          stdout,
+          stderr,
+          error,
+          command: params.command,
+          sandboxArgs: args,
+        }},
+      }});
+    }};
+    let child;
+    try {{
+      child = spawn(STATEFUL, args, {{
+        cwd: ctx.cwd,
+        stdio: ["ignore", "pipe", "pipe"],
+        signal,
+      }});
+    }} catch (error) {{
+      finish(1, error instanceof Error ? error.message : String(error));
+      return;
+    }}
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => {{
+      stdout = truncateSandboxToolText(stdout + chunk, label);
+    }});
+    child.stderr?.on("data", (chunk) => {{
+      stderr = truncateSandboxToolText(stderr + chunk, label);
+    }});
+    child.on("error", (error) => {{
+      processError = error instanceof Error ? error.message : String(error);
+    }});
+    child.on("close", (code, signalName) => {{
+      const exitCode = typeof code === "number" ? code : 1;
+      const signalError = signalName ? "terminated by signal " + signalName : "";
+      finish(exitCode, processError || signalError);
+    }});
   }});
-  const exitCode = typeof result.status === "number" ? result.status : 1;
-  const error = result.error ? String(result.error.message || result.error) : "";
-  const stdout = truncateSandboxToolText(result.stdout || "", label);
-  const stderr = truncateSandboxToolText(result.stderr || "", label);
-  const text = sandboxToolResultText(exitCode, stdout, stderr, error);
-  return {{
-    isError: Boolean(error) || exitCode !== 0,
-    content: [{{ type: "text", text }}],
-    details: {{
-      exitCode,
-      stdout,
-      stderr,
-      error,
-      command: params.command,
-      sandboxArgs: args,
-    }},
-  }};
 }}
 
 export default function statefulOmpExtension(pi) {{

@@ -215,6 +215,10 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("name: \"sandbox_bash\""));
     assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
     assert!(extension.contains("sandbox_bash does not support --fs external; use external_bash"));
+    assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
+    assert!(extension.contains("function runSandboxTool(params, args, signal, ctx, label)"));
+    assert!(extension.contains("return new Promise((resolve) =>"));
+    assert!(extension.contains("spawn(STATEFUL, args"));
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", fs]"));
     assert!(extension.contains("ctx.ui.confirm"));
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", \"external\""));
