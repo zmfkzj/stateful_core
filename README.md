@@ -862,11 +862,14 @@ events; the verified smoke run
 `r110-denovo-one-omp-docker-stateful-onoff-subagent-on` produced that sequence.
 
 For DeNovo `subagent:on`, the generated benchmark prompt explicitly requires
-native Codex/OMP subagents, names OMP's `multi_agent_v1spawn_agent` tool when
-available, requires every counted subagent to edit an implementation slice, and
-requires blocker reporting when subagent tools are unavailable. The adapter
-enforces the minimum native subagent spawn count for both Codex and OMP
-`subagent:on` runs. That injected instruction is a declared behavior-test
+native Codex/OMP subagents, names OMP's current `task` tool and older
+`multi_agent_v1spawn_agent` tool when available, and requires every counted
+subagent to edit an implementation slice. OMP runs also unpack bundled task
+agents into the isolated OMP home and append the subagent requirement to the
+system prompt while enabling `features.multi_agent=true`. It also requires
+blocker reporting when subagent tools are unavailable. The adapter enforces the
+minimum native subagent spawn count for both Codex and OMP `subagent:on` runs.
+That injected instruction is a declared behavior-test
 condition axis; do not add other prompt hints to normal scored comparisons.
 
 Generate reports:

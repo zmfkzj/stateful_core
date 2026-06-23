@@ -708,6 +708,7 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
     assert_eq!(
         json["allowed_tools"],
         serde_json::json!([
+            "task",
             "multi_agent_v1spawn_agent",
             "multi_agent_v1wait_agent",
             "multi_agent_v1close_agent",

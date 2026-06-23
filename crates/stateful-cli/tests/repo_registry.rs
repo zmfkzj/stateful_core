@@ -8,6 +8,7 @@ use stateful_cli::{
 
 fn default_allowed_tools() -> Vec<String> {
     [
+        "task",
         "multi_agent_v1spawn_agent",
         "multi_agent_v1wait_agent",
         "multi_agent_v1close_agent",

@@ -239,10 +239,12 @@ missing registration, absent heartbeat, or missing finalization as a lifecycle
 failure rather than a model-quality result.
 
 For `subagent:on`, the generated DeNovo prompt requires native Codex/OMP
-subagents, tells OMP to use available multi-agent tools such as
-`multi_agent_v1spawn_agent`, requires every counted subagent to inspect, edit,
-and verify a distinct implementation slice, and requires explicit blocker
-reporting if the runtime does not expose subagent tools. The adapter enforces
+subagents, tells OMP to use the current `task` tool or older multi-agent tools
+such as `multi_agent_v1spawn_agent`, requires every counted subagent to inspect,
+edit, and verify a distinct implementation slice, and requires explicit blocker
+reporting if the runtime does not expose subagent tools. OMP runs also unpack
+bundled task agents into the isolated runtime home, append the requirement to
+the system prompt, and enable `features.multi_agent=true`. The adapter enforces
 the minimum native subagent spawn count for both Codex and OMP `subagent:on`
 runs. This prompt addition is a declared behavior-test condition axis, not a
 general prompt policy for normal scored comparisons.

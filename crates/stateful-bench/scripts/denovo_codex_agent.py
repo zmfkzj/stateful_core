@@ -147,8 +147,9 @@ def native_subagent_prompt_instruction(subagent: str, subagent_min_count: int) -
 
 Native Codex/OMP subagent requirements:
 - MUST use native subagents for this benchmark condition before making the final answer.
-- Spawn at least {subagent_min_count} native subagents before finishing.
-- In OMP, use the available multi-agent/subagent tools such as `multi_agent_v1spawn_agent` and wait for them with the matching wait/resume tool when those tools are present.
+- FIRST ACTION: before `todo`, `read`, `find`, `search`, `bash`, `eval`, or any repository exploration, call the OMP `task` tool once with a single `tasks` array containing at least {subagent_min_count} implementation subagent assignments.
+- Spawn at least {subagent_min_count} native subagents before repository exploration or implementation unless the runtime does not expose any native subagent tool.
+- In OMP, the current native subagent tool is `task`: call it with a `tasks` array containing at least {subagent_min_count} implementation subagents. Older OMP multi-agent builds may expose `multi_agent_v1spawn_agent` instead.
 - Use all {subagent_min_count} native subagents for repository editing; each subagent must inspect, edit, and verify a distinct implementation slice.
 - Do not leave any native subagent as analysis-only, documentation-only, or idle.
 - Wait for each spawned subagent and incorporate its work or findings into the final workspace.
@@ -175,6 +176,8 @@ You are solving one DeNovoSWE benchmark instance.
 
 Instance id:
 {instance_id}
+{subagent_instruction}
+
 
 Repository specification:
 {document}
@@ -186,7 +189,6 @@ Constraints:
 - Leave the workspace containing the final code changes.
 - Benchmark max turns: {benchmark_max_turns}.
 {step_line}- Prompt version: {prompt_version}.
-{subagent_instruction}
 """.strip()
 
 
@@ -703,8 +705,10 @@ def omp_command_for_profile(
     prompt_path: Path,
     omp_bin: str,
     benchmark_model: str,
+    enable_native_subagent: bool = False,
+    subagent_min_count: int = DEFAULT_SUBAGENT_MIN_COUNT,
 ) -> list[str]:
-    return [
+    command = [
         omp_bin,
         "-p",
         "--mode",
@@ -715,8 +719,18 @@ def omp_command_for_profile(
         str(workspace),
         "--approval-mode",
         "yolo",
-        f"@{prompt_path.resolve()}",
     ]
+    if enable_native_subagent:
+        command.extend(
+            [
+                "-c",
+                "features.multi_agent=true",
+                "--append-system-prompt",
+                native_subagent_prompt_instruction("on", subagent_min_count),
+            ]
+        )
+    command.append(f"@{prompt_path.resolve()}")
+    return command
 
 def docker_host_url(value: str) -> str:
     parsed = urllib.parse.urlparse(value)
@@ -751,6 +765,8 @@ def docker_omp_command_for_profile(
     docker_image: str,
     base_env: dict[str, str],
     docker_bin: str = "docker",
+    enable_native_subagent: bool = False,
+    subagent_min_count: int = DEFAULT_SUBAGENT_MIN_COUNT,
 ) -> list[str]:
     docker_env = omp_agent_docker_env(base_env)
     command = [
@@ -777,6 +793,8 @@ def docker_omp_command_for_profile(
             prompt_path=Path(OMP_AGENT_DOCKER_PROMPT),
             omp_bin=omp_bin,
             benchmark_model=benchmark_model,
+            enable_native_subagent=enable_native_subagent,
+            subagent_min_count=subagent_min_count,
         )
     )
     return command
@@ -855,8 +873,24 @@ def prepare_omp_environment(
     runner: Any = subprocess.run,
     runtime_stateful_binary: str | None = None,
     runtime_omp_home: str | None = None,
+    omp_bin: str | None = None,
+    enable_native_subagent: bool = False,
 ) -> None:
     Path(env["PI_CODING_AGENT_DIR"]).mkdir(parents=True, exist_ok=True)
+    if enable_native_subagent:
+        if omp_bin is None:
+            raise StatefulRepoEnableError("OMP subagent:on requires an omp binary to unpack task agents")
+        completed = runner(
+            [omp_bin, "agents", "unpack", "--force"],
+            text=True,
+            check=False,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if completed.returncode != 0:
+            message = (completed.stderr or completed.stdout).strip()
+            raise StatefulRepoEnableError(message or f"omp agents unpack exited {completed.returncode}")
     if not enable_stateful:
         return
     command = [stateful_binary, "install", "--agent", "omp", "--yes"]
@@ -1169,6 +1203,7 @@ SUBAGENT_TOOL_NAMES = {
     "multi_agent_v1spawn_agent": "spawn_agent_calls",
     "multi_agent_v1.spawn_agent": "spawn_agent_calls",
     "multi_agent_v1__spawn_agent": "spawn_agent_calls",
+    "task": "spawn_agent_calls",
     "wait_agent": "wait_agent_calls",
     "multi_agent_v1wait_agent": "wait_agent_calls",
     "multi_agent_v1.wait_agent": "wait_agent_calls",
@@ -1224,6 +1259,44 @@ def response_item_function_name(event: dict[str, Any]) -> str | None:
     return None
 
 
+def omp_session_tool_calls(event: dict[str, Any]) -> list[tuple[str, Any]]:
+    message = event.get("message")
+    if not isinstance(message, dict):
+        return []
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    calls: list[tuple[str, Any]] = []
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "toolCall":
+            continue
+        name = item.get("name")
+        if isinstance(name, str):
+            calls.append((name, item.get("arguments")))
+    return calls
+
+
+def subagent_tool_call_weight(name: str, arguments: Any) -> int:
+    if name != "task" or not isinstance(arguments, dict):
+        return 1
+    tasks = arguments.get("tasks")
+    if isinstance(tasks, list) and tasks:
+        return len(tasks)
+    return 1
+
+
+def add_subagent_tool_call_count(
+    counts: dict[str, int],
+    name: str | None,
+    arguments: Any = None,
+) -> bool:
+    count_key = SUBAGENT_TOOL_NAMES.get(name or "")
+    if count_key is None:
+        return False
+    counts[count_key] += subagent_tool_call_weight(name or "", arguments)
+    return True
+
+
 def detect_native_subagent_usage(codex_home: Path) -> dict[str, Any]:
     counts = empty_subagent_usage_counts()
     sources: set[str] = set()
@@ -1252,10 +1325,11 @@ def detect_native_subagent_usage(codex_home: Path) -> dict[str, Any]:
                 if not isinstance(event, dict):
                     continue
                 name = response_item_function_name(event)
-                count_key = SUBAGENT_TOOL_NAMES.get(name or "")
-                if count_key is not None:
-                    counts[count_key] += 1
+                if add_subagent_tool_call_count(counts, name):
                     sources.add("codex_session_log")
+                for omp_name, arguments in omp_session_tool_calls(event):
+                    if add_subagent_tool_call_count(counts, omp_name, arguments):
+                        sources.add("omp_session_log")
 
     used_keys = (
         "agent_jobs",
@@ -1729,6 +1803,8 @@ async def run_one_instance_async(
                     args.agent_docker_stateful_binary if args.agent_docker_image else None
                 ),
                 runtime_omp_home=OMP_AGENT_DOCKER_HOME if args.agent_docker_image else None,
+                omp_bin=args.omp_bin,
+                enable_native_subagent=args.subagent == "on",
             )
             if args.agent_docker_image:
                 command = docker_omp_command_for_profile(
@@ -1739,6 +1815,8 @@ async def run_one_instance_async(
                     benchmark_model=args.benchmark_model,
                     docker_image=args.agent_docker_image,
                     base_env=env,
+                    enable_native_subagent=args.subagent == "on",
+                    subagent_min_count=args.subagent_min_count,
                 )
             else:
                 command = omp_command_for_profile(
@@ -1746,6 +1824,8 @@ async def run_one_instance_async(
                     prompt_path=prompt_path,
                     omp_bin=args.omp_bin,
                     benchmark_model=args.benchmark_model,
+                    enable_native_subagent=args.subagent == "on",
+                    subagent_min_count=args.subagent_min_count,
                 )
         else:
             seeded_auth = prepare_codex_environment(

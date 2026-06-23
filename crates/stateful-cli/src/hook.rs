@@ -1281,6 +1281,7 @@ fn is_builtin_safe_tool(tool_name: &str) -> bool {
         "update_goal",
         "request_user_input",
         "view_image",
+        "task",
         "spawn_agent",
         "multi_agent_v1spawn_agent",
         "wait_agent",

@@ -10,6 +10,7 @@ use anyhow::Context;
 use crate::{GlobalPaths, default_config_yml};
 
 const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
+    "task",
     "multi_agent_v1spawn_agent",
     "multi_agent_v1wait_agent",
     "multi_agent_v1close_agent",

@@ -1543,9 +1543,16 @@ relative_command = module.omp_command_for_profile(
     omp_bin="/opt/homebrew/bin/omp",
     benchmark_model="deepseek-v4-flash",
 )
+native_command = module.omp_command_for_profile(
+    workspace=Path("/tmp/workspace"),
+    prompt_path=Path("/tmp/instance/prompt.txt"),
+    omp_bin="/opt/homebrew/bin/omp",
+    benchmark_model="deepseek-v4-flash",
+    enable_native_subagent=True,
+)
 relative_prompt_arg = next(arg for arg in relative_command if arg.startswith("@"))
 command_prompt_arg = next(arg for arg in command if arg.startswith("@"))
-print(json.dumps({{"command": command, "command_prompt_arg": command_prompt_arg, "relative_prompt_arg": relative_prompt_arg}}))
+print(json.dumps({{"command": command, "native_command": native_command, "command_prompt_arg": command_prompt_arg, "relative_prompt_arg": relative_prompt_arg}}))
 "#,
         agent_path = denovo_codex_agent_path_json(),
     );
@@ -1553,6 +1560,9 @@ print(json.dumps({{"command": command, "command_prompt_arg": command_prompt_arg,
     let command = output["command"]
         .as_array()
         .expect("command should be an array");
+    let native_command = output["native_command"]
+        .as_array()
+        .expect("native command should be an array");
     let relative_prompt_arg = output["relative_prompt_arg"]
         .as_str()
         .expect("relative prompt arg should be a string");
@@ -1596,6 +1606,15 @@ print(json.dumps({{"command": command, "command_prompt_arg": command_prompt_arg,
         command,
         "--dangerously-bypass-hook-trust"
     ));
+    assert!(!command_contains(command, "features.multi_agent=true"));
+    assert!(command_contains(native_command, "features.multi_agent=true"));
+    assert!(
+        command_arg_after(native_command, "--append-system-prompt")
+            .expect("native system prompt should exist")
+            .contains("FIRST ACTION")
+    );
+    assert!(command_contains(native_command, "@/tmp/instance/prompt.txt")
+        || command_contains(native_command, "@/private/tmp/instance/prompt.txt"));
 }
 
 #[test]
@@ -1635,6 +1654,7 @@ command = module.docker_omp_command_for_profile(
         "STATEFUL_SERVER_TOKEN": "token-123",
         "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
     }},
+    enable_native_subagent=True,
 )
 print(json.dumps({{
     "command": command,
@@ -1674,6 +1694,12 @@ print(json.dumps({{
     assert!(command_contains(command, "@/prompt.txt"));
     assert!(command_contains(command, "--approval-mode"));
     assert!(command_contains(command, "yolo"));
+    assert!(command_contains(command, "features.multi_agent=true"));
+    assert!(
+        command_arg_after(command, "--append-system-prompt")
+            .expect("docker system prompt should exist")
+            .contains("FIRST ACTION")
+    );
 
     assert!(
         env.iter()
@@ -1926,6 +1952,8 @@ module.prepare_omp_environment(
     runner=fake_runner,
     runtime_stateful_binary="/container/stateful",
     runtime_omp_home="/home/stateful",
+    omp_bin="/tmp/omp",
+    enable_native_subagent=True,
 )
 stateful_agent = Path(stateful_env["PI_CODING_AGENT_DIR"])
 explicit_stateful_env = module.denovo_omp_environment(
@@ -1970,7 +1998,8 @@ print(json.dumps({{
     "explicit_stateful_session_id": explicit_stateful_env.get("STATEFUL_SESSION_ID"),
     "explicit_stateful_has_codex_run": "STATEFUL_CODEX_RUN_ID" in explicit_stateful_env,
     "explicit_stateful_codex_run_id": explicit_stateful_env.get("STATEFUL_CODEX_RUN_ID"),
-    "install_command": commands[0]["command"] if commands else [],
+    "unpack_command": commands[0]["command"] if commands else [],
+    "install_command": commands[1]["command"] if len(commands) > 1 else [],
     "expected_no_state_home": str(expected_no_state_home),
     "expected_stateful_home": str(expected_stateful_home),
     "expected_no_state_config_home": str(expected_no_state_config_home),
@@ -2061,6 +2090,13 @@ print(json.dumps({{
         ),
         "Docker OMP config must not keep host-only extension paths: {stateful_config}"
     );
+    let unpack_command = output["unpack_command"]
+        .as_array()
+        .expect("unpack command should be captured");
+    assert!(command_contains(unpack_command, "/tmp/omp"));
+    assert!(command_contains(unpack_command, "agents"));
+    assert!(command_contains(unpack_command, "unpack"));
+    assert!(command_contains(unpack_command, "--force"));
     let install_command = output["install_command"]
         .as_array()
         .expect("install command should be captured");
@@ -3541,9 +3577,14 @@ print(json.dumps({{"off": off, "on": on}}, sort_keys=True))
     assert!(!off.contains("Native Codex/OMP subagent requirements"));
     assert!(on.contains("Native Codex/OMP subagent requirements"));
     assert!(on.contains("MUST use native subagents"));
-    assert!(on.contains("Spawn at least 3 native subagents"));
+    assert!(on.contains("Spawn at least 3 native subagents before repository exploration"));
+    assert!(on.contains("FIRST ACTION"));
+    assert!(on.contains("before `todo`, `read`, `find`, `search`, `bash`, `eval`"));
+    assert!(on.contains("the current native subagent tool is `task`"));
+    assert!(on.contains("tasks` array containing at least 3 implementation subagents"));
     assert!(on.contains("multi_agent_v1spawn_agent"));
     assert!(on.contains("Use all 3 native subagents for repository editing"));
+    assert!(on.find("Native Codex/OMP subagent requirements").unwrap() < on.find("Repository specification:").unwrap());
     assert!(on.contains("Do not leave any native subagent as analysis-only"));
     assert!(on.contains("Wait for each spawned subagent"));
     assert!(on.contains("explicitly report that blocker"));
@@ -3575,6 +3616,19 @@ with tempfile.TemporaryDirectory() as tmp:
         + json.dumps({{"type": "response_item", "payload": {{"type": "function_call", "name": "wait_agent"}}}}) + "\n",
         encoding="utf-8",
     )
+    omp_home = Path(tmp) / "omp-agent"
+    omp_session_dir = omp_home / "sessions" / "--workspace--"
+    omp_session_dir.mkdir(parents=True)
+    (omp_session_dir / "session.jsonl").write_text(
+        json.dumps({{"type": "message", "message": {{"role": "assistant", "content": [
+            {{"type": "toolCall", "name": "task", "arguments": {{"tasks": [
+                {{"assignment": "one"}},
+                {{"assignment": "two"}},
+                {{"assignment": "three"}},
+            ]}}}}
+        ]}}}}) + "\n",
+        encoding="utf-8",
+    )
     db = sqlite3.connect(codex_home / "state_5.sqlite")
     db.execute("create table agent_jobs(id integer primary key)")
     db.execute("insert into agent_jobs(id) values (1)")
@@ -3588,7 +3642,7 @@ with tempfile.TemporaryDirectory() as tmp:
     db.close()
 
     used = module.detect_native_subagent_usage(codex_home)
-    omp_usage = module.native_subagent_usage("on", 1, codex_home, cli_runtime="omp")
+    omp_usage = module.native_subagent_usage("on", 3, omp_home, cli_runtime="omp")
     empty = module.detect_native_subagent_usage(Path(tmp) / "empty" / ".codex")
 
 print(json.dumps({{"used": used, "omp_usage": omp_usage, "empty": empty}}, sort_keys=True))
@@ -3603,6 +3657,8 @@ print(json.dumps({{"used": used, "omp_usage": omp_usage, "empty": empty}}, sort_
     assert_eq!(output["used"]["counts"]["agent_jobs"], 1);
     assert_eq!(output["used"]["counts"]["thread_spawn_edges"], 1);
     assert_eq!(output["omp_usage"]["mode"], "native_omp_subagents");
+    assert_eq!(output["omp_usage"]["native_subagent"]["subagent_spawn_count"], 3);
+    assert_eq!(output["omp_usage"]["native_subagent"]["counts"]["spawn_agent_calls"], 3);
     assert_eq!(output["omp_usage"]["subagent_requirement_met"], true);
     assert_eq!(output["empty"]["subagent_used"], false);
 }

@@ -2186,6 +2186,7 @@ fn pre_tool_use_allows_known_non_repo_write_tools_without_runtime() {
         "update_goal",
         "request_user_input",
         "view_image",
+        "task",
         "spawn_agent",
         "multi_agent_v1spawn_agent",
         "wait_agent",
