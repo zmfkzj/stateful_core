@@ -20,5 +20,5 @@ Before any of these actions, read and follow `skill://stateful-command-policy`:
 - Inspect current state first with `state_current_read` or `state_context_render`.
 - Declare exact intended files with `state_intent_declare` and acquire matching leases with `state_lease_acquire` before writes.
 - Use active Stateful MCP tool names for coordination; never repair session state through Bash or eval.
-- In OMP, use `sandbox_bash` for non-external sandbox profiles and `external_bash` for `--fs external`; no-target external read-only commands are allowed through `external_bash`, repo-relative external write scopes require Stateful intent and leases, and raw Bash/eval wrappers are never allowed.
+- In OMP, use `sandbox_bash` for non-external sandbox profiles, `ext_ro_bash` for read-only `--fs external` commands with only `purpose` and `command` and no OMP UI confirmation, and `ext_rw_bash` for `--fs external` commands with at least one write target, create target, or write directory scope and an OMP UI confirmation prompt; repo-relative external write scopes require Stateful intent and leases, and raw Bash/eval wrappers are never allowed.
 - If a hook denies an action, read the denial and choose the documented Stateful alternative instead of retrying variants.

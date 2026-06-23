@@ -1229,10 +1229,19 @@ fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow
         &mut lines,
         "tools",
         "approval",
-        "external_bash",
+        "ext_ro_bash",
         "allow",
         update_existing,
     )?;
+    ensure_omp_nested_child_scalar(
+        &mut lines,
+        "tools",
+        "approval",
+        "ext_rw_bash",
+        "allow",
+        update_existing,
+    )?;
+    remove_omp_nested_child_scalar(&mut lines, "tools", "approval", "external_bash")?;
     ensure_omp_child_scalar(&mut lines, "eval", "py", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "js", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "rb", "false", update_existing)?;
@@ -1276,6 +1285,20 @@ fn ensure_omp_nested_child_scalar(
         }
     } else {
         lines.insert(child_end, format!("    {key}: {value}"));
+    }
+
+    Ok(())
+}
+
+fn remove_omp_nested_child_scalar(
+    lines: &mut Vec<String>,
+    section: &str,
+    child: &str,
+    key: &str,
+) -> anyhow::Result<()> {
+    let (child_offset, child_end) = ensure_omp_child_mapping(lines, section, child)?;
+    if let Some(offset) = find_omp_yaml_key(lines, child_offset + 1, child_end, 4, key) {
+        lines.remove(offset);
     }
 
     Ok(())
@@ -1656,7 +1679,7 @@ function sandboxBashArgs(params) {{
   }}
   const fs = params.fs.trim();
   if (fs === "external") {{
-    throw new Error("sandbox_bash does not support --fs external; use external_bash");
+    throw new Error("sandbox_bash does not support --fs external; use ext_ro_bash for read-only external operations or ext_rw_bash for external writes");
   }}
   if (!SANDBOX_BASH_FS_PROFILES.has(fs)) {{
     throw new Error("sandbox_bash fs must be one of: read-only, write-targets, build, git, github-pr");
@@ -1670,15 +1693,39 @@ function sandboxBashArgs(params) {{
   return args;
 }}
 
-function externalBashArgs(params) {{
+function validateExternalPurposeAndCommand(params, toolName) {{
   if (typeof params?.purpose !== "string" || params.purpose.trim().length === 0) {{
-    throw new Error("external_bash requires a non-empty purpose");
+    throw new Error(toolName + " requires a non-empty purpose");
   }}
   if (typeof params?.command !== "string" || params.command.trim().length === 0) {{
-    throw new Error("external_bash requires a non-empty command");
+    throw new Error(toolName + " requires a non-empty command");
+  }}
+}}
+
+function hasExternalWriteScope(params) {{
+  return stringList(params.write_targets).length > 0
+    || stringList(params.create_targets).length > 0
+    || stringList(params.write_dirs).length > 0;
+}}
+
+function externalReadOnlyBashArgs(params) {{
+  validateExternalPurposeAndCommand(params, "ext_ro_bash");
+  if (hasExternalWriteScope(params) || stringList(params.connect_sockets).length > 0 || params.allow_signal === true) {{
+    throw new Error("ext_ro_bash does not accept write, socket, or signal scope; use ext_rw_bash for scoped external operations");
   }}
   const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
-  addCommonSandboxArgs(args, params, "external_bash");
+  addCommonSandboxArgs(args, params, "ext_ro_bash");
+  args.push("--command", params.command);
+  return args;
+}}
+
+function externalReadWriteBashArgs(params) {{
+  validateExternalPurposeAndCommand(params, "ext_rw_bash");
+  if (!hasExternalWriteScope(params)) {{
+    throw new Error("ext_rw_bash requires at least one write_targets, create_targets, or write_dirs entry");
+  }}
+  const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
+  addCommonSandboxArgs(args, params, "ext_rw_bash");
   args.push("--command", params.command);
   return args;
 }}
@@ -1692,13 +1739,13 @@ function externalBashApprovalMessage(params, args) {{
     ...(params.allow_signal === true ? ["allow-signal"] : []),
   ];
   return [
-    "Stateful is requesting a repo-external sandbox operation.",
+    "Stateful is requesting a read/write repo-external sandbox operation.",
     "",
     "Purpose:",
     params.purpose,
     "",
     "Declared external write/socket/signal scope:",
-    scope.length ? scope.join("\n") : "No declared external write/socket/signal scope; this approval is for a read-only external command.",
+    scope.length ? scope.join("\n") : "No declared external write/socket/signal scope.",
     "",
     "Command:",
     params.command,
@@ -1863,7 +1910,7 @@ export default function statefulOmpExtension(pi) {{
   pi.registerTool({{
     name: "sandbox_bash",
     label: "Sandbox Bash",
-    description: "Run a command through stateful sandbox run. Supports all sandbox run --fs profiles except external; use external_bash for external operations.",
+    description: "Run a command through stateful sandbox run. Supports all sandbox run --fs profiles except external; use ext_ro_bash for read-only external operations or ext_rw_bash for external writes.",
     parameters: {{
       type: "object",
       properties: {{
@@ -1894,17 +1941,45 @@ export default function statefulOmpExtension(pi) {{
     }},
   }});
   pi.registerTool({{
-    name: "external_bash",
-    label: "External Bash",
-    description: "Run a command through stateful sandbox run --fs external after explicit OMP UI approval. Read-only commands may omit targets; repo-relative write scopes require Stateful authorization and absolute scopes are treated as repo-external approval details.",
+    name: "ext_ro_bash",
+    label: "External Read-only Bash",
+    description: "Run a read-only command through stateful sandbox run --fs external without OMP UI confirmation. Write, socket, and signal scopes are rejected.",
     parameters: {{
       type: "object",
       properties: {{
-        purpose: {{ type: "string", description: "Human-readable purpose for the external operation." }},
+        purpose: {{ type: "string", description: "Human-readable purpose for the external read-only operation." }},
         command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
-        write_targets: {{ type: "array", items: {{ type: "string" }}, description: "Optional existing repo-relative or absolute external file paths the command may write." }},
-        create_targets: {{ type: "array", items: {{ type: "string" }}, description: "Optional new repo-relative or absolute external file paths the command may create." }},
-        write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Optional repo-relative directories or absolute external directories the command may write under." }},
+        network: {{ type: "string", description: "Network mode: enabled or disabled." }},
+        timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
+        async: {{ type: "boolean", description: "Return immediately and deliver the external sandbox command result automatically when complete." }},
+      }},
+      required: ["purpose", "command"],
+    }},
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+      let args;
+      try {{
+        args = externalReadOnlyBashArgs(params);
+      }} catch (error) {{
+        return sandboxToolError(error);
+      }}
+      if (params.async === true) {{
+        return startSandboxBackgroundTool(pi, params, args, ctx, "ext_ro_bash");
+      }}
+      return runSandboxTool(params, args, signal, ctx, "ext_ro_bash", _onUpdate);
+    }},
+  }});
+  pi.registerTool({{
+    name: "ext_rw_bash",
+    label: "External Read/write Bash",
+    description: "Run a command through stateful sandbox run --fs external after explicit OMP UI approval. At least one write_targets, create_targets, or write_dirs entry is required.",
+    parameters: {{
+      type: "object",
+      properties: {{
+        purpose: {{ type: "string", description: "Human-readable purpose for the external write operation." }},
+        command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
+        write_targets: {{ type: "array", items: {{ type: "string" }}, description: "Existing repo-relative or absolute external file paths the command may write. At least one write/create/directory scope is required." }},
+        create_targets: {{ type: "array", items: {{ type: "string" }}, description: "New repo-relative or absolute external file paths the command may create. At least one write/create/directory scope is required." }},
+        write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Repo-relative directories or absolute external directories the command may write under. At least one write/create/directory scope is required." }},
         connect_sockets: {{ type: "array", items: {{ type: "string" }}, description: "Optional absolute Unix socket paths the sandbox may connect to." }},
         allow_signal: {{ type: "boolean", description: "Optionally allow the sandboxed command to signal approved external processes." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
@@ -1916,14 +1991,14 @@ export default function statefulOmpExtension(pi) {{
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
       let args;
       try {{
-        args = externalBashArgs(params);
+        args = externalReadWriteBashArgs(params);
       }} catch (error) {{
         return sandboxToolError(error);
       }}
       if (typeof ctx?.ui?.confirm !== "function") {{
         return {{
           isError: true,
-          content: [{{ type: "text", text: "external_bash requires OMP UI confirmation, but ctx.ui.confirm is unavailable." }}],
+          content: [{{ type: "text", text: "ext_rw_bash requires OMP UI confirmation, but ctx.ui.confirm is unavailable." }}],
           details: {{ error: "confirmation_unavailable" }},
         }};
       }}
@@ -1934,14 +2009,14 @@ export default function statefulOmpExtension(pi) {{
       if (!approved) {{
         return {{
           isError: true,
-          content: [{{ type: "text", text: "external_bash blocked by user" }}],
+          content: [{{ type: "text", text: "ext_rw_bash blocked by user" }}],
           details: {{ blocked: true }},
         }};
       }}
       if (params.async === true) {{
-        return startSandboxBackgroundTool(pi, params, args, ctx, "external_bash");
+        return startSandboxBackgroundTool(pi, params, args, ctx, "ext_rw_bash");
       }}
-      return runSandboxTool(params, args, signal, ctx, "external_bash", _onUpdate);
+      return runSandboxTool(params, args, signal, ctx, "ext_rw_bash", _onUpdate);
     }},
   }});
   pi.on("session_start", async (event, ctx) => {{

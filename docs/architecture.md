@@ -119,8 +119,9 @@ stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) and ensures the target keys
 `tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
 `eval.js: false`, `eval.rb: false`, `eval.jl: false`,
-`tools.approval.task: allow`, `tools.approval.sandbox_bash: allow`, and
-`tools.approval.external_bash: allow`. Without `--update`, existing values are
+`tools.approval.task: allow`, `tools.approval.sandbox_bash: allow`,
+`tools.approval.ext_ro_bash: allow`, and
+`tools.approval.ext_rw_bash: allow`. Without `--update`, existing values are
 preserved and only missing keys are inserted; with `--update`, existing target
 values are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
 tools are denied at the host approval and hook levels. The installer also writes
@@ -129,10 +130,12 @@ that isolated agent directory:
 the always-apply rule tells the model when Stateful policy applies, the skill
 keeps the detailed procedure, and hooks remain the enforcement boundary. The
 generated extension registers `sandbox_bash` for read-only, write-targets,
-build, git, and github-pr sandbox runs, including common sandbox flags, and
-registers `external_bash` for
-`--fs external`; `sandbox_bash` rejects `--fs external` with guidance to use
-`external_bash`. Raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool calls
+build, git, and github-pr sandbox runs, including common sandbox flags,
+registers `ext_ro_bash` for read-only `--fs external` commands, and registers
+`ext_rw_bash` for external writes that require write/create/dir scope and OMP UI
+confirmation. `sandbox_bash` rejects `--fs external` with guidance to use
+`ext_ro_bash` or `ext_rw_bash`. Raw Bash and Python/JavaScript/JS/Ruby/Julia
+eval-tool calls
 are blocked even if their command text
 invokes `stateful sandbox run`. The OMP
 global/default profile is not modified.
@@ -180,9 +183,10 @@ is unavailable, the hook follows the availability policy: agent writes and
 reconciliation fail closed; read/search/diff remains allowed.
 
 For OMP, the generated `sandbox_bash` tool owns non-external sandbox command
-execution for read-only, write-targets, build, git, and github-pr profiles, and
-the generated `external_bash` tool owns external-sandbox UI confirmation. Other
-stateful allows translate to OMP allow. Stateful deny or unavailable server
+execution for read-only, write-targets, build, git, and github-pr profiles;
+`ext_ro_bash` owns read-only external commands without OMP UI confirmation; and
+`ext_rw_bash` owns external writes with OMP UI confirmation. Other stateful
+allows translate to OMP allow. Stateful deny or unavailable server
 translates to a hard block, even when OMP yolo metadata is present.
 
 Hook scripts should resolve paths from the git root. Envelope-enforced routes
@@ -244,8 +248,9 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 - deny Codex raw Bash with sandbox guidance. For OMP, raw Bash and the
   Python/JavaScript/JS/Ruby/Julia eval tools are denied at host approval and hook
   levels, even when the raw command invokes `stateful sandbox run`; non-external
-  sandbox command work must use `sandbox_bash`, and repo-external shell work must
-  use `external_bash`, which prompts before invoking `sandbox run --fs external`.
+  sandbox command work must use `sandbox_bash`, read-only repo-external shell
+  work must use `ext_ro_bash` without OMP UI confirmation, and external writes
+  must use `ext_rw_bash` with write/create/dir scope and OMP UI confirmation.
   Hook-mediated command execution outside OMP custom tools must be a single
   strict invocation of the trusted absolute `stateful` binary running
   `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
@@ -255,9 +260,10 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   `--create-target <file>` values and repo intent plus same-session leases. Local
   Git uses `--fs git --network disabled`, GitHub PR operations use
   `--fs github-pr --network enabled`, and external operations use `--fs external`
-  with Codex approval or OMP `external_bash` confirmation. A purpose and command are
-  sufficient for read-only/no-declared-scope external operations; absolute
-  external targets remain required when declaring external write scope.
+  with Codex approval, OMP `ext_ro_bash` for read-only/no-write-scope commands,
+  or OMP `ext_rw_bash` for writes. A purpose and command are sufficient for
+  read-only/no-declared-scope external operations; absolute external targets
+  remain required when declaring external write scope.
 - check leases and planned edits for likely conflicts
 - return allow, warning context, or deny based on policy
 
@@ -332,17 +338,17 @@ classification, so `functions.bash` is Bash,
   approval and hook levels, even when the raw command itself invokes
   `stateful sandbox run`. OMP command-shaped sandbox work uses generated tools:
   `sandbox_bash` for read-only, write-targets, build, git, and github-pr
-  profiles, and `external_bash` for
-  `--fs external` with UI confirmation. Ordinary read work should use native
-  read/search/diff tools when available. Read-only command-shaped inspection
-  that genuinely needs a shell uses `--fs read-only --network disabled`; process
-  inspection uses `sandbox process find <selector>`, not raw `ps` or `pgrep`.
-  Command-shaped repo writes use `--fs write-targets` with explicit
-  `--write-target <file>` / `--create-target <file>` values and target
-  authorization. External operations use `--fs external` with no repo
-  intent or lease, and Codex approval or OMP `external_bash` confirmation.
-  Purpose and command are sufficient for read-only/no-declared-scope use; any
-  supplied external write targets must be absolute and outside the repo.
+  profiles, `ext_ro_bash` for read-only `--fs external` commands without OMP UI
+  confirmation, and `ext_rw_bash` for external writes with OMP UI confirmation.
+  Ordinary read work should use native read/search/diff tools when available.
+  Read-only command-shaped inspection that genuinely needs a shell uses
+  `--fs read-only --network disabled`; process inspection uses
+  `sandbox process find <selector>`, not raw `ps` or `pgrep`. Command-shaped
+  repo writes use `--fs write-targets` with explicit `--write-target <file>` /
+  `--create-target <file>` values and target authorization. External operations
+  use `--fs external` with no repo intent or lease, and Codex approval or OMP
+  `ext_ro_bash` for read-only/no-write-scope commands; OMP external writes use
+  `ext_rw_bash` with at least one write target, create target, or write dir.
 - Test execution: run only through sandboxed test actions such as
   `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`.
   Build artifacts live under `/tmp/stateful/<session>/<scratch-purpose>/`.
@@ -352,8 +358,8 @@ classification, so `functions.bash` is Bash,
 Denied Bash should direct the agent to native read/search tools for ordinary
 read work, native edit tools for repo file edits, strict sandbox-run wrappers
 for Codex command-shaped shell execution, `sandbox_bash` for OMP non-external
-sandbox runs, `external_bash` for OMP external runs, and build-profile sandbox
-wrappers for tests.
+sandbox runs, `ext_ro_bash` for OMP read-only external runs, `ext_rw_bash` for
+OMP external writes, and build-profile sandbox wrappers for tests.
 
 MCP does not perform local command-shaped file writes. Hook-mediated shell
 execution uses `<absolute-stateful-binary> sandbox run ... --command <cmd>`;
@@ -641,8 +647,8 @@ The system should prefer explicit uncertainty:
 - interrupted session -> keep last state until TTL expires
 - hook failure -> warn and fail closed only for high-risk writes
 - OMP stateful hook deny or unavailable result -> block, never warn because of
-  yolo metadata; repo-external command-shaped work must still use
-  `external_bash`, not raw Bash or eval tools
+  yolo metadata; repo-external command-shaped work must still use `ext_ro_bash`
+  for reads or `ext_rw_bash` for writes, not raw Bash or eval tools
 - state server unavailable -> deny supported writes that cannot prove active
   intent
 - state server unavailable -> deny Codex raw Bash, repo-internal Bash, and all

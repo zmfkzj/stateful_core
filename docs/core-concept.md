@@ -146,18 +146,20 @@ Python execution are denied at host approval and hook levels, even when the raw
 command itself invokes `stateful sandbox run`; OMP sessions use generated custom
 tools instead. `sandbox_bash` invokes the trusted stateful binary for read-only,
 write-targets, build, git, and github-pr sandbox profiles, including common
-sandbox flags, and rejects `--fs external` with guidance to use
-`external_bash`. In foreground mode, both generated sandbox tools stream
-stdout/stderr chunks to OMP while the command runs and return the final result.
-With optional `async: true`, they return immediately with a background-job start
-message while the trusted stateful sandbox process continues, then deliver an
-automatic completion message back into OMP when it exits. `external_bash`
-performs its own approval prompt before starting foreground or async execution
-with `stateful sandbox run --fs external --purpose ...`. The generated extension
-also subscribes to Stateful SSE reservation notifications and injects a
-next-turn OMP message when a queued `wait_id` becomes claimable; the claim and
-write still use the normal Stateful tools. Ordinary read work should use
-agent-native read, search, or diff tools when available.
+sandbox flags, and rejects `--fs external` with guidance to use `ext_ro_bash` or
+`ext_rw_bash`. `ext_ro_bash` runs purpose-and-command-only external reads
+without OMP UI confirmation. `ext_rw_bash` asks OMP UI confirmation before
+foreground or async execution for external writes that declare at least one
+write target, create target, or write dir. In foreground mode, generated command
+tools stream stdout/stderr chunks to OMP while the command runs and return the
+final result. With optional `async: true`, they return immediately with a
+background-job start message while the trusted stateful sandbox process
+continues, then deliver an automatic completion message back into OMP when it
+exits. The generated extension also subscribes to Stateful SSE reservation
+notifications and injects a next-turn OMP message when a queued `wait_id`
+becomes claimable; the claim and write still use the normal Stateful tools.
+Ordinary read work should use agent-native read, search, or diff tools when
+available.
 Read-only inspection that genuinely needs a shell must use the trusted absolute
 `stateful` wrapper: `<absolute-stateful-binary> sandbox run --fs read-only
 --network disabled --command <cmd>`; in OMP, use `sandbox_bash` for that
@@ -165,9 +167,9 @@ profile. Command-shaped repo writes must use the wrapper with
 `--fs write-targets` and explicit repo-relative target flags after intent and
 same-session lease; in OMP, use `sandbox_bash`. Repo-external operations use
 `--fs external` with purpose and command; read-only external commands may omit
-targets, while supplied write/create/dir/socket/signal scopes must be absolute
-external paths and approved. In OMP, use `external_bash`. Raw Bash test commands
-are not allowlisted; use
+targets and use OMP `ext_ro_bash`, while external writes must declare
+write/create/dir scope and use OMP `ext_rw_bash`. Raw Bash test commands are
+not allowlisted; use
 `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
 --command <cmd>` so build artifacts go under
 `/tmp/stateful/<session>/<scratch-purpose>/`; in OMP, use `sandbox_bash`.

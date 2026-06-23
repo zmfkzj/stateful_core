@@ -22,8 +22,9 @@ The prototype supports user-level installation with repo allowlist gating.
 `stateful install --yes` installs stateful global files only. `stateful install
 --agent codex --yes` configures global Codex hooks and MCP. `stateful install
 --agent omp --yes` configures the isolated OMP `stateful` profile with stateful
-hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `external_bash`
-for `--fs external`, and approval entries that deny raw Bash while setting
+hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `ext_ro_bash`
+for read-only `--fs external`, `ext_rw_bash` for external writes, and approval
+entries that deny raw Bash while setting
 Python/JavaScript/JS/Ruby/Julia eval tools to false. The OMP installer also
 writes `rules/stateful-required.md` and
 `skills/stateful-command-policy/SKILL.md` under that isolated agent directory:
@@ -235,14 +236,16 @@ at host approval and hook levels, even when the raw command itself invokes
 sandbox command execution uses generated custom tools: `sandbox_bash` invokes
 the trusted stateful binary for read-only, write-targets, build, git, and
 github-pr profiles, including common sandbox flags, and rejects `--fs external`
-with guidance to use `external_bash`; `external_bash` asks OMP UI confirmation
-before spawning the
-trusted stateful binary with `sandbox run --fs external --purpose ...`. The
-external sandbox profile requires purpose and command; read-only/no-declared-scope
-operations may omit targets, while supplied external write scopes are validated
-as absolute paths outside the repo. It runs through the sandbox after Codex
-approval or `external_bash` confirmation and does not require repo intent or
-lease.
+with guidance to use `ext_ro_bash` or `ext_rw_bash`; `ext_ro_bash` runs
+purpose-and-command-only external reads without OMP UI confirmation; `ext_rw_bash`
+asks OMP UI confirmation before spawning the trusted stateful binary with
+`sandbox run --fs external --purpose ...` for external writes that declare at
+least one write target, create target, or write dir. The external sandbox
+profile requires purpose and command; read-only/no-declared-scope operations may
+omit targets, while supplied external write scopes are validated as absolute
+paths outside the repo. It runs through the sandbox after Codex approval,
+`ext_ro_bash` execution, or `ext_rw_bash` confirmation and does not require repo
+intent or lease unless repo-relative write scope is supplied.
 Local git operations use `<absolute-stateful-binary> sandbox run --fs git
 --network disabled --command 'git <args>'`; use `--network enabled` only for
 remote git operations. GitHub pull request list/view/status/create commands use
@@ -559,9 +562,10 @@ before it runs the external sandbox command. Purpose-and-command-only operations
 are allowed for read-only/no-declared-scope use; supplied external write scopes
 are validated before the sandbox starts. `stateful
 install --agent omp --yes` registers `sandbox_bash` for read-only,
-write-targets, build, git, and github-pr sandbox profiles and `external_bash`
-for `--fs external`; `external_bash` asks OMP UI confirmation before spawning
-the trusted stateful binary with the external profile. Raw OMP Bash and
+write-targets, build, git, and github-pr sandbox profiles, `ext_ro_bash` for
+read-only external commands, and `ext_rw_bash` for external writes. `ext_ro_bash`
+does not ask OMP UI confirmation; `ext_rw_bash` asks before spawning the trusted
+stateful binary with the external profile. Raw OMP Bash and
 Python/JavaScript/JS/Ruby/Julia eval-tool sandbox invocations are denied.
 OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
 extension events to `stateful hook omp session-start`, `pre-tool-use`,
@@ -670,12 +674,12 @@ always-apply `rules/stateful-required.md` rule,
 `stateful` profile agent directory (`~/.omp/profiles/stateful/agent`) with
 `tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
 `eval.js: false`, `eval.rb: false`, `eval.jl: false`,
-`tools.approval.sandbox_bash: allow`, and
-`tools.approval.external_bash: allow`, so that profile carries the stateful
-approval context, denies raw Bash and Python/JavaScript/JS/Ruby/Julia
-eval-tool execution at host approval, allows sandbox runs through
-`sandbox_bash` or `external_bash`, and keeps the trusted external sandbox
-approval prompt inside `external_bash`. `stateful enable`
+`tools.approval.sandbox_bash: allow`, `tools.approval.ext_ro_bash: allow`, and
+`tools.approval.ext_rw_bash: allow`, so that profile carries the stateful
+approval context, denies raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool
+execution at host approval, allows sandbox runs through `sandbox_bash`,
+`ext_ro_bash`, or `ext_rw_bash`, and keeps the trusted external write approval
+prompt inside `ext_rw_bash`. `stateful enable`
 opts the current repo into enforcement. Repo-local packaging and managed hooks
 must reuse the same hook adapter library and HTTP protocol.
 
