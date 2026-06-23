@@ -1158,7 +1158,7 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
             contents.push('\n');
         }
         contents.push_str(
-            "tools:\n  approvalMode: write\n  approval:\n    bash: prompt\n    python: prompt\n    task: allow\n    external_bash: prompt\n",
+            "tools:\n  approvalMode: write\n  approval:\n    bash: deny\n    python: deny\n    sandbox_bash: allow\n    task: allow\n    external_bash: prompt\n",
         );
         return contents;
     }
@@ -1191,9 +1191,11 @@ fn ensure_omp_approval_mode(mut contents: String) -> String {
         insert_offset
     };
 
-    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "bash", "prompt");
+    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "bash", "deny");
     tools_end = find_omp_top_level_section_end(&lines, tools_offset);
-    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "python", "prompt");
+    ensure_omp_tool_approval_value(&mut lines, approval_offset, tools_end, "python", "deny");
+    tools_end = find_omp_top_level_section_end(&lines, tools_offset);
+    ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "sandbox_bash");
     tools_end = find_omp_top_level_section_end(&lines, tools_offset);
     ensure_omp_tool_approval(&mut lines, approval_offset, tools_end, "task");
     tools_end = find_omp_top_level_section_end(&lines, tools_offset);
@@ -1309,7 +1311,8 @@ function sessionId(event, ctx) {{
   return id;
 }}
 
-const MAX_EXTERNAL_BASH_OUTPUT_BYTES = 50 * 1024;
+const MAX_SANDBOX_TOOL_OUTPUT_BYTES = 50 * 1024;
+const SANDBOX_BASH_FS_PROFILES = new Set(["read-only", "write-targets", "build", "git", "github-pr"]);
 
 function stringList(value) {{
   if (Array.isArray(value)) {{
@@ -1321,15 +1324,56 @@ function stringList(value) {{
   return [];
 }}
 
-function truncateExternalBashText(value) {{
+function truncateSandboxToolText(value, label) {{
   const text = value || "";
-  if (Buffer.byteLength(text, "utf8") <= MAX_EXTERNAL_BASH_OUTPUT_BYTES) {{
+  if (Buffer.byteLength(text, "utf8") <= MAX_SANDBOX_TOOL_OUTPUT_BYTES) {{
     return text;
   }}
   return Buffer
     .from(text, "utf8")
-    .subarray(0, MAX_EXTERNAL_BASH_OUTPUT_BYTES)
-    .toString("utf8") + "\n\n[external_bash output truncated to 51200 bytes]";
+    .subarray(0, MAX_SANDBOX_TOOL_OUTPUT_BYTES)
+    .toString("utf8") + "\n\n[" + label + " output truncated to 51200 bytes]";
+}}
+
+function addCommonSandboxArgs(args, params, toolName) {{
+  for (const target of stringList(params.write_targets)) args.push("--write-target", target);
+  for (const target of stringList(params.create_targets)) args.push("--create-target", target);
+  for (const dir of stringList(params.write_dirs)) args.push("--write-dir", dir);
+  for (const socket of stringList(params.connect_sockets)) args.push("--connect-socket", socket);
+  if (params.allow_signal === true) args.push("--allow-signal");
+  if (params.network !== undefined) {{
+    if (params.network !== "enabled" && params.network !== "disabled") {{
+      throw new Error(toolName + " network must be 'enabled' or 'disabled'");
+    }}
+    args.push("--network", params.network);
+  }}
+  const timeoutSeconds = params.timeout_seconds ?? params.timeoutSeconds;
+  if (timeoutSeconds !== undefined) {{
+    if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1) {{
+      throw new Error(toolName + " timeout_seconds must be a positive integer");
+    }}
+    args.push("--timeout-seconds", String(timeoutSeconds));
+  }}
+}}
+
+function sandboxBashArgs(params) {{
+  if (typeof params?.fs !== "string" || params.fs.trim().length === 0) {{
+    throw new Error("sandbox_bash requires a non-empty fs profile");
+  }}
+  const fs = params.fs.trim();
+  if (fs === "external") {{
+    throw new Error("sandbox_bash does not support --fs external; use external_bash");
+  }}
+  if (!SANDBOX_BASH_FS_PROFILES.has(fs)) {{
+    throw new Error("sandbox_bash fs must be one of: read-only, write-targets, build, git, github-pr");
+  }}
+  if (typeof params?.command !== "string" || params.command.trim().length === 0) {{
+    throw new Error("sandbox_bash requires a non-empty command");
+  }}
+  const args = ["sandbox", "run", "--fs", fs];
+  addCommonSandboxArgs(args, params, "sandbox_bash");
+  args.push("--command", params.command);
+  return args;
 }}
 
 function externalBashArgs(params) {{
@@ -1340,17 +1384,7 @@ function externalBashArgs(params) {{
     throw new Error("external_bash requires a non-empty command");
   }}
   const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
-  for (const target of stringList(params.write_targets)) args.push("--write-target", target);
-  for (const target of stringList(params.create_targets)) args.push("--create-target", target);
-  for (const dir of stringList(params.write_dirs)) args.push("--write-dir", dir);
-  for (const socket of stringList(params.connect_sockets)) args.push("--connect-socket", socket);
-  if (params.allow_signal === true) args.push("--allow-signal");
-  if (params.network !== undefined) {{
-    if (params.network !== "enabled" && params.network !== "disabled") {{
-      throw new Error("external_bash network must be 'enabled' or 'disabled'");
-    }}
-    args.push("--network", params.network);
-  }}
+  addCommonSandboxArgs(args, params, "external_bash");
   args.push("--command", params.command);
   return args;
 }}
@@ -1379,7 +1413,7 @@ function externalBashApprovalMessage(params, args) {{
   ].join("\n");
 }}
 
-function externalBashResultText(exitCode, stdout, stderr, error) {{
+function sandboxToolResultText(exitCode, stdout, stderr, error) {{
   const sections = ["exit_code: " + exitCode];
   if (stdout) sections.push("stdout:\n" + stdout);
   if (stderr) sections.push("stderr:\n" + stderr);
@@ -1387,8 +1421,66 @@ function externalBashResultText(exitCode, stdout, stderr, error) {{
   return sections.join("\n\n");
 }}
 
+function sandboxToolError(error) {{
+  return {{
+    isError: true,
+    content: [{{ type: "text", text: error instanceof Error ? error.message : String(error) }}],
+    details: {{ error: error instanceof Error ? error.message : String(error) }},
+  }};
+}}
+
+function runSandboxTool(params, args, signal, ctx, label) {{
+  const result = spawnSync(STATEFUL, args, {{
+    cwd: ctx.cwd,
+    encoding: "utf8",
+    signal,
+  }});
+  const exitCode = typeof result.status === "number" ? result.status : 1;
+  const error = result.error ? String(result.error.message || result.error) : "";
+  const stdout = truncateSandboxToolText(result.stdout || "", label);
+  const stderr = truncateSandboxToolText(result.stderr || "", label);
+  const text = sandboxToolResultText(exitCode, stdout, stderr, error);
+  return {{
+    isError: Boolean(error) || exitCode !== 0,
+    content: [{{ type: "text", text }}],
+    details: {{
+      exitCode,
+      stdout,
+      stderr,
+      error,
+      command: params.command,
+      sandboxArgs: args,
+    }},
+  }};
+}}
+
 export default function statefulOmpExtension(pi) {{
   pi.setLabel("Stateful");
+  pi.registerTool({{
+    name: "sandbox_bash",
+    label: "Sandbox Bash",
+    description: "Run a command through stateful sandbox run. Supports all sandbox run --fs profiles except external; use external_bash for external operations.",
+    parameters: Type.Object({{
+      fs: Type.String({{ description: "Sandbox filesystem profile: read-only, write-targets, build, git, or github-pr. external is not supported here." }}),
+      command: Type.String({{ description: "Shell command to run inside the stateful sandbox." }}),
+      write_targets: Type.Optional(Type.Array(Type.String({{ description: "Existing repo-relative file paths the command may write." }}))),
+      create_targets: Type.Optional(Type.Array(Type.String({{ description: "New repo-relative file paths the command may create." }}))),
+      write_dirs: Type.Optional(Type.Array(Type.String({{ description: "Repo-relative directories or build scratch purpose the command may write under." }}))),
+      connect_sockets: Type.Optional(Type.Array(Type.String({{ description: "Unix socket paths the sandbox may connect to when the selected profile supports sockets." }}))),
+      allow_signal: Type.Optional(Type.Boolean({{ description: "Allow the sandboxed command to signal approved processes when the selected profile supports signaling." }})),
+      network: Type.Optional(Type.String({{ description: "Network mode: enabled or disabled." }})),
+      timeout_seconds: Type.Optional(Type.Number({{ description: "Positive integer timeout in seconds." }})),
+    }}),
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+      let args;
+      try {{
+        args = sandboxBashArgs(params);
+      }} catch (error) {{
+        return sandboxToolError(error);
+      }}
+      return runSandboxTool(params, args, signal, ctx, "sandbox_bash");
+    }},
+  }});
   pi.registerTool({{
     name: "external_bash",
     label: "External Bash",
@@ -1402,17 +1494,14 @@ export default function statefulOmpExtension(pi) {{
       connect_sockets: Type.Optional(Type.Array(Type.String({{ description: "Absolute Unix socket paths the command may connect to." }}))),
       allow_signal: Type.Optional(Type.Boolean({{ description: "Allow the sandboxed command to signal approved external processes." }})),
       network: Type.Optional(Type.String({{ description: "Network mode: enabled or disabled." }})),
+      timeout_seconds: Type.Optional(Type.Number({{ description: "Positive integer timeout in seconds." }})),
     }}),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
       let args;
       try {{
         args = externalBashArgs(params);
       }} catch (error) {{
-        return {{
-          isError: true,
-          content: [{{ type: "text", text: error instanceof Error ? error.message : String(error) }}],
-          details: {{ error: error instanceof Error ? error.message : String(error) }},
-        }};
+        return sandboxToolError(error);
       }}
       if (typeof ctx?.ui?.confirm !== "function") {{
         return {{
@@ -1432,28 +1521,7 @@ export default function statefulOmpExtension(pi) {{
           details: {{ blocked: true }},
         }};
       }}
-      const result = spawnSync(STATEFUL, args, {{
-        cwd: ctx.cwd,
-        encoding: "utf8",
-        signal,
-      }});
-      const exitCode = typeof result.status === "number" ? result.status : 1;
-      const error = result.error ? String(result.error.message || result.error) : "";
-      const stdout = truncateExternalBashText(result.stdout || "");
-      const stderr = truncateExternalBashText(result.stderr || "");
-      const text = externalBashResultText(exitCode, stdout, stderr, error);
-      return {{
-        isError: Boolean(error) || exitCode !== 0,
-        content: [{{ type: "text", text }}],
-        details: {{
-          exitCode,
-          stdout,
-          stderr,
-          error,
-          command: params.command,
-          sandboxArgs: args,
-        }},
-      }};
+      return runSandboxTool(params, args, signal, ctx, "external_bash");
     }},
   }});
   pi.on("session_start", async (event, ctx) => {{

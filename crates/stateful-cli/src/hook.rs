@@ -308,26 +308,19 @@ fn omp_pre_tool_action(
             }
             Ok(OmpPreToolAction::Targets(targets))
         }
-        tool_name if tool_name.eq_ignore_ascii_case("external_bash") => Ok(OmpPreToolAction::Allow),
+        tool_name
+            if tool_name.eq_ignore_ascii_case("external_bash")
+                || tool_name.eq_ignore_ascii_case("sandbox_bash") =>
+        {
+            Ok(OmpPreToolAction::Allow)
+        }
         tool_name
             if tool_name.eq_ignore_ascii_case("bash")
                 || tool_name.eq_ignore_ascii_case("python") =>
         {
-            let command = input.command().unwrap_or_default();
-            if let Some(action) = omp_sandbox_run_action(command) {
-                return Ok(action);
-            }
-            if !cwd_is_inside_repo(repo_root, cwd) {
-                return Ok(OmpPreToolAction::Block {
-                    reason: format!(
-                        "repo-external {} requires stateful sandbox run --fs external --purpose",
-                        input.tool_name
-                    ),
-                });
-            }
             Ok(OmpPreToolAction::Block {
                 reason: format!(
-                    "targetless {} requires stateful sandbox run",
+                    "OMP raw {} is denied; use sandbox_bash for stateful sandbox run profiles except --fs external, or external_bash for --fs external",
                     input.tool_name
                 ),
             })
