@@ -2062,7 +2062,9 @@ async def run_real_instances_async(args: argparse.Namespace) -> int:
 
     async def run_limited(index: int, inst: Any) -> tuple[int, InstanceResult]:
         async with semaphore:
-            result = await run_one_instance_async(args, config, task, inst, output)
+            result = await asyncio.to_thread(
+                lambda: asyncio.run(run_one_instance_async(args, config, task, inst, output))
+            )
             return index, result
 
     tasks = [
