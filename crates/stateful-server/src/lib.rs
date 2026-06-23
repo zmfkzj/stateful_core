@@ -5,6 +5,10 @@ use axum::{
     Json, Router,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
+    response::{
+        IntoResponse, Response,
+        sse::{Event as SseEvent, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use policy_service::{
@@ -19,13 +23,17 @@ use stateful_core::{
     normalized_relative_path_is_empty, render_prompt_text,
 };
 use stateful_store::{
-    CurrentStateIdentityFilter, Event, OutboxEntry, Store, StoreError, WaitRecord,
+    CurrentStateIdentityFilter, Event, NotificationRecord, OutboxEntry, Store, StoreError,
+    WaitRecord,
 };
 use std::{
+    collections::VecDeque,
+    convert::Infallible,
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tokio_stream::{Stream, StreamExt, wrappers::IntervalStream};
 
 pub const CRATE_NAME: &str = "stateful-server";
 const RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
@@ -87,6 +95,7 @@ pub fn build_router(config: ServerConfig) -> Router {
         .route("/v1/context/render", post(context_render))
         .route("/v1/reconcile/ack", post(reconcile_ack))
         .route("/v1/notifications/poll", post(notifications_poll))
+        .route("/v1/notifications/stream", get(notifications_stream))
         .route("/v1/resume/next", post(resume_next))
         .route("/v1/outbox/sync", post(outbox_sync))
         .with_state(config)
@@ -1090,6 +1099,76 @@ async fn notifications_poll(
     }
 }
 
+async fn notifications_stream(
+    State(config): State<ServerConfig>,
+    headers: HeaderMap,
+    Query(input): Query<NotificationsPollRequest>,
+) -> Response {
+    if !has_valid_bearer_token(&headers, &config.bearer_token) {
+        return unauthorized().into_response();
+    }
+
+    Sse::new(notification_sse_stream(config.store.clone(), input))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+fn notification_sse_stream(
+    store: SharedStore,
+    input: NotificationsPollRequest,
+) -> impl Stream<Item = Result<SseEvent, Infallible>> {
+    let pending = Arc::new(Mutex::new(VecDeque::<NotificationRecord>::new()));
+    let interval = tokio::time::interval(Duration::from_secs(1));
+    IntervalStream::new(interval).filter_map(move |_| {
+        let store = store.clone();
+        let input = input.clone();
+        let pending = pending.clone();
+        let next = {
+            let mut queued = pending
+                .lock()
+                .expect("notification queue lock should not poison");
+            if queued.is_empty() {
+                if let Ok(notifications) = store
+                    .lock()
+                    .map_err(|_| "store lock poisoned".to_string())
+                    .and_then(|store| {
+                        store
+                            .pending_notifications(&input.session_id, &input.workspace_id)
+                            .map_err(|error| error.to_string())
+                    })
+                {
+                    queued.extend(notifications);
+                }
+            }
+            queued.pop_front()
+        };
+
+        next.map(|notification| Ok(notification_sse_event(notification)))
+    })
+}
+
+fn notification_sse_event(notification: NotificationRecord) -> SseEvent {
+    let required_next_action = if notification.kind == "reservation_granted" {
+        Some("Reread the target, then call state.intent.claim for the reservation before writing.")
+    } else {
+        None
+    };
+    SseEvent::default()
+        .id(notification.notification_id.clone())
+        .event(notification.kind.clone())
+        .data(
+            json!({
+                "status": "ok",
+                "notification_id": notification.notification_id,
+                "workspace_id": notification.workspace_id,
+                "kind": notification.kind,
+                "payload": notification.payload,
+                "required_next_action": required_next_action
+            })
+            .to_string(),
+        )
+}
+
 async fn resume_next(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
@@ -1650,7 +1729,7 @@ struct WorkspaceIdentityRequest {
     branch: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct NotificationsPollRequest {
     session_id: String,
     workspace_id: String,

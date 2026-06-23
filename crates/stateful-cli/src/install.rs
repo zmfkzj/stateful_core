@@ -1435,6 +1435,169 @@ function sessionId(event, ctx) {{
   return id;
 }}
 
+let reservationStreamAbort;
+const seenReservationWaitIds = new Set();
+
+function stopReservationStream() {{
+  if (reservationStreamAbort) {{
+    reservationStreamAbort.abort();
+    reservationStreamAbort = undefined;
+  }}
+}}
+
+function sleepWithAbort(ms, signal) {{
+  return new Promise((resolve) => {{
+    const timer = setTimeout(resolve, ms);
+    if (signal) {{
+      signal.addEventListener("abort", () => {{
+        clearTimeout(timer);
+        resolve();
+      }}, {{ once: true }});
+    }}
+  }});
+}}
+
+function reservationStreamUrl(stream) {{
+  const base = String(stream.base_url || "").replace(/\/+$/, "");
+  return base + "/v1/notifications/stream?session_id=" + encodeURIComponent(stream.session_id) + "&workspace_id=" + encodeURIComponent(stream.workspace_id);
+}}
+
+function reservationResumeUrl(stream) {{
+  const base = String(stream.base_url || "").replace(/\/+$/, "");
+  return base + "/v1/resume/next";
+}}
+
+function reservationMessage(notification) {{
+  const payload = notification?.payload || {{}};
+  const target = payload.relative_path || "the reserved target";
+  const waitId = payload.wait_id || "unknown";
+  const action = payload.action || "write";
+  return [
+    "Stateful reservation is ready for " + target + ".",
+    "wait_id: " + waitId,
+    "action: " + action,
+    "Next: reread the target, then call state_intent_claim with this wait_id before retrying the write.",
+  ].join("\n");
+}}
+
+function deliverReservationNotification(pi, notification) {{
+  const payload = notification?.payload || {{}};
+  const waitId = payload.wait_id;
+  if (!waitId || seenReservationWaitIds.has(waitId)) {{
+    return;
+  }}
+  if (typeof pi?.sendMessage !== "function") {{
+    return;
+  }}
+  const text = reservationMessage(notification);
+  try {{
+    pi.sendMessage(
+      {{
+        customType: "stateful_reservation_ready",
+        content: text,
+        display: true,
+        details: notification,
+      }},
+      {{ triggerTurn: true, deliverAs: "nextTurn" }}
+    );
+    seenReservationWaitIds.add(waitId);
+  }} catch (_) {{}}
+}}
+
+async function checkReservationResume(pi, stream, signal) {{
+  if (typeof fetch !== "function" || signal?.aborted) return;
+  try {{
+    const response = await fetch(reservationResumeUrl(stream), {{
+      method: "POST",
+      headers: {{
+        authorization: stream.authorization,
+        "content-type": "application/json",
+      }},
+      body: JSON.stringify({{ session_id: stream.session_id, workspace_id: stream.workspace_id }}),
+      signal,
+    }});
+    if (!response.ok) return;
+    const body = await response.json();
+    if (body?.resume_available && body?.reservation) {{
+      deliverReservationNotification(pi, {{
+        notification_id: "resume:" + body.reservation.wait_id,
+        workspace_id: stream.workspace_id,
+        kind: "reservation_granted",
+        payload: {{
+          wait_id: body.reservation.wait_id,
+          relative_path: body.reservation.relative_path,
+          action: body.reservation.action,
+          reservation_expires_at: body.reservation.reservation_expires_at,
+        }},
+        required_next_action: body.required_next_action,
+      }});
+    }}
+  }} catch (_) {{}}
+}}
+
+function processReservationSseBlock(pi, block) {{
+  let event = "message";
+  const data = [];
+  for (const rawLine of block.split(/\r?\n/)) {{
+    const line = rawLine.trimEnd();
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  }}
+  if (event !== "reservation_granted" || data.length === 0) return;
+  try {{
+    deliverReservationNotification(pi, JSON.parse(data.join("\n")));
+  }} catch (_) {{}}
+}}
+
+function processReservationSseBuffer(pi, buffer) {{
+  buffer = buffer.replace(/\r\n/g, "\n");
+  let cursor = 0;
+  for (;;) {{
+    const next = buffer.indexOf("\n\n", cursor);
+    if (next === -1) break;
+    processReservationSseBlock(pi, buffer.slice(cursor, next));
+    cursor = next + 2;
+  }}
+  return buffer.slice(cursor);
+}}
+
+function startReservationStream(pi, stream) {{
+  if (!stream?.base_url || !stream?.authorization || !stream?.session_id || !stream?.workspace_id) return;
+  if (typeof fetch !== "function" || typeof TextDecoder !== "function") return;
+  stopReservationStream();
+  const controller = new AbortController();
+  reservationStreamAbort = controller;
+  const signal = controller.signal;
+  const run = async () => {{
+    let backoffMs = 1000;
+    await checkReservationResume(pi, stream, signal);
+    while (!signal.aborted) {{
+      try {{
+        const response = await fetch(reservationStreamUrl(stream), {{
+          headers: {{ authorization: stream.authorization, accept: "text/event-stream" }},
+          signal,
+        }});
+        if (!response.ok || !response.body?.getReader) throw new Error("reservation stream unavailable");
+        backoffMs = 1000;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        for (;;) {{
+          const {{ done, value }} = await reader.read();
+          if (done || signal.aborted) break;
+          buffer = processReservationSseBuffer(pi, buffer + decoder.decode(value, {{ stream: true }}));
+        }}
+      }} catch (_) {{
+        if (signal.aborted) return;
+        await checkReservationResume(pi, stream, signal);
+        await sleepWithAbort(backoffMs, signal);
+        backoffMs = Math.min(backoffMs * 2, 30000);
+      }}
+    }}
+  }};
+  run().catch(() => {{}});
+}}
+
 const MAX_SANDBOX_TOOL_OUTPUT_BYTES = 50 * 1024;
 const SANDBOX_BASH_FS_PROFILES = new Set(["read-only", "write-targets", "build", "git", "github-pr"]);
 
@@ -1782,10 +1945,11 @@ export default function statefulOmpExtension(pi) {{
     }},
   }});
   pi.on("session_start", async (event, ctx) => {{
-    runStatefulHook("session-start", {{
+    const result = runStatefulHook("session-start", {{
       session_id: sessionId(event, ctx),
       cwd: ctx.cwd,
     }});
+    startReservationStream(pi, result?.notifications_stream);
   }});
   pi.on("tool_call", async (event, ctx) => {{
     const decision = runStatefulHook("pre-tool-use", {{
@@ -1823,6 +1987,7 @@ export default function statefulOmpExtension(pi) {{
     }});
   }});
   pi.on("session_shutdown", async (event, ctx) => {{
+    stopReservationStream();
     runStatefulHook("stop", {{
       session_id: sessionId(event, ctx),
       cwd: ctx.cwd,

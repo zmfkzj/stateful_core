@@ -5,7 +5,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use stateful_core::normalize_relative_path;
 
@@ -100,6 +100,22 @@ impl HookOutcome {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OmpSessionStartOutput {
+    pub decision: &'static str,
+    pub session_id: String,
+    pub workspace_id: String,
+    pub notifications_stream: OmpNotificationsStream,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OmpNotificationsStream {
+    pub base_url: String,
+    pub authorization: String,
+    pub session_id: String,
+    pub workspace_id: String,
+}
+
 pub fn run_hook(runtime: HookRuntime) -> anyhow::Result<()> {
     match runtime {
         HookRuntime::Codex { command } => run_codex_hook(command),
@@ -139,13 +155,14 @@ fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
             println!("{}", outcome.to_stdout_json());
         }
         HookCommand::SessionStart => {
-            if let Err(error) = handle_omp_session_start_with_identity(
+            match handle_omp_session_start_with_identity(
                 &input,
                 &runtime,
                 &repo_root,
                 identity.as_ref(),
             ) {
-                eprintln!("stateful omp session-start warning: {error}");
+                Ok(output) => println!("{}", serde_json::to_string(&output)?),
+                Err(error) => eprintln!("stateful omp session-start warning: {error}"),
             }
         }
         HookCommand::PostToolUse => {
@@ -521,15 +538,24 @@ fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {
 pub fn handle_omp_session_start_with_runtime(
     input: &str,
     runtime: &ServerRuntime,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<OmpSessionStartOutput> {
     let input: OmpSessionEventInput = serde_json::from_str(input)?;
+    let workspace_id = input
+        .workspace_id
+        .clone()
+        .unwrap_or_else(|| effective_workspace_id(runtime, None));
     post_omp_session_event(
         runtime,
         "/v1/session/register",
         "omp_session_start",
         &input,
         None,
-    )
+    )?;
+    Ok(omp_session_start_output(
+        runtime,
+        &input.session_id,
+        workspace_id,
+    ))
 }
 
 fn handle_omp_session_start_with_identity(
@@ -537,7 +563,7 @@ fn handle_omp_session_start_with_identity(
     runtime: &ServerRuntime,
     repo_root: &Path,
     identity: Option<&RepoIdentity>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<OmpSessionStartOutput> {
     let input: OmpSessionEventInput = serde_json::from_str(input)?;
     let workspace_id = input
         .workspace_id
@@ -545,7 +571,7 @@ fn handle_omp_session_start_with_identity(
         .unwrap_or_else(|| effective_workspace_id(runtime, identity));
     write_current_session_file_for_explicit_session(
         repo_root,
-        &CurrentSession::new(input.session_id.clone(), workspace_id),
+        &CurrentSession::new(input.session_id.clone(), workspace_id.clone()),
     )?;
     post_omp_session_event(
         runtime,
@@ -553,7 +579,30 @@ fn handle_omp_session_start_with_identity(
         "omp_session_start",
         &input,
         identity,
-    )
+    )?;
+    Ok(omp_session_start_output(
+        runtime,
+        &input.session_id,
+        workspace_id,
+    ))
+}
+
+fn omp_session_start_output(
+    runtime: &ServerRuntime,
+    session_id: &str,
+    workspace_id: String,
+) -> OmpSessionStartOutput {
+    OmpSessionStartOutput {
+        decision: "allow",
+        session_id: session_id.to_string(),
+        workspace_id: workspace_id.clone(),
+        notifications_stream: OmpNotificationsStream {
+            base_url: runtime.base_url.clone(),
+            authorization: format!("Bearer {}", runtime.token),
+            session_id: session_id.to_string(),
+            workspace_id,
+        },
+    }
 }
 
 pub fn handle_omp_post_tool_use_with_runtime(

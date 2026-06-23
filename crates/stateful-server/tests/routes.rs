@@ -6,6 +6,7 @@ use axum::{
 use stateful_server::{ServerConfig, build_router, serve_listener};
 use stateful_store::{Event, Store};
 use std::{sync::Arc, time::Duration};
+use tokio_stream::StreamExt;
 use tower::ServiceExt;
 
 fn acquire_test_lease(store: &Store, session_id: &str, workspace_id: &str, path: &str) {
@@ -3707,6 +3708,92 @@ async fn activity_finalize_releases_leases_and_notifications_poll_returns_resume
             .len(),
         0
     );
+}
+
+#[tokio::test]
+async fn notifications_stream_emits_reservation_granted_sse() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    ensure_test_intent_via_http(&app, "s1", "w1", "src/auth.ts").await;
+    let lease = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/lease/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("lease acquire should complete");
+    assert_eq!(lease.status(), StatusCode::OK);
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/intent/declare",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "purpose": "Test requested work.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("intent declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let queued = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "queue_on_conflict": true,
+                "purpose": "Queue requested write after blocker clears."
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(queued.status(), StatusCode::OK);
+
+    let finalize = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/activity/finalize",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("finalize should complete");
+    assert_eq!(finalize.status(), StatusCode::OK);
+
+    let stream = app
+        .oneshot(authorized_get(
+            "/v1/notifications/stream?session_id=s2&workspace_id=w1",
+        ))
+        .await
+        .expect("notification stream should complete");
+    assert_eq!(stream.status(), StatusCode::OK);
+    assert_eq!(stream.headers()["content-type"], "text/event-stream");
+
+    let mut body = stream.into_body().into_data_stream();
+    let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("stream should emit notification")
+        .expect("stream item should exist")
+        .expect("stream chunk should read");
+    let text = String::from_utf8(chunk.to_vec()).expect("chunk should be utf8");
+    assert!(text.contains("event: reservation_granted"));
+    assert!(text.contains("\"relative_path\":\"src/auth.ts\""));
+    assert!(text.contains("state.intent.claim"));
 }
 
 #[tokio::test]

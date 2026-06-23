@@ -130,7 +130,7 @@ Resume signals are available through:
 - `stateful resume next`
 - MCP tools `state_notifications_poll` and `state_resume_next` using protocol
   names `state.notifications.poll` and `state.resume.next`
-- the `/v1/notifications/poll` and `/v1/resume/next` HTTP endpoints
+- the `/v1/notifications/poll`, `/v1/notifications/stream`, and `/v1/resume/next` HTTP endpoints
 
 ## What It Provides
 
@@ -504,6 +504,9 @@ profile can run purpose-and-command-only read-only operations or validate
 declared absolute scope for external writes. Other
 stateful hook allows become OMP allows; denials or unavailable authorization
 remain hard OMP blocks even if OMP yolo metadata is present.
+When a queued Stateful reservation becomes claimable, the generated extension
+subscribes to the server's SSE notification stream and injects a next-turn OMP
+message with the `wait_id`; the agent must still reread and claim before writing.
 OMP built-ins that do not write repo files, including `ask`, `ast_grep`, `job`,
 `irc`, `task`, `todo`, `report_tool_issue`, `generate_image`, and native
 read/search tools, are allowed by default. Other unclassified OMP-origin tools

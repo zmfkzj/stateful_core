@@ -18,6 +18,7 @@ stateful-core = { path = "../stateful-core" }
 stateful-store = { path = "../stateful-store" }
 thiserror.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true

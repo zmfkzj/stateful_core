@@ -2722,6 +2722,19 @@ fn run_hook_omp_env_runtime_derives_workspace_id_from_enabled_repo() {
         "stateful hook failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8(output.stdout.clone()).expect("stdout should be utf8");
+    let session_start_output: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("session start stdout should be json");
+    assert_eq!(session_start_output["decision"], "allow");
+    assert_eq!(session_start_output["workspace_id"], expected_workspace_id);
+    assert_eq!(
+        session_start_output["notifications_stream"]["session_id"],
+        "omp-parent"
+    );
+    assert_eq!(
+        session_start_output["notifications_stream"]["workspace_id"],
+        expected_workspace_id
+    );
     let register = request_json_body(&rx.recv().expect("session register should arrive"));
     assert_eq!(register["session_id"], "omp-parent");
     assert_eq!(register["workspace_id"], expected_workspace_id);
@@ -3223,8 +3236,16 @@ fn omp_session_start_posts_parent_session_register() {
     })
     .to_string();
 
-    handle_omp_session_start_with_runtime(&input, &runtime)
+    let output = handle_omp_session_start_with_runtime(&input, &runtime)
         .expect("omp session start should post register");
+    assert_eq!(output.decision, "allow");
+    assert_eq!(output.session_id, "omp-parent");
+    assert_eq!(output.workspace_id, runtime.workspace_id);
+    assert_eq!(output.notifications_stream.base_url, runtime.base_url);
+    assert_eq!(
+        output.notifications_stream.authorization,
+        format!("Bearer {}", runtime.token)
+    );
 
     let body = request_json_body(&rx.recv().expect("session register request should arrive"));
     assert_eq!(body["session_id"], "omp-parent");

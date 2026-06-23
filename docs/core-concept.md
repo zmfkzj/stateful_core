@@ -153,8 +153,11 @@ With optional `async: true`, they return immediately with a background-job start
 message while the trusted stateful sandbox process continues, then deliver an
 automatic completion message back into OMP when it exits. `external_bash`
 performs its own approval prompt before starting foreground or async execution
-with `stateful sandbox run --fs external --purpose ...`. Ordinary
-read work should use agent-native read, search, or diff tools when available.
+with `stateful sandbox run --fs external --purpose ...`. The generated extension
+also subscribes to Stateful SSE reservation notifications and injects a
+next-turn OMP message when a queued `wait_id` becomes claimable; the claim and
+write still use the normal Stateful tools. Ordinary read work should use
+agent-native read, search, or diff tools when available.
 Read-only inspection that genuinely needs a shell must use the trusted absolute
 `stateful` wrapper: `<absolute-stateful-binary> sandbox run --fs read-only
 --network disabled --command <cmd>`; in OMP, use `sandbox_bash` for that

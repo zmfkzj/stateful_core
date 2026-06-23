@@ -234,6 +234,11 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("display: true"));
     assert!(extension.contains("triggerTurn: true"));
     assert!(extension.contains("Result will be delivered automatically when complete."));
+    assert!(extension.contains("function startReservationStream(pi, stream)"));
+    assert!(extension.contains("/v1/notifications/stream?session_id="));
+    assert!(extension.contains("customType: \"stateful_reservation_ready\""));
+    assert!(extension.contains("startReservationStream(pi, result?.notifications_stream)"));
+    assert!(extension.contains("stopReservationStream();"));
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", fs]"));
     assert!(extension.contains("ctx.ui.confirm"));
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", \"external\""));
