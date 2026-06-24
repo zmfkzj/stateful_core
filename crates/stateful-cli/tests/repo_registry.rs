@@ -16,6 +16,7 @@ fn default_allowed_tools() -> Vec<String> {
         "mcp__openaiDeveloperDocs__search_openai_docs",
         "multi_agent_v1send_input",
         "task",
+        "yield",
     ]
     .into_iter()
     .map(str::to_string)

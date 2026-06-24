@@ -731,6 +731,7 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
             "mcp__openaiDeveloperDocs__search_openai_docs",
             "multi_agent_v1send_input",
             "task",
+            "yield",
             "KnownTool"
         ])
     );
