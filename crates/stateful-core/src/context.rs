@@ -12,10 +12,10 @@ pub enum RenderMode {
 #[serde(rename_all = "snake_case")]
 pub enum CurrentItemKind {
     Session,
-    Intent,
-    Lease,
-    WaitQueue,
     Reservation,
+    Claim,
+    WaitQueue,
+    ClaimableReservation,
     Finalization,
 }
 
@@ -49,8 +49,8 @@ pub enum CurrentFreshness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CurrentEvidenceKind {
-    DeclaredIntent,
-    LeaseOnly,
+    DeclaredReservation,
+    ClaimOnly,
     WaitQueue,
     Reservation,
     ObservedWrite,
@@ -60,8 +60,8 @@ pub enum CurrentEvidenceKind {
 impl CurrentEvidenceKind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::DeclaredIntent => "declared_intent",
-            Self::LeaseOnly => "lease_only",
+            Self::DeclaredReservation => "declared_reservation",
+            Self::ClaimOnly => "claim_only",
             Self::WaitQueue => "wait_queue",
             Self::Reservation => "reservation",
             Self::ObservedWrite => "observed_write",
@@ -205,7 +205,7 @@ impl ContextPackage {
         let path = path.into();
         Self::from_items(vec![
             CurrentItem::new(
-                CurrentItemKind::Lease,
+                CurrentItemKind::Claim,
                 CurrentSeverity::Block,
                 CurrentFreshness::Live,
                 path.clone(),
@@ -222,7 +222,7 @@ impl ContextPackage {
 
     pub fn with_warning(mut self, resource: impl Into<String>, summary: impl Into<String>) -> Self {
         self.items.push(CurrentItem::new(
-            CurrentItemKind::Intent,
+            CurrentItemKind::Reservation,
             CurrentSeverity::Warn,
             CurrentFreshness::Live,
             resource,

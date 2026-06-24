@@ -30,12 +30,12 @@ impl ActivityPhase {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "path", rename_all = "snake_case")]
-pub enum IntentScope {
+pub enum ReservationScope {
     File(String),
     Directory(String),
 }
 
-impl IntentScope {
+impl ReservationScope {
     pub fn file(path: impl AsRef<str>) -> Self {
         Self::File(normalize_relative_path(path.as_ref()))
     }
@@ -62,11 +62,11 @@ impl IntentScope {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopeSet {
-    scopes: Vec<IntentScope>,
+    scopes: Vec<ReservationScope>,
 }
 
 impl ScopeSet {
-    pub fn new(scopes: Vec<IntentScope>) -> Self {
+    pub fn new(scopes: Vec<ReservationScope>) -> Self {
         Self { scopes }
     }
 
@@ -99,17 +99,17 @@ pub struct PolicyState {
 }
 
 impl PolicyState {
-    pub fn with_active_file_intent(mut self, path: impl AsRef<str>) -> Self {
-        self.scopes = Some(ScopeSet::new(vec![IntentScope::file(path)]));
+    pub fn with_active_file_reservation(mut self, path: impl AsRef<str>) -> Self {
+        self.scopes = Some(ScopeSet::new(vec![ReservationScope::file(path)]));
         self
     }
 
-    pub fn with_active_directory_intent(mut self, path: impl AsRef<str>) -> Self {
-        self.scopes = Some(ScopeSet::new(vec![IntentScope::directory(path)]));
+    pub fn with_active_directory_reservation(mut self, path: impl AsRef<str>) -> Self {
+        self.scopes = Some(ScopeSet::new(vec![ReservationScope::directory(path)]));
         self
     }
 
-    pub fn with_active_intent_scopes(mut self, scopes: Vec<IntentScope>) -> Self {
+    pub fn with_active_reservation_scopes(mut self, scopes: Vec<ReservationScope>) -> Self {
         self.scopes = Some(ScopeSet::new(scopes));
         self
     }
@@ -166,9 +166,9 @@ impl AuthorizationInput {
 pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decision {
     let Some(scopes) = &state.scopes else {
         return Decision::deny(
-            "missing_intent",
-            "Supported writes require active file or directory intent.",
-            "Call state.intent.declare with file or directory scope before writing.",
+            "missing_reservation",
+            "Supported writes require active file or directory reservation.",
+            "Call state.reservation.declare with file or directory scope before writing.",
         );
     };
 
@@ -183,25 +183,27 @@ pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decis
     }
 
     match input {
-        AuthorizationInput::WriteFile { path } if scopes.allows_write(&path) => {
-            Decision::allow("authorized", "Write target has exact active file intent.")
-        }
+        AuthorizationInput::WriteFile { path } if scopes.allows_write(&path) => Decision::allow(
+            "authorized",
+            "Write target is covered by active task reservation exact file scope.",
+        ),
         AuthorizationInput::WriteDirectory { path } if scopes.allows_write_directory(&path) => {
             Decision::allow(
                 "authorized",
-                "Write directory target matches active directory intent.",
+                "Write directory target matches active directory reservation.",
             )
         }
-        AuthorizationInput::DeleteFile { path } if scopes.allows_delete(&path) => {
-            Decision::allow("authorized", "Delete target has exact active file intent.")
-        }
+        AuthorizationInput::DeleteFile { path } if scopes.allows_delete(&path) => Decision::allow(
+            "authorized",
+            "Delete target is covered by active task reservation exact file scope.",
+        ),
         AuthorizationInput::RenameFile { old_path, new_path }
         | AuthorizationInput::MoveFile { old_path, new_path }
             if scopes.allows_rename(&old_path, &new_path) =>
         {
             Decision::allow(
                 "authorized",
-                "Rename or move source and destination have exact active file intent.",
+                "Rename or move source and destination are covered by active task reservation exact file scopes.",
             )
         }
         AuthorizationInput::WriteFile { .. }
@@ -210,8 +212,8 @@ pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decis
         | AuthorizationInput::RenameFile { .. }
         | AuthorizationInput::MoveFile { .. } => Decision::deny(
             "scope_mismatch",
-            "Target is outside active intent scope.",
-            "Declare exact file intent for file actions, or exact directory intent for write-directory actions.",
+            "Target is outside active reservation scope.",
+            "Add exact file scope to the task reservation for file actions, or exact directory scope for write-directory actions.",
         ),
     }
 }

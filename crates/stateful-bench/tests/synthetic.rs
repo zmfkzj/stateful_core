@@ -154,7 +154,7 @@ fn synthetic_benchmark_records_idempotency_and_reload_failures_as_no_state_regre
 }
 
 #[test]
-fn chaos_agent_manifest_records_tiers_baselines_schedules_and_lease_conflicts() {
+fn chaos_agent_manifest_records_tiers_baselines_schedules_and_claim_conflicts() {
     let root = repo_root();
     let full_path = root.join(".stateful_bench/agent_synthetic/chaos_manifest.jsonl");
     let sample_path =
@@ -192,7 +192,10 @@ fn chaos_agent_manifest_records_tiers_baselines_schedules_and_lease_conflicts() 
         .map(|metadata| metadata["scenario"].as_str().expect("scenario"))
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(full_scenarios.len(), 15);
-    assert!(full_scenarios.contains("agent_agent_lease_conflict"));
+    assert!(
+        full_scenarios.contains("agent_agent_claim_conflict")
+            || full_scenarios.contains("agent_agent_lease_conflict")
+    );
     assert!(full_scenarios.contains("duplicate_anchor_insert"));
     assert!(full_scenarios.contains("move_vs_insert"));
     assert!(full_scenarios.contains("delete_vs_replace"));
@@ -268,22 +271,31 @@ fn chaos_agent_manifest_records_tiers_baselines_schedules_and_lease_conflicts() 
         let expectations = metadata["baseline_expectations"]
             .as_object()
             .expect("baseline_expectations should be object");
-        assert_eq!(
-            expectations
-                .keys()
-                .map(String::as_str)
-                .collect::<std::collections::BTreeSet<_>>(),
-            [
-                "no_state",
-                "stateful_full",
-                "stateful_without_commit_tracking",
-                "stateful_without_lease",
-                "stateful_without_replay",
-                "stateful_without_resume",
-            ]
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>()
-        );
+        let expectation_keys = expectations
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected_new = [
+            "no_state",
+            "stateful_full",
+            "stateful_without_commit_tracking",
+            "stateful_without_claim",
+            "stateful_without_replay",
+            "stateful_without_resume",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+        let expected_legacy = [
+            "no_state",
+            "stateful_full",
+            "stateful_without_commit_tracking",
+            "stateful_without_lease",
+            "stateful_without_replay",
+            "stateful_without_resume",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+        assert!(expectation_keys == expected_new || expectation_keys == expected_legacy);
     }
 }
 

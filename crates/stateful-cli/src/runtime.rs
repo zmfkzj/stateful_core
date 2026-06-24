@@ -21,7 +21,7 @@ const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
 static SECRET_JSON_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IntentDeclareArgs {
+pub struct ReservationDeclareArgs {
     pub session_id: String,
     pub workspace_id: String,
     pub purpose: String,
@@ -30,7 +30,7 @@ pub struct IntentDeclareArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IntentClaimArgs {
+pub struct ReservationClaimArgs {
     pub session_id: String,
     pub workspace_id: String,
     pub wait_id: String,
@@ -38,7 +38,7 @@ pub struct IntentClaimArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IntentRequestArgs {
+pub struct ReservationRequestArgs {
     pub session_id: String,
     pub workspace_id: String,
     pub request_id: String,
@@ -49,7 +49,7 @@ pub struct IntentRequestArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IntentCancelArgs {
+pub struct ReservationCancelArgs {
     pub session_id: String,
     pub workspace_id: String,
     pub request_id: String,
@@ -635,17 +635,17 @@ pub fn get_json(runtime: &ServerRuntime, path: &str) -> anyhow::Result<HttpRespo
     parse_http_response(&response)
 }
 
-pub fn declare_intent_via_http(
+pub fn declare_reservation_via_http(
     runtime: &ServerRuntime,
-    args: IntentDeclareArgs,
+    args: ReservationDeclareArgs,
 ) -> anyhow::Result<()> {
-    let body = intent_declare_protocol_body(runtime, args, "cli", "stateful-cli");
+    let body = reservation_declare_protocol_body(runtime, args, "cli", "stateful-cli");
 
-    let response = post_json(runtime, "/v1/intent/declare", &body)?;
+    let response = post_json(runtime, "/v1/reservation/declare", &body)?;
 
     if !(200..300).contains(&response.status_code) {
         anyhow::bail!(
-            "intent declaration failed with HTTP {}: {}",
+            "reservation declaration failed with HTTP {}: {}",
             response.status_code,
             response.body
         );
@@ -654,33 +654,36 @@ pub fn declare_intent_via_http(
     Ok(())
 }
 
-pub fn claim_intent_via_http(runtime: &ServerRuntime, args: IntentClaimArgs) -> anyhow::Result<()> {
-    let body = intent_claim_protocol_body(runtime, args, "cli", "stateful-cli");
-
-    let response = post_json(runtime, "/v1/intent/claim", &body)?;
-
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!(
-            "intent claim failed with HTTP {}: {}",
-            response.status_code,
-            response.body
-        );
-    }
-
-    Ok(())
-}
-
-pub fn request_intent_via_http(
+pub fn claim_reservation_via_http(
     runtime: &ServerRuntime,
-    args: IntentRequestArgs,
-) -> anyhow::Result<HttpResponse> {
-    let body = intent_request_protocol_body(runtime, args, "cli", "stateful-cli");
+    args: ReservationClaimArgs,
+) -> anyhow::Result<()> {
+    let body = reservation_claim_protocol_body(runtime, args, "cli", "stateful-cli");
 
-    let response = post_json(runtime, "/v1/intent/request", &body)?;
+    let response = post_json(runtime, "/v1/reservation/claim", &body)?;
 
     if !(200..300).contains(&response.status_code) {
         anyhow::bail!(
-            "intent request failed with HTTP {}: {}",
+            "reservation claim failed with HTTP {}: {}",
+            response.status_code,
+            response.body
+        );
+    }
+
+    Ok(())
+}
+
+pub fn request_reservation_via_http(
+    runtime: &ServerRuntime,
+    args: ReservationRequestArgs,
+) -> anyhow::Result<HttpResponse> {
+    let body = reservation_request_protocol_body(runtime, args, "cli", "stateful-cli");
+
+    let response = post_json(runtime, "/v1/reservation/request", &body)?;
+
+    if !(200..300).contains(&response.status_code) {
+        anyhow::bail!(
+            "reservation request failed with HTTP {}: {}",
             response.status_code,
             response.body
         );
@@ -689,17 +692,17 @@ pub fn request_intent_via_http(
     Ok(response)
 }
 
-pub fn cancel_intent_via_http(
+pub fn cancel_reservation_via_http(
     runtime: &ServerRuntime,
-    args: IntentCancelArgs,
+    args: ReservationCancelArgs,
 ) -> anyhow::Result<()> {
-    let body = intent_cancel_protocol_body(runtime, args, "cli", "stateful-cli");
+    let body = reservation_cancel_protocol_body(runtime, args, "cli", "stateful-cli");
 
-    let response = post_json(runtime, "/v1/intent/cancel", &body)?;
+    let response = post_json(runtime, "/v1/reservation/cancel", &body)?;
 
     if !(200..300).contains(&response.status_code) {
         anyhow::bail!(
-            "intent cancel failed with HTTP {}: {}",
+            "reservation cancel failed with HTTP {}: {}",
             response.status_code,
             response.body
         );
@@ -708,13 +711,13 @@ pub fn cancel_intent_via_http(
     Ok(())
 }
 
-pub fn intent_declare_protocol_body(
+pub fn reservation_declare_protocol_body(
     runtime: &ServerRuntime,
-    args: IntentDeclareArgs,
+    args: ReservationDeclareArgs,
     source_kind: &str,
     source_ref: &str,
 ) -> serde_json::Value {
-    let IntentDeclareArgs {
+    let ReservationDeclareArgs {
         session_id,
         workspace_id,
         purpose,
@@ -728,7 +731,7 @@ pub fn intent_declare_protocol_body(
         workspace_id,
         identity,
         source_kind,
-        event: "intent_declare",
+        event: "reservation_declare",
         source_ref,
         source_tool_name: None,
         payload: serde_json::json!({
@@ -738,13 +741,13 @@ pub fn intent_declare_protocol_body(
     })
 }
 
-pub fn intent_claim_protocol_body(
+pub fn reservation_claim_protocol_body(
     runtime: &ServerRuntime,
-    args: IntentClaimArgs,
+    args: ReservationClaimArgs,
     source_kind: &str,
     source_ref: &str,
 ) -> serde_json::Value {
-    let IntentClaimArgs {
+    let ReservationClaimArgs {
         session_id,
         workspace_id,
         wait_id,
@@ -757,7 +760,7 @@ pub fn intent_claim_protocol_body(
         workspace_id,
         identity,
         source_kind,
-        event: "intent_claim",
+        event: "reservation_claim",
         source_ref,
         source_tool_name: None,
         payload: serde_json::json!({
@@ -766,13 +769,13 @@ pub fn intent_claim_protocol_body(
     })
 }
 
-pub fn intent_request_protocol_body(
+pub fn reservation_request_protocol_body(
     runtime: &ServerRuntime,
-    args: IntentRequestArgs,
+    args: ReservationRequestArgs,
     source_kind: &str,
     source_ref: &str,
 ) -> serde_json::Value {
-    let IntentRequestArgs {
+    let ReservationRequestArgs {
         session_id,
         workspace_id,
         request_id,
@@ -788,7 +791,7 @@ pub fn intent_request_protocol_body(
         workspace_id,
         identity,
         source_kind,
-        event: "intent_request",
+        event: "reservation_request",
         source_ref,
         source_tool_name: None,
         payload: serde_json::json!({
@@ -800,13 +803,13 @@ pub fn intent_request_protocol_body(
     })
 }
 
-pub fn intent_cancel_protocol_body(
+pub fn reservation_cancel_protocol_body(
     runtime: &ServerRuntime,
-    args: IntentCancelArgs,
+    args: ReservationCancelArgs,
     source_kind: &str,
     source_ref: &str,
 ) -> serde_json::Value {
-    let IntentCancelArgs {
+    let ReservationCancelArgs {
         session_id,
         workspace_id,
         request_id,
@@ -819,7 +822,7 @@ pub fn intent_cancel_protocol_body(
         workspace_id,
         identity,
         source_kind,
-        event: "intent_cancel",
+        event: "reservation_cancel",
         source_ref,
         source_tool_name: None,
         payload: serde_json::json!({

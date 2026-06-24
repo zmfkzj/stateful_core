@@ -24,6 +24,7 @@ fn parses_sandbox_run_read_only_defaults() {
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::ReadOnly);
             assert_eq!(network, SandboxNetworkPolicy::Disabled);
@@ -33,6 +34,7 @@ fn parses_sandbox_run_read_only_defaults() {
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!stream_events);
             assert_eq!(command, "rg auth src");
             assert_eq!(timeout_seconds, None);
         }
@@ -109,6 +111,7 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::WriteTargets);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
@@ -118,6 +121,7 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             assert_eq!(write_dirs, vec!["tmp"]);
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!stream_events);
             assert_eq!(command, "printf x > README.md");
             assert_eq!(timeout_seconds, Some(12));
         }
@@ -154,6 +158,7 @@ fn parses_sandbox_run_git_profile() {
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::Git);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
@@ -163,6 +168,7 @@ fn parses_sandbox_run_git_profile() {
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!stream_events);
             assert_eq!(command, "git fetch --all");
             assert_eq!(timeout_seconds, Some(30));
         }
@@ -199,6 +205,7 @@ fn parses_sandbox_run_github_pr_profile() {
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::GithubPr);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
@@ -208,6 +215,7 @@ fn parses_sandbox_run_github_pr_profile() {
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!stream_events);
             assert_eq!(command, "gh pr status");
             assert_eq!(timeout_seconds, Some(30));
         }
@@ -244,6 +252,7 @@ fn parses_sandbox_run_build_profile() {
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::Build);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
@@ -253,6 +262,7 @@ fn parses_sandbox_run_build_profile() {
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!stream_events);
             assert_eq!(command, "npm test");
             assert_eq!(timeout_seconds, Some(60));
         }
@@ -418,6 +428,7 @@ fn parses_sandbox_run_external_profile() {
             allow_signal,
             timeout_seconds,
             command,
+            stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::External);
             assert_eq!(purpose, Some("install rebuilt binaries".to_string()));
@@ -428,6 +439,7 @@ fn parses_sandbox_run_external_profile() {
             assert!(allow_signal);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(timeout_seconds, Some(10));
+            assert!(!stream_events);
             assert_eq!(
                 command,
                 "install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful"
@@ -719,6 +731,7 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
             "mcp__openaiDeveloperDocs__search_openai_docs",
             "multi_agent_v1send_input",
             "task",
+            "yield",
             "KnownTool"
         ])
     );
@@ -808,10 +821,10 @@ fn hook_legacy_pre_tool_use_command_is_rejected() {
 }
 
 #[test]
-fn intent_declare_command_parses_file_scopes() {
+fn reservation_declare_command_parses_file_scopes() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "intent",
+        "reservation",
         "declare",
         "--session-id",
         "s1",
@@ -822,11 +835,11 @@ fn intent_declare_command_parses_file_scopes() {
         "src/auth.ts",
         "src/session/",
     ])
-    .expect("intent declare command should parse");
+    .expect("reservation declare command should parse");
 
     assert!(matches!(
         cli.command,
-        Command::Intent(stateful_cli::IntentCommand::Declare {
+        Command::Reservation(stateful_cli::ReservationCommand::Declare {
             ref session_id,
             ref workspace_id,
             ref purpose,
@@ -839,20 +852,20 @@ fn intent_declare_command_parses_file_scopes() {
 }
 
 #[test]
-fn intent_declare_command_can_default_session_and_workspace() {
+fn reservation_declare_command_can_default_session_and_workspace() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "intent",
+        "reservation",
         "declare",
         "--purpose",
         "Fix auth validation behavior.",
         "src/auth.ts",
     ])
-    .expect("intent declare command should parse without explicit session flags");
+    .expect("reservation declare command should parse without explicit session flags");
 
     assert!(matches!(
         cli.command,
-        Command::Intent(stateful_cli::IntentCommand::Declare {
+        Command::Reservation(stateful_cli::ReservationCommand::Declare {
             session_id: None,
             workspace_id: None,
             ref purpose,
@@ -863,15 +876,15 @@ fn intent_declare_command_can_default_session_and_workspace() {
 }
 
 #[test]
-fn intent_declare_command_requires_at_least_one_file() {
+fn reservation_declare_command_requires_at_least_one_file() {
     let error = Cli::try_parse_from([
         "stateful",
-        "intent",
+        "reservation",
         "declare",
         "--purpose",
         "Fix auth validation behavior.",
     ])
-    .expect_err("intent declare without files should fail");
+    .expect_err("reservation declare without files should fail");
 
     assert!(
         error.to_string().contains("files_planned") || error.to_string().contains("FILES_PLANNED"),
@@ -880,10 +893,10 @@ fn intent_declare_command_requires_at_least_one_file() {
 }
 
 #[test]
-fn intent_claim_command_parses_wait_id() {
+fn reservation_claim_command_parses_wait_id() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "intent",
+        "reservation",
         "claim",
         "--session-id",
         "s1",
@@ -892,11 +905,11 @@ fn intent_claim_command_parses_wait_id() {
         "--wait-id",
         "wait-1",
     ])
-    .expect("intent claim command should parse");
+    .expect("reservation claim command should parse");
 
     assert!(matches!(
         cli.command,
-        Command::Intent(stateful_cli::IntentCommand::Claim {
+        Command::Reservation(stateful_cli::ReservationCommand::Claim {
             ref session_id,
             ref workspace_id,
             ref wait_id,
@@ -907,10 +920,10 @@ fn intent_claim_command_parses_wait_id() {
 }
 
 #[test]
-fn intent_request_command_parses_request_id_action_and_path() {
+fn reservation_request_command_parses_request_id_action_and_path() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "intent",
+        "reservation",
         "request",
         "--session-id",
         "s1",
@@ -925,11 +938,11 @@ fn intent_request_command_parses_request_id_action_and_path() {
         "--purpose",
         "Queue auth file changes.",
     ])
-    .expect("intent request command should parse");
+    .expect("reservation request command should parse");
 
     assert!(matches!(
         cli.command,
-        Command::Intent(stateful_cli::IntentCommand::Request {
+        Command::Reservation(stateful_cli::ReservationCommand::Request {
             ref session_id,
             ref workspace_id,
             ref request_id,
@@ -946,10 +959,10 @@ fn intent_request_command_parses_request_id_action_and_path() {
 }
 
 #[test]
-fn intent_cancel_command_parses_request_id() {
+fn reservation_cancel_command_parses_request_id() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "intent",
+        "reservation",
         "cancel",
         "--session-id",
         "s1",
@@ -958,11 +971,11 @@ fn intent_cancel_command_parses_request_id() {
         "--request-id",
         "request-1",
     ])
-    .expect("intent cancel command should parse");
+    .expect("reservation cancel command should parse");
 
     assert!(matches!(
         cli.command,
-        Command::Intent(stateful_cli::IntentCommand::Cancel {
+        Command::Reservation(stateful_cli::ReservationCommand::Cancel {
             ref session_id,
             ref workspace_id,
             ref request_id,

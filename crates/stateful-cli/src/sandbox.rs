@@ -6,13 +6,22 @@ use std::{
     error::Error as StdError,
     ffi::OsString,
     fmt, fs, io,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use signal_hook::{
+    consts::signal::{SIGHUP, SIGINT, SIGTERM},
+    iterator::{Handle as SignalsHandle, Signals},
+};
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 #[cfg(unix)]
@@ -32,8 +41,6 @@ use crate::{
 pub(crate) const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
 pub(crate) const STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV: &str = "STATEFUL_ALLOW_NESTED_SANDBOX_RUN";
 const SANDBOX_TMP_ROOT: &str = "/tmp/stateful";
-#[cfg(unix)]
-const SIGTERM: i32 = 15;
 #[cfg(unix)]
 const SIGKILL: i32 = 9;
 
@@ -65,6 +72,7 @@ pub struct SandboxRunRequest {
     pub allow_signal: bool,
     pub command: String,
     pub timeout_seconds: Option<u64>,
+    pub stream_events: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,7 +393,7 @@ pub fn run_sandbox_in_repo(
                     )
                     .to_string();
                     if let Some(release_context) = &release_after_run {
-                        release_sandbox_write_leases(runtime, release_context);
+                        release_sandbox_write_claims(runtime, release_context);
                     }
                     return Err(SandboxAuthorizationDenied::new(body).into());
                 }
@@ -475,7 +483,7 @@ pub fn run_sandbox_in_repo(
                 )
                 .to_string();
                 if let Some(release_context) = &release_after_run {
-                    release_sandbox_write_leases(runtime, release_context);
+                    release_sandbox_write_claims(runtime, release_context);
                 }
                 return Err(SandboxAuthorizationDenied::new(body).into());
             }
@@ -533,6 +541,7 @@ pub fn run_sandbox_in_repo(
                     &git_profile_hooks_dir(&repo_root),
                     request.network,
                     timeout,
+                    request.stream_events,
                 )
             }
             Some(ValidatedSandboxDirectCommand::GithubPr(words)) => {
@@ -546,6 +555,7 @@ pub fn run_sandbox_in_repo(
                     &temp_dir,
                     request.network,
                     timeout,
+                    request.stream_events,
                 )
             }
             None => run_sandboxed_command(
@@ -557,13 +567,14 @@ pub fn run_sandbox_in_repo(
                 request.fs == SandboxFsProfile::External,
                 request.network,
                 timeout,
+                request.stream_events,
             ),
         }
     })();
     if let Some(release_context) = &release_after_run
         && let Some(runtime) = runtime.as_ref()
     {
-        release_sandbox_write_leases(runtime, release_context);
+        release_sandbox_write_claims(runtime, release_context);
     }
     let result = result?;
 
@@ -605,6 +616,7 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
     let mut allow_signal = false;
     let mut inner_command = None;
     let mut timeout_seconds = None;
+    let mut stream_events = false;
     let mut index = 3;
     while index < words.len() {
         let arg = &words[index];
@@ -674,6 +686,9 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
                     "stateful sandbox run --timeout-seconds requires an integer value".to_string()
                 })?);
             }
+            "--stream-events" => {
+                stream_events = true;
+            }
             _ => {
                 return Err(format!("unsupported stateful sandbox run argument `{arg}`"));
             }
@@ -698,6 +713,7 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         },
     })
 }
@@ -951,12 +967,13 @@ fn run_sandboxed_command(
     allow_macos_identity_and_trust_services: bool,
     network: SandboxNetworkPolicy,
     timeout: Duration,
+    stream_events: bool,
 ) -> anyhow::Result<SandboxCommandResult> {
     let temp_dir = sandbox_temp_dir(writable_paths);
     if allow_direct_nested_sandbox_run() {
         let mut command = direct_shell_command(command, cwd);
         apply_sandbox_temp_env(&mut command, temp_dir.as_deref());
-        return run_command_with_timeout(command, timeout);
+        return run_command_with_timeout(command, timeout, stream_events);
     }
     #[cfg(target_os = "macos")]
     {
@@ -972,6 +989,7 @@ fn run_sandboxed_command(
                 network,
             ),
             timeout,
+            stream_events,
         )
     }
 
@@ -988,6 +1006,7 @@ fn run_sandboxed_command(
                 network,
             ),
             timeout,
+            stream_events,
         )
     }
 
@@ -1016,13 +1035,14 @@ fn run_sandboxed_git_command(
     hooks_dir: &Path,
     network: SandboxNetworkPolicy,
     timeout: Duration,
+    stream_events: bool,
 ) -> anyhow::Result<SandboxCommandResult> {
     let config = discover_git_profile_config(cwd);
 
     if allow_direct_nested_sandbox_run() {
         let mut command = direct_git_command(words, cwd);
         apply_git_profile_env(&mut command, temp_dir, hooks_dir, &config);
-        return run_command_with_timeout(command, timeout);
+        return run_command_with_timeout(command, timeout, stream_events);
     }
 
     #[cfg(target_os = "macos")]
@@ -1038,6 +1058,7 @@ fn run_sandboxed_git_command(
                 network,
             ),
             timeout,
+            stream_events,
         )
     }
 
@@ -1054,6 +1075,7 @@ fn run_sandboxed_git_command(
                 network,
             ),
             timeout,
+            stream_events,
         )
     }
 
@@ -1079,11 +1101,12 @@ fn run_sandboxed_github_pr_command(
     temp_dir: &Path,
     network: SandboxNetworkPolicy,
     timeout: Duration,
+    stream_events: bool,
 ) -> anyhow::Result<SandboxCommandResult> {
     if allow_direct_nested_sandbox_run() {
         let mut command = direct_github_pr_command(words, cwd);
         apply_github_pr_profile_env(&mut command, temp_dir);
-        return run_command_with_timeout(command, timeout);
+        return run_command_with_timeout(command, timeout, stream_events);
     }
 
     #[cfg(target_os = "macos")]
@@ -1091,6 +1114,7 @@ fn run_sandboxed_github_pr_command(
         run_command_with_timeout(
             seatbelt_github_pr_command(words, cwd, writable_paths, temp_dir, network),
             timeout,
+            stream_events,
         )
     }
 
@@ -1099,6 +1123,7 @@ fn run_sandboxed_github_pr_command(
         run_command_with_timeout(
             bubblewrap_github_pr_command(words, cwd, writable_paths, temp_dir, network),
             timeout,
+            stream_events,
         )
     }
 
@@ -3189,7 +3214,7 @@ fn sandbox_content_hash(bytes: &[u8]) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
-fn release_sandbox_write_leases(runtime: &ServerRuntime, context: &SandboxLeaseReleaseContext) {
+fn release_sandbox_write_claims(runtime: &ServerRuntime, context: &SandboxLeaseReleaseContext) {
     let mut paths = BTreeSet::new();
     for path in &context.paths {
         paths.insert(path);
@@ -3201,7 +3226,7 @@ fn release_sandbox_write_leases(runtime: &ServerRuntime, context: &SandboxLeaseR
             "workspace_id": context.workspace_id,
             "path": path,
         });
-        let Ok(response) = post_json(runtime, "/v1/lease/release", &body) else {
+        let Ok(response) = post_json(runtime, "/v1/claim/release", &body) else {
             continue;
         };
         if !(200..300).contains(&response.status_code) {
@@ -3792,35 +3817,90 @@ fn apply_github_pr_profile_env(command: &mut Command, temp_dir: &Path) {
         .env("PAGER", "cat");
 }
 
+fn emit_sandbox_stream_event(stream: &str, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let chunk = String::from_utf8_lossy(bytes);
+    let event = serde_json::json!({
+        "event": "sandbox_output",
+        "stream": stream,
+        "chunk": chunk,
+    });
+    let mut stdout = io::stdout().lock();
+    let _ = writeln!(stdout, "{event}");
+    let _ = stdout.flush();
+}
+
+fn read_sandbox_pipe_to_end<R>(
+    mut pipe: R,
+    stream: &'static str,
+    stream_events: bool,
+) -> io::Result<Vec<u8>>
+where
+    R: Read,
+{
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = pipe.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let chunk = &buffer[..count];
+        if stream_events {
+            emit_sandbox_stream_event(stream, chunk);
+        }
+        bytes.extend_from_slice(chunk);
+    }
+    Ok(bytes)
+}
+
 pub(crate) fn run_command_with_timeout(
+    command: Command,
+    timeout: Duration,
+    stream_events: bool,
+) -> anyhow::Result<SandboxCommandResult> {
+    let signal_monitor = SandboxSignalMonitor::install()?;
+    run_command_with_timeout_and_cancel(command, timeout, stream_events, || {
+        signal_monitor.is_cancelled()
+    })
+}
+
+fn run_command_with_timeout_and_cancel(
     mut command: Command,
     timeout: Duration,
+    stream_events: bool,
+    mut is_cancelled: impl FnMut() -> bool,
 ) -> anyhow::Result<SandboxCommandResult> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     isolate_sandbox_process_group(&mut command);
     let mut child = command.spawn()?;
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("failed to capture sandbox stdout"))?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .ok_or_else(|| anyhow::anyhow!("failed to capture sandbox stderr"))?;
-    let stdout_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
+    let stdout_reader =
+        thread::spawn(move || read_sandbox_pipe_to_end(stdout, "stdout", stream_events));
+    let stderr_reader =
+        thread::spawn(move || read_sandbox_pipe_to_end(stderr, "stderr", stream_events));
 
     let deadline = Instant::now() + timeout;
     let mut timed_out = false;
+    let mut cancelled = false;
     let exit_status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
+        }
+        if is_cancelled() {
+            cancelled = true;
+            break terminate_sandbox_child(&mut child)?.ok_or_else(|| {
+                anyhow::anyhow!("cancelled and failed to terminate sandbox command")
+            })?;
         }
         if Instant::now() >= deadline {
             timed_out = true;
@@ -3830,7 +3910,7 @@ pub(crate) fn run_command_with_timeout(
         }
         thread::sleep(Duration::from_millis(25));
     };
-    cleanup_sandbox_process_group(&mut child, timed_out)?;
+    cleanup_sandbox_process_group(&mut child, timed_out || cancelled)?;
 
     let stdout = stdout_reader
         .join()
@@ -3840,11 +3920,77 @@ pub(crate) fn run_command_with_timeout(
         .map_err(|_| anyhow::anyhow!("sandbox stderr reader panicked"))??;
 
     Ok(SandboxCommandResult {
-        status: if timed_out { "timed_out" } else { "exited" },
+        status: if cancelled {
+            "cancelled"
+        } else if timed_out {
+            "timed_out"
+        } else {
+            "exited"
+        },
         exit_code: exit_status.code(),
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
     })
+}
+
+struct SandboxSignalMonitor {
+    #[cfg(unix)]
+    cancelled: Arc<AtomicBool>,
+    #[cfg(unix)]
+    handle: SignalsHandle,
+    #[cfg(unix)]
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl SandboxSignalMonitor {
+    fn install() -> anyhow::Result<Self> {
+        #[cfg(unix)]
+        {
+            let mut signals = Signals::new([SIGHUP, SIGINT, SIGTERM])?;
+            let handle = signals.handle();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let thread_cancelled = Arc::clone(&cancelled);
+            let thread = thread::spawn(move || {
+                if signals.forever().next().is_some() {
+                    thread_cancelled.store(true, Ordering::SeqCst);
+                }
+            });
+            Ok(Self {
+                cancelled,
+                handle,
+                thread: Some(thread),
+            })
+        }
+
+        #[cfg(not(unix))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+}
+
+impl Drop for SandboxSignalMonitor {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            self.handle.close();
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
 }
 
 fn isolate_sandbox_process_group(command: &mut Command) {
@@ -3950,6 +4096,7 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
+        time::{Duration, Instant},
     };
 
     const SANDBOX_SESSION_CHILD_CASE: &str = "STATEFUL_SANDBOX_SESSION_CHILD_CASE";
@@ -4141,6 +4288,7 @@ mod tests {
             allow_signal: false,
             command: "ps -o pid,comm -p 1".to_string(),
             timeout_seconds: None,
+            stream_events: false,
         };
 
         let error = validate_sandbox_run_request_shape(&request)
@@ -4167,6 +4315,7 @@ mod tests {
             allow_signal: false,
             command: "pgrep -f denovo_codex_agent".to_string(),
             timeout_seconds: None,
+            stream_events: false,
         };
 
         let error = validate_sandbox_run_request_shape(&request)
@@ -4207,6 +4356,7 @@ mod tests {
                 allow_signal: false,
                 command: command.to_string(),
                 timeout_seconds: None,
+                stream_events: false,
             };
 
             let Err(error) = validate_sandbox_run_request_shape(&request) else {
@@ -4235,6 +4385,7 @@ mod tests {
             allow_signal: false,
             command: "rg ps crates".to_string(),
             timeout_seconds: None,
+            stream_events: false,
         };
 
         validate_sandbox_run_request_shape(&request)
@@ -4254,6 +4405,39 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn cancelled_wrapper_cleans_background_descendants_before_joining_readers() {
+        if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
+            return;
+        }
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let thread_cancelled = Arc::clone(&cancelled);
+        let setter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            thread_cancelled.store(true, Ordering::SeqCst);
+        });
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("(trap '' TERM HUP INT; sleep 5) & wait");
+
+        let started = Instant::now();
+        let output =
+            run_command_with_timeout_and_cancel(command, Duration::from_secs(10), false, || {
+                cancelled.load(Ordering::SeqCst)
+            })
+            .expect("sandbox command should cancel and terminate");
+        setter.join().expect("cancellation setter should join");
+
+        assert_eq!(output.status, "cancelled");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "cancel cleanup should not wait for ignored-TERM descendants"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn timeout_kills_process_group_descendants_before_joining_readers() {
         if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
             return;
@@ -4265,7 +4449,7 @@ mod tests {
             .arg("(trap '' TERM HUP INT; sleep 5) & wait");
 
         let started = Instant::now();
-        let output = run_command_with_timeout(command, Duration::from_millis(100))
+        let output = run_command_with_timeout(command, Duration::from_millis(100), false)
             .expect("sandbox command should time out and terminate");
 
         assert_eq!(output.status, "timed_out");
@@ -4288,7 +4472,7 @@ mod tests {
             .arg("(trap '' TERM HUP INT; sleep 5) & printf done");
 
         let started = Instant::now();
-        let output = run_command_with_timeout(command, Duration::from_secs(10))
+        let output = run_command_with_timeout(command, Duration::from_secs(10), false)
             .expect("sandbox command should exit and clean descendants");
 
         assert_eq!(output.status, "exited");
@@ -4483,6 +4667,7 @@ mod tests {
                 SandboxNetworkPolicy::Disabled,
             ),
             Duration::from_secs(10),
+            false,
         )
         .expect("bubblewrap command should run");
 
@@ -4988,6 +5173,7 @@ mod tests {
             allow_signal: false,
             command: "true".to_string(),
             timeout_seconds: None,
+            stream_events: false,
         };
 
         let error = validate_sandbox_run_request_shape(&request)

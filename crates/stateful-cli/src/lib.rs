@@ -53,15 +53,16 @@ pub use repo_registry::{
     workspace_id_for_enabled_repo, workspace_id_for_repo_identity,
 };
 pub use runtime::{
-    CurrentSession, HttpResponse, IntentCancelArgs, IntentClaimArgs, IntentDeclareArgs,
-    IntentRequestArgs, ProtocolEnvelopeArgs, STATEFUL_SESSION_ID_ENV, ServerRuntime,
-    cancel_intent_via_http, claim_intent_via_http, declare_intent_via_http, discover_runtime,
-    discover_runtime_with_global, discover_runtime_with_optional_global, get_json,
-    global_state_db_path, intent_cancel_protocol_body, intent_claim_protocol_body,
-    intent_declare_protocol_body, intent_request_protocol_body, post_json, protocol_envelope,
-    read_current_session_file, read_current_session_file_for_session, request_intent_via_http,
-    runtime_env_override_is_configured, runtime_from_remote, runtime_has_required_identity,
-    runtime_identity_matches_pid, write_current_session_file,
+    CurrentSession, HttpResponse, ProtocolEnvelopeArgs, ReservationCancelArgs,
+    ReservationClaimArgs, ReservationDeclareArgs, ReservationRequestArgs, STATEFUL_SESSION_ID_ENV,
+    ServerRuntime, cancel_reservation_via_http, claim_reservation_via_http,
+    declare_reservation_via_http, discover_runtime, discover_runtime_with_global,
+    discover_runtime_with_optional_global, get_json, global_state_db_path, post_json,
+    protocol_envelope, read_current_session_file, read_current_session_file_for_session,
+    request_reservation_via_http, reservation_cancel_protocol_body,
+    reservation_claim_protocol_body, reservation_declare_protocol_body,
+    reservation_request_protocol_body, runtime_env_override_is_configured, runtime_from_remote,
+    runtime_has_required_identity, runtime_identity_matches_pid, write_current_session_file,
     write_current_session_file_for_current_stateful_session,
     write_current_session_file_for_session, write_global_runtime_file, write_runtime_file,
 };
@@ -139,7 +140,7 @@ pub enum Command {
     #[command(subcommand)]
     Resume(ResumeCommand),
     #[command(subcommand)]
-    Intent(IntentCommand),
+    Reservation(ReservationCommand),
     #[command(subcommand)]
     Mcp(McpCommand),
     SyncOutbox,
@@ -222,6 +223,8 @@ pub enum SandboxCommand {
         command: String,
         #[arg(long)]
         timeout_seconds: Option<u64>,
+        #[arg(long, hide = true)]
+        stream_events: bool,
     },
     Process {
         #[command(subcommand)]
@@ -260,7 +263,7 @@ pub enum SandboxProcessCommand {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum IntentCommand {
+pub enum ReservationCommand {
     Declare {
         #[arg(long)]
         session_id: Option<String>,
@@ -585,6 +588,7 @@ pub fn run() -> anyhow::Result<()> {
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         }) => {
             let paths = GlobalPaths::from_env()?;
             let repo_root = current_repo_root_or_current_dir()?;
@@ -602,6 +606,7 @@ pub fn run() -> anyhow::Result<()> {
                     allow_signal,
                     command,
                     timeout_seconds,
+                    stream_events,
                 },
             ) {
                 Ok(output) => output,
@@ -766,7 +771,7 @@ pub fn run() -> anyhow::Result<()> {
             )?;
             print_http_response(response)?;
         }
-        Command::Intent(IntentCommand::Declare {
+        Command::Reservation(ReservationCommand::Declare {
             session_id,
             workspace_id,
             purpose,
@@ -775,9 +780,9 @@ pub fn run() -> anyhow::Result<()> {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let (session_id, workspace_id) =
                 resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
-            declare_intent_via_http(
+            declare_reservation_via_http(
                 &runtime,
-                IntentDeclareArgs {
+                ReservationDeclareArgs {
                     session_id,
                     workspace_id,
                     purpose,
@@ -787,9 +792,9 @@ pub fn run() -> anyhow::Result<()> {
                         .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
                 },
             )?;
-            println!("declared stateful intent");
+            println!("declared stateful reservation");
         }
-        Command::Intent(IntentCommand::Request {
+        Command::Reservation(ReservationCommand::Request {
             session_id,
             workspace_id,
             request_id,
@@ -800,9 +805,9 @@ pub fn run() -> anyhow::Result<()> {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let (session_id, workspace_id) =
                 resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
-            let response = request_intent_via_http(
+            let response = request_reservation_via_http(
                 &runtime,
-                IntentRequestArgs {
+                ReservationRequestArgs {
                     session_id,
                     workspace_id,
                     request_id,
@@ -816,7 +821,7 @@ pub fn run() -> anyhow::Result<()> {
             )?;
             print_http_response(response)?;
         }
-        Command::Intent(IntentCommand::Claim {
+        Command::Reservation(ReservationCommand::Claim {
             session_id,
             workspace_id,
             wait_id,
@@ -824,9 +829,9 @@ pub fn run() -> anyhow::Result<()> {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let (session_id, workspace_id) =
                 resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
-            claim_intent_via_http(
+            claim_reservation_via_http(
                 &runtime,
-                IntentClaimArgs {
+                ReservationClaimArgs {
                     session_id,
                     workspace_id,
                     wait_id,
@@ -835,9 +840,9 @@ pub fn run() -> anyhow::Result<()> {
                         .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
                 },
             )?;
-            println!("claimed stateful intent");
+            println!("claimed stateful reservation");
         }
-        Command::Intent(IntentCommand::Cancel {
+        Command::Reservation(ReservationCommand::Cancel {
             session_id,
             workspace_id,
             request_id,
@@ -845,9 +850,9 @@ pub fn run() -> anyhow::Result<()> {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let (session_id, workspace_id) =
                 resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
-            cancel_intent_via_http(
+            cancel_reservation_via_http(
                 &runtime,
-                IntentCancelArgs {
+                ReservationCancelArgs {
                     session_id,
                     workspace_id,
                     request_id,
@@ -856,7 +861,7 @@ pub fn run() -> anyhow::Result<()> {
                         .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
                 },
             )?;
-            println!("canceled stateful intent");
+            println!("canceled stateful reservation");
         }
         Command::Mcp(McpCommand::Call {
             tool_name,
@@ -1046,7 +1051,7 @@ fn default_config_yml() -> &'static str {
 protocol_version: stateful.v1
 intent_ttl_seconds: 900
 intent_max_seconds: 3600
-lease_ttl_seconds: 300
+claim_ttl_seconds: 300
 reservation_ttl_seconds: 120
 directory_scope_depth: 2
 delete_requires_exact_file_scope: true

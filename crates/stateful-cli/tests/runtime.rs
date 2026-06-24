@@ -12,13 +12,13 @@ use std::{
 use std::os::unix::fs::PermissionsExt;
 
 use stateful_cli::{
-    CurrentSession, GlobalPaths, IntentCancelArgs, IntentClaimArgs, IntentDeclareArgs,
-    IntentRequestArgs, ServerRuntime, cancel_intent_via_http, claim_intent_via_http,
-    declare_intent_via_http, discover_runtime, discover_runtime_with_global, get_json,
-    global_state_db_path, post_json, read_current_session_file,
-    read_current_session_file_for_session, request_intent_via_http, state_db_path,
-    write_current_session_file, write_current_session_file_for_session, write_global_runtime_file,
-    write_runtime_file,
+    CurrentSession, GlobalPaths, ReservationCancelArgs, ReservationClaimArgs,
+    ReservationDeclareArgs, ReservationRequestArgs, ServerRuntime, cancel_reservation_via_http,
+    claim_reservation_via_http, declare_reservation_via_http, discover_runtime,
+    discover_runtime_with_global, get_json, global_state_db_path, post_json,
+    read_current_session_file, read_current_session_file_for_session, request_reservation_via_http,
+    state_db_path, write_current_session_file, write_current_session_file_for_session,
+    write_global_runtime_file, write_runtime_file,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -841,7 +841,7 @@ fn post_json_sends_bearer_token_and_payload() {
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     let response = post_json(
         &runtime,
-        "/v1/intent/declare",
+        "/v1/reservation/declare",
         &serde_json::json!({
             "session_id": "s1",
             "workspace_id": "w1",
@@ -854,7 +854,7 @@ fn post_json_sends_bearer_token_and_payload() {
     assert_eq!(response.status_code, 200);
 
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
+    assert!(request.contains("POST /v1/reservation/declare HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
     assert!(request.contains("\"purpose\":\"Fix auth validation behavior.\""));
     assert!(request.contains("\"files_planned\":[\"src/auth.ts\"]"));
@@ -887,7 +887,7 @@ fn get_json_sends_bearer_token_without_body() {
 }
 
 #[test]
-fn declare_intent_via_http_posts_expected_payload() {
+fn declare_reservation_via_http_posts_expected_payload() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
@@ -904,9 +904,9 @@ fn declare_intent_via_http_posts_expected_payload() {
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
 
     let before_request = OffsetDateTime::now_utc();
-    declare_intent_via_http(
+    declare_reservation_via_http(
         &runtime,
-        IntentDeclareArgs {
+        ReservationDeclareArgs {
             session_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             purpose: "Fix auth validation behavior.".to_string(),
@@ -914,10 +914,10 @@ fn declare_intent_via_http_posts_expected_payload() {
             identity: None,
         },
     )
-    .expect("intent declaration should post");
+    .expect("reservation declaration should post");
 
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
+    assert!(request.contains("POST /v1/reservation/declare HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v1");
     assert!(
@@ -946,7 +946,7 @@ fn declare_intent_via_http_posts_expected_payload() {
     assert_eq!(body["workspace"]["root"], "");
     assert_eq!(body["workspace"]["branch"], "");
     assert_eq!(body["source"]["kind"], "cli");
-    assert_eq!(body["source"]["event"], "intent_declare");
+    assert_eq!(body["source"]["event"], "reservation_declare");
     assert_eq!(body["source"]["source_ref"], "stateful-cli");
     assert_eq!(
         body["payload"],
@@ -959,7 +959,7 @@ fn declare_intent_via_http_posts_expected_payload() {
 }
 
 #[test]
-fn claim_intent_via_http_posts_expected_payload() {
+fn claim_reservation_via_http_posts_expected_payload() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
@@ -975,25 +975,25 @@ fn claim_intent_via_http_posts_expected_payload() {
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
 
-    claim_intent_via_http(
+    claim_reservation_via_http(
         &runtime,
-        IntentClaimArgs {
+        ReservationClaimArgs {
             session_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             wait_id: "wait-1".to_string(),
             identity: None,
         },
     )
-    .expect("intent claim should post");
+    .expect("reservation claim should post");
 
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/intent/claim HTTP/1.1"));
+    assert!(request.contains("POST /v1/reservation/claim HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v1");
     assert_eq!(body["session"]["session_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert_eq!(body["source"]["kind"], "cli");
-    assert_eq!(body["source"]["event"], "intent_claim");
+    assert_eq!(body["source"]["event"], "reservation_claim");
     assert_eq!(body["source"]["source_ref"], "stateful-cli");
     assert_eq!(
         body["payload"],
@@ -1005,7 +1005,7 @@ fn claim_intent_via_http_posts_expected_payload() {
 }
 
 #[test]
-fn request_intent_via_http_posts_expected_payload() {
+fn request_reservation_via_http_posts_expected_payload() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
@@ -1021,9 +1021,9 @@ fn request_intent_via_http_posts_expected_payload() {
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
 
-    let response = request_intent_via_http(
+    let response = request_reservation_via_http(
         &runtime,
-        IntentRequestArgs {
+        ReservationRequestArgs {
             session_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             request_id: "request-1".to_string(),
@@ -1033,18 +1033,18 @@ fn request_intent_via_http_posts_expected_payload() {
             identity: None,
         },
     )
-    .expect("intent request should post");
+    .expect("reservation request should post");
     assert_eq!(response.status_code, 200);
     assert_eq!(response.body, "{\"status\":\"ok\"}");
 
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/intent/request HTTP/1.1"));
+    assert!(request.contains("POST /v1/reservation/request HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v1");
     assert_eq!(body["session"]["session_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert_eq!(body["source"]["kind"], "cli");
-    assert_eq!(body["source"]["event"], "intent_request");
+    assert_eq!(body["source"]["event"], "reservation_request");
     assert_eq!(body["source"]["source_ref"], "stateful-cli");
     assert_eq!(
         body["payload"],
@@ -1059,7 +1059,7 @@ fn request_intent_via_http_posts_expected_payload() {
 }
 
 #[test]
-fn cancel_intent_via_http_posts_expected_payload() {
+fn cancel_reservation_via_http_posts_expected_payload() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
@@ -1075,25 +1075,25 @@ fn cancel_intent_via_http_posts_expected_payload() {
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
 
-    cancel_intent_via_http(
+    cancel_reservation_via_http(
         &runtime,
-        IntentCancelArgs {
+        ReservationCancelArgs {
             session_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             request_id: "request-1".to_string(),
             identity: None,
         },
     )
-    .expect("intent cancel should post");
+    .expect("reservation cancel should post");
 
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/intent/cancel HTTP/1.1"));
+    assert!(request.contains("POST /v1/reservation/cancel HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v1");
     assert_eq!(body["session"]["session_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert_eq!(body["source"]["kind"], "cli");
-    assert_eq!(body["source"]["event"], "intent_cancel");
+    assert_eq!(body["source"]["event"], "reservation_cancel");
     assert_eq!(body["source"]["source_ref"], "stateful-cli");
     assert_eq!(
         body["payload"],

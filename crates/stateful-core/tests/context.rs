@@ -30,7 +30,7 @@ fn detailed_context_renders_warning_nearby_and_stale_sections() {
     let package = ContextPackage::blocked_human_write("src/auth.ts")
         .with_warning("src/session.ts", "Another session plans a related edit")
         .with_nearby_activity("src/auth/mod.ts", "Agent s2 is inspecting nearby auth code")
-        .with_stale_activity("src/old_auth.ts", "Expired auth refactor intent");
+        .with_stale_activity("src/old_auth.ts", "Expired auth refactor reservation");
 
     let text = render_prompt_text(&package, RenderMode::Detailed);
 
@@ -46,16 +46,16 @@ fn detailed_context_renders_warning_nearby_and_stale_sections() {
 fn structured_items_render_purpose_and_required_actions() {
     let package = ContextPackage::from_items(vec![
         CurrentItem::new(
-            CurrentItemKind::Lease,
+            CurrentItemKind::Claim,
             CurrentSeverity::Block,
             CurrentFreshness::Live,
             "src/auth.ts",
             "Fix auth validation behavior requested by the user.",
-            "Session s1 has an active write lease.",
+            "Session s1 has an active write claim.",
         )
-        .with_next_action("Wait for s1 to release the lease."),
+        .with_next_action("Wait for s1 to release the claim."),
         CurrentItem::new(
-            CurrentItemKind::Reservation,
+            CurrentItemKind::ClaimableReservation,
             CurrentSeverity::Info,
             CurrentFreshness::Live,
             "src/session.ts",
@@ -70,7 +70,7 @@ fn structured_items_render_purpose_and_required_actions() {
     assert!(text.contains("Blocking"));
     assert!(text.contains("Required Next Action"));
     assert!(text.contains("purpose: Fix auth validation behavior requested by the user"));
-    assert!(text.contains("next: Wait for s1 to release the lease"));
+    assert!(text.contains("next: Wait for s1 to release the claim"));
     assert!(text.contains("Nearby Activity"));
     assert!(text.contains("purpose: Resume queued session cleanup after rereading"));
     assert!(!text.contains("next: Reread src/session.ts before continuing"));
@@ -78,28 +78,28 @@ fn structured_items_render_purpose_and_required_actions() {
 
 #[test]
 fn required_next_action_deduplicates_repeated_blocking_actions() {
-    let repeated = "Wait for the lease to release, or coordinate with session-a.";
+    let repeated = "Wait for the claim to release, or coordinate with session-a.";
     let package = ContextPackage::from_items(vec![
         CurrentItem::new(
-            CurrentItemKind::Lease,
+            CurrentItemKind::Claim,
             CurrentSeverity::Block,
             CurrentFreshness::Live,
             "src/auth.ts",
             "Fix auth validation behavior.",
-            "session-a has an active write lease on src/auth.ts.",
+            "session-a has an active write claim on src/auth.ts.",
         )
         .with_next_action(repeated),
         CurrentItem::new(
-            CurrentItemKind::Lease,
+            CurrentItemKind::Claim,
             CurrentSeverity::Block,
             CurrentFreshness::Live,
             "src/session.ts",
             "Fix auth validation behavior.",
-            "session-a has an active write lease on src/session.ts.",
+            "session-a has an active write claim on src/session.ts.",
         )
         .with_next_action(repeated),
         CurrentItem::new(
-            CurrentItemKind::Reservation,
+            CurrentItemKind::ClaimableReservation,
             CurrentSeverity::Block,
             CurrentFreshness::Live,
             "src/cache.ts",
@@ -117,7 +117,7 @@ fn required_next_action_deduplicates_repeated_blocking_actions() {
 
     assert_eq!(
         required_section
-            .matches("- Wait for the lease to release, or coordinate with session-a")
+            .matches("- Wait for the claim to release, or coordinate with session-a")
             .count(),
         1
     );
@@ -128,42 +128,42 @@ fn required_next_action_deduplicates_repeated_blocking_actions() {
 fn brief_context_renders_evidence_kind_without_evidence_text() {
     let package = ContextPackage::from_items(vec![
         CurrentItem::new(
-            CurrentItemKind::Intent,
+            CurrentItemKind::Reservation,
             CurrentSeverity::Info,
             CurrentFreshness::Live,
             "src/auth.ts",
             "Fix auth validation behavior.",
-            "Session s1 declared intent for src/auth.ts.",
+            "Session s1 declared reservation for src/auth.ts.",
         )
-        .with_evidence("IntentDeclared event from session s1.")
-        .with_evidence_kind(CurrentEvidenceKind::DeclaredIntent),
+        .with_evidence("ReservationDeclared event from session s1.")
+        .with_evidence_kind(CurrentEvidenceKind::DeclaredReservation),
     ]);
 
     let text = render_prompt_text(&package, RenderMode::Brief);
 
-    assert!(text.contains("evidence kind: declared_intent"));
-    assert!(!text.contains("evidence: IntentDeclared event"));
+    assert!(text.contains("evidence kind: declared_reservation"));
+    assert!(!text.contains("evidence: ReservationDeclared event"));
 }
 
 #[test]
 fn detailed_context_renders_evidence_text() {
     let package = ContextPackage::from_items(vec![
         CurrentItem::new(
-            CurrentItemKind::Intent,
+            CurrentItemKind::Reservation,
             CurrentSeverity::Info,
             CurrentFreshness::Live,
             "src/auth.ts",
             "Fix auth validation behavior.",
-            "Session s1 declared intent for src/auth.ts.",
+            "Session s1 declared reservation for src/auth.ts.",
         )
-        .with_evidence("IntentDeclared event from session s1.")
-        .with_evidence_kind(CurrentEvidenceKind::DeclaredIntent),
+        .with_evidence("ReservationDeclared event from session s1.")
+        .with_evidence_kind(CurrentEvidenceKind::DeclaredReservation),
     ]);
 
     let text = render_prompt_text(&package, RenderMode::Detailed);
 
-    assert!(text.contains("evidence kind: declared_intent"));
-    assert!(text.contains("evidence: IntentDeclared event from session s1"));
+    assert!(text.contains("evidence kind: declared_reservation"));
+    assert!(text.contains("evidence: ReservationDeclared event from session s1"));
 }
 
 #[test]

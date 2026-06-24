@@ -18,33 +18,34 @@ are still out of scope.
 Implement the full scheduling API:
 
 ```text
-POST /v1/intent/request
-POST /v1/intent/claim
-POST /v1/intent/cancel
+POST /v1/reservation/request
+POST /v1/reservation/claim
+POST /v1/reservation/cancel
 ```
 
-`intent/request` creates or returns an idempotent request by `request_id`.
+`reservation/request` creates or returns an idempotent request by `request_id`.
 Available requests may grant immediately. Conflicting requests queue FIFO.
 Retrying the same `request_id` after reservation expiry requeues the same waiter
 in place instead of creating a duplicate or permanently consuming the key.
 
-`intent/claim` is the manual reservation claim path. It creates
-write-authorizing intent and active leases only for the reservation owner.
-Clients must reread the reserved target before writing. Manual MCP/CLI flows
-then call `state_intent_claim` or `stateful intent claim --wait-id <id>`;
-native edit hooks and sandbox `write-targets` authorization may lazy-claim the
-reservation at the retried write boundary.
+`reservation/claim` is the manual reservation claim path. It creates
+active reservation scope and active claims only for the reservation owner.
+Clients must reread the target for the claimable reservation before writing.
+Manual MCP/CLI flows then call `state_reservation_claim` or
+`stateful reservation claim --wait-id <id>`; native edit hooks and sandbox
+`write-targets` authorization may lazy-claim the reservation at the retried write boundary.
 
-Current implementation status: `/v1/intent/request`, `/v1/intent/claim`, and
-`/v1/intent/cancel` are implemented with MCP tools and CLI commands. Immediate
-availability returns a `reserved` request state; the reserved session must still
-reread the target. Manual MCP/CLI flows call `state_intent_claim`; hook and sandbox
-authorization sources may lazy-claim the reservation when the write is retried.
+Current implementation status: `/v1/reservation/request`, `/v1/reservation/claim`, and
+`/v1/reservation/cancel` are implemented with MCP tools and CLI commands. Immediate
+availability returns a `reserved` request state, which is the current API spelling
+for a claimable reservation; that session must still reread the target. Manual
+MCP/CLI flows call `state_reservation_claim`; hook and sandbox authorization
+sources may lazy-claim the reservation when the write is retried.
 
-`intent/cancel` cancels queued or reserved requests owned by the caller. It must
-not cancel another session's reservation or reorder waiters.
+`reservation/cancel` cancels queued or claimable (`reserved`) requests owned by
+the caller. It must not cancel another session's reservation or reorder waiters.
 
-Remove public `stateful intent wait --timeout` documentation and do not
+Remove public `stateful reservation wait --timeout` documentation and do not
 implement it in this pass. Waiting can be a later CLI convenience over
 notifications and `resume next`.
 
@@ -62,13 +63,13 @@ Hook-mediated Bash must be a single strict invocation of the trusted absolute
 <cmd>`. The build profile writes disposable artifacts under
 `/tmp/stateful/<session>/<scratch-purpose>/`; source-tree edits use native edit tools
 with hook-visible targets, such as Codex `apply_patch` or Edit, after exact
-intent declaration and a successful same-session file lease. The completed write
-transaction releases the authorizing lease. Command-shaped source writes require
+reservation declaration and a successful same-session file claim. The completed write
+transaction releases the authorizing claim. Command-shaped source writes require
 exact `--write-target <file>` or `--create-target <file>` entries.
 
 ## Protocol Envelope
 
-Envelope-enforced write authorization, intent, and reconciliation HTTP requests
+Envelope-enforced write authorization, reservation, and reconciliation HTTP requests
 must use a v1 envelope:
 
 ```json
@@ -125,14 +126,14 @@ HTTP handlers should authenticate and parse protocol input, then delegate final
 allow, warn, deny, and error decisions to the policy service. Handlers should not
 carry independent policy branches.
 
-The server policy service normalizes `authorize_write` and `claim_intent`.
-Remaining scheduling and orchestration work should extend it with:
+The server policy service normalizes `authorize_write`, `claim_intent`,
+`request_intent`, and `cancel_intent`; the `*_intent` function names are retained
+internal compatibility names for reservation operations. Remaining scheduling and
+orchestration work should extend it with:
 
 ```text
-request_intent
-cancel_intent
-acquire_lease
-release_lease
+acquire_claim
+release_claim
 ack_reconciliation
 check_conflicts
 ```
@@ -147,7 +148,7 @@ filesystem watcher.
 
 The first IDE integration should check the state server before a save when the
 editor exposes a pre-save hook. It should surface warnings or blocks for active
-agent leases, pending reservations, and unresolved human-write reconciliation
+agent claims, pending reservations, and unresolved human-write reconciliation
 requirements.
 
 Filesystem watcher inference remains out of scope for this pass.
@@ -156,10 +157,10 @@ Filesystem watcher inference remains out of scope for this pass.
 
 MCP file-write tools are not the current repo edit path. Repo file edits should
 use native edit tools with hook-visible targets, such as Codex `apply_patch` or
-Edit, after exact intent declaration and a successful same-session file lease.
+Edit, after task-level reservation covers the target and a successful same-session file claim.
 Hooks normalize hook-exposed targets, call the same policy service as MCP and
 CLI, fail closed on missing state, protocol mismatch, or denied authorization,
-record activity after successful edits, and release the authorizing lease after
+record activity after successful edits, and release the authorizing claim after
 the completed write transaction.
 
 Command-shaped writes remain outside MCP and must use
@@ -176,11 +177,11 @@ specific staged/commit operations only after authorization.
 
 Background expiration and retention pruning are shipped in the state server,
 with lazy expiration kept as the safety net on read/write paths. Expiration
-paths expire stale leases, stale reservations, and stale intent state, promote
-eligible FIFO waiters, and create notifications.
+paths expire stale claims, stale active reservations, and stale
+claimable reservations, then promote eligible FIFO waiters and create notifications.
 
-Implement the full rolling maximum model for active write-authorizing intent.
-The default rolling maximum is 60 minutes unless a narrower profile or future
+Implement the full rolling maximum model for active task reservation.
+The default rolling maximum for active task reservations is 60 minutes unless a narrower profile or future
 policy overrides it.
 
 Retention pruning removes historical evidence older than the built-in 14-day
@@ -236,16 +237,16 @@ distribution story for hook-capable agents:
 
 ## Implementation Order
 
-1. Done: remove `intent wait` docs.
+1. Done: remove `reservation wait` docs.
 2. Done: add protocol envelope builders for CLI, hook, MCP, and outbox.
 3. Done: add server protocol parser and migration tests.
 4. Done: introduce policy service and move `/v1/authorize` first.
-5. Done: implement explicit `intent/request`, `intent/claim`, and
-   `intent/cancel`.
+5. Done: implement explicit `reservation/request`, `reservation/claim`, and
+   `reservation/cancel`.
 6. Done: enforce sandbox-run write-target policy semantics.
 7. Remaining: add IDE save gate API and harden native edit hook target
    extraction.
-8. Done: add background expiration, retention pruning, and active-intent rolling
+8. Done: add background expiration, retention pruning, and active-reservation rolling
    maximum.
 9. Remaining: reject stale or malformed runtime discovery files more aggressively.
 10. Remaining: expand doctor diagnostics.

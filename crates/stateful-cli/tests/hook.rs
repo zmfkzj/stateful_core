@@ -346,8 +346,8 @@ fn pre_tool_use_raw_bash_denial_mentions_command_policy_skill_and_example() {
 
     assert!(reason.contains("stateful-command-policy"));
     assert!(reason.contains("state_current_read"));
-    assert!(reason.contains("state_intent_declare"));
-    assert!(reason.contains("state_lease_acquire"));
+    assert!(reason.contains("state_reservation_declare"));
+    assert!(reason.contains("state_claim_acquire"));
     assert!(reason.contains("--fs read-only --network disabled"));
     assert!(reason.contains("--fs build --network enabled"));
     assert!(reason.contains("--fs write-targets --write-target <file>"));
@@ -1830,14 +1830,14 @@ fn pre_tool_use_denies_native_write_when_runtime_unreachable() {
 }
 
 #[test]
-fn pre_tool_use_denies_raw_stateful_intent_declare_with_mcp_guidance() {
+fn pre_tool_use_denies_raw_stateful_reservation_declare_with_mcp_guidance() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
       "tool_input": {
-      "command": "stateful intent declare --session-id s1 --workspace-id w1 --purpose 'Fix auth validation behavior.' src/auth.ts"
+      "command": "stateful reservation declare --session-id s1 --workspace-id w1 --purpose 'Fix auth validation behavior.' src/auth.ts"
       }
     }"#;
 
@@ -1847,22 +1847,22 @@ fn pre_tool_use_denies_raw_stateful_intent_declare_with_mcp_guidance() {
         outcome,
         &[
             "Use canonical Stateful MCP tool names",
-            "state_intent_declare",
-            "state_lease_acquire",
-            "Do not run `stateful intent declare`",
+            "state_reservation_declare",
+            "state_claim_acquire",
+            "Do not run `stateful reservation declare`",
         ],
     );
 }
 
 #[test]
-fn pre_tool_use_denies_stateful_mcp_call_intent_declare_with_mcp_guidance() {
+fn pre_tool_use_denies_stateful_mcp_call_reservation_declare_with_mcp_guidance() {
     let input = r#"{
       "session_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
       "tool_input": {
-        "command": "stateful mcp call state_intent_declare"
+        "command": "stateful mcp call state_reservation_declare"
       }
     }"#;
 
@@ -1872,8 +1872,8 @@ fn pre_tool_use_denies_stateful_mcp_call_intent_declare_with_mcp_guidance() {
         outcome,
         &[
             "Use canonical Stateful MCP tool names",
-            "state_intent_declare",
-            "state_lease_acquire",
+            "state_reservation_declare",
+            "state_claim_acquire",
             "`stateful mcp call` through Bash",
         ],
     );
@@ -2216,14 +2216,14 @@ fn pre_tool_use_allows_known_non_repo_write_tools_without_runtime() {
         "multi_agent_v1close_agent",
         "resume_agent",
         "multi_agent_v1resume_agent",
-        "state_intent_declare",
-        "state_lease_acquire",
+        "state_reservation_declare",
+        "state_claim_acquire",
         "state_current_read",
         "state_context_render",
-        "mcp__stateful__state_intent_declare",
-        "mcp__stateful__state_lease_acquire",
-        "mcp__stateful_state_intent_declare",
-        "mcp__stateful_state_lease_acquire",
+        "mcp__stateful__state_reservation_declare",
+        "mcp__stateful__state_claim_acquire",
+        "mcp__stateful_state_reservation_declare",
+        "mcp__stateful_state_claim_acquire",
         "mcp__stateful_state_current_read",
         "mcp__stateful_state_context_render",
         "mcp__stateful__state_current_read",
@@ -2304,7 +2304,7 @@ fn pre_tool_use_bash_denial_in_repo_includes_live_context() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"status":"ok","prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared intent for src/auth.ts."}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared reservation for src/auth.ts."}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -2595,6 +2595,31 @@ fn omp_unclassified_tools_are_manageable_with_stateful_tools_allowlist() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let yield_input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": repo_root,
+        "yolo": false,
+        "tool_name": "yield",
+        "tool_input": {"result": {"data": "done"}}
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "pre-tool-use"],
+        &yield_input,
+    );
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
+    assert_eq!(stdout["decision"], "allow");
+    let list = tool_list_for_repo(&paths, &repo_root).expect("tool list should load");
+    assert!(list.unclassified_tools.is_empty());
 
     let input = serde_json::json!({
         "session_id": "omp-parent",
@@ -3133,9 +3158,9 @@ fn omp_allows_classified_read_only_and_non_file_writing_tools() {
         "todo",
         "web_search",
         "mcp__stateful_state_current_read",
-        "mcp__stateful_state_intent_declare",
+        "mcp__stateful_state_reservation_declare",
         "state_current_read",
-        "state_intent_declare",
+        "state_reservation_declare",
     ] {
         let input = serde_json::json!({
             "session_id": "omp-parent",
@@ -3215,7 +3240,7 @@ fn omp_denies_sandbox_external_profile_without_external_tool_wrappers() {
 #[test]
 fn omp_yolo_does_not_downgrade_server_denial() {
     let (runtime, _rx) =
-        spawn_fake_stateful_server(r#"{"decision":"deny","message":"missing lease"}"#);
+        spawn_fake_stateful_server(r#"{"decision":"deny","message":"missing claim"}"#);
     let input = serde_json::json!({
         "session_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
@@ -3309,7 +3334,7 @@ fn pre_tool_use_edit_posts_authorize_and_denies_when_server_denies() {
         .expect("observed file should be writable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Write target is outside active intent scope.","required_next_action":"Declare matching intent."}"#,
+        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Write target is outside active reservation scope.","required_next_action":"Declare matching reservation."}"#,
     );
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -3428,7 +3453,7 @@ fn pre_tool_use_edit_posts_authorize_and_renders_live_context_when_server_allows
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","items":[{"severity":"info"}],"prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared intent for src/auth.ts."}"#,
+        r#"{"status":"ok","items":[{"severity":"info"}],"prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared reservation for src/auth.ts."}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -3647,7 +3672,7 @@ fn pre_tool_use_apply_patch_uses_current_intent_purpose_for_queue_even_when_targ
         ],
         Some(
             r#"{"status":"ok","current":{},"items":[{
-                "kind":"intent",
+                "kind":"reservation",
                 "freshness":"live",
                 "resource":"docs/notes.md",
                 "purpose":"Continue documented retry work.",
@@ -3705,7 +3730,7 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared intent for src/auth.ts."}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared reservation for src/auth.ts."}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -3857,7 +3882,7 @@ fn pre_tool_use_apply_patch_injects_block_context_when_server_allows() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","items":[{"severity":"block"}],"prompt_text":"Blocking\n- [block] src/auth.ts: another session has a lease."}"#,
+        r#"{"status":"ok","items":[{"severity":"block"}],"prompt_text":"Blocking\n- [block] src/auth.ts: another session has a claim."}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -3914,8 +3939,8 @@ fn pre_tool_use_apply_patch_denial_keeps_info_context() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Write target is outside active intent scope.","required_next_action":"Declare matching intent."}"#,
-        r#"{"status":"ok","items":[{"severity":"info"}],"prompt_text":"Nearby Activity\n- [info] src/session.ts: another session declared intent."}"#,
+        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Write target is outside active reservation scope.","required_next_action":"Declare matching reservation."}"#,
+        r#"{"status":"ok","items":[{"severity":"info"}],"prompt_text":"Nearby Activity\n- [info] src/session.ts: another session declared reservation."}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -4033,7 +4058,7 @@ fn pre_tool_use_apply_patch_patch_field_authorizes_every_file_target() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Write target is outside active intent scope.","required_next_action":"Declare matching intent."}"#,
+        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Write target is outside active reservation scope.","required_next_action":"Declare matching reservation."}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -4073,7 +4098,7 @@ fn pre_tool_use_apply_patch_patch_field_authorizes_every_file_target() {
     assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
     assert_eq!(
         json["hookSpecificOutput"]["permissionDecisionReason"],
-        "Declare matching intent."
+        "Declare matching reservation."
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -4093,7 +4118,7 @@ fn pre_tool_use_apply_patch_move_authorizes_source_and_destination() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Move target is outside exact intent scope.","required_next_action":"Declare exact source and destination intent and acquire both leases."}"#,
+        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Move target is outside task reservation exact scope.","required_next_action":"Add exact source and destination scopes to the task reservation and acquire both claims."}"#,
     );
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -4134,7 +4159,7 @@ fn pre_tool_use_apply_patch_move_authorizes_source_and_destination() {
     assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
     assert_eq!(
         json["hookSpecificOutput"]["permissionDecisionReason"],
-        "Declare exact source and destination intent and acquire both leases."
+        "Add exact source and destination scopes to the task reservation and acquire both claims."
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -4313,7 +4338,7 @@ fn pre_tool_use_apply_patch_denies_when_server_denies() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Write target is outside active intent scope.","required_next_action":"Declare matching intent."}"#,
+        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Write target is outside active reservation scope.","required_next_action":"Declare matching reservation."}"#,
     );
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -4345,7 +4370,7 @@ fn pre_tool_use_apply_patch_denies_when_server_denies() {
     assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
     assert_eq!(
         json["hookSpecificOutput"]["permissionDecisionReason"],
-        "Declare matching intent."
+        "Declare matching reservation."
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -4436,7 +4461,7 @@ fn pre_tool_use_apply_patch_denial_includes_wait_id_guidance() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"deny","reason_code":"active_lease_conflict","message":"Write target is covered by another active session lease.","required_next_action":"Wait for the active lease to release, then claim the reservation before writing.","wait":{"wait_id":"wait-123","session_id":"s1","workspace_id":"w1","path":"src/auth.ts","action":"write_file","status":"queued","queue_position":2,"blocking_session_id":"s2"}}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Wait for the active claim to release, then claim the reservation before writing.","wait":{"wait_id":"wait-123","session_id":"s1","workspace_id":"w1","path":"src/auth.ts","action":"write_file","status":"queued","queue_position":2,"blocking_session_id":"s2"}}"#,
     );
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -4474,7 +4499,7 @@ fn pre_tool_use_apply_patch_denial_includes_wait_id_guidance() {
     assert!(reason.contains("state_notifications_poll"));
     assert!(reason.contains("state_resume_next"));
     assert!(reason.contains("reread"));
-    assert!(reason.contains("state_intent_claim"));
+    assert!(reason.contains("state_reservation_claim"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -4605,7 +4630,7 @@ fn post_tool_use_posts_session_heartbeat() {
 }
 
 #[test]
-fn post_tool_use_edit_refreshes_file_lease_observation() {
+fn post_tool_use_edit_refreshes_file_claim_observation() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-post-refresh-test-{}",
         std::process::id()
@@ -4653,8 +4678,8 @@ fn post_tool_use_edit_refreshes_file_lease_observation() {
 
     let refresh = rx
         .recv_timeout(Duration::from_secs(2))
-        .expect("lease observation refresh request should arrive");
-    assert!(refresh.contains("POST /v1/lease/refresh-observation HTTP/1.1"));
+        .expect("claim observation refresh request should arrive");
+    assert!(refresh.contains("POST /v1/claim/refresh-observation HTTP/1.1"));
     let body = request_json_body(&refresh);
     assert_eq!(body["session_id"], "s1");
     assert_eq!(body["workspace_id"], "w1");
@@ -4671,7 +4696,7 @@ fn post_tool_use_edit_refreshes_file_lease_observation() {
 }
 
 #[test]
-fn post_tool_use_edit_releases_file_lease_after_refresh() {
+fn post_tool_use_edit_reclaims_file_lease_after_refresh() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-post-release-test-{}",
         std::process::id()
@@ -4722,13 +4747,13 @@ fn post_tool_use_edit_releases_file_lease_after_refresh() {
 
     let refresh = rx
         .recv_timeout(Duration::from_secs(2))
-        .expect("lease observation refresh request should arrive");
-    assert!(refresh.contains("POST /v1/lease/refresh-observation HTTP/1.1"));
+        .expect("claim observation refresh request should arrive");
+    assert!(refresh.contains("POST /v1/claim/refresh-observation HTTP/1.1"));
 
     let release = rx
         .recv_timeout(Duration::from_secs(2))
-        .expect("lease release request should arrive after refresh");
-    assert!(release.contains("POST /v1/lease/release HTTP/1.1"));
+        .expect("claim release request should arrive after refresh");
+    assert!(release.contains("POST /v1/claim/release HTTP/1.1"));
     let body = request_json_body(&release);
     assert_eq!(body["session_id"], "s1");
     assert_eq!(body["workspace_id"], "w1");
@@ -5130,16 +5155,16 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
     let heartbeat_body = request_json_body(&heartbeat);
     assert_eq!(heartbeat_body["session_id"], "omp-parent");
     assert_eq!(heartbeat_body["source"]["event"], "omp_post_tool_use");
-    let refresh = rx.recv().expect("lease refresh request should arrive");
-    assert!(refresh.contains("POST /v1/lease/refresh-observation HTTP/1.1"));
+    let refresh = rx.recv().expect("claim refresh request should arrive");
+    assert!(refresh.contains("POST /v1/claim/refresh-observation HTTP/1.1"));
     let refresh_body = request_json_body(&refresh);
     assert_eq!(refresh_body["session_id"], "omp-parent");
     assert_eq!(refresh_body["path"], "docs/a.md");
-    let release = rx.recv().expect("lease release request should arrive");
-    assert!(release.contains("POST /v1/lease/release HTTP/1.1"));
-    let release_body = request_json_body(&release);
-    assert_eq!(release_body["session_id"], "omp-parent");
-    assert_eq!(release_body["path"], "docs/a.md");
+    let release = rx.recv().expect("claim release request should arrive");
+    assert!(release.contains("POST /v1/claim/release HTTP/1.1"));
+    let reclaim_body = request_json_body(&release);
+    assert_eq!(reclaim_body["session_id"], "omp-parent");
+    assert_eq!(reclaim_body["path"], "docs/a.md");
 
     let stop = serde_json::json!({
         "session_id": "omp-parent",
@@ -5210,10 +5235,10 @@ fn user_prompt_submit_posts_context_render() {
     assert!(rendered.contains("Before using Bash"));
     assert!(rendered.contains("stateful-command-policy"));
     assert!(rendered.contains("Use canonical Stateful MCP tool names"));
-    assert!(rendered.contains("state_intent_declare"));
-    assert!(rendered.contains("state_lease_acquire"));
+    assert!(rendered.contains("state_reservation_declare"));
+    assert!(rendered.contains("state_claim_acquire"));
     assert!(rendered.contains("runtime-specific tool names"));
-    assert!(rendered.contains("Do not run `stateful intent declare`"));
+    assert!(rendered.contains("Do not run `stateful reservation declare`"));
     assert!(rendered.contains("--fs read-only --network disabled"));
     assert!(rendered.contains("--fs build --network enabled"));
     assert!(rendered.contains("--fs git --network disabled"));
@@ -5334,7 +5359,7 @@ fn fake_current_response(request: &str) -> String {
         "status": "ok",
         "current": {},
         "items": [{
-            "kind": "intent",
+            "kind": "reservation",
             "freshness": "live",
             "resource": resource,
             "purpose": "Fix auth validation behavior.",

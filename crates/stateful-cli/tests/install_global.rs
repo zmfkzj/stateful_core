@@ -144,7 +144,7 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     );
     assert!(
         !first_config.contains(
-            "[mcp_servers.stateful.tools.state_lease_acquire]\napproval_mode = \"approve\""
+            "[mcp_servers.stateful.tools.state_claim_acquire]\napproval_mode = \"approve\""
         )
     );
     assert!(first_config.contains("hook codex pre-tool-use"));
@@ -219,41 +219,63 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
     assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
-    assert!(extension.contains(
-        "function runSandboxToolProcess(params, args, ctx, label, onStdout, onComplete)"
-    ));
+    assert!(
+        extension
+            .contains("function runSandboxToolProcess(params, args, ctx, label, signal, onStdout)")
+    );
     assert!(!extension.contains("function runSandboxTool(params"));
     assert!(extension.contains("spawn(STATEFUL, args"));
     assert!(extension.contains(
-        "Stdout will stream as collapsible output (Ctrl+O); stderr and status stay in details unless the command fails."
+        "Deprecated compatibility field; commands now wait for completion before returning."
     ));
-    assert!(extension.contains("function deliverSandboxStdoutChunk(pi, jobId, label, chunk)"));
-    assert!(extension.contains("customType: \"stateful_sandbox_bash_stdout\""));
+    assert!(
+        extension.contains("function deliverSandboxStdoutChunk(onUpdate, jobId, label, chunk)")
+    );
+    assert!(extension.contains("content: [{ type: \"text\", text: chunk }]"));
+    assert!(extension.contains("return Promise.resolve(onUpdate(update)).catch(() => {});"));
     assert!(extension.contains("stream: \"stdout\""));
     assert!(extension.contains("collapsible: true"));
     assert!(extension.contains("collapseShortcut: \"Ctrl+O\""));
     assert!(extension.contains("function parseSandboxRunOutput(rawStdout)"));
     assert!(extension.contains("const parsed = JSON.parse(text)"));
-    assert!(extension.contains("stdout = truncateSandboxToolText(stdout + chunk, label)"));
-    assert!(extension.contains("onStdout(commandStdout)"));
-    assert!(!extension.contains("onStdout(chunk)"));
+    assert!(extension.contains("const event = JSON.parse(line)"));
+    assert!(extension.contains("event?.event === \"sandbox_output\""));
+    assert!(extension.contains("emitOutputChunk(event.chunk)"));
+    assert!(extension.contains("stdout += line + \"\\n\";"));
+    assert!(extension.contains("if (commandStdout && !streamedOutput)"));
     assert!(extension.contains("result.details.sandboxRunOutput = sandboxRunOutput"));
     assert!(extension.contains("stderr = truncateSandboxToolText(stderr + chunk, label)"));
     assert!(
-        extension.contains("function startSandboxBackgroundTool(pi, params, args, ctx, label)")
-    );
-    assert!(
-        extension.contains("Deprecated compatibility field; commands always run in background")
-    );
-    assert!(!extension.contains("params.async === true"));
-    assert!(
         extension
-            .contains("return startSandboxBackgroundTool(pi, params, args, ctx, \"sandbox_bash\")")
+            .contains("streamedStdout = truncateSandboxToolText(streamedStdout + chunk, label)")
     );
+    assert!(extension.contains("const fallbackStdout = streamedOutput ? streamedStdout : stdout"));
+    assert!(extension.contains("function killSandboxChild(child, signalName)"));
+    assert!(extension.contains("process.kill(-child.pid, signalName)"));
+    assert!(extension.contains("signal.addEventListener(\"abort\", abortHandler, { once: true })"));
+    assert!(extension.contains("killSandboxChild(child, \"SIGTERM\")"));
+    assert!(extension.contains("killSandboxChild(child, \"SIGKILL\")"));
+    assert!(extension.contains("result.details.cancelled = true"));
+    assert!(extension.contains("async function confirmExternalBashGrant(ctx, params, signal)"));
+    assert!(extension.contains("await Promise.race([confirmPromise, abortPromise])"));
+    assert!(extension.contains(
+        "async function runSandboxAwaitedTool(params, args, ctx, label, signal, onUpdate)"
+    ));
+    assert!(extension.contains("await runSandboxToolProcess(params, args, ctx, label, signal"));
+    assert!(extension.contains("await stdoutStreamer.drain();"));
+    assert!(extension.contains("await Promise.allSettled(deliveries);"));
+    assert!(!extension.contains("function startSandboxBackgroundTool"));
+    assert!(!extension.contains("Background job "));
+    assert!(!extension.contains("stateful_sandbox_bash_result"));
+    assert!(!extension.contains("params.async === true"));
+    assert!(extension.contains(
+        "return await runSandboxAwaitedTool(params, args, ctx, \"sandbox_bash\", signal, onUpdate)"
+    ));
+    assert!(extension.contains("async execute(_toolCallId, params, signal, onUpdate, ctx)"));
+    assert!(extension.contains("args.push(\"--stream-events\");"));
     assert!(extension.contains("pi.sendMessage"));
     assert!(extension.contains("display: true"));
     assert!(extension.contains("triggerTurn: true"));
-    assert!(extension.contains("triggerTurn: false"));
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?session_id="));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));
@@ -264,6 +286,15 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("stopReservationStream();"));
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", fs]"));
     assert!(extension.contains("ctx.ui.confirm"));
+    assert!(extension.contains("const externalBashGrants = new Map()"));
+    assert!(extension.contains("function externalGrantDescriptor(params)"));
+    assert!(extension.contains("async function ensureExternalBashGrant(ctx, params, signal)"));
+    assert!(extension.contains("Approve external sandbox grant"));
+    assert!(
+        extension.contains("Raw command text is intentionally hidden from this approval prompt.")
+    );
+    assert!(!extension.contains("\"Command:\""));
+    assert!(!extension.contains("\"Sandbox invocation:\""));
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", \"external\""));
     assert!(extension.contains("without OMP UI confirmation"));
     assert!(
@@ -526,21 +557,22 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     assert_eq!(command_policy_skill, source_command_policy_skill);
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
     assert!(command_policy_skill.contains("Use canonical Stateful MCP tool names"));
-    assert!(command_policy_skill.contains("state_intent_declare"));
-    assert!(command_policy_skill.contains("state_lease_acquire"));
+    assert!(command_policy_skill.contains("state_reservation_declare"));
+    assert!(command_policy_skill.contains("state_claim_acquire"));
     assert!(command_policy_skill.contains("runtime-specific tool names"));
     assert!(
-        command_policy_skill
-            .contains("Do not run `stateful intent declare` or `stateful mcp call` through Bash")
+        command_policy_skill.contains(
+            "Do not run `stateful reservation declare` or `stateful mcp call` through Bash"
+        )
     );
-    assert!(command_policy_skill.contains("Intent declarations add"));
+    assert!(command_policy_skill.contains("task-level file sets"));
     assert!(command_policy_skill.contains("--fs build --network enabled"));
     assert!(command_policy_skill.contains("--write-dir <scratch-purpose>"));
-    assert!(command_policy_skill.contains("state_intent_request"));
+    assert!(command_policy_skill.contains("state_reservation_request"));
     assert!(command_policy_skill.contains("state_notifications_poll"));
     assert!(command_policy_skill.contains("state_resume_next"));
-    assert!(command_policy_skill.contains("state_intent_claim"));
-    assert!(!command_policy_skill.contains("Intent declarations replace"));
+    assert!(command_policy_skill.contains("state_reservation_claim"));
+    assert!(!command_policy_skill.contains("Reservation declarations replace"));
     assert!(
         !command_policy_skill.contains("--fs write-targets --network enabled --write-dir target")
     );

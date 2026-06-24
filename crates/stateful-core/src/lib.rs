@@ -12,7 +12,7 @@ pub use path::{
     normalize_directory_path, normalize_relative_path, normalized_relative_path_is_empty,
 };
 pub use policy::{
-    ActivityPhase, AuthorizationInput, IntentScope, PolicyState, ScopeSet, authorize_action,
+    ActivityPhase, AuthorizationInput, PolicyState, ReservationScope, ScopeSet, authorize_action,
 };
 pub use reconcile::ReconciliationDecision;
 pub use types::{

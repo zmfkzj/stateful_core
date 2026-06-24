@@ -1034,7 +1034,7 @@ statusMessage = "Loading stateful current state"
 [[hooks.UserPromptSubmit.hooks]]
 type = "command"
 command = {}
-statusMessage = "Checking stateful intent context"
+statusMessage = "Checking stateful reservation context"
 
 [[hooks.PreToolUse]]
 matcher = ".*"
@@ -1435,7 +1435,7 @@ function reservationMessage(notification) {{
   if (typeof purpose === "string" && purpose.trim().length > 0) {{
     lines.push("purpose: " + purpose.trim());
   }}
-  lines.push("Next: reread the target, then call state_intent_claim with this wait_id before retrying the write.");
+  lines.push("Next: reread the target, then call state_reservation_claim with this wait_id before retrying the write.");
   return lines.join("\n");
 }}
 
@@ -1563,6 +1563,12 @@ const SANDBOX_BASH_FS_PROFILES = new Set(["read-only", "write-targets", "build",
 
 let sandboxJobCounter = 0;
 
+const EXTERNAL_GRANT_DEFAULT_MAX_USES = 5;
+const EXTERNAL_GRANT_MAX_USES_LIMIT = 20;
+const EXTERNAL_GRANT_DEFAULT_TTL_MS = 10 * 60 * 1000;
+const EXTERNAL_GRANT_MAX_TTL_MS = 60 * 60 * 1000;
+const externalBashGrants = new Map();
+
 function nextSandboxJobId(label) {{
   sandboxJobCounter += 1;
   return label.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() + "-" + Date.now().toString(36) + "-" + sandboxJobCounter.toString(36);
@@ -1625,6 +1631,7 @@ function sandboxBashArgs(params) {{
     throw new Error("sandbox_bash requires a non-empty command");
   }}
   const args = ["sandbox", "run", "--fs", fs];
+  args.push("--stream-events");
   addCommonSandboxArgs(args, params, "sandbox_bash");
   args.push("--command", params.command);
   return args;
@@ -1651,6 +1658,7 @@ function externalReadOnlyBashArgs(params) {{
     throw new Error("ext_ro_bash does not accept write, socket, or signal scope; use ext_rw_bash for scoped external operations");
   }}
   const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
+  args.push("--stream-events");
   addCommonSandboxArgs(args, params, "ext_ro_bash");
   args.push("--command", params.command);
   return args;
@@ -1662,34 +1670,133 @@ function externalReadWriteBashArgs(params) {{
     throw new Error("ext_rw_bash requires at least one write_targets, create_targets, or write_dirs entry");
   }}
   const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
+  args.push("--stream-events");
   addCommonSandboxArgs(args, params, "ext_rw_bash");
   args.push("--command", params.command);
   return args;
 }}
 
-function externalBashApprovalMessage(params, args) {{
+function normalizedStringList(value) {{
+  return stringList(value).map((item) => item.trim()).sort();
+}}
+
+function externalGrantSettings(params) {{
+  const requestedMaxUses = params.grant_max_uses ?? params.grantMaxUses;
+  const requestedTtlSeconds = params.grant_expires_seconds ?? params.grantExpiresSeconds;
+  let maxUses = EXTERNAL_GRANT_DEFAULT_MAX_USES;
+  if (requestedMaxUses !== undefined) {{
+    if (!Number.isInteger(requestedMaxUses) || requestedMaxUses < 1 || requestedMaxUses > EXTERNAL_GRANT_MAX_USES_LIMIT) {{
+      throw new Error("ext_rw_bash grant_max_uses must be an integer from 1 to " + EXTERNAL_GRANT_MAX_USES_LIMIT);
+    }}
+    maxUses = requestedMaxUses;
+  }}
+  let ttlMs = EXTERNAL_GRANT_DEFAULT_TTL_MS;
+  if (requestedTtlSeconds !== undefined) {{
+    if (!Number.isInteger(requestedTtlSeconds) || requestedTtlSeconds < 1 || requestedTtlSeconds > EXTERNAL_GRANT_MAX_TTL_MS / 1000) {{
+      throw new Error("ext_rw_bash grant_expires_seconds must be an integer from 1 to " + (EXTERNAL_GRANT_MAX_TTL_MS / 1000));
+    }}
+    ttlMs = requestedTtlSeconds * 1000;
+  }}
+  return {{ maxUses, ttlMs }};
+}}
+
+function externalGrantDescriptor(params) {{
+  return {{
+    purpose: params.purpose.trim(),
+    write_targets: normalizedStringList(params.write_targets),
+    create_targets: normalizedStringList(params.create_targets),
+    write_dirs: normalizedStringList(params.write_dirs),
+    connect_sockets: normalizedStringList(params.connect_sockets),
+    allow_signal: params.allow_signal === true,
+    network: typeof params.network === "string" ? params.network : "default",
+  }};
+}}
+
+function externalGrantKey(params) {{
+  return JSON.stringify(externalGrantDescriptor(params));
+}}
+
+function pruneExternalBashGrants(now) {{
+  for (const [key, grant] of externalBashGrants) {{
+    if (grant.expiresAt <= now || grant.uses >= grant.maxUses) {{
+      externalBashGrants.delete(key);
+    }}
+  }}
+}}
+
+function externalBashApprovalMessage(params) {{
+  const descriptor = externalGrantDescriptor(params);
+  const settings = externalGrantSettings(params);
   const scope = [
-    ...stringList(params.write_targets).map((path) => "write-target: " + path),
-    ...stringList(params.create_targets).map((path) => "create-target: " + path),
-    ...stringList(params.write_dirs).map((path) => "write-dir: " + path),
-    ...stringList(params.connect_sockets).map((path) => "connect-socket: " + path),
-    ...(params.allow_signal === true ? ["allow-signal"] : []),
+    ...descriptor.write_targets.map((path) => "write-target: " + path),
+    ...descriptor.create_targets.map((path) => "create-target: " + path),
+    ...descriptor.write_dirs.map((path) => "write-dir: " + path),
+    ...descriptor.connect_sockets.map((path) => "connect-socket: " + path),
+    ...(descriptor.allow_signal ? ["allow-signal"] : []),
+    "network: " + descriptor.network,
   ];
+  const examples = stringList(params.approval_examples);
   return [
-    "Stateful is requesting a read/write repo-external sandbox operation.",
+    "Stateful is requesting a scoped repo-external sandbox grant.",
     "",
     "Purpose:",
-    params.purpose,
+    descriptor.purpose,
     "",
-    "Declared external write/socket/signal scope:",
+    "Allowed external write/socket/signal scope:",
     scope.length ? scope.join("\n") : "No declared external write/socket/signal scope.",
     "",
-    "Command:",
-    params.command,
+    "Grant limits:",
+    "max uses: " + settings.maxUses,
+    "expires in seconds: " + Math.floor(settings.ttlMs / 1000),
     "",
-    "Sandbox invocation:",
-    STATEFUL + " " + args.join(" "),
+    "Command examples:",
+    examples.length ? examples.map((example) => "- " + example).join("\n") : "- Commands may vary, but must stay within the purpose and scope above.",
+    "",
+    "Raw command text is intentionally hidden from this approval prompt.",
   ].join("\n");
+}}
+
+async function confirmExternalBashGrant(ctx, params, signal) {{
+  if (signal?.aborted) return false;
+  let abortHandler;
+  const abortPromise = signal ? new Promise((resolve) => {{
+    abortHandler = () => resolve(false);
+    signal.addEventListener("abort", abortHandler, {{ once: true }});
+  }}) : undefined;
+  try {{
+    const confirmPromise = ctx.ui.confirm(
+      "Approve external sandbox grant",
+      externalBashApprovalMessage(params)
+    );
+    return abortPromise
+      ? await Promise.race([confirmPromise, abortPromise])
+      : await confirmPromise;
+  }} finally {{
+    if (signal && abortHandler) {{
+      signal.removeEventListener("abort", abortHandler);
+    }}
+  }}
+}}
+
+async function ensureExternalBashGrant(ctx, params, signal) {{
+  const now = Date.now();
+  pruneExternalBashGrants(now);
+  const key = externalGrantKey(params);
+  const existing = externalBashGrants.get(key);
+  if (existing && existing.expiresAt > now && existing.uses < existing.maxUses) {{
+    existing.uses += 1;
+    return true;
+  }}
+  const settings = externalGrantSettings(params);
+  const approved = await confirmExternalBashGrant(ctx, params, signal);
+  if (!approved) return false;
+  const approvedAt = Date.now();
+  externalBashGrants.set(key, {{
+    expiresAt: approvedAt + settings.ttlMs,
+    maxUses: settings.maxUses,
+    uses: 1,
+  }});
+  return true;
 }}
 
 function sandboxToolResultText(exitCode, stdout, stderr, error) {{
@@ -1714,9 +1821,6 @@ function sandboxToolError(error) {{
   }};
 }}
 
-function sandboxBackgroundToolOutputState(result) {{
-  return result.isError ? "failed" : "completed";
-}}
 
 function parseSandboxRunOutput(rawStdout) {{
   const text = String(rawStdout || "").trim();
@@ -1750,43 +1854,35 @@ function buildSandboxToolResult(params, args, exitCode, stdout, stderr, error) {
   }};
 }}
 
-function buildSandboxBackgroundStartResult(jobId, label) {{
-  return {{
-    content: [{{ type: "text", text: [
-      "Background job " + jobId + " started: " + label,
-      "The command is running outside the tool call so OMP can continue.",
-      "Stdout will stream as collapsible output (Ctrl+O); stderr and status stay in details unless the command fails.",
-    ].join("\n") }}],
-    details: {{ async: {{ state: "running", jobId, type: "bash" }} }},
-  }};
-}}
-
-function deliverSandboxStdoutChunk(pi, jobId, label, chunk) {{
-  if (!chunk || typeof pi?.sendMessage !== "function") {{
-    return;
+function deliverSandboxStdoutChunk(onUpdate, jobId, label, chunk) {{
+  if (!chunk || typeof onUpdate !== "function") {{
+    return Promise.resolve();
   }}
+  const update = {{
+    content: [{{ type: "text", text: chunk }}],
+    details: {{
+      runId: jobId,
+      stream: "stdout",
+      label,
+      collapsible: true,
+      collapseShortcut: "Ctrl+O",
+    }},
+  }};
   try {{
-    pi.sendMessage(
-      {{
-        customType: "stateful_sandbox_bash_stdout",
-        content: chunk,
-        display: true,
-        details: {{
-          async: {{ state: "streaming", jobId, type: "bash" }},
-          stream: "stdout",
-          label,
-          collapsible: true,
-          collapseShortcut: "Ctrl+O",
-        }},
-      }},
-      {{ triggerTurn: false }}
-    );
-  }} catch (_) {{}}
+    return Promise.resolve(onUpdate(update)).catch(() => {{}});
+  }} catch (_) {{
+    try {{
+      return Promise.resolve(onUpdate(chunk)).catch(() => {{}});
+    }} catch (_) {{
+      return Promise.resolve();
+    }}
+  }}
 }}
-
-function createSandboxStdoutStreamer(pi, jobId, label) {{
+ 
+function createSandboxStdoutStreamer(onUpdate, jobId, label) {{
   let buffer = "";
   let timer = null;
+  let pending = [];
   const flush = () => {{
     if (timer) {{
       clearTimeout(timer);
@@ -1795,7 +1891,7 @@ function createSandboxStdoutStreamer(pi, jobId, label) {{
     if (!buffer) return;
     const chunk = buffer;
     buffer = "";
-    deliverSandboxStdoutChunk(pi, jobId, label, chunk);
+    pending.push(deliverSandboxStdoutChunk(onUpdate, jobId, label, chunk));
   }};
   return {{
     push(chunk) {{
@@ -1806,97 +1902,162 @@ function createSandboxStdoutStreamer(pi, jobId, label) {{
       }}
     }},
     flush,
+    async drain() {{
+      flush();
+      const deliveries = pending;
+      pending = [];
+      await Promise.allSettled(deliveries);
+    }},
   }};
 }}
 
-function deliverSandboxBackgroundResult(pi, jobId, label, result) {{
-  if (typeof pi?.sendMessage !== "function") {{
-    return;
-  }}
-  const state = sandboxBackgroundToolOutputState(result);
-  const diagnostics = [];
-  if (result.isError) {{
-    if (result.details?.stderr) diagnostics.push("stderr:\n" + result.details.stderr);
-    if (result.details?.error) diagnostics.push("error:\n" + result.details.error);
-  }}
-  const text = [
-    "Background job " + jobId + " " + state + ": " + label,
-    ...diagnostics,
-  ].filter(Boolean).join("\n");
+function killSandboxChild(child, signalName) {{
+  if (!child) return;
   try {{
-    pi.sendMessage(
-      {{
-        customType: "stateful_sandbox_bash_result",
-        content: text,
-        display: true,
-        details: {{ ...result.details, async: {{ state, jobId, type: "bash" }} }},
-      }},
-      {{ triggerTurn: true, deliverAs: "nextTurn" }}
-    );
+    if (process.platform !== "win32" && typeof child.pid === "number") {{
+      process.kill(-child.pid, signalName);
+      return;
+    }}
+  }} catch (_) {{}}
+  try {{
+    child.kill(signalName);
   }} catch (_) {{}}
 }}
 
-function runSandboxToolProcess(params, args, ctx, label, onStdout, onComplete) {{
-  let stdout = "";
-  let stderr = "";
-  let processError = "";
-  let settled = false;
-  const finish = (exitCode, error) => {{
-    if (settled) return;
-    settled = true;
-    const sandboxRunOutput = parseSandboxRunOutput(stdout);
-    const commandStdout = sandboxRunOutput ? String(sandboxRunOutput.stdout || "") : stdout;
-    const commandStderr = sandboxRunOutput ? String(sandboxRunOutput.stderr || "") || stderr : stderr;
-    const commandExitCode = typeof sandboxRunOutput?.exit_code === "number" ? sandboxRunOutput.exit_code : exitCode;
-    if (commandStdout) {{
-      onStdout(commandStdout);
+function runSandboxToolProcess(params, args, ctx, label, signal, onStdout) {{
+  return new Promise((resolve) => {{
+    let stdout = "";
+    let stderr = "";
+    let stdoutLineBuffer = "";
+    let streamedStdout = "";
+    let streamedOutput = false;
+    let processError = "";
+    let settled = false;
+    let cancelled = false;
+    let child;
+    let abortHandler;
+    let killTimer;
+    let resolveTimer;
+    const clearCancelTimers = () => {{
+      if (killTimer) {{
+        clearTimeout(killTimer);
+        killTimer = undefined;
+      }}
+      if (resolveTimer) {{
+        clearTimeout(resolveTimer);
+        resolveTimer = undefined;
+      }}
+    }};
+    const emitOutputChunk = (chunk) => {{
+      if (!chunk) return;
+      streamedOutput = true;
+      streamedStdout = truncateSandboxToolText(streamedStdout + chunk, label);
+      onStdout(chunk);
+    }};
+    const handleStdoutLine = (line) => {{
+      if (!line) return;
+      try {{
+        const event = JSON.parse(line);
+        if (event?.event === "sandbox_output" && typeof event.chunk === "string") {{
+          emitOutputChunk(event.chunk);
+          return;
+        }}
+      }} catch (_) {{}}
+      stdout += line + "\n";
+    }};
+    const handleStatefulStdout = (chunk) => {{
+      stdoutLineBuffer += chunk;
+      const lines = stdoutLineBuffer.split("\n");
+      stdoutLineBuffer = lines.pop() || "";
+      for (const line of lines) {{
+        handleStdoutLine(line);
+      }}
+    }};
+    const flushStatefulStdout = () => {{
+      if (!stdoutLineBuffer) return;
+      handleStdoutLine(stdoutLineBuffer);
+      stdoutLineBuffer = "";
+    }};
+    const finish = (exitCode, error) => {{
+      if (settled) return;
+      settled = true;
+      clearCancelTimers();
+      if (signal && abortHandler) {{
+        signal.removeEventListener("abort", abortHandler);
+      }}
+      flushStatefulStdout();
+      const sandboxRunOutput = parseSandboxRunOutput(stdout);
+      const fallbackStdout = streamedOutput ? streamedStdout : stdout;
+      const commandStdout = sandboxRunOutput ? String(sandboxRunOutput.stdout || "") : fallbackStdout;
+      const commandStderr = sandboxRunOutput ? String(sandboxRunOutput.stderr || "") || stderr : stderr;
+      const commandExitCode = typeof sandboxRunOutput?.exit_code === "number" ? sandboxRunOutput.exit_code : exitCode;
+      if (commandStdout && !streamedOutput) {{
+        onStdout(commandStdout);
+      }}
+      const result = buildSandboxToolResult(params, args, commandExitCode, commandStdout, commandStderr, error);
+      if (sandboxRunOutput) {{
+        result.details.sandboxRunOutput = sandboxRunOutput;
+      }}
+      if (cancelled) {{
+        result.details.cancelled = true;
+      }}
+      resolve(result);
+    }};
+    abortHandler = () => {{
+      if (settled || cancelled) return;
+      cancelled = true;
+      processError = "cancelled by user";
+      killSandboxChild(child, "SIGTERM");
+      killTimer = setTimeout(() => killSandboxChild(child, "SIGKILL"), 1000);
+      resolveTimer = setTimeout(() => finish(1, processError), 3000);
+    }};
+    if (signal?.aborted) {{
+      cancelled = true;
+      finish(1, "cancelled by user");
+      return;
     }}
-    const result = buildSandboxToolResult(params, args, commandExitCode, commandStdout, commandStderr, error);
-    if (sandboxRunOutput) {{
-      result.details.sandboxRunOutput = sandboxRunOutput;
+    try {{
+      child = spawn(STATEFUL, args, {{
+        cwd: ctx.cwd,
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+      }});
+    }} catch (error) {{
+      finish(1, error instanceof Error ? error.message : String(error));
+      return;
     }}
-    onComplete(result);
-  }};
-  let child;
-  try {{
-    child = spawn(STATEFUL, args, {{
-      cwd: ctx.cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: false,
+    if (signal) {{
+      signal.addEventListener("abort", abortHandler, {{ once: true }});
+    }}
+    if (signal?.aborted) {{
+      abortHandler();
+    }}
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", handleStatefulStdout);
+    child.stderr?.on("data", (chunk) => {{
+      stderr = truncateSandboxToolText(stderr + chunk, label);
     }});
-  }} catch (error) {{
-    finish(1, error instanceof Error ? error.message : String(error));
-    return;
-  }}
-  child.stdout?.setEncoding("utf8");
-  child.stderr?.setEncoding("utf8");
-  child.stdout?.on("data", (chunk) => {{
-    stdout = truncateSandboxToolText(stdout + chunk, label);
-  }});
-  child.stderr?.on("data", (chunk) => {{
-    stderr = truncateSandboxToolText(stderr + chunk, label);
-  }});
-  child.on("error", (error) => {{
-    processError = error instanceof Error ? error.message : String(error);
-  }});
-  child.on("close", (code, signalName) => {{
-    const exitCode = typeof code === "number" ? code : 1;
-    const signalError = signalName ? "terminated by signal " + signalName : "";
-    finish(exitCode, processError || signalError);
+    child.on("error", (error) => {{
+      processError = error instanceof Error ? error.message : String(error);
+    }});
+    child.on("close", (code, signalName) => {{
+      const exitCode = typeof code === "number" ? code : 1;
+      const signalError = signalName ? "terminated by signal " + signalName : "";
+      finish(exitCode, processError || signalError);
+    }});
   }});
 }}
 
-function startSandboxBackgroundTool(pi, params, args, ctx, label) {{
-  const jobId = nextSandboxJobId(label);
+async function runSandboxAwaitedTool(params, args, ctx, label, signal, onUpdate) {{
+  const runId = nextSandboxJobId(label);
   const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
-  const stdoutStreamer = createSandboxStdoutStreamer(pi, jobId, commandLabel);
-  runSandboxToolProcess(params, args, ctx, label, (chunk) => {{
+  const stdoutStreamer = createSandboxStdoutStreamer(onUpdate, runId, commandLabel);
+  const result = await runSandboxToolProcess(params, args, ctx, label, signal, (chunk) => {{
     stdoutStreamer.push(chunk);
-  }}, (result) => {{
-    stdoutStreamer.flush();
-    deliverSandboxBackgroundResult(pi, jobId, commandLabel, result);
   }});
-  return buildSandboxBackgroundStartResult(jobId, commandLabel);
+  await stdoutStreamer.drain();
+  return result;
 }}
 
 export default function statefulOmpExtension(pi) {{
@@ -1917,18 +2078,18 @@ export default function statefulOmpExtension(pi) {{
         allow_signal: {{ type: "boolean", description: "Allow the sandboxed command to signal approved processes when the selected profile supports signaling." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and stream stdout automatically." }},
+        async: {{ type: "boolean", description: "Deprecated compatibility field; commands now wait for completion before returning." }},
       }},
       required: ["fs", "command"],
     }},
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {{
       let args;
       try {{
         args = sandboxBashArgs(params);
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      return startSandboxBackgroundTool(pi, params, args, ctx, "sandbox_bash");
+      return await runSandboxAwaitedTool(params, args, ctx, "sandbox_bash", signal, onUpdate);
     }},
   }});
   pi.registerTool({{
@@ -1942,24 +2103,24 @@ export default function statefulOmpExtension(pi) {{
         command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and stream stdout automatically." }},
+        async: {{ type: "boolean", description: "Deprecated compatibility field; commands now wait for completion before returning." }},
       }},
       required: ["purpose", "command"],
     }},
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {{
       let args;
       try {{
         args = externalReadOnlyBashArgs(params);
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      return startSandboxBackgroundTool(pi, params, args, ctx, "ext_ro_bash");
+      return await runSandboxAwaitedTool(params, args, ctx, "ext_ro_bash", signal, onUpdate);
     }},
   }});
   pi.registerTool({{
     name: "ext_rw_bash",
     label: "External Read/write Bash",
-    description: "Run a command through stateful sandbox run --fs external after explicit OMP UI approval. At least one write_targets, create_targets, or write_dirs entry is required.",
+    description: "Run a command through stateful sandbox run --fs external after explicit OMP UI approval of a scoped purpose grant. At least one write_targets, create_targets, or write_dirs entry is required.",
     parameters: {{
       type: "object",
       properties: {{
@@ -1970,13 +2131,16 @@ export default function statefulOmpExtension(pi) {{
         write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Repo-relative directories or absolute external directories the command may write under. At least one write/create/directory scope is required." }},
         connect_sockets: {{ type: "array", items: {{ type: "string" }}, description: "Optional absolute Unix socket paths the sandbox may connect to." }},
         allow_signal: {{ type: "boolean", description: "Optionally allow the sandboxed command to signal approved external processes." }},
+        approval_examples: {{ type: "array", items: {{ type: "string" }}, description: "Optional example command classes to show in the approval prompt; raw command text is not shown." }},
+        grant_max_uses: {{ type: "number", description: "Maximum executions covered by the approved purpose/scope grant, from 1 to 20. Defaults to 5." }},
+        grant_expires_seconds: {{ type: "number", description: "Grant lifetime in seconds, from 1 to 3600. Defaults to 600." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and stream stdout automatically." }},
+        async: {{ type: "boolean", description: "Deprecated compatibility field; commands now wait for completion before returning." }},
       }},
       required: ["purpose", "command"],
     }},
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {{
       let args;
       try {{
         args = externalReadWriteBashArgs(params);
@@ -1990,10 +2154,12 @@ export default function statefulOmpExtension(pi) {{
           details: {{ error: "confirmation_unavailable" }},
         }};
       }}
-      const approved = await ctx.ui.confirm(
-        "Approve external sandbox command",
-        externalBashApprovalMessage(params, args)
-      );
+      let approved;
+      try {{
+        approved = await ensureExternalBashGrant(ctx, params, signal);
+      }} catch (error) {{
+        return sandboxToolError(error);
+      }}
       if (!approved) {{
         return {{
           isError: true,
@@ -2001,7 +2167,10 @@ export default function statefulOmpExtension(pi) {{
           details: {{ blocked: true }},
         }};
       }}
-      return startSandboxBackgroundTool(pi, params, args, ctx, "ext_rw_bash");
+      if (signal?.aborted) {{
+        return sandboxToolError("cancelled by user");
+      }}
+      return await runSandboxAwaitedTool(params, args, ctx, "ext_rw_bash", signal, onUpdate);
     }},
   }});
   pi.on("session_start", async (event, ctx) => {{

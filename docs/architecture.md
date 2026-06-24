@@ -54,7 +54,7 @@ Agent hooks and external observers
 ```
 
 The event log is used for audit evidence and event-backed replay of accepted
-session and intent declaration events. The materialized current-state view is
+session and reservation declaration events. The materialized current-state view is
 the active coordination source for fast reads, conflict checks, and prompt
 rendering.
 
@@ -105,9 +105,9 @@ This keeps policy centralized and avoids duplicating authorization logic inside
 hook scripts or MCP tool handlers.
 
 The concrete v1 HTTP API lives under `/v1` and is defined in the implementation
-contract. The intended envelope includes `protocol_version`, session identity,
+contract. The target envelope includes `protocol_version`, session identity,
 workspace identity, and source metadata. The current implementation enforces
-that envelope for write authorization and intent declare/request/claim/cancel;
+that envelope for write authorization and reservation declare/request/claim/cancel;
 other POST routes still use flat request bodies.
 
 ## Hook Packaging
@@ -131,12 +131,16 @@ keeps the detailed procedure, and hooks remain the enforcement boundary. The
 generated extension registers `sandbox_bash` for read-only, write-targets,
 build, git, and github-pr sandbox runs, including common sandbox flags,
 registers `ext_ro_bash` for read-only `--fs external` commands, and registers
-`ext_rw_bash` for external writes that require write/create/dir scope and OMP UI
-confirmation. All three generated `*_bash` tools start sandbox commands in the
-background, immediately return a background-job start result, stream stdout back
-into OMP as collapsible output while the command runs, and keep stderr/status in
-details unless the command fails; their `async` input is a deprecated
-compatibility no-op that does not select execution mode. `sandbox_bash` rejects
+`ext_rw_bash` for external writes that require write/create/dir scope plus a
+scoped OMP UI approval grant. That grant shows purpose, declared
+write/socket/signal scope, network mode, examples, max uses, and expiry instead
+of raw command text, and matching calls can reuse it until the limit is reached.
+All three generated `*_bash` tools wait for the sandbox command to finish before returning the tool result, so final stdout/stderr/status are
+available before the agent can end the turn. They emit stdout through inline OMP
+tool updates so it renders in the tool output panel, and OMP abort/ESC cancels
+the foreground tool while the sandbox runner cleans up its child process group.
+Their `async` input is a deprecated compatibility no-op that does not select
+background execution. `sandbox_bash` rejects
 `--fs external` with guidance to use `ext_ro_bash` or `ext_rw_bash`. Raw Bash and
 Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
@@ -189,16 +193,16 @@ reconciliation fail closed; read/search/diff remains allowed.
 For OMP, the generated `sandbox_bash` tool owns non-external sandbox command
 execution for read-only, write-targets, build, git, and github-pr profiles;
 `ext_ro_bash` owns read-only external commands without OMP UI confirmation; and
-`ext_rw_bash` owns external writes with OMP UI confirmation. Each generated tool
-always starts the sandbox command in the background, returns only the
-background-job start result immediately, streams stdout back into OMP as
-collapsible output, and keeps stderr/status in details unless the command fails.
+`ext_rw_bash` owns external writes through reusable scoped purpose grants. Each
+generated tool waits for the sandbox command to finish before returning, emits
+stdout through inline OMP tool updates, cancels on OMP abort, and returns final
+stdout/stderr/exit status in the tool details.
 Other stateful allows translate to OMP allow. Stateful deny or unavailable server
 translates to a hard block, even when OMP yolo metadata is present.
 
 Hook scripts should resolve paths from the git root. Envelope-enforced routes
 include `protocol_version`; a major protocol mismatch fails closed on those
-write authorization and intent paths.
+write authorization and reservation paths.
 
 ## Trigger Sources
 
@@ -228,8 +232,8 @@ Each trigger should carry the session id, actor identity when known, workspace,
 branch, timestamp, and source reference.
 
 When subagent trigger sources are implemented, subagents inherit write
-authorization only from the parent session's active valid intent scope. They
-still record activity and leases with their own `actor_id` so attribution stays
+authorization only from the parent session's active valid reservation scope. They
+still record activity and claims with their own `actor_id` so attribution stays
 precise.
 
 ## Hook Responsibilities
@@ -246,25 +250,25 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 `UserPromptSubmit`:
 
-- capture the user's requested goal as an initial intent candidate
+- capture the user's requested goal as an initial reservation candidate
 - attach relevant active conflicts as context
 
 `PreToolUse`:
 
-- deny supported write calls when the session has no active intent
+- deny supported write calls when the session has no active reservation
 - deny Codex raw Bash with sandbox guidance. For OMP, raw Bash and the
   Python/JavaScript/JS/Ruby/Julia eval tools are denied at host approval and hook
   levels, even when the raw command invokes `stateful sandbox run`; non-external
   sandbox command work must use `sandbox_bash`, read-only repo-external shell
   work must use `ext_ro_bash` without OMP UI confirmation, and external writes
-  must use `ext_rw_bash` with write/create/dir scope and OMP UI confirmation.
+  must use `ext_rw_bash` with write/create/dir scope plus a scoped purpose grant.
   Hook-mediated command execution outside OMP custom tools must be a single
   strict invocation of the trusted absolute `stateful` binary running
   `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
   command-shaped inspection uses `--fs read-only --network disabled`; process
   inspection uses `sandbox process find <selector>`. Command-shaped repo writes
   use `--fs write-targets` with explicit `--write-target <file>` /
-  `--create-target <file>` values and repo intent plus same-session leases. Local
+  `--create-target <file>` values and repo reservation plus same-session claims. Local
   Git uses `--fs git --network disabled`, GitHub PR operations use
   `--fs github-pr --network enabled`, and external operations use `--fs external`
   with Codex approval, OMP `ext_ro_bash` for read-only/no-write-scope commands,
@@ -273,22 +277,22 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   remain required when declaring external write scope. On macOS, external runs
   allow `trustd` and DirectoryService Mach lookups for TLS certificate
   verification by Go tools.
-- check leases and planned edits for likely conflicts
+- check claims and planned edits for likely conflicts
 - return allow, warning context, or deny based on policy
 
 `PostToolUse`:
 
 - observe files, commands, and results from supported tool calls
-- release same-session repo-write leases after completed native edit and
+- release same-session repo-write claims after completed native edit and
   `write-targets` transactions
-- refresh heartbeat timestamps and lease TTLs only for remaining active leases
-  still covered by active intent
+- refresh heartbeat timestamps and claim TTLs only for remaining active claims
+  still covered by active reservation
 - update phase, touched resources, and last result
 
 `Stop`:
 
 - post activity finalization for the session
-- release the session's leases through finalization
+- release the session's claims through finalization
 - leave explicit `state_activity_finalize` available for manual final status
   updates before shutdown
 
@@ -300,12 +304,12 @@ map to dotted protocol names:
 ```text
 state_session_register (state.session.register)
 state_session_heartbeat (state.session.heartbeat)
-state_intent_declare (state.intent.declare)
-state_intent_request (state.intent.request)
-state_intent_claim (state.intent.claim)
-state_intent_cancel (state.intent.cancel)
-state_lease_acquire (state.lease.acquire)
-state_lease_release (state.lease.release)
+state_reservation_declare (state.reservation.declare)
+state_reservation_request (state.reservation.request)
+state_reservation_claim (state.reservation.claim)
+state_reservation_cancel (state.reservation.cancel)
+state_claim_acquire (state.claim.acquire)
+state_claim_release (state.claim.release)
 state_activity_observe (state.activity.observe)
 state_activity_finalize (state.activity.finalize)
 state_conflicts_check (state.conflicts.check)
@@ -319,15 +323,21 @@ state_resume_next (state.resume.next)
 
 Hooks and MCP tools should call the same state server API. Policy must live in
 the state server, not in duplicated hook scripts. Native edit tools with
-hook-visible targets are the repo file edit path after exact intent declaration
-and a successful file lease; command-shaped shell writes remain outside MCP and
-go through the sandbox-run wrapper.
+hook-visible targets are the repo file edit path after task-level reservation
+covers the target and a successful file claim is active; command-shaped shell
+writes remain outside MCP and go through the sandbox-run wrapper.
 
-Intent declare and request payloads require a non-empty `purpose`; clients infer
-it from the user or agent instruction and send it explicitly. Intent declare
+Reservation declare and request payloads require a non-empty `purpose`; clients infer
+it from the user or agent instruction and send it explicitly. Reservation declare
 also requires non-empty `files_planned`; empty arrays and empty or normalized-empty
-paths fail with `missing_scope`. Intent request also requires a non-empty
+paths fail with `missing_scope`. Reservation request also requires a non-empty
 `path`; empty or normalized-empty request paths fail with `missing_scope`.
+
+Claim acquisition accepts `paths: string[]` so MCP clients can claim a declared
+batch in one request. Each path still creates an exact file or directory claim;
+directory claims do not authorize child file actions. The server still accepts
+legacy claim-acquire requests with `path` for compatibility, and
+`state_claim_release` remains single-resource with `path`.
 
 ## Tool Classification
 
@@ -339,28 +349,30 @@ classification, so `functions.bash` is Bash,
 `functions.search` remain native read/search tools.
 
 - Native edit tools such as Codex `apply_patch`, `Edit`, and `Write` or OMP
-  `edit` and `write`: enforce by inspecting hook-exposed targets after exact
-  intent declaration and a successful same-session file lease. The completed
-  write transaction releases the lease that authorized it.
+  `edit` and `write`: enforce by inspecting hook-exposed targets after
+  task-level reservation covers the target and a successful same-session file
+  claim is active. The completed write transaction releases the claim that
+  authorized it.
 - Command execution: Codex raw Bash is denied with sandbox guidance. OMP raw Bash
   and Python/JavaScript/JS/Ruby/Julia eval-tool execution are denied at host
   approval and hook levels, even when the raw command itself invokes
   `stateful sandbox run`. OMP command-shaped sandbox work uses generated tools:
   `sandbox_bash` for read-only, write-targets, build, git, and github-pr
   profiles, `ext_ro_bash` for read-only `--fs external` commands without OMP UI
-  confirmation, and `ext_rw_bash` for external writes with OMP UI confirmation.
-  These tools always run sandbox commands in the background, return only a
-  background-job start result immediately, stream stdout back into OMP as
-  collapsible output, and keep stderr/status in details unless the command fails.
+  confirmation, and `ext_rw_bash` for external writes with a scoped purpose
+  grant. These tools wait for sandbox commands to finish before returning, emit
+  stdout through inline OMP tool updates, cancel on OMP abort, and return final
+  stdout/stderr/exit status in tool details.
   Ordinary read work should use native read/search/diff tools when available.
   Read-only command-shaped inspection that genuinely needs a shell uses
   `--fs read-only --network disabled`; process inspection uses
   `sandbox process find <selector>`, not raw `ps` or `pgrep`. Command-shaped
   repo writes use `--fs write-targets` with explicit `--write-target <file>` /
   `--create-target <file>` values and target authorization. External operations
-  use `--fs external` with no repo intent or lease, and Codex approval or OMP
+  use `--fs external` with no repo reservation or claim, and Codex approval or OMP
   `ext_ro_bash` for read-only/no-write-scope commands; OMP external writes use
-  `ext_rw_bash` with at least one write target, create target, or write dir. On
+  `ext_rw_bash` with at least one write target, create target, or write dir and a
+  scoped purpose grant. On
   macOS, the external profile permits `trustd` and DirectoryService Mach lookups
   so Go TLS clients such as `gh` can verify certificates.
 - Test execution: run only through sandboxed test actions such as
@@ -411,21 +423,21 @@ The state server is responsible for:
 
 - appending coordination events
 - materializing active current state
-- running background and lazy expiration for stale activity, intent, leases, and
+- running background and lazy expiration for stale activity, reservation, claims, and
   reservations
-- extending active intent TTL from explicit heartbeats and authorize-time
+- extending active reservation TTL from explicit heartbeats and authorize-time
   implicit heartbeat events within a 60-minute rolling maximum
 - evaluating conflict policy
-- promoting FIFO wait queue reservations after explicit lease release,
-  session/activity finalization, or lease expiry, and emitting notification
-  payloads that carry the stored reservation purpose
-- requiring reservation claim before creating active write-authorizing intent
-  and active leases from that stored purpose
+- promoting FIFO wait queue requests into claimable reservations after explicit
+  claim release, session/activity finalization, or claim expiry, and emitting
+  notification payloads that carry the stored reservation purpose
+- requiring reservation claim before creating active reservation scope and active
+  claims from that stored purpose
 - rendering concise prompt context
 - retaining expired activity as historical evidence
 
-The server should block supported write actions without active intent and
-support advisory blocking for high-risk conflicts. V1 does not treat leases as
+The server should block supported write actions without active reservation and
+support advisory blocking for high-risk conflicts. V1 does not treat claims as
 hard distributed locks.
 
 ## Policy Engine
@@ -455,14 +467,14 @@ for deny decisions.
 
 The target policy engine owns:
 
-- active intent checks
+- active reservation checks
 - file and directory scope checks
-- lease conflict checks
+- claim conflict checks
 - collision-domain evaluation
 - human-write reconciliation checks
 - state-server availability behavior
 
-Hooks and adapters classify runtime-specific tool calls, extract tool intent and
+Hooks and adapters classify runtime-specific tool calls, extract tool reservation and
 targets when supported, and call the policy API for store-backed coordination
 decisions. Adapter-local policy is limited to fail-closed classification and
 trusted wrapper validation for command-shaped execution. In the shipped
@@ -477,7 +489,7 @@ to create a soft save gate, not a guaranteed lock. The extension should:
 - report opened, dirty, selected, and saved files as human activity signals
 - check the state server before a human save when the IDE exposes a pre-save
   event
-- warn the user when the save target conflicts with an active agent lease
+- warn the user when the save target conflicts with an active agent claim
 - let the user explicitly continue the save, recording that decision as an
   audited human event
 - fail open with a visible warning if the state server is unavailable, because
@@ -490,7 +502,7 @@ until the agent refreshes state and reconciles the change.
 V1 does not require the IDE extension. Target human-write reconciliation is
 driven by conservative git working-tree or filesystem observation. The observer
 should prefer warnings and reconciliation blocks over pretending to know the
-human's intent.
+human's reservation.
 
 ## Human Write Reconciliation
 
@@ -520,9 +532,9 @@ the human change, state whether it conflicts with the agent's previous plan, and
 choose `adopt`, `reapply`, `ask_user`, or `abandon`.
 
 Only `adopt` and `reapply` can clear the human-write block, and only when the
-session still has active, unexpired, matching intent. `ask_user` keeps writes
+session still has active, unexpired, matching reservation. `ask_user` keeps writes
 blocked until the user responds. `abandon` should release or shorten the
-affected lease.
+affected claim.
 
 If the state server is unavailable, `state.reconcile.ack` fails closed and cannot
 clear the block.
@@ -531,25 +543,25 @@ clear the block.
 
 Initial policy:
 
-- no active intent before supported write action: deny
-- intent without matching file or directory scope before supported write action:
+- no active reservation before supported write action: deny
+- reservation without matching file or directory scope before supported write action:
   deny
-- expired intent or intent beyond its 60-minute rolling window: deny as missing
-  active intent
+- expired reservation or reservation beyond its 60-minute rolling window: deny as missing
+  active reservation
 - blocked phase or finalized session before supported write action: target
   phase-aware deny behavior
-- directory intent and directory lease authorize only `write_directory` for the
+- directory reservation and directory claim authorize only `write_directory` for the
   exact directory resource; they do not authorize `write_file`, delete, rename,
   or move actions on child paths
-- `write_directory` requires exact directory intent, and a matching directory
-  lease fences the whole subtree because command-shaped `--write-dir` execution
+- `write_directory` requires exact directory reservation, and a matching directory
+  claim fences the whole subtree because command-shaped `--write-dir` execution
   can write anywhere below that directory
 - delete operation without exact file scope: deny
 - rename or move without exact file scope for both source and destination: deny
-- active lease in the hard conflict domain by another actor: deny unless the
+- active claim in the hard conflict domain by another actor: deny unless the
   current session contains an explicit user override for that resource
 - same `workspace_id` and same normalized `relative_path`: shipped hard conflict
-  domain for active lease and wait-queue checks
+  domain for active claim and wait-queue checks
 - same normalized `absolute_path`: target physical-file hard conflict domain
 - planned edit in the same area: target warning context
 - same `repo_id` and same `relative_path` across different workspace, worktree,
@@ -557,13 +569,13 @@ Initial policy:
 - unknown repository identity: target behavior is to hard-block only on same
   normalized absolute path and render weaker matches as unknown-confidence
   context
-- expired lease: allow and surface stale context
+- expired claim: allow and surface stale context
 - human working tree change near the target: warn before edits
-- human save observed after an agent lease or write: deny further agent writes
+- human save observed after an agent claim or write: deny further agent writes
   until the agent acknowledges reconciliation or receives an explicit user
   instruction
-- current shipped hook path records file target observations on exact file lease
-  acquire, denies hook-originated writes when the leased file changes before
+- current shipped hook path records file target observations on exact file claim
+  acquire, denies hook-originated writes when the claimed file changes before
   authorization, and refreshes that observation after same-session supported file
   tools complete
 - unrelated reads and searches: allow
@@ -576,15 +588,15 @@ valid only when the user explicitly instructs the current session to allow a
 specific resource override, for example: "Allow override for `src/auth.ts`."
 The user owns the judgment and responsibility for that exception.
 
-Overrides apply only to active lease conflicts. They do not bypass missing
-intent, expired intent, target blocked/finalized state, file or directory scope
+Overrides apply only to active claim conflicts. They do not bypass missing
+reservation, expired reservation, target blocked/finalized state, file or directory scope
 matching, delete exact-scope rules, or rename/move exact-scope rules. Overrides
 are scoped to the current session, current turn, and specific resource when the
 target override policy is implemented.
 
 Overrides do not act as queue priority. They cannot reorder FIFO waiters,
 transfer a reservation, or let a later waiter take a resource ahead of the
-reserved session.
+session with the claimable reservation.
 
 ## Prompt Rendering
 
@@ -606,11 +618,11 @@ resource filter. `brief` is for session start and prompt submit context.
 `detailed` is for denied actions or focused resource checks. Rendered output
 must include concrete next actions when a block or warning is present.
 
-The current server route renders store-backed live context from active intents,
-active leases, and queued or reserved wait records. The response includes
-summary counts, structured `items`, and prompt-ready `prompt_text`.
-Released leases are absent from this live render. A later same-session write
-must acquire a fresh lease or claim an eligible reservation before authorization
+The current server route renders store-backed live context from active reservations,
+active claims, and queued or claimable (`reserved`) wait records. The response
+includes summary counts, structured `items`, and prompt-ready `prompt_text`.
+Released claims are absent from this live render. A later same-session write
+must acquire a fresh claim or claim a claimable reservation before authorization
 can succeed.
 
 The shipped `/v1/context/render` route returns structured data and prompt-ready
@@ -641,7 +653,7 @@ Severity values are `block`, `warn`, and `info`. `brief` output is limited to 8
 bullets total. `detailed` output is limited to 20 bullets total. Empty sections
 are omitted except `Blocking: None` when a resource filter is present.
 
-Evidence kind distinguishes declared intent, lease-only blockers, queue or
+Evidence kind distinguishes declared reservation, claim-only blockers, queue or
 reservation state, observed writes, and verified diffs; `evidence` remains
 optional supporting detail.
 
@@ -665,7 +677,7 @@ The system should prefer explicit uncertainty:
   yolo metadata; repo-external command-shaped work must still use `ext_ro_bash`
   for reads or `ext_rw_bash` for writes, not raw Bash or eval tools
 - state server unavailable -> deny supported writes that cannot prove active
-  intent
+  reservation
 - state server unavailable -> deny Codex raw Bash, repo-internal Bash, and all
   OMP raw Bash plus Python/JavaScript/JS/Ruby/Julia eval-tool execution. OMP
   non-external sandbox runs must use `sandbox_bash`, and command-shaped writes
@@ -673,8 +685,8 @@ The system should prefer explicit uncertainty:
   closed when target authorization cannot be proven.
 - state server unavailable -> write-target sandbox authorization fails closed
   and does not run the command
-- state server unavailable -> fail closed for `state.reconcile.ack`, intent
-  declaration, lease acquisition, and lease refresh
+- state server unavailable -> fail closed for `state.reconcile.ack`, reservation
+  declaration, claim acquisition, and claim refresh
 - state server unavailable -> allow non-Bash read, search, and diff actions
 - state server unavailable during IDE human save gate -> warn the user and allow
   the save

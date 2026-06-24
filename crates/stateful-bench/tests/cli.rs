@@ -1833,15 +1833,26 @@ print(json.dumps({{
     );
     assert!(
         env.iter()
-            .any(|value| value.as_str() == Some("OPENAI_API_KEY=sk-test"))
+            .any(|value| value.as_str() == Some("OPENAI_API_KEY"))
     );
     assert!(env.iter().any(|value| {
         value.as_str() == Some("STATEFUL_SERVER_URL=http://host.docker.internal:43873")
     }));
     assert!(
         env.iter()
+            .any(|value| value.as_str() == Some("STATEFUL_SERVER_TOKEN"))
+    );
+    assert!(
+        !env.iter()
+            .any(|value| value.as_str() == Some("OPENAI_API_KEY=sk-test"))
+    );
+    assert!(
+        !env.iter()
             .any(|value| value.as_str() == Some("STATEFUL_SERVER_TOKEN=token-123"))
     );
+    let command_text = serde_json::to_string(command).expect("command should encode");
+    assert!(!command_text.contains("sk-test"));
+    assert!(!command_text.contains("token-123"));
     assert!(
         !env.iter()
             .any(|value| value.as_str() == Some("HOME=/host/home"))
@@ -2080,6 +2091,7 @@ module.prepare_omp_environment(
     runtime_omp_home="/home/stateful",
     omp_bin="/tmp/omp",
     enable_native_subagent=True,
+    agent_docker_image="ghcr.io/stateful/omp-agent:latest",
 )
 stateful_agent = Path(stateful_env["PI_CODING_AGENT_DIR"])
 explicit_stateful_env = module.denovo_omp_environment(
@@ -2219,6 +2231,12 @@ print(json.dumps({{
     let unpack_command = output["unpack_command"]
         .as_array()
         .expect("unpack command should be captured");
+    assert!(command_contains(unpack_command, "docker"));
+    assert!(command_contains(unpack_command, "run"));
+    assert!(command_contains(
+        unpack_command,
+        "ghcr.io/stateful/omp-agent:latest"
+    ));
     assert!(command_contains(unpack_command, "/tmp/omp"));
     assert!(command_contains(unpack_command, "agents"));
     assert!(command_contains(unpack_command, "unpack"));
@@ -2314,8 +2332,8 @@ fn denovo_progress_report_aggregates_in_progress_shards_from_results_jsonl() {
     fs::write(
         shard_a_off.join("results.jsonl"),
         [
-            r#"{"instance_id":"a-1","success":true,"score":1.0,"finish_reason":"stop","subagent_used":true,"orchestration_trace":{"trace_captured":true,"intent_events":2,"lease_events":1,"conflict_events":0}}"#,
-            r#"{"instance_id":"a-2","success":false,"score":0.5,"finish_reason":"setup-error","subagent_used":false,"orchestration_trace":{"trace_captured":false,"intent_events":0,"lease_events":0,"conflict_events":0}}"#,
+            r#"{"instance_id":"a-1","success":true,"score":1.0,"finish_reason":"stop","subagent_used":true,"orchestration_trace":{"trace_captured":true,"reservation_events":2,"claim_events":1,"conflict_events":0}}"#,
+            r#"{"instance_id":"a-2","success":false,"score":0.5,"finish_reason":"setup-error","subagent_used":false,"orchestration_trace":{"trace_captured":false,"reservation_events":0,"claim_events":0,"conflict_events":0}}"#,
         ]
         .join("\n")
             + "\n",
@@ -2379,8 +2397,8 @@ print(json.dumps(summary, sort_keys=True))
     assert_eq!(off["subagent_observed"], 3);
     assert_eq!(off["orchestration_trace_observed"], 2);
     assert_eq!(off["orchestration_trace_captured"], 1);
-    assert_eq!(off["orchestration_intent_events"], 2);
-    assert_eq!(off["orchestration_lease_events"], 1);
+    assert_eq!(off["orchestration_reservation_events"], 2);
+    assert_eq!(off["orchestration_claim_events"], 1);
     assert_eq!(off["orchestration_conflict_events"], 0);
     assert_eq!(off["progress_rate"], 0.75);
     assert!(
@@ -2426,7 +2444,7 @@ fn denovo_progress_report_prefers_cumulative_condition_report() {
     .expect("fixture results should be written");
     fs::write(
         condition_dir.join("denovo-report.json"),
-        r#"{"condition_id":"stateful-off_subagent-on","total_instances":3,"success_count":2,"average_score":0.75,"completed_instances":3,"scored_instances":3,"error_count":0,"subagent_observed_instances":3,"subagent_used_count":2,"subagent_used_rate":0.6666666667,"orchestration_trace_observed":3,"orchestration_trace_captured":2,"orchestration_intent_events":5,"orchestration_lease_events":4,"orchestration_conflict_events":1,"running_time_ms":1234}"#,
+        r#"{"condition_id":"stateful-off_subagent-on","total_instances":3,"success_count":2,"average_score":0.75,"completed_instances":3,"scored_instances":3,"error_count":0,"subagent_observed_instances":3,"subagent_used_count":2,"subagent_used_rate":0.6666666667,"orchestration_trace_observed":3,"orchestration_trace_captured":2,"orchestration_reservation_events":5,"orchestration_claim_events":4,"orchestration_conflict_events":1,"running_time_ms":1234}"#,
     )
     .expect("fixture cumulative report should be written");
 
@@ -2471,8 +2489,8 @@ print(json.dumps(summary, sort_keys=True))
     assert_eq!(condition["subagent_observed"], 3);
     assert_eq!(condition["orchestration_trace_observed"], 3);
     assert_eq!(condition["orchestration_trace_captured"], 2);
-    assert_eq!(condition["orchestration_intent_events"], 5);
-    assert_eq!(condition["orchestration_lease_events"], 4);
+    assert_eq!(condition["orchestration_reservation_events"], 5);
+    assert_eq!(condition["orchestration_claim_events"], 4);
     assert_eq!(condition["orchestration_conflict_events"], 1);
 
     let run = output["runs"]
@@ -3821,8 +3839,8 @@ result = module.InstanceResult(
     orchestration_trace={{
         "trace_path": "fake-a/orchestration-trace.json",
         "trace_captured": True,
-        "intent_events": 2,
-        "lease_events": 1,
+        "reservation_events": 2,
+        "claim_events": 1,
         "conflict_events": 0,
     }},
 )
@@ -3837,8 +3855,8 @@ print(json.dumps(module.instance_result_row(result), sort_keys=True))
         "fake-a/orchestration-trace.json"
     );
     assert_eq!(output["orchestration_trace"]["trace_captured"], true);
-    assert_eq!(output["orchestration_trace"]["intent_events"], 2);
-    assert_eq!(output["orchestration_trace"]["lease_events"], 1);
+    assert_eq!(output["orchestration_trace"]["reservation_events"], 2);
+    assert_eq!(output["orchestration_trace"]["claim_events"], 1);
 }
 
 #[test]
@@ -4192,8 +4210,8 @@ print(json.dumps({{
     let skill = output["skill"].as_str().expect("skill should be text");
     assert!(skill.contains("name: stateful-command-policy"));
     assert!(skill.contains("Use canonical Stateful MCP tool names"));
-    assert!(skill.contains("state_intent_declare"));
-    assert!(skill.contains("state_lease_acquire"));
+    assert!(skill.contains("state_reservation_declare"));
+    assert!(skill.contains("state_claim_acquire"));
     assert!(skill.contains("runtime-specific tool names"));
     assert_eq!(output["auth_exists"], false);
 
