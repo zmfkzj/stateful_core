@@ -36,18 +36,23 @@ fn install_codex_dry_run_plans_codex_config_without_writing() {
 
     let plan = plan_codex_install(&options).expect("codex install should plan");
     let applied = apply_codex_install(options).expect("dry-run codex install should succeed");
-    let skill_path = fixture
+    let command_policy_skill_path = fixture
         .codex_config_parent()
         .join("skills/stateful-command-policy/SKILL.md");
+    let dispatching_skill_path = fixture
+        .codex_config_parent()
+        .join("skills/dispatching-parallel-agents/SKILL.md");
 
     assert!(plan.summary.contains("dry-run"));
     assert!(applied.summary.contains("dry-run"));
     assert!(plan.files.contains(&fixture.paths.home));
     assert!(plan.files.contains(&fixture.paths.state_db));
     assert!(plan.files.contains(&fixture.codex_config));
-    assert!(plan.files.contains(&skill_path));
+    assert!(plan.files.contains(&command_policy_skill_path));
+    assert!(plan.files.contains(&dispatching_skill_path));
     assert!(!fixture.paths.home.exists());
     assert!(!fixture.codex_config.exists());
+    assert!(!dispatching_skill_path.exists());
 }
 
 #[test]
@@ -57,17 +62,24 @@ fn install_omp_dry_run_plans_command_policy_skill_without_writing() {
 
     let plan = plan_omp_install(&options).expect("omp install should plan");
     let applied = apply_omp_install(options).expect("dry-run omp install should succeed");
-    let skill_path = fixture
+    let command_policy_skill_path = fixture
         .omp_agent_dir()
         .join("skills")
         .join("stateful-command-policy")
         .join("SKILL.md");
+    let dispatching_skill_path = fixture
+        .omp_agent_dir()
+        .join("skills")
+        .join("dispatching-parallel-agents")
+        .join("SKILL.md");
 
     assert!(plan.summary.contains("dry-run"));
     assert!(applied.summary.contains("dry-run"));
-    assert!(plan.files.contains(&skill_path));
+    assert!(plan.files.contains(&command_policy_skill_path));
+    assert!(plan.files.contains(&dispatching_skill_path));
     assert!(!fixture.paths.home.exists());
-    assert!(!skill_path.exists());
+    assert!(!command_policy_skill_path.exists());
+    assert!(!dispatching_skill_path.exists());
 }
 
 #[test]
@@ -184,11 +196,16 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
         .join("skills")
         .join("stateful-command-policy")
         .join("SKILL.md");
+    let omp_dispatching_skill = omp_agent_dir
+        .join("skills")
+        .join("dispatching-parallel-agents")
+        .join("SKILL.md");
 
     assert!(omp_config.is_file());
     assert!(omp_mcp.is_file());
     assert!(omp_extension.is_file());
     assert!(omp_skill.is_file());
+    assert!(omp_dispatching_skill.is_file());
     assert!(
         fs::read_to_string(&omp_config)
             .expect("omp config should read")
@@ -318,6 +335,16 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert_eq!(command_policy_skill, source_command_policy_skill);
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
     assert!(plan.files.contains(&omp_skill));
+    let dispatching_skill =
+        fs::read_to_string(&omp_dispatching_skill).expect("omp dispatching skill should read");
+    let source_dispatching_skill = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/dispatching-parallel-agents/SKILL.md"),
+    )
+    .expect("source dispatching skill should exist");
+    assert_eq!(dispatching_skill, source_dispatching_skill);
+    assert!(dispatching_skill.contains("name: dispatching-parallel-agents"));
+    assert!(plan.files.contains(&omp_dispatching_skill));
     assert!(plan.files.iter().any(|path| path.ends_with("mcp.json")));
 }
 
@@ -548,6 +575,9 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     let skill_path = fixture
         .codex_config_parent()
         .join("skills/stateful-command-policy/SKILL.md");
+    let dispatching_skill_path = fixture
+        .codex_config_parent()
+        .join("skills/dispatching-parallel-agents/SKILL.md");
     let command_policy_skill =
         fs::read_to_string(&skill_path).expect("global command policy skill should exist");
     let source_command_policy_skill = fs::read_to_string(
@@ -576,10 +606,23 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     assert!(
         !command_policy_skill.contains("--fs write-targets --network enabled --write-dir target")
     );
+    let dispatching_skill =
+        fs::read_to_string(&dispatching_skill_path).expect("global dispatching skill should exist");
+    let source_dispatching_skill = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/dispatching-parallel-agents/SKILL.md"),
+    )
+    .expect("source dispatching skill should exist");
+    assert_eq!(dispatching_skill, source_dispatching_skill);
+    assert!(dispatching_skill.contains("name: dispatching-parallel-agents"));
+    assert!(dispatching_skill.contains(
+        "Dispatch one agent per independent problem domain"
+    ));
 
     let plan =
         apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");
     assert!(plan.files.contains(&skill_path));
+    assert!(plan.files.contains(&dispatching_skill_path));
     assert_eq!(
         fs::read_to_string(&skill_path).expect("global command policy skill should reread"),
         command_policy_skill
