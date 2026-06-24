@@ -1,6 +1,6 @@
 # DeNovoSWE Benchmark Guide
 
-Last updated: 2026-06-22.
+Last updated: 2026-06-24.
 
 This guide records the protocol we use when running DeNovoSWE through
 `stateful-bench`. It follows the official AweAgent DeNovoSWE recipe/task
@@ -78,12 +78,20 @@ debug run:
   runs, unless the experiment explicitly compares agent CLIs or models.
 - Isolated OMP homes must have the benchmark model's API key seeded, or the
   equivalent provider API key must be present in the launch environment.
+  For Docker OMP runs, provider API keys must be present in the launch
+  environment before `stateful-bench` starts; sourcing a shell startup file such
+  as `~/.zshrc` is sufficient when that file exports the key.
 - For Docker-isolated OMP agent runs, build or tag the image from
   `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`; it includes
   Bun-installed `omp` plus the Linux `stateful` binary. Add
   `--agent-docker-image <image>`. `--agent-docker-stateful-binary <path>` only
   needs to be set when the image's `stateful` binary is not at
   `/usr/local/bin/stateful`.
+- A reduced `stateful:off/on,subagent:on` matrix with `--max-concurrent 6` is a
+  subagent/concurrency behavior test. Keep the same 12-instance list, shard,
+  model, prompt version, temperature, context window, max turns, evaluator
+  settings, and Docker image across all three trials, and do not mix it with
+  official-style `--max-concurrent 1` comparisons.
 
 Historical runs may use `--prompt-version v1`; do not mix v1 and v2 results in
 the same comparison table.
@@ -130,6 +138,11 @@ differences only after three independent trials. For partial or interrupted
 runs, compare only the common completed instance set and clearly mark the result
 as exploratory.
 
+The 12-instance Docker OMP command in
+`docs/denovo-benchmark-commands.md` uses this reduced subagent matrix and
+`--max-concurrent 6`. Treat it as a declared behavior/concurrency run; report it
+separately from full four-axis or official-style stateful/no-state comparisons.
+
 For `subagent:on`, the generated DeNovo prompt explicitly requires native
 Codex/OMP subagents before implementation or broad repository exploration,
 while allowing narrow preflight to read the prompt, inspect tool availability,
@@ -141,9 +154,8 @@ tools. OMP runs also unpack bundled task agents into the isolated runtime home,
 append the requirement to the system prompt, and enable `features.multi_agent=true`.
 The adapter enforces the minimum native subagent spawn count for both Codex and
 OMP `subagent:on` runs. Treat that injected instruction as a declared
-behavior-test condition
-axis; do not reuse it as normal scored comparison policy or as general
-patch-quality guidance.
+behavior-test condition axis; do not reuse it as normal scored comparison policy
+or as general patch-quality guidance.
 
 ## Docker OMP Stateful Lifecycle
 

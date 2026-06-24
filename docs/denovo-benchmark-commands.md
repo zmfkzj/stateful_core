@@ -1,6 +1,6 @@
 # DeNovoSWE Benchmark Commands
 
-Last updated: 2026-06-22.
+Last updated: 2026-06-24.
 
 Use this file to relaunch the OMP-backed DeNovoSWE benchmark without
 reconstructing the command line.
@@ -54,13 +54,19 @@ file, not the public full JSONL. The aborted r36 attempt duplicated the full
 - OMP runs use isolated OMP home/profile state. Seed the required OMP API key
   into that isolated profile, or provide it through an environment variable;
   host OMP profile auth is not inherited automatically.
+- If the model provider key is exported from a shell startup file, source that
+  file before launching. Docker OMP runs pass allowlisted API-key environment
+  variables such as `DEEPSEEK_API_KEY`, but they do not inherit host OMP login
+  state or unsourced shell config.
 - The DeNovo CLI patch harvester excludes Codex/stateful runtime dirs,
   `.stateful-tmp/**`, common Python cache/coverage dirs, `target/**`, and root
   `clean.sh`. Repo `tmp/**` changes are harvested like other source-tree
   changes.
-- For host-side inputs and tools, use absolute paths for `--aweagent-root`,
-  `--python`, `--data-file`, `--config`, `STATEFUL_BIN`, `OMP_BIN`, `TMUX`, and
-  `TMUX_SOCKET`.
+- For host-side inputs and tools, use absolute paths for `STATEFUL_BENCH_BIN`,
+  `--aweagent-root`, `--python`, `--data-file`, `--config`, `STATEFUL_BIN`,
+  `OMP_BIN`, `TMUX`, and `TMUX_SOCKET`.
+- For Docker-backed OMP agent runs through Docker Desktop or Colima, set
+  `DOCKER_HOST` to the Unix socket used by the Docker CLI before launching.
 - Change run IDs and isolated OMP home directories before reusing commands.
 - For Docker-isolated OMP runs, build or tag the agent image from
   `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. The image includes
@@ -107,6 +113,7 @@ Set these values before reusing the commands:
 REPO_ROOT=/absolute/path/to/stateful_core
 AWEAGENT_ROOT=/absolute/path/to/AweAgent
 PYTHON=/absolute/path/to/python3
+STATEFUL_BENCH_BIN=/absolute/path/to/stateful-bench
 STATEFUL_BIN=/absolute/path/to/stateful
 OMP_BIN=/absolute/path/to/omp
 TMUX=/absolute/path/to/tmux
@@ -117,6 +124,8 @@ STATEFUL_SERVER_TOKEN=$(python3 -c 'import json, os, pathlib; print(json.load(op
 DENOVO_OMP_AGENT_IMAGE=stateful-denovo-omp-agent:local
 DOCKER_OMP_BIN=omp
 DOCKER_STATEFUL_BIN=/usr/local/bin/stateful
+DOCKER_HOST=unix:///absolute/path/to/docker.sock
+DENOVO_OUTPUT_ROOT=/absolute/path/to/stateful_bench_runs/denovo/runs
 RUN_SERIES=rNN-denovo
 TRIAL=1
 RUN_ID=$RUN_SERIES-t$TRIAL
@@ -128,12 +137,12 @@ Use `--agent omp-cli` for DeNovoSWE benchmark runs. Use `deepseek-v4-flash`
 unless deliberately testing another model:
 
 ```bash
-stateful-bench denovo run \
+"$STATEFUL_BENCH_BIN" denovo run \
   --agent omp-cli \
   --aweagent-root "$AWEAGENT_ROOT" \
   --python "$PYTHON" \
   --data-file "$REPO_ROOT/datasets/denovo/shards/denovoswe_public_shard_a.jsonl" \
-  --output-dir "$REPO_ROOT/.stateful_bench/denovo/runs" \
+  --output-dir "$DENOVO_OUTPUT_ROOT" \
   --run-id "$RUN_ID-shard-a-omp" \
   --mode batch \
   --condition stateful:off,subagent:off \
@@ -155,14 +164,14 @@ For a one-instance stateful smoke run, keep the same defaults and narrow the
 matrix:
 
 ```bash
-stateful-bench denovo run \
+"$STATEFUL_BENCH_BIN" denovo run \
   --agent omp-cli \
   --aweagent-root "$AWEAGENT_ROOT" \
   --python "$PYTHON" \
   --data-file "$REPO_ROOT/datasets/denovo/shards/denovoswe_public_shard_b.jsonl" \
-  --output-dir "$REPO_ROOT/target/stateful-bench/denovo/runs" \
+  --output-dir "$DENOVO_OUTPUT_ROOT" \
   --run-id "$RUN_ID-one-stateful-on-omp" \
-  --config "$REPO_ROOT/target/stateful-bench/denovo/configs/denovoswe-cpu2.yaml" \
+  --config "$AWEAGENT_ROOT/configs/tasks/denovoswe.yaml" \
   --mode batch \
   --condition stateful:on,subagent:on \
   --max-concurrent 1 \
@@ -185,14 +194,14 @@ the default in-image `stateful` path explicitly; omit
 `--agent-docker-stateful-binary` when the image uses the default:
 
 ```bash
-stateful-bench denovo run \
+"$STATEFUL_BENCH_BIN" denovo run \
   --agent omp-cli \
   --aweagent-root "$AWEAGENT_ROOT" \
   --python "$PYTHON" \
   --data-file "$REPO_ROOT/datasets/denovo/shards/denovoswe_public_shard_b.jsonl" \
-  --output-dir "$REPO_ROOT/target/stateful-bench/denovo/runs" \
+  --output-dir "$DENOVO_OUTPUT_ROOT" \
   --run-id "$RUN_ID-one-omp-docker" \
-  --config "$REPO_ROOT/target/stateful-bench/denovo/configs/denovoswe-cpu2.yaml" \
+  --config "$AWEAGENT_ROOT/configs/tasks/denovoswe.yaml" \
   --mode batch \
   --condition stateful:off,subagent:on \
   --condition stateful:on,subagent:on \
@@ -209,6 +218,91 @@ stateful-bench denovo run \
   --benchmark-max-turns 500 \
   --prompt-version v2 \
   --eval-iters 1
+```
+
+## Current 12-Instance Docker OMP Subagent-On Run
+
+This is the relaunch shape used for the 2026-06-24 OMP Docker run over 12
+instances with `subagent:on`, `stateful:on/off`, six-way instance concurrency,
+and three independent trials. It is a declared subagent/concurrency behavior
+test, not the official-style `--max-concurrent 1` default from
+`docs/denovo-benchmark-guide.md`.
+
+Rebuild the Docker agent image before relaunching after local `stateful` or OMP
+integration changes:
+
+```bash
+DOCKER_HOST="$DOCKER_HOST" docker build --pull --no-cache \
+  -f "$REPO_ROOT/crates/stateful-bench/docker/denovo-omp-agent.Dockerfile" \
+  -t "$DENOVO_OMP_AGENT_IMAGE" \
+  "$REPO_ROOT"
+```
+
+Source the shell file that exports the model API key before launching the
+benchmark. The adapter passes allowlisted provider keys into the Docker agent
+container:
+
+```bash
+source "$HOME/.zshrc"
+
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+export STATEFUL_SERVER_URL
+export STATEFUL_SERVER_TOKEN
+export DOCKER_HOST
+
+for trial in 1 2 3; do
+  "$STATEFUL_BENCH_BIN" denovo run \
+    --agent omp-cli \
+    --aweagent-root "$AWEAGENT_ROOT" \
+    --python "$PYTHON" \
+    --data-file "$REPO_ROOT/datasets/denovo/shards/denovoswe_public_shard_b.jsonl" \
+    --output-dir "$DENOVO_OUTPUT_ROOT" \
+    --run-id "$RUN_SERIES-t${trial}" \
+    --config "$AWEAGENT_ROOT/configs/tasks/denovoswe.yaml" \
+    --condition stateful:off,subagent:on \
+    --condition stateful:on,subagent:on \
+    --mode batch \
+    --max-concurrent 6 \
+    --instance-id tlambert03_mkdocs-api-autonav_pr25 \
+    --instance-id russhousley_pyasn1-alt-modules_pr92 \
+    --instance-id francof2a_fxpmath_pr63 \
+    --instance-id cloudtools_troposphere_pr2343 \
+    --instance-id ramonhagenaars_jsons_pr143 \
+    --instance-id thebjorn_pydeps_pr233 \
+    --instance-id hh-h_aiohttp-swagger3_pr109 \
+    --instance-id pusher_pusher-http-python_pr207 \
+    --instance-id lepture_flask-oauthlib_pr385 \
+    --instance-id aurzenligl_prophy_pr33 \
+    --instance-id phfaist_pylatexenc_pr66 \
+    --instance-id pahaz_sshtunnel_pr247 \
+    --omp-bin "$DOCKER_OMP_BIN" \
+    --stateful-binary "$STATEFUL_BIN" \
+    --agent-docker-image "$DENOVO_OMP_AGENT_IMAGE" \
+    --agent-docker-stateful-binary "$DOCKER_STATEFUL_BIN" \
+    --benchmark-model deepseek-v4-flash \
+    --benchmark-reasoning-effort low \
+    --benchmark-model-context-window 256000 \
+    --benchmark-temperature 1 \
+    --benchmark-max-turns 500 \
+    --subagent-min-count 3 \
+    --max-resumes 1 \
+    --codex-timeout-seconds 7200 \
+    --eval-iters 1 \
+    --prompt-version v2 \
+    --del-done-images
+done
+```
+
+The corresponding authenticated run used:
+
+```text
+RUN_SERIES=r20260624-denovo-12-omp-docker-subagent-on-auth
+STATEFUL_BENCH_BIN=/Users/arthur/Downloads/stateful_bench_runs/cargo-target/debug/stateful-bench
+STATEFUL_BIN=/Users/arthur/Downloads/stateful_bench_runs/cargo-target/debug/stateful
+PYTHON=/Users/arthur/Code/stateful_core/tmp/aweagent-venv/bin/python
+AWEAGENT_ROOT=/Users/arthur/Code/stateful_core/tmp/AweAgent
+DENOVO_OUTPUT_ROOT=/Users/arthur/Downloads/stateful_bench_runs/denovo/runs
+DOCKER_HOST=unix:///Users/arthur/.colima/default/docker.sock
 ```
 
 OMP `stateful:on`/`off` both use isolated OMP home/profile state. Neither
