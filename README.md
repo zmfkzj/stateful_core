@@ -128,30 +128,25 @@ dry-run plan.
 stateful install --yes
 ```
 
+### Codex
+
 Install Codex integration when you want global Codex hooks, MCP, and the
 stateful command-policy skill:
 
 ```bash
 stateful install --agent codex --yes
+stateful enable
+stateful codex
 ```
+
+### OMP
 
 Install OMP integration when you want the isolated OMP `stateful` profile,
 stateful hooks, MCP, and generated sandbox command tools:
 
 ```bash
 stateful install --agent omp --yes
-```
-
-Opt the current git repository into stateful enforcement:
-
-```bash
 stateful enable
-```
-
-Run Codex through the stateful wrapper:
-
-```bash
-stateful codex
 ```
 
 Check local setup health:
