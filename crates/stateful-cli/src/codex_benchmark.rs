@@ -266,6 +266,7 @@ fn run_nested_codex_benchmark_sandboxed_command(
                 runtime,
             ),
             timeout,
+            false,
         )
     }
 

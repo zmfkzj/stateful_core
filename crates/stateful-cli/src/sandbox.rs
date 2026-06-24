@@ -6,7 +6,7 @@ use std::{
     error::Error as StdError,
     ffi::OsString,
     fmt, fs, io,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     thread,
@@ -65,6 +65,7 @@ pub struct SandboxRunRequest {
     pub allow_signal: bool,
     pub command: String,
     pub timeout_seconds: Option<u64>,
+    pub stream_events: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -533,6 +534,7 @@ pub fn run_sandbox_in_repo(
                     &git_profile_hooks_dir(&repo_root),
                     request.network,
                     timeout,
+                    request.stream_events,
                 )
             }
             Some(ValidatedSandboxDirectCommand::GithubPr(words)) => {
@@ -546,6 +548,7 @@ pub fn run_sandbox_in_repo(
                     &temp_dir,
                     request.network,
                     timeout,
+                    request.stream_events,
                 )
             }
             None => run_sandboxed_command(
@@ -557,6 +560,7 @@ pub fn run_sandbox_in_repo(
                 request.fs == SandboxFsProfile::External,
                 request.network,
                 timeout,
+                request.stream_events,
             ),
         }
     })();
@@ -605,6 +609,7 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
     let mut allow_signal = false;
     let mut inner_command = None;
     let mut timeout_seconds = None;
+    let mut stream_events = false;
     let mut index = 3;
     while index < words.len() {
         let arg = &words[index];
@@ -674,6 +679,9 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
                     "stateful sandbox run --timeout-seconds requires an integer value".to_string()
                 })?);
             }
+            "--stream-events" => {
+                stream_events = true;
+            }
             _ => {
                 return Err(format!("unsupported stateful sandbox run argument `{arg}`"));
             }
@@ -698,6 +706,7 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         },
     })
 }
@@ -951,12 +960,13 @@ fn run_sandboxed_command(
     allow_macos_identity_and_trust_services: bool,
     network: SandboxNetworkPolicy,
     timeout: Duration,
+    stream_events: bool,
 ) -> anyhow::Result<SandboxCommandResult> {
     let temp_dir = sandbox_temp_dir(writable_paths);
     if allow_direct_nested_sandbox_run() {
         let mut command = direct_shell_command(command, cwd);
         apply_sandbox_temp_env(&mut command, temp_dir.as_deref());
-        return run_command_with_timeout(command, timeout);
+        return run_command_with_timeout(command, timeout, stream_events);
     }
     #[cfg(target_os = "macos")]
     {
@@ -972,6 +982,7 @@ fn run_sandboxed_command(
                 network,
             ),
             timeout,
+            stream_events,
         )
     }
 
@@ -988,6 +999,7 @@ fn run_sandboxed_command(
                 network,
             ),
             timeout,
+            stream_events,
         )
     }
 
@@ -1016,13 +1028,14 @@ fn run_sandboxed_git_command(
     hooks_dir: &Path,
     network: SandboxNetworkPolicy,
     timeout: Duration,
+    stream_events: bool,
 ) -> anyhow::Result<SandboxCommandResult> {
     let config = discover_git_profile_config(cwd);
 
     if allow_direct_nested_sandbox_run() {
         let mut command = direct_git_command(words, cwd);
         apply_git_profile_env(&mut command, temp_dir, hooks_dir, &config);
-        return run_command_with_timeout(command, timeout);
+        return run_command_with_timeout(command, timeout, stream_events);
     }
 
     #[cfg(target_os = "macos")]
@@ -1038,6 +1051,7 @@ fn run_sandboxed_git_command(
                 network,
             ),
             timeout,
+            stream_events,
         )
     }
 
@@ -1054,6 +1068,7 @@ fn run_sandboxed_git_command(
                 network,
             ),
             timeout,
+            stream_events,
         )
     }
 
@@ -1079,11 +1094,12 @@ fn run_sandboxed_github_pr_command(
     temp_dir: &Path,
     network: SandboxNetworkPolicy,
     timeout: Duration,
+    stream_events: bool,
 ) -> anyhow::Result<SandboxCommandResult> {
     if allow_direct_nested_sandbox_run() {
         let mut command = direct_github_pr_command(words, cwd);
         apply_github_pr_profile_env(&mut command, temp_dir);
-        return run_command_with_timeout(command, timeout);
+        return run_command_with_timeout(command, timeout, stream_events);
     }
 
     #[cfg(target_os = "macos")]
@@ -1091,6 +1107,7 @@ fn run_sandboxed_github_pr_command(
         run_command_with_timeout(
             seatbelt_github_pr_command(words, cwd, writable_paths, temp_dir, network),
             timeout,
+            stream_events,
         )
     }
 
@@ -1099,6 +1116,7 @@ fn run_sandboxed_github_pr_command(
         run_command_with_timeout(
             bubblewrap_github_pr_command(words, cwd, writable_paths, temp_dir, network),
             timeout,
+            stream_events,
         )
     }
 
@@ -3792,29 +3810,65 @@ fn apply_github_pr_profile_env(command: &mut Command, temp_dir: &Path) {
         .env("PAGER", "cat");
 }
 
+fn emit_sandbox_stream_event(stream: &str, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let chunk = String::from_utf8_lossy(bytes);
+    let event = serde_json::json!({
+        "event": "sandbox_output",
+        "stream": stream,
+        "chunk": chunk,
+    });
+    let mut stdout = io::stdout().lock();
+    let _ = writeln!(stdout, "{event}");
+    let _ = stdout.flush();
+}
+
+fn read_sandbox_pipe_to_end<R>(
+    mut pipe: R,
+    stream: &'static str,
+    stream_events: bool,
+) -> io::Result<Vec<u8>>
+where
+    R: Read,
+{
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = pipe.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let chunk = &buffer[..count];
+        if stream_events {
+            emit_sandbox_stream_event(stream, chunk);
+        }
+        bytes.extend_from_slice(chunk);
+    }
+    Ok(bytes)
+}
+
 pub(crate) fn run_command_with_timeout(
     mut command: Command,
     timeout: Duration,
+    stream_events: bool,
 ) -> anyhow::Result<SandboxCommandResult> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     isolate_sandbox_process_group(&mut command);
     let mut child = command.spawn()?;
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("failed to capture sandbox stdout"))?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .ok_or_else(|| anyhow::anyhow!("failed to capture sandbox stderr"))?;
-    let stdout_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
+    let stdout_reader =
+        thread::spawn(move || read_sandbox_pipe_to_end(stdout, "stdout", stream_events));
+    let stderr_reader =
+        thread::spawn(move || read_sandbox_pipe_to_end(stderr, "stderr", stream_events));
 
     let deadline = Instant::now() + timeout;
     let mut timed_out = false;
@@ -4141,6 +4195,7 @@ mod tests {
             allow_signal: false,
             command: "ps -o pid,comm -p 1".to_string(),
             timeout_seconds: None,
+            stream_events: false,
         };
 
         let error = validate_sandbox_run_request_shape(&request)
@@ -4167,6 +4222,7 @@ mod tests {
             allow_signal: false,
             command: "pgrep -f denovo_codex_agent".to_string(),
             timeout_seconds: None,
+            stream_events: false,
         };
 
         let error = validate_sandbox_run_request_shape(&request)
@@ -4207,6 +4263,7 @@ mod tests {
                 allow_signal: false,
                 command: command.to_string(),
                 timeout_seconds: None,
+                stream_events: false,
             };
 
             let Err(error) = validate_sandbox_run_request_shape(&request) else {
@@ -4235,6 +4292,7 @@ mod tests {
             allow_signal: false,
             command: "rg ps crates".to_string(),
             timeout_seconds: None,
+            stream_events: false,
         };
 
         validate_sandbox_run_request_shape(&request)
@@ -4265,7 +4323,7 @@ mod tests {
             .arg("(trap '' TERM HUP INT; sleep 5) & wait");
 
         let started = Instant::now();
-        let output = run_command_with_timeout(command, Duration::from_millis(100))
+        let output = run_command_with_timeout(command, Duration::from_millis(100), false)
             .expect("sandbox command should time out and terminate");
 
         assert_eq!(output.status, "timed_out");
@@ -4288,7 +4346,7 @@ mod tests {
             .arg("(trap '' TERM HUP INT; sleep 5) & printf done");
 
         let started = Instant::now();
-        let output = run_command_with_timeout(command, Duration::from_secs(10))
+        let output = run_command_with_timeout(command, Duration::from_secs(10), false)
             .expect("sandbox command should exit and clean descendants");
 
         assert_eq!(output.status, "exited");
@@ -4483,6 +4541,7 @@ mod tests {
                 SandboxNetworkPolicy::Disabled,
             ),
             Duration::from_secs(10),
+            false,
         )
         .expect("bubblewrap command should run");
 
@@ -4988,6 +5047,7 @@ mod tests {
             allow_signal: false,
             command: "true".to_string(),
             timeout_seconds: None,
+            stream_events: false,
         };
 
         let error = validate_sandbox_run_request_shape(&request)

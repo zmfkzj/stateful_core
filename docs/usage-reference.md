@@ -88,7 +88,8 @@ Generated OMP tools:
   for OMP UI confirmation
 
 Generated OMP bash tools wait for sandbox commands to finish before returning,
-so final stdout/stderr/status are available before the agent can end the turn.
+emit stdout through inline OMP tool updates, and include final stdout/stderr/status
+before the agent can end the turn.
 
 Raw Bash and eval tool calls are denied by stateful hooks; use the generated
 OMP tools instead.

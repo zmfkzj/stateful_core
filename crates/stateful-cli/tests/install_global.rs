@@ -227,20 +227,26 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains(
         "Deprecated compatibility field; commands now wait for completion before returning."
     ));
-    assert!(extension.contains("function deliverSandboxStdoutChunk(pi, jobId, label, chunk)"));
-    assert!(extension.contains("customType: \"stateful_sandbox_bash_stdout\""));
+    assert!(
+        extension.contains("function deliverSandboxStdoutChunk(onUpdate, jobId, label, chunk)")
+    );
+    assert!(extension.contains("content: [{ type: \"text\", text: chunk }]"));
+    assert!(extension.contains("return Promise.resolve(onUpdate(update)).catch(() => {});"));
     assert!(extension.contains("stream: \"stdout\""));
     assert!(extension.contains("collapsible: true"));
     assert!(extension.contains("collapseShortcut: \"Ctrl+O\""));
     assert!(extension.contains("function parseSandboxRunOutput(rawStdout)"));
     assert!(extension.contains("const parsed = JSON.parse(text)"));
-    assert!(extension.contains("stdout = truncateSandboxToolText(stdout + chunk, label)"));
-    assert!(extension.contains("onStdout(commandStdout)"));
-    assert!(!extension.contains("onStdout(chunk)"));
+    assert!(extension.contains("const event = JSON.parse(line)"));
+    assert!(extension.contains("event?.event === \"sandbox_output\""));
+    assert!(extension.contains("emitOutputChunk(event.chunk)"));
+    assert!(extension.contains("stdout += line + \"\\n\";"));
+    assert!(extension.contains("if (commandStdout && !streamedOutput)"));
     assert!(extension.contains("result.details.sandboxRunOutput = sandboxRunOutput"));
     assert!(extension.contains("stderr = truncateSandboxToolText(stderr + chunk, label)"));
     assert!(
-        extension.contains("async function runSandboxAwaitedTool(pi, params, args, ctx, label)")
+        extension
+            .contains("async function runSandboxAwaitedTool(params, args, ctx, label, onUpdate)")
     );
     assert!(extension.contains("await runSandboxToolProcess(params, args, ctx, label"));
     assert!(extension.contains("await stdoutStreamer.drain();"));
@@ -249,15 +255,14 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(!extension.contains("Background job "));
     assert!(!extension.contains("stateful_sandbox_bash_result"));
     assert!(!extension.contains("params.async === true"));
-    assert!(
-        extension.contains(
-            "return await runSandboxAwaitedTool(pi, params, args, ctx, \"sandbox_bash\")"
-        )
-    );
+    assert!(extension.contains(
+        "return await runSandboxAwaitedTool(params, args, ctx, \"sandbox_bash\", onUpdate)"
+    ));
+    assert!(extension.contains("async execute(_toolCallId, params, signal, onUpdate, ctx)"));
+    assert!(extension.contains("args.push(\"--stream-events\");"));
     assert!(extension.contains("pi.sendMessage"));
     assert!(extension.contains("display: true"));
     assert!(extension.contains("triggerTurn: true"));
-    assert!(extension.contains("triggerTurn: false"));
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?session_id="));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));

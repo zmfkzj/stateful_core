@@ -248,7 +248,7 @@ asks OMP UI confirmation before starting the trusted stateful binary with
 least one write target, create target, or write dir. All generated `*_bash` tools
 wait for sandbox commands to finish before returning the tool result, so final
 stdout/stderr/status are available before the agent can end the turn. They emit
-stdout to OMP as a collapsible message before returning; their
+stdout through inline OMP tool updates; their
 `async` input is a deprecated compatibility no-op that does not select background execution.
 The external sandbox profile requires
 purpose and command; read-only/no-declared-scope operations may
@@ -582,7 +582,7 @@ install --agent omp --yes` registers `sandbox_bash` for read-only,
 write-targets, build, git, and github-pr sandbox profiles, `ext_ro_bash` for
 read-only external commands, and `ext_rw_bash` for external writes. All three
 generated `*_bash` tools wait for sandbox commands to finish before returning,
-emit stdout to OMP as a collapsible message before return, and keep
+emit stdout through inline OMP tool updates, and keep
 stderr/status in returned tool details unless the command fails; the
 compatibility `async` input is a no-op.
 `ext_ro_bash` does not ask OMP UI confirmation; `ext_rw_bash` asks before

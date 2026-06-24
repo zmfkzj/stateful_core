@@ -222,6 +222,8 @@ pub enum SandboxCommand {
         command: String,
         #[arg(long)]
         timeout_seconds: Option<u64>,
+        #[arg(long, hide = true)]
+        stream_events: bool,
     },
     Process {
         #[command(subcommand)]
@@ -585,6 +587,7 @@ pub fn run() -> anyhow::Result<()> {
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         }) => {
             let paths = GlobalPaths::from_env()?;
             let repo_root = current_repo_root_or_current_dir()?;
@@ -602,6 +605,7 @@ pub fn run() -> anyhow::Result<()> {
                     allow_signal,
                     command,
                     timeout_seconds,
+                    stream_events,
                 },
             ) {
                 Ok(output) => output,

@@ -1625,6 +1625,7 @@ function sandboxBashArgs(params) {{
     throw new Error("sandbox_bash requires a non-empty command");
   }}
   const args = ["sandbox", "run", "--fs", fs];
+  args.push("--stream-events");
   addCommonSandboxArgs(args, params, "sandbox_bash");
   args.push("--command", params.command);
   return args;
@@ -1651,6 +1652,7 @@ function externalReadOnlyBashArgs(params) {{
     throw new Error("ext_ro_bash does not accept write, socket, or signal scope; use ext_rw_bash for scoped external operations");
   }}
   const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
+  args.push("--stream-events");
   addCommonSandboxArgs(args, params, "ext_ro_bash");
   args.push("--command", params.command);
   return args;
@@ -1662,6 +1664,7 @@ function externalReadWriteBashArgs(params) {{
     throw new Error("ext_rw_bash requires at least one write_targets, create_targets, or write_dirs entry");
   }}
   const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
+  args.push("--stream-events");
   addCommonSandboxArgs(args, params, "ext_rw_bash");
   args.push("--command", params.command);
   return args;
@@ -1747,32 +1750,32 @@ function buildSandboxToolResult(params, args, exitCode, stdout, stderr, error) {
   }};
 }}
 
-function deliverSandboxStdoutChunk(pi, jobId, label, chunk) {{
-  if (!chunk || typeof pi?.sendMessage !== "function") {{
+function deliverSandboxStdoutChunk(onUpdate, jobId, label, chunk) {{
+  if (!chunk || typeof onUpdate !== "function") {{
     return Promise.resolve();
   }}
+  const update = {{
+    content: [{{ type: "text", text: chunk }}],
+    details: {{
+      runId: jobId,
+      stream: "stdout",
+      label,
+      collapsible: true,
+      collapseShortcut: "Ctrl+O",
+    }},
+  }};
   try {{
-    return Promise.resolve(pi.sendMessage(
-      {{
-        customType: "stateful_sandbox_bash_stdout",
-        content: chunk,
-        display: true,
-        details: {{
-          runId: jobId,
-          stream: "stdout",
-          label,
-          collapsible: true,
-          collapseShortcut: "Ctrl+O",
-        }},
-      }},
-      {{ triggerTurn: false }}
-    )).catch(() => {{}});
+    return Promise.resolve(onUpdate(update)).catch(() => {{}});
   }} catch (_) {{
-    return Promise.resolve();
+    try {{
+      return Promise.resolve(onUpdate(chunk)).catch(() => {{}});
+    }} catch (_) {{
+      return Promise.resolve();
+    }}
   }}
 }}
  
-function createSandboxStdoutStreamer(pi, jobId, label) {{
+function createSandboxStdoutStreamer(onUpdate, jobId, label) {{
   let buffer = "";
   let timer = null;
   let pending = [];
@@ -1784,7 +1787,7 @@ function createSandboxStdoutStreamer(pi, jobId, label) {{
     if (!buffer) return;
     const chunk = buffer;
     buffer = "";
-    pending.push(deliverSandboxStdoutChunk(pi, jobId, label, chunk));
+    pending.push(deliverSandboxStdoutChunk(onUpdate, jobId, label, chunk));
   }};
   return {{
     push(chunk) {{
@@ -1808,16 +1811,48 @@ function runSandboxToolProcess(params, args, ctx, label, onStdout) {{
   return new Promise((resolve) => {{
     let stdout = "";
     let stderr = "";
+    let stdoutLineBuffer = "";
+    let streamedOutput = false;
     let processError = "";
     let settled = false;
+    const emitOutputChunk = (chunk) => {{
+      if (!chunk) return;
+      streamedOutput = true;
+      onStdout(chunk);
+    }};
+    const handleStdoutLine = (line) => {{
+      if (!line) return;
+      try {{
+        const event = JSON.parse(line);
+        if (event?.event === "sandbox_output" && typeof event.chunk === "string") {{
+          emitOutputChunk(event.chunk);
+          return;
+        }}
+      }} catch (_) {{}}
+      stdout += line + "\n";
+    }};
+    const handleStatefulStdout = (chunk) => {{
+      stdoutLineBuffer += chunk;
+      const lines = stdoutLineBuffer.split("\n");
+      stdoutLineBuffer = lines.pop() || "";
+      for (const line of lines) {{
+        handleStdoutLine(line);
+      }}
+    }};
+    const flushStatefulStdout = () => {{
+      if (!stdoutLineBuffer) return;
+      handleStdoutLine(stdoutLineBuffer);
+      stdoutLineBuffer = "";
+    }};
     const finish = (exitCode, error) => {{
       if (settled) return;
       settled = true;
+      flushStatefulStdout();
       const sandboxRunOutput = parseSandboxRunOutput(stdout);
       const commandStdout = sandboxRunOutput ? String(sandboxRunOutput.stdout || "") : stdout;
       const commandStderr = sandboxRunOutput ? String(sandboxRunOutput.stderr || "") || stderr : stderr;
       const commandExitCode = typeof sandboxRunOutput?.exit_code === "number" ? sandboxRunOutput.exit_code : exitCode;
-      if (commandStdout) {{
+      if (commandStdout && !streamedOutput) {{
         onStdout(commandStdout);
       }}
       const result = buildSandboxToolResult(params, args, commandExitCode, commandStdout, commandStderr, error);
@@ -1839,9 +1874,7 @@ function runSandboxToolProcess(params, args, ctx, label, onStdout) {{
     }}
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk) => {{
-      stdout = truncateSandboxToolText(stdout + chunk, label);
-    }});
+    child.stdout?.on("data", handleStatefulStdout);
     child.stderr?.on("data", (chunk) => {{
       stderr = truncateSandboxToolText(stderr + chunk, label);
     }});
@@ -1856,10 +1889,10 @@ function runSandboxToolProcess(params, args, ctx, label, onStdout) {{
   }});
 }}
 
-async function runSandboxAwaitedTool(pi, params, args, ctx, label) {{
+async function runSandboxAwaitedTool(params, args, ctx, label, onUpdate) {{
   const runId = nextSandboxJobId(label);
   const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
-  const stdoutStreamer = createSandboxStdoutStreamer(pi, runId, commandLabel);
+  const stdoutStreamer = createSandboxStdoutStreamer(onUpdate, runId, commandLabel);
   const result = await runSandboxToolProcess(params, args, ctx, label, (chunk) => {{
     stdoutStreamer.push(chunk);
   }});
@@ -1889,14 +1922,14 @@ export default function statefulOmpExtension(pi) {{
       }},
       required: ["fs", "command"],
     }},
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {{
       let args;
       try {{
         args = sandboxBashArgs(params);
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      return await runSandboxAwaitedTool(pi, params, args, ctx, "sandbox_bash");
+      return await runSandboxAwaitedTool(params, args, ctx, "sandbox_bash", onUpdate);
     }},
   }});
   pi.registerTool({{
@@ -1914,14 +1947,14 @@ export default function statefulOmpExtension(pi) {{
       }},
       required: ["purpose", "command"],
     }},
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {{
       let args;
       try {{
         args = externalReadOnlyBashArgs(params);
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      return await runSandboxAwaitedTool(pi, params, args, ctx, "ext_ro_bash");
+      return await runSandboxAwaitedTool(params, args, ctx, "ext_ro_bash", onUpdate);
     }},
   }});
   pi.registerTool({{
@@ -1944,7 +1977,7 @@ export default function statefulOmpExtension(pi) {{
       }},
       required: ["purpose", "command"],
     }},
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {{
       let args;
       try {{
         args = externalReadWriteBashArgs(params);
@@ -1969,7 +2002,7 @@ export default function statefulOmpExtension(pi) {{
           details: {{ blocked: true }},
         }};
       }}
-      return await runSandboxAwaitedTool(pi, params, args, ctx, "ext_rw_bash");
+      return await runSandboxAwaitedTool(params, args, ctx, "ext_rw_bash", onUpdate);
     }},
   }});
   pi.on("session_start", async (event, ctx) => {{
