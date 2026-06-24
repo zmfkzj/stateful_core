@@ -58,6 +58,15 @@ file, not the public full JSONL. The aborted r36 attempt duplicated the full
   file before launching. Docker OMP runs pass allowlisted API-key environment
   variables such as `DEEPSEEK_API_KEY`, but they do not inherit host OMP login
   state or unsourced shell config.
+- When launching through a restricted wrapper or external sandbox, do not rely
+  on an interactive shell startup file that performs writes before exporting the
+  model key. Source it in a normal shell first, or pass `DEEPSEEK_API_KEY`
+  explicitly in the launch environment. A failed startup-file side effect such
+  as `mkdir ~/.cache/oh-my-zsh: Operation not permitted` can prevent the key
+  export and makes OMP exit before model execution.
+  When using Colima, prefer the real socket path in `DOCKER_HOST`, for example
+  `unix://$HOME/.colima/default/docker.sock`; `/var/run/docker.sock` may be a
+  dangling Docker Desktop compatibility symlink.
 - The DeNovo CLI patch harvester excludes Codex/stateful runtime dirs,
   `.stateful-tmp/**`, common Python cache/coverage dirs, `target/**`, and root
   `clean.sh`. Repo `tmp/**` changes are harvested like other source-tree
@@ -304,6 +313,32 @@ AWEAGENT_ROOT=/Users/arthur/Code/stateful_core/tmp/AweAgent
 DENOVO_OUTPUT_ROOT=/Users/arthur/Downloads/stateful_bench_runs/denovo/runs
 DOCKER_HOST=unix:///Users/arthur/.colima/default/docker.sock
 ```
+
+Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
+
+- Do not treat the tmux shard launcher as the default path for a one-instance
+  Docker rerun. The direct `stateful-bench denovo run ... --agent-docker-image`
+  command above is the source of truth; tmux is only a convenience wrapper for
+  prebuilt shard scripts.
+- In agent harnesses that clean up child process groups when a sandboxed command
+  exits, `daemonize.py`/background `&` launches may create a pid file and then
+  die before `stateful-bench` creates the run directory. For long-running
+  fire-and-forget launches from that environment, use an existing tmux server as
+  the process owner and run the same direct `stateful-bench denovo run` command
+  inside it, passing `STATEFUL_*`, `DOCKER_HOST`, and provider key variables
+  with `tmux new-session -e`.
+- If OMP exits in about one second with empty `patch.diff`, zero subagent
+  spawns, and `omp exited 1`, first check provider auth propagation. In Docker
+  OMP mode the isolated home does not inherit host OMP login state, and the
+  adapter only forwards allowlisted provider key environment variables that are
+  present before `stateful-bench` starts.
+- A `stateful:on` Docker run that emits `SessionRegistered` but no nested
+  `SessionHeartbeat` or `ActivityFinalized` is not lifecycle-valid. Report it as
+  a runtime/lifecycle failure, not as a model-quality score.
+- Do not keep abandoned runtime containers around after a failed launch. Remove
+  containers named for the instance, such as
+  `awe-agent-denovoswe-<instance-id>-<suffix>`, before rerunning the same
+  instance so the next run starts from a clean runtime container set.
 
 OMP `stateful:on`/`off` both use isolated OMP home/profile state. Neither
 inherits host Codex config, session, rules, or skills. Only `stateful:on`

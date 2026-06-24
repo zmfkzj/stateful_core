@@ -81,6 +81,9 @@ debug run:
   For Docker OMP runs, provider API keys must be present in the launch
   environment before `stateful-bench` starts; sourcing a shell startup file such
   as `~/.zshrc` is sufficient when that file exports the key.
+  When a wrapper or sandbox blocks shell startup side effects, export the key
+  explicitly instead of relying on that startup file. Missing provider auth often
+  appears as an immediate `omp exited 1`, empty patch, and zero subagent spawns.
 - For Docker-isolated OMP agent runs, build or tag the image from
   `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`; it includes
   Bun-installed `omp` plus the Linux `stateful` binary. Add
@@ -174,6 +177,23 @@ events for the nested OMP session. The verified run
 stateful-off/stateful-on subagent-on pair with that event sequence. Treat missing
 registration, no heartbeat, or missing finalization as lifecycle evidence
 failure, not as a model-quality result.
+
+Lifecycle troubleshooting checklist:
+
+- `SessionRegistered` alone is insufficient. Require subsequent nested
+  `SessionHeartbeat` events and `ActivityFinalized` before treating the
+  stateful-on condition as a valid rollout.
+- If `codex-command.json` or `results.jsonl` shows `omp exited 1` with runtime
+  under a few seconds, empty `patch.diff`, and zero subagent spawns, inspect
+  provider API-key propagation before analyzing model behavior.
+- If Docker still shows a runtime container for the instance after the run has
+  finished or failed, remove that container before rerunning the same instance.
+  Leftover `sleep infinity` runtime containers indicate cleanup did not
+  complete cleanly.
+- If the benchmark launcher must return before the run finishes, make sure the
+  long-running `stateful-bench` process is owned by a durable process manager.
+  Some restricted command wrappers reap daemonized/background children on exit;
+  the symptom is a pid file or empty launch log with no durable run directory.
 
 ## Reporting Rules
 
