@@ -168,34 +168,37 @@ triggers makes the requested resource available:
 
 Each promoted waiter receives a short reservation. Reservations prevent a later
 session from taking the same resource ahead of an earlier conflicting waiter, but
-they are not active write authority. The reserved session must reread the
-target. Manual MCP/CLI flows then call `state_intent_claim` /
-`stateful intent claim --wait-id <id>` before writing; native edit hooks and
-sandbox `write-targets` authorization can lazy-claim the reservation when the
-write is retried. Claiming creates write-authorizing intent and the active
-same-session lease. The default reservation TTL is 120 seconds. If a reservation
-expires without being claimed, the server may promote the next eligible FIFO
-waiter.
+they are not active write authority. The promotion records a pending notification
+payload containing the wait queue row's stored, non-empty purpose. The reserved
+session must reread the target. Manual MCP/CLI flows then call
+`state_intent_claim` / `stateful intent claim --wait-id <id>` before writing;
+the claim uses the stored reservation purpose, and clients do not provide a new
+claim purpose. Native edit hooks and sandbox `write-targets` authorization can
+lazy-claim the reservation when the write is retried. Claiming creates
+write-authorizing intent and the active same-session lease. The default
+reservation TTL is 120 seconds. If a reservation expires without being claimed,
+the server may promote the next eligible FIFO waiter.
 
 Resume is notification-driven rather than process-driven. The state server
-records a pending notification when it promotes a reservation. Agents and
-orchestrators discover that signal by polling notifications, asking for the
-next resumable reservation, or receiving that context from a lifecycle hook.
-Polling returns each pending notification once and marks it delivered; callers
-that miss or discard a poll response should use `stateful resume next` /
-`state_resume_next` to rediscover any still-active reservation.
-The state server does not wake a sleeping Codex process by itself; external
-orchestration can build on the notification and resume APIs.
+records a pending notification with the stored purpose when it promotes a
+reservation. Agents and orchestrators discover that signal by polling
+notifications, asking for the next resumable reservation, or receiving that
+context from a lifecycle hook. Polling returns each pending notification once and
+marks it delivered; callers that miss or discard a poll response should use
+`stateful resume next` / `state_resume_next` to rediscover any still-active
+reservation and its stored purpose. The state server does not wake a sleeping
+Codex process by itself; external orchestration can build on the notification
+and resume APIs.
 
 Full scheduling works through immediate request/response plus polling. Intent
 request APIs return `queued`, `reserved`, `claimed`, `canceled`, or `expired`
 state without blocking indefinitely. Immediate availability creates a `reserved` request state;
 the session must still reread the target. Manual MCP/CLI flows claim with
-`state_intent_claim` / `stateful intent claim --wait-id <id>` before retrying,
-while native edit hooks and sandbox `write-targets` authorization can
-lazy-claim at the retry write boundary.
-Waiting is handled by polling `stateful notifications poll` or
-`stateful resume next`.
+`state_intent_claim` / `stateful intent claim --wait-id <id>` before retrying;
+the server uses the stored reservation purpose. Native edit hooks and sandbox
+`write-targets` authorization can lazy-claim at the retry write boundary.
+Waiting is handled by polling `stateful notifications poll` or `stateful resume
+next`; both reservation surfaces expose the stored purpose.
 `stateful intent wait --timeout` is not part of the v1 hardening implementation.
 
 `request_id` and non-empty `purpose` are required for idempotency and live state
@@ -408,12 +411,13 @@ state_resume_next (state.resume.next)
 `state_intent_declare` and `state_intent_request` require a non-empty `purpose`.
 The caller must infer that purpose from the user or agent instruction when it is
 not explicit; the server must not synthesize a fallback purpose.
-`state_intent_declare` also requires non-empty `files_planned`; empty arrays
-and empty or normalized-empty entries are rejected with `missing_scope`.
+`state_intent_declare` also requires non-empty `files_planned`; empty arrays and
+empty or normalized-empty entries are rejected with `missing_scope`.
 `state_intent_request` also requires a non-empty `path`; empty or
 normalized-empty request paths are rejected with `missing_scope`.
 `state_intent_request` and `state_intent_cancel` expose the explicit scheduling
-queue. `state_intent_claim` is the explicit reservation claim path.
+queue. `state_intent_claim` takes a `wait_id` only and uses the stored
+reservation purpose; callers must not send a claim purpose.
 
 Hooks should call the same state server API as MCP tools so policy remains
 centralized. Native edit tools with hook-visible targets are the repo file edit

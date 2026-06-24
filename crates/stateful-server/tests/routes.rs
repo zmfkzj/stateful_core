@@ -3684,6 +3684,10 @@ async fn activity_finalize_releases_leases_and_notifications_poll_returns_resume
         json["notifications"][0]["payload"]["relative_path"],
         "src/auth.ts"
     );
+    assert_eq!(
+        json["notifications"][0]["payload"]["purpose"],
+        "Queue requested write after blocker clears."
+    );
 
     let second_poll = app
         .oneshot(json_request(
@@ -3793,6 +3797,7 @@ async fn notifications_stream_emits_reservation_granted_sse() {
     let text = String::from_utf8(chunk.to_vec()).expect("chunk should be utf8");
     assert!(text.contains("event: reservation_granted"));
     assert!(text.contains("\"relative_path\":\"src/auth.ts\""));
+    assert!(text.contains("\"purpose\":\"Queue requested write after blocker clears.\""));
     assert!(text.contains("state.intent.claim"));
 }
 
@@ -4035,6 +4040,10 @@ async fn resume_next_returns_active_reservation_for_session() {
     assert_eq!(json["resume_available"], true);
     assert_eq!(json["reservation"]["session_id"], "s2");
     assert_eq!(json["reservation"]["relative_path"], "src/auth.ts");
+    assert_eq!(
+        json["reservation"]["purpose"],
+        "Queue requested write after blocker clears."
+    );
     assert_eq!(
         json["required_next_action"],
         "Reread the target, then call state.intent.claim for the reservation before writing."

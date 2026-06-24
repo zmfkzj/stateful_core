@@ -114,12 +114,14 @@ blocked -> queued -> reserved -> claimed -> active
 A conflicting writer is blocked by the active lease and can enter a FIFO wait
 queue. When the active lease is released or the owning activity finalizes, each
 eligible waiter whose requested resource no longer conflicts receives a short
-reservation in FIFO order. The reserved session must reread the target. Manual
-MCP/CLI flows then call `state_intent_claim` /
+reservation in FIFO order. The reservation notification payload and resume result
+carry the wait queue row's stored, non-empty purpose. The reserved session must
+reread the target. Manual MCP/CLI flows then call `state_intent_claim` /
 `stateful intent claim --wait-id <id>`; native edit hooks and sandbox
 `write-targets` authorization can lazy-claim the reservation when the write is
-retried. Claiming creates write-authorizing intent and the active same-session
-lease. The default reservation TTL is 120 seconds.
+retried. Claiming uses that stored reservation purpose to create
+write-authorizing intent and the active same-session lease; clients do not
+provide a claim purpose. The default reservation TTL is 120 seconds.
 
 Detailed queue states, lease expiry behavior, and promotion rules are covered
 in the state model and implementation contract docs.
@@ -397,14 +399,16 @@ installation health.
   reservation expires requeues the same waiter instead of creating a duplicate.
   The path must be non-empty after normalization.
 - `stateful intent claim --wait-id <id>` manually claims a reserved request
-  after the session rereads the target; native edit hooks and sandbox
+  after the session rereads the target, using the stored reservation purpose;
+  clients do not pass a new claim purpose. Native edit hooks and sandbox
   `write-targets` authorization may lazy-claim a reserved request at the retry
   write boundary.
 - `stateful intent cancel --request-id <id>` cancels a queued or reserved
   request owned by the active session.
-- `stateful notifications poll` reads pending coordination notifications.
+- `stateful notifications poll` reads pending coordination notifications;
+  reservation notifications include the stored purpose in their payload.
 - `stateful resume next` reads the next reservation available to the active
-  session.
+  session, including its stored purpose.
 - `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`
   runs build or test commands with disposable artifact writes under
   `/tmp/stateful/<session>/<scratch-purpose>/`. The profile is language-independent for
@@ -515,7 +519,8 @@ Other stateful hook allows become OMP allows; denials or unavailable authorizati
 remain hard OMP blocks even if OMP yolo metadata is present.
 When a queued Stateful reservation becomes claimable, the generated extension
 subscribes to the server's SSE notification stream and injects a next-turn OMP
-message with the `wait_id`; the agent must still reread and claim before writing.
+message with the `wait_id` and stored, non-empty payload `purpose`; the agent
+must still reread and claim before writing.
 OMP built-ins that do not write repo files, including `ask`, `ast_grep`, `job`,
 `irc`, `task`, `todo`, `report_tool_issue`, `generate_image`, and native
 read/search tools, are allowed by default. Other unclassified OMP-origin tools
@@ -582,10 +587,11 @@ deletes, renames, and moves require exact file intents for the affected paths;
 directory intent does not authorize them. Writes without matching active intent
 are denied, and active leases held by another session block conflicting writes.
 A blocked writer can queue with `queue_on_conflict`; after promotion, the
-reserved session must reread the target. Manual MCP/CLI flows claim with
-`state_intent_claim` / `stateful intent claim --wait-id <id>`, while native edit
-hooks and sandbox `write-targets` authorization can lazy-claim during the
-retried write.
+reservation notification and resume payload carry the stored request purpose and
+the reserved session must reread the target. Manual MCP/CLI flows claim with
+`state_intent_claim` / `stateful intent claim --wait-id <id>`, using that stored
+purpose; native edit hooks and sandbox `write-targets` authorization can
+lazy-claim during the retried write.
 
 Repo file edits should use native edit tools with hook-visible targets, such as
 Codex `apply_patch`, Edit, or `Write`, after exact intent declaration and a
@@ -745,6 +751,9 @@ infer it from the user or agent instruction and send it explicitly. Intent
 declare payloads also require non-empty `files_planned`; empty arrays and empty
 or normalized-empty paths are rejected with `missing_scope`. Intent request
 payloads also reject empty or normalized-empty `path` with `missing_scope`.
+Intent claim payloads carry only the `wait_id`; the server uses the stored
+reservation purpose. Reservation notifications and resume payloads include that
+stored purpose.
 
 ## Sandboxed Tests
 

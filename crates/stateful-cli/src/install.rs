@@ -1426,12 +1426,17 @@ function reservationMessage(notification) {{
   const target = payload.relative_path || "the reserved target";
   const waitId = payload.wait_id || "unknown";
   const action = payload.action || "write";
-  return [
+  const purpose = payload.purpose;
+  const lines = [
     "Stateful reservation is ready for " + target + ".",
     "wait_id: " + waitId,
     "action: " + action,
-    "Next: reread the target, then call state_intent_claim with this wait_id before retrying the write.",
-  ].join("\n");
+  ];
+  if (typeof purpose === "string" && purpose.trim().length > 0) {{
+    lines.push("purpose: " + purpose.trim());
+  }}
+  lines.push("Next: reread the target, then call state_intent_claim with this wait_id before retrying the write.");
+  return lines.join("\n");
 }}
 
 function deliverReservationNotification(pi, notification) {{
@@ -1481,6 +1486,7 @@ async function checkReservationResume(pi, stream, signal) {{
           wait_id: body.reservation.wait_id,
           relative_path: body.reservation.relative_path,
           action: body.reservation.action,
+          purpose: body.reservation.purpose,
           reservation_expires_at: body.reservation.reservation_expires_at,
         }},
         required_next_action: body.required_next_action,

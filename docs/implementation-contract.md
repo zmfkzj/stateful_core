@@ -135,14 +135,17 @@ GET  /v1/runtime/identity
 engine and must not create leases or write-authorizing state.
 `/v1/notifications/poll` returns pending coordination notifications for a
 session and marks returned notifications as delivered so a later poll does not
-redeliver the same notification. `/v1/resume/next` is the durable recovery path:
-it returns the first active reservation that the session can claim after
-rereading the target, even if the reservation notification was already delivered
-or the client missed the poll response. `/v1/intent/claim` is the explicit
-reservation claim path; it creates write-authorizing intent and an active lease
-for the reservation owner. `/v1/authorize` may lazy-claim an active reservation
-for hook and sandbox authorization sources after the client rereads and retries
-the write boundary; read-only conflict checks must not claim reservations.
+redeliver the same notification. Reservation notification payloads include the
+stored, non-empty reservation purpose. `/v1/resume/next` is the durable recovery
+path: it returns the first active reservation that the session can claim,
+including its stored purpose, after rereading the target, even if the
+reservation notification was already delivered or the client missed the poll
+response. `/v1/intent/claim` is the explicit reservation claim path; it takes a
+`wait_id`, uses the stored reservation purpose, and creates write-authorizing
+intent plus an active lease for the reservation owner. `/v1/authorize` may
+lazy-claim an active reservation for hook and sandbox authorization sources
+after the client rereads and retries the write boundary; read-only conflict
+checks must not claim reservations.
 `/v1/lease/acquire` records the target existence and content hash when `root` is
 supplied; hook-originated native file writes compare that observation before
 authorization. `/v1/lease/refresh-observation` refreshes the same-session exact
@@ -171,6 +174,8 @@ Current envelope enforcement is limited to `/v1/authorize` and
 `files_planned`; empty arrays and empty or normalized-empty paths fail with
 `missing_scope`. Intent request requires non-empty `purpose` and a non-empty
 `path`; empty or normalized-empty request paths fail with `missing_scope`.
+Intent claim clients provide a `wait_id` only; they must not provide a purpose
+because the server uses the stored reservation purpose.
 
 ## Authorization Input
 
@@ -295,16 +300,18 @@ per wait request, and a request is reservable only when that requested resource
 is available. Promotion is triggered by explicit lease release, session or
 activity finalization, lease/reservation expiry, or current-state materialization
 that finds an already-unblocked queued waiter. Promotion creates short
-reservations and pending notifications for the waiting sessions.
+reservations and pending notifications whose payloads carry the waiting row's
+stored, non-empty purpose.
 
 Promotion creates reservations first. A reservation is not active write
 authority. Each waiting session must reread the target. Manual MCP/CLI flows
 then explicitly claim with `state_intent_claim` or
-`stateful intent claim --wait-id <id>`. Hook and sandbox authorization sources
-may lazy-claim the reservation at the retried write boundary. Claiming creates
-write-authorizing intent and active same-session leases. The default reservation
-TTL is 120 seconds; the default lease TTL is 300 seconds and is refreshed by
-heartbeat.
+`stateful intent claim --wait-id <id>`; claim uses the stored reservation
+purpose and clients do not provide a claim purpose. Hook and sandbox
+authorization sources may lazy-claim the reservation at the retried write
+boundary. Claiming creates write-authorizing intent and active same-session
+leases. The default reservation TTL is 120 seconds; the default lease TTL is 300
+seconds and is refreshed by heartbeat.
 
 The target multi-resource model is atomic all-or-nothing: a multi-resource
 request is reservable only when it is the head entry for every requested resource

@@ -2401,6 +2401,10 @@ fn released_child_lease_promotes_directory_waiter_to_reservation() {
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].kind, "reservation_granted");
     assert_eq!(notifications[0].payload["relative_path"], "target");
+    assert_eq!(
+        notifications[0].payload["purpose"],
+        "Queue requested directory write after blocker clears."
+    );
 }
 
 #[test]
@@ -2899,6 +2903,10 @@ fn reservation_promotion_creates_pending_notification_for_waiter() {
     assert_eq!(notifications[0].workspace_id, "w1");
     assert_eq!(notifications[0].kind, "reservation_granted");
     assert_eq!(notifications[0].payload["relative_path"], "src/auth.ts");
+    assert_eq!(
+        notifications[0].payload["purpose"],
+        "Queue requested file write after blocker clears."
+    );
 }
 
 #[test]

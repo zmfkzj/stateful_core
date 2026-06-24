@@ -417,9 +417,10 @@ The state server is responsible for:
   implicit heartbeat events within a 60-minute rolling maximum
 - evaluating conflict policy
 - promoting FIFO wait queue reservations after explicit lease release,
-  session/activity finalization, or lease expiry
+  session/activity finalization, or lease expiry, and emitting notification
+  payloads that carry the stored reservation purpose
 - requiring reservation claim before creating active write-authorizing intent
-  and active leases
+  and active leases from that stored purpose
 - rendering concise prompt context
 - retaining expired activity as historical evidence
 
