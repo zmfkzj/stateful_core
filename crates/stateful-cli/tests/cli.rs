@@ -24,6 +24,7 @@ fn parses_sandbox_run_read_only_defaults() {
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::ReadOnly);
             assert_eq!(network, SandboxNetworkPolicy::Disabled);
@@ -33,6 +34,7 @@ fn parses_sandbox_run_read_only_defaults() {
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!stream_events);
             assert_eq!(command, "rg auth src");
             assert_eq!(timeout_seconds, None);
         }
@@ -109,6 +111,7 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::WriteTargets);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
@@ -118,6 +121,7 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             assert_eq!(write_dirs, vec!["tmp"]);
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!stream_events);
             assert_eq!(command, "printf x > README.md");
             assert_eq!(timeout_seconds, Some(12));
         }
@@ -154,6 +158,7 @@ fn parses_sandbox_run_git_profile() {
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::Git);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
@@ -163,6 +168,7 @@ fn parses_sandbox_run_git_profile() {
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!stream_events);
             assert_eq!(command, "git fetch --all");
             assert_eq!(timeout_seconds, Some(30));
         }
@@ -199,6 +205,7 @@ fn parses_sandbox_run_github_pr_profile() {
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::GithubPr);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
@@ -208,6 +215,7 @@ fn parses_sandbox_run_github_pr_profile() {
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!stream_events);
             assert_eq!(command, "gh pr status");
             assert_eq!(timeout_seconds, Some(30));
         }
@@ -244,6 +252,7 @@ fn parses_sandbox_run_build_profile() {
             allow_signal,
             command,
             timeout_seconds,
+            stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::Build);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
@@ -253,6 +262,7 @@ fn parses_sandbox_run_build_profile() {
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!stream_events);
             assert_eq!(command, "npm test");
             assert_eq!(timeout_seconds, Some(60));
         }
@@ -418,6 +428,7 @@ fn parses_sandbox_run_external_profile() {
             allow_signal,
             timeout_seconds,
             command,
+            stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::External);
             assert_eq!(purpose, Some("install rebuilt binaries".to_string()));
@@ -428,6 +439,7 @@ fn parses_sandbox_run_external_profile() {
             assert!(allow_signal);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(timeout_seconds, Some(10));
+            assert!(!stream_events);
             assert_eq!(
                 command,
                 "install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful"

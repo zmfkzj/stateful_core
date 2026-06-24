@@ -1695,6 +1695,28 @@ function externalBashApprovalMessage(params, args) {{
   ].join("\n");
 }}
 
+async function confirmExternalBashCommand(ctx, params, args, signal) {{
+  if (signal?.aborted) return null;
+  let abortHandler;
+  const abortPromise = signal ? new Promise((resolve) => {{
+    abortHandler = () => resolve(null);
+    signal.addEventListener("abort", abortHandler, {{ once: true }});
+  }}) : undefined;
+  try {{
+    const confirmPromise = ctx.ui.confirm(
+      "Approve external sandbox command",
+      externalBashApprovalMessage(params, args)
+    );
+    return abortPromise
+      ? await Promise.race([confirmPromise, abortPromise])
+      : await confirmPromise;
+  }} finally {{
+    if (signal && abortHandler) {{
+      signal.removeEventListener("abort", abortHandler);
+    }}
+  }}
+}}
+
 function sandboxToolResultText(exitCode, stdout, stderr, error) {{
   if (!stderr && !error) {{
     return stdout || "";
@@ -1807,17 +1829,47 @@ function createSandboxStdoutStreamer(onUpdate, jobId, label) {{
   }};
 }}
 
-function runSandboxToolProcess(params, args, ctx, label, onStdout) {{
+function killSandboxChild(child, signalName) {{
+  if (!child) return;
+  try {{
+    if (process.platform !== "win32" && typeof child.pid === "number") {{
+      process.kill(-child.pid, signalName);
+      return;
+    }}
+  }} catch (_) {{}}
+  try {{
+    child.kill(signalName);
+  }} catch (_) {{}}
+}}
+
+function runSandboxToolProcess(params, args, ctx, label, signal, onStdout) {{
   return new Promise((resolve) => {{
     let stdout = "";
     let stderr = "";
     let stdoutLineBuffer = "";
+    let streamedStdout = "";
     let streamedOutput = false;
     let processError = "";
     let settled = false;
+    let cancelled = false;
+    let child;
+    let abortHandler;
+    let killTimer;
+    let resolveTimer;
+    const clearCancelTimers = () => {{
+      if (killTimer) {{
+        clearTimeout(killTimer);
+        killTimer = undefined;
+      }}
+      if (resolveTimer) {{
+        clearTimeout(resolveTimer);
+        resolveTimer = undefined;
+      }}
+    }};
     const emitOutputChunk = (chunk) => {{
       if (!chunk) return;
       streamedOutput = true;
+      streamedStdout = truncateSandboxToolText(streamedStdout + chunk, label);
       onStdout(chunk);
     }};
     const handleStdoutLine = (line) => {{
@@ -1847,9 +1899,14 @@ function runSandboxToolProcess(params, args, ctx, label, onStdout) {{
     const finish = (exitCode, error) => {{
       if (settled) return;
       settled = true;
+      clearCancelTimers();
+      if (signal && abortHandler) {{
+        signal.removeEventListener("abort", abortHandler);
+      }}
       flushStatefulStdout();
       const sandboxRunOutput = parseSandboxRunOutput(stdout);
-      const commandStdout = sandboxRunOutput ? String(sandboxRunOutput.stdout || "") : stdout;
+      const fallbackStdout = streamedOutput ? streamedStdout : stdout;
+      const commandStdout = sandboxRunOutput ? String(sandboxRunOutput.stdout || "") : fallbackStdout;
       const commandStderr = sandboxRunOutput ? String(sandboxRunOutput.stderr || "") || stderr : stderr;
       const commandExitCode = typeof sandboxRunOutput?.exit_code === "number" ? sandboxRunOutput.exit_code : exitCode;
       if (commandStdout && !streamedOutput) {{
@@ -1859,18 +1916,39 @@ function runSandboxToolProcess(params, args, ctx, label, onStdout) {{
       if (sandboxRunOutput) {{
         result.details.sandboxRunOutput = sandboxRunOutput;
       }}
+      if (cancelled) {{
+        result.details.cancelled = true;
+      }}
       resolve(result);
     }};
-    let child;
+    abortHandler = () => {{
+      if (settled || cancelled) return;
+      cancelled = true;
+      processError = "cancelled by user";
+      killSandboxChild(child, "SIGTERM");
+      killTimer = setTimeout(() => killSandboxChild(child, "SIGKILL"), 1000);
+      resolveTimer = setTimeout(() => finish(1, processError), 3000);
+    }};
+    if (signal?.aborted) {{
+      cancelled = true;
+      finish(1, "cancelled by user");
+      return;
+    }}
     try {{
       child = spawn(STATEFUL, args, {{
         cwd: ctx.cwd,
         stdio: ["ignore", "pipe", "pipe"],
-        detached: false,
+        detached: process.platform !== "win32",
       }});
     }} catch (error) {{
       finish(1, error instanceof Error ? error.message : String(error));
       return;
+    }}
+    if (signal) {{
+      signal.addEventListener("abort", abortHandler, {{ once: true }});
+    }}
+    if (signal?.aborted) {{
+      abortHandler();
     }}
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
@@ -1889,11 +1967,11 @@ function runSandboxToolProcess(params, args, ctx, label, onStdout) {{
   }});
 }}
 
-async function runSandboxAwaitedTool(params, args, ctx, label, onUpdate) {{
+async function runSandboxAwaitedTool(params, args, ctx, label, signal, onUpdate) {{
   const runId = nextSandboxJobId(label);
   const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
   const stdoutStreamer = createSandboxStdoutStreamer(onUpdate, runId, commandLabel);
-  const result = await runSandboxToolProcess(params, args, ctx, label, (chunk) => {{
+  const result = await runSandboxToolProcess(params, args, ctx, label, signal, (chunk) => {{
     stdoutStreamer.push(chunk);
   }});
   await stdoutStreamer.drain();
@@ -1929,7 +2007,7 @@ export default function statefulOmpExtension(pi) {{
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      return await runSandboxAwaitedTool(params, args, ctx, "sandbox_bash", onUpdate);
+      return await runSandboxAwaitedTool(params, args, ctx, "sandbox_bash", signal, onUpdate);
     }},
   }});
   pi.registerTool({{
@@ -1954,7 +2032,7 @@ export default function statefulOmpExtension(pi) {{
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      return await runSandboxAwaitedTool(params, args, ctx, "ext_ro_bash", onUpdate);
+      return await runSandboxAwaitedTool(params, args, ctx, "ext_ro_bash", signal, onUpdate);
     }},
   }});
   pi.registerTool({{
@@ -1991,10 +2069,7 @@ export default function statefulOmpExtension(pi) {{
           details: {{ error: "confirmation_unavailable" }},
         }};
       }}
-      const approved = await ctx.ui.confirm(
-        "Approve external sandbox command",
-        externalBashApprovalMessage(params, args)
-      );
+      const approved = await confirmExternalBashCommand(ctx, params, args, signal);
       if (!approved) {{
         return {{
           isError: true,
@@ -2002,7 +2077,10 @@ export default function statefulOmpExtension(pi) {{
           details: {{ blocked: true }},
         }};
       }}
-      return await runSandboxAwaitedTool(params, args, ctx, "ext_rw_bash", onUpdate);
+      if (signal?.aborted) {{
+        return sandboxToolError("cancelled by user");
+      }}
+      return await runSandboxAwaitedTool(params, args, ctx, "ext_rw_bash", signal, onUpdate);
     }},
   }});
   pi.on("session_start", async (event, ctx) => {{

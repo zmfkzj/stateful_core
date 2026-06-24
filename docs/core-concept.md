@@ -152,8 +152,8 @@ without OMP UI confirmation. `ext_rw_bash` asks for OMP UI confirmation before
 running external writes that declare at least one write target, create target, or
 write dir. Generated OMP `*_bash` tools wait for sandbox commands to finish
 before returning the tool result, so final stdout/stderr/status arrive before
-the agent can end the turn. They emit stdout through inline OMP tool updates.
-The deprecated `async` parameter is accepted only
+the agent can end the turn. They emit stdout through inline OMP tool updates and
+cancel on OMP abort/ESC. The deprecated `async` parameter is accepted only
 as a compatibility no-op. The
 generated extension also subscribes to Stateful SSE reservation
 notifications and injects a next-turn OMP message when a queued `wait_id`

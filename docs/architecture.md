@@ -135,8 +135,10 @@ registers `ext_ro_bash` for read-only `--fs external` commands, and registers
 confirmation. All three generated `*_bash` tools wait for the sandbox command
 to finish before returning the tool result, so final stdout/stderr/status are
 available before the agent can end the turn. They emit stdout through inline OMP
-tool updates so it renders in the tool output panel; their `async` input is a deprecated
-compatibility no-op that does not select background execution. `sandbox_bash` rejects
+tool updates so it renders in the tool output panel, and OMP abort/ESC cancels
+the foreground tool while the sandbox runner cleans up its child process group.
+Their `async` input is a deprecated compatibility no-op that does not select
+background execution. `sandbox_bash` rejects
 `--fs external` with guidance to use `ext_ro_bash` or `ext_rw_bash`. Raw Bash and
 Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
@@ -191,8 +193,8 @@ execution for read-only, write-targets, build, git, and github-pr profiles;
 `ext_ro_bash` owns read-only external commands without OMP UI confirmation; and
 `ext_rw_bash` owns external writes with OMP UI confirmation. Each generated tool
 waits for the sandbox command to finish before returning, emits stdout through
-inline OMP tool updates, and keeps stderr/status in the returned tool
-details unless the command fails.
+inline OMP tool updates, cancels on OMP abort, and returns final
+stdout/stderr/exit status in the tool details.
 Other stateful allows translate to OMP allow. Stateful deny or unavailable server
 translates to a hard block, even when OMP yolo metadata is present.
 
@@ -350,8 +352,8 @@ classification, so `functions.bash` is Bash,
   profiles, `ext_ro_bash` for read-only `--fs external` commands without OMP UI
   confirmation, and `ext_rw_bash` for external writes with OMP UI confirmation.
   These tools wait for sandbox commands to finish before returning, emit stdout
-  through inline OMP tool updates, and keep stderr/status in
-  returned tool details unless the command fails.
+  through inline OMP tool updates, cancel on OMP abort, and return final
+  stdout/stderr/exit status in tool details.
   Ordinary read work should use native read/search/diff tools when available.
   Read-only command-shaped inspection that genuinely needs a shell uses
   `--fs read-only --network disabled`; process inspection uses

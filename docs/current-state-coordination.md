@@ -271,8 +271,10 @@ registers `ext_ro_bash` for read-only `--fs external` commands, and registers
 confirmation. All three generated `*_bash` tools wait for the sandbox command
 to finish before returning the tool result, so final stdout/stderr/status are
 available before the agent can end the turn. They emit stdout through inline OMP
-tool updates so it renders in the tool output panel; their `async` input is a deprecated
-compatibility no-op that does not select background execution. `sandbox_bash` rejects
+tool updates so it renders in the tool output panel, and OMP abort/ESC cancels
+the foreground tool while the sandbox runner cleans up its child process group.
+Their `async` input is a deprecated compatibility no-op that does not select
+background execution. `sandbox_bash` rejects
 `--fs external` with guidance to use `ext_ro_bash` or `ext_rw_bash`. Raw Bash and
 Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
@@ -324,8 +326,8 @@ sandbox command execution for read-only, write-targets, build, git, and
 github-pr profiles; `ext_ro_bash` owns read-only external commands without OMP
 UI confirmation; `ext_rw_bash` owns external writes with OMP UI confirmation;
 all generated `*_bash` tools wait for the sandbox command to finish before
-returning, emit stdout through inline OMP tool updates, and keep
-stderr/status in returned tool details unless the command fails;
+returning, emit stdout through inline OMP tool updates, and return final
+stdout/stderr/exit status in tool details;
 stateful allow maps to allow; and stateful denial or unavailable state maps to
 block even when OMP yolo metadata is present.
 

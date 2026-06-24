@@ -9,10 +9,19 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use signal_hook::{
+    consts::signal::{SIGHUP, SIGINT, SIGTERM},
+    iterator::{Handle as SignalsHandle, Signals},
+};
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 #[cfg(unix)]
@@ -32,8 +41,6 @@ use crate::{
 pub(crate) const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
 pub(crate) const STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV: &str = "STATEFUL_ALLOW_NESTED_SANDBOX_RUN";
 const SANDBOX_TMP_ROOT: &str = "/tmp/stateful";
-#[cfg(unix)]
-const SIGTERM: i32 = 15;
 #[cfg(unix)]
 const SIGKILL: i32 = 9;
 
@@ -3850,9 +3857,21 @@ where
 }
 
 pub(crate) fn run_command_with_timeout(
+    command: Command,
+    timeout: Duration,
+    stream_events: bool,
+) -> anyhow::Result<SandboxCommandResult> {
+    let signal_monitor = SandboxSignalMonitor::install()?;
+    run_command_with_timeout_and_cancel(command, timeout, stream_events, || {
+        signal_monitor.is_cancelled()
+    })
+}
+
+fn run_command_with_timeout_and_cancel(
     mut command: Command,
     timeout: Duration,
     stream_events: bool,
+    mut is_cancelled: impl FnMut() -> bool,
 ) -> anyhow::Result<SandboxCommandResult> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     isolate_sandbox_process_group(&mut command);
@@ -3872,9 +3891,16 @@ pub(crate) fn run_command_with_timeout(
 
     let deadline = Instant::now() + timeout;
     let mut timed_out = false;
+    let mut cancelled = false;
     let exit_status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
+        }
+        if is_cancelled() {
+            cancelled = true;
+            break terminate_sandbox_child(&mut child)?.ok_or_else(|| {
+                anyhow::anyhow!("cancelled and failed to terminate sandbox command")
+            })?;
         }
         if Instant::now() >= deadline {
             timed_out = true;
@@ -3884,7 +3910,7 @@ pub(crate) fn run_command_with_timeout(
         }
         thread::sleep(Duration::from_millis(25));
     };
-    cleanup_sandbox_process_group(&mut child, timed_out)?;
+    cleanup_sandbox_process_group(&mut child, timed_out || cancelled)?;
 
     let stdout = stdout_reader
         .join()
@@ -3894,11 +3920,77 @@ pub(crate) fn run_command_with_timeout(
         .map_err(|_| anyhow::anyhow!("sandbox stderr reader panicked"))??;
 
     Ok(SandboxCommandResult {
-        status: if timed_out { "timed_out" } else { "exited" },
+        status: if cancelled {
+            "cancelled"
+        } else if timed_out {
+            "timed_out"
+        } else {
+            "exited"
+        },
         exit_code: exit_status.code(),
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
     })
+}
+
+struct SandboxSignalMonitor {
+    #[cfg(unix)]
+    cancelled: Arc<AtomicBool>,
+    #[cfg(unix)]
+    handle: SignalsHandle,
+    #[cfg(unix)]
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl SandboxSignalMonitor {
+    fn install() -> anyhow::Result<Self> {
+        #[cfg(unix)]
+        {
+            let mut signals = Signals::new([SIGHUP, SIGINT, SIGTERM])?;
+            let handle = signals.handle();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let thread_cancelled = Arc::clone(&cancelled);
+            let thread = thread::spawn(move || {
+                if signals.forever().next().is_some() {
+                    thread_cancelled.store(true, Ordering::SeqCst);
+                }
+            });
+            Ok(Self {
+                cancelled,
+                handle,
+                thread: Some(thread),
+            })
+        }
+
+        #[cfg(not(unix))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+}
+
+impl Drop for SandboxSignalMonitor {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            self.handle.close();
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
 }
 
 fn isolate_sandbox_process_group(command: &mut Command) {
@@ -4004,6 +4096,7 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
+        time::{Duration, Instant},
     };
 
     const SANDBOX_SESSION_CHILD_CASE: &str = "STATEFUL_SANDBOX_SESSION_CHILD_CASE";
@@ -4308,6 +4401,39 @@ mod tests {
             allowed_write_targets: Vec::new(),
             denied_write_targets: Vec::new(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelled_wrapper_cleans_background_descendants_before_joining_readers() {
+        if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
+            return;
+        }
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let thread_cancelled = Arc::clone(&cancelled);
+        let setter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            thread_cancelled.store(true, Ordering::SeqCst);
+        });
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("(trap '' TERM HUP INT; sleep 5) & wait");
+
+        let started = Instant::now();
+        let output =
+            run_command_with_timeout_and_cancel(command, Duration::from_secs(10), false, || {
+                cancelled.load(Ordering::SeqCst)
+            })
+            .expect("sandbox command should cancel and terminate");
+        setter.join().expect("cancellation setter should join");
+
+        assert_eq!(output.status, "cancelled");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "cancel cleanup should not wait for ignored-TERM descendants"
+        );
     }
 
     #[cfg(unix)]

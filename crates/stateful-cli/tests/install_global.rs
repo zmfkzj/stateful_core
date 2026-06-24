@@ -220,7 +220,8 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
     assert!(
-        extension.contains("function runSandboxToolProcess(params, args, ctx, label, onStdout)")
+        extension
+            .contains("function runSandboxToolProcess(params, args, ctx, label, signal, onStdout)")
     );
     assert!(!extension.contains("function runSandboxTool(params"));
     assert!(extension.contains("spawn(STATEFUL, args"));
@@ -246,9 +247,23 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("stderr = truncateSandboxToolText(stderr + chunk, label)"));
     assert!(
         extension
-            .contains("async function runSandboxAwaitedTool(params, args, ctx, label, onUpdate)")
+            .contains("streamedStdout = truncateSandboxToolText(streamedStdout + chunk, label)")
     );
-    assert!(extension.contains("await runSandboxToolProcess(params, args, ctx, label"));
+    assert!(extension.contains("const fallbackStdout = streamedOutput ? streamedStdout : stdout"));
+    assert!(extension.contains("function killSandboxChild(child, signalName)"));
+    assert!(extension.contains("process.kill(-child.pid, signalName)"));
+    assert!(extension.contains("signal.addEventListener(\"abort\", abortHandler, { once: true })"));
+    assert!(extension.contains("killSandboxChild(child, \"SIGTERM\")"));
+    assert!(extension.contains("killSandboxChild(child, \"SIGKILL\")"));
+    assert!(extension.contains("result.details.cancelled = true"));
+    assert!(
+        extension.contains("async function confirmExternalBashCommand(ctx, params, args, signal)")
+    );
+    assert!(extension.contains("await Promise.race([confirmPromise, abortPromise])"));
+    assert!(extension.contains(
+        "async function runSandboxAwaitedTool(params, args, ctx, label, signal, onUpdate)"
+    ));
+    assert!(extension.contains("await runSandboxToolProcess(params, args, ctx, label, signal"));
     assert!(extension.contains("await stdoutStreamer.drain();"));
     assert!(extension.contains("await Promise.allSettled(deliveries);"));
     assert!(!extension.contains("function startSandboxBackgroundTool"));
@@ -256,7 +271,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(!extension.contains("stateful_sandbox_bash_result"));
     assert!(!extension.contains("params.async === true"));
     assert!(extension.contains(
-        "return await runSandboxAwaitedTool(params, args, ctx, \"sandbox_bash\", onUpdate)"
+        "return await runSandboxAwaitedTool(params, args, ctx, \"sandbox_bash\", signal, onUpdate)"
     ));
     assert!(extension.contains("async execute(_toolCallId, params, signal, onUpdate, ctx)"));
     assert!(extension.contains("args.push(\"--stream-events\");"));
