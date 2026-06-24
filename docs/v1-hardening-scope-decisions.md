@@ -29,7 +29,7 @@ Retrying the same `request_id` after reservation expiry requeues the same waiter
 in place instead of creating a duplicate or permanently consuming the key.
 
 `reservation/claim` is the manual reservation claim path. It creates
-write-authorizing reservation and active claims only for the reservation owner.
+active reservation scope and active claims only for the reservation owner.
 Clients must reread the target for the claimable reservation before writing.
 Manual MCP/CLI flows then call `state_reservation_claim` or
 `stateful reservation claim --wait-id <id>`; native edit hooks and sandbox
@@ -157,7 +157,7 @@ Filesystem watcher inference remains out of scope for this pass.
 
 MCP file-write tools are not the current repo edit path. Repo file edits should
 use native edit tools with hook-visible targets, such as Codex `apply_patch` or
-Edit, after exact reservation declaration and a successful same-session file claim.
+Edit, after task-level reservation covers the target and a successful same-session file claim.
 Hooks normalize hook-exposed targets, call the same policy service as MCP and
 CLI, fail closed on missing state, protocol mismatch, or denied authorization,
 record activity after successful edits, and release the authorizing claim after
@@ -177,11 +177,11 @@ specific staged/commit operations only after authorization.
 
 Background expiration and retention pruning are shipped in the state server,
 with lazy expiration kept as the safety net on read/write paths. Expiration
-paths expire stale claims, stale write-authorizing reservations, and stale
+paths expire stale claims, stale active reservations, and stale
 claimable reservations, then promote eligible FIFO waiters and create notifications.
 
-Implement the full rolling maximum model for active write-authorizing reservation.
-The default rolling maximum is 60 minutes unless a narrower profile or future
+Implement the full rolling maximum model for active task reservation.
+The default rolling maximum for active task reservations is 60 minutes unless a narrower profile or future
 policy overrides it.
 
 Retention pruning removes historical evidence older than the built-in 14-day

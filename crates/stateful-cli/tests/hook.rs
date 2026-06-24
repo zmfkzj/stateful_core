@@ -4093,7 +4093,7 @@ fn pre_tool_use_apply_patch_move_authorizes_source_and_destination() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Move target is outside exact reservation scope.","required_next_action":"Declare exact source and destination reservation and acquire both claims."}"#,
+        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Move target is outside task reservation exact scope.","required_next_action":"Add exact source and destination scopes to the task reservation and acquire both claims."}"#,
     );
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -4134,7 +4134,7 @@ fn pre_tool_use_apply_patch_move_authorizes_source_and_destination() {
     assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
     assert_eq!(
         json["hookSpecificOutput"]["permissionDecisionReason"],
-        "Declare exact source and destination reservation and acquire both claims."
+        "Add exact source and destination scopes to the task reservation and acquire both claims."
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");

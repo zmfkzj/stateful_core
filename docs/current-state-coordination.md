@@ -176,7 +176,7 @@ reservation must reread the target. Manual MCP/CLI flows then call
 the claim uses the stored reservation purpose, and clients do not provide a new
 claim purpose. Native edit hooks and sandbox `write-targets` authorization can
 lazy-claim the claimable reservation when the write is retried. Claiming creates
-write-authorizing reservation and the active same-session claim. The default
+active reservation scope and the active same-session claim. The default
 claimable reservation TTL is 120 seconds. If a claimable reservation expires
 without being claimed, the server may promote the next eligible FIFO waiter.
 
@@ -478,7 +478,7 @@ namespaced runtime tool names -> classify by leaf
   tools; functions.read / functions.search as native read/search)
 native read/search/diff tools -> preferred path for ordinary read work
 native edit tools with hook-visible targets -> enforce by inspecting targets
-  after exact reservation and a same-session claim; release the claim after the
+  after task-level reservation covers the target and a same-session claim; release the claim after the
   completed write transaction
 Codex Bash read-only inspection that genuinely needs a shell -> require a strict
   trusted wrapper:
@@ -517,9 +517,9 @@ There is no command-text authorization path. Command text alone does not
 authorize `rg`, `git diff`, test runners, stateful operational commands, or any
 other Bash command. Test commands should run through the trusted
 `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
---command <cmd>` wrapper. Repo writes require exact reservation plus a matching
-same-session claim and must use native edit tools or `--fs write-targets` with
-explicit targets.
+--command <cmd>` wrapper. Repo writes require task-level reservation covering
+the target plus a matching same-session claim and must use native edit tools or
+`--fs write-targets` with explicit targets.
 
 Minimum sandboxed test shape:
 
@@ -851,7 +851,7 @@ authorization exception for the current session and resource, but it must not
 reorder existing waiters, steal a claimable reservation, or move the overriding session to
 the head of a queue.
 
-A v1 write-authorizing reservation must be active, unexpired, belong to the same
+A v1 task reservation must be active, unexpired, belong to the same
 session, and include matching exact file or directory scope. Abstract task,
 test, port, or migration reservation can be stored as context but does not permit
 writes. Directory scope authorizes `write_directory` for the exact directory
@@ -883,7 +883,7 @@ target finalization statuses: done/failed/blocked
 The shipped server does not persist or populate activity phase in store-backed
 authorization. Blocked-phase and finalized-session deny reasons are target
 policy behavior; current finalization completes active reservations, so later writes
-fail because no active write-authorizing reservation remains.
+fail because no active task reservation remains.
 
 The shipped hook path records target existence and content hash when an exact
 file claim is acquired with `root`, denies hook-originated native file writes

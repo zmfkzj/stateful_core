@@ -296,7 +296,7 @@ fn structured_commit_does_not_allow_deleted_file_under_write_authorization() {
         authorize: Some(Box::new(|action, path| {
             assert_eq!(path, "docs/plan.md");
             if action == "delete_file" {
-                anyhow::bail!("delete requires exact file reservation");
+                anyhow::bail!("delete requires task reservation exact file scope");
             }
             Ok(())
         })),
@@ -306,7 +306,7 @@ fn structured_commit_does_not_allow_deleted_file_under_write_authorization() {
         result
             .expect_err("denied delete authorization should fail")
             .to_string()
-            .contains("delete requires exact file reservation")
+            .contains("delete requires task reservation exact file scope")
     );
     let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
     assert!(staged.is_empty(), "denied delete should not mutate index");

@@ -185,7 +185,7 @@ pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decis
     match input {
         AuthorizationInput::WriteFile { path } if scopes.allows_write(&path) => Decision::allow(
             "authorized",
-            "Write target has exact active file reservation.",
+            "Write target is covered by active task reservation exact file scope.",
         ),
         AuthorizationInput::WriteDirectory { path } if scopes.allows_write_directory(&path) => {
             Decision::allow(
@@ -195,7 +195,7 @@ pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decis
         }
         AuthorizationInput::DeleteFile { path } if scopes.allows_delete(&path) => Decision::allow(
             "authorized",
-            "Delete target has exact active file reservation.",
+            "Delete target is covered by active task reservation exact file scope.",
         ),
         AuthorizationInput::RenameFile { old_path, new_path }
         | AuthorizationInput::MoveFile { old_path, new_path }
@@ -203,7 +203,7 @@ pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decis
         {
             Decision::allow(
                 "authorized",
-                "Rename or move source and destination have exact active file reservation.",
+                "Rename or move source and destination are covered by active task reservation exact file scopes.",
             )
         }
         AuthorizationInput::WriteFile { .. }
@@ -213,7 +213,7 @@ pub fn authorize_action(state: &PolicyState, input: AuthorizationInput) -> Decis
         | AuthorizationInput::MoveFile { .. } => Decision::deny(
             "scope_mismatch",
             "Target is outside active reservation scope.",
-            "Declare exact file reservation for file actions, or exact directory reservation for write-directory actions.",
+            "Add exact file scope to the task reservation for file actions, or exact directory scope for write-directory actions.",
         ),
     }
 }

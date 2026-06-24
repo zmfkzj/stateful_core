@@ -98,9 +98,10 @@ Reservation Declaration
 -> Claim Release / Expiration
 ```
 
-Reservation is the authorization scope. Claim is the live claim. The effect log is
-the audit trail and target replay source; shipped v1 materializes selected
-session and reservation events and appends audit events for lifecycle mutations.
+Reservation is the task-level file set. Claim is the live resource-level claim.
+The effect log is the audit trail and target replay source; shipped v1
+materializes selected session and reservation events and appends audit events for
+lifecycle mutations.
 Validation is post-effect evidence, not a substitute for authorization.
 
 ## Implementation Status
@@ -124,41 +125,44 @@ documents.
 
 ## Reservation Graph
 
-A reservation declares what a session plans to do before it performs important
-actions. The graph connects user goals, sessions, turns, actors, and resources:
+A reservation declares the file/directory set a session plans to touch for a
+task before it performs important actions. The graph connects user goals,
+sessions, turns, actors, task-scoped reservations, and resources:
 
 ```text
 goal
   session
     turn
       actor
-        reservation
+        task reservation
           resource scopes
 ```
 
 Reservation answers:
 
 ```text
-What may this session work on?
+Which resources belong to this task's planned write set?
 ```
 
 The graph matters because a single user goal can span multiple turns and a
 session can spawn subagents. Subagents may contribute work, but they should not
-gain broader write authority than the parent session's active reservation scope.
+gain broader write authority than the parent session's active task reservation
+scope.
 
 Reservation must be:
 
 - explicit
-- scoped to files or directories for write authorization
+- scoped to the task's known files or directories for write authorization
 - attached to a purpose
 - time-bound
 - extensible when the active target set grows
 
-Reservation declarations add to the active file scope for the session in the
-workspace. If a session expands from `src/auth.ts` to `src/auth.ts` plus
+Reservation declarations add to the active file set for the session in the
+workspace. If a task expands from `src/auth.ts` to `src/auth.ts` plus
 `src/session.ts`, it may declare the new target without invalidating the
-existing one. If the same path is declared again, the latest matching active
-declaration supplies the purpose used for future claim acquisition.
+existing reservation or already claimed paths. If the same path is declared
+again, the latest matching active declaration supplies the purpose used for
+future claim acquisition.
 
 ## Scoped Claim
 
@@ -172,7 +176,8 @@ Who is actively holding this now?
 
 For v1, only file and directory claims authorize supported filesystem writes.
 Other resources, such as tasks, tests, ports, and migrations, can provide
-coordination context but do not authorize source-tree mutation by themselves.
+coordination context; the task grouping itself does not replace exact claims for
+source-tree mutation.
 
 Claims are advisory as product semantics, but checked where the runtime has a
 reliable hook or sandbox boundary. This split is intentional:
@@ -382,8 +387,8 @@ blocked -> queued -> claimable_reservation -> claimed -> active
 
 Queued requests are FIFO per resource. A claimable reservation (the current API
 state is `reserved`) is not write authority. The owning session must reread the
-target, claim the reservation, and then retry the write. The claim creates a
-fresh write-authorizing reservation and claim for that resource.
+target, claim the reservation, and then retry the write. The claim creates fresh
+active reservation scope and a same-session claim for that resource.
 
 This preserves ordering without letting a sleeping or stale session mutate the
 workspace later on old state.

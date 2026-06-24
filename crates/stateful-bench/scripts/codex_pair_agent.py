@@ -37,8 +37,9 @@ description: Detailed procedure for using Stateful MCP coordination, claims, san
 
 This skill is the procedural manual. Rules and hook denials decide when Stateful
 policy applies. First inspect current state with the active Stateful MCP tool
-names, then declare exact file reservation and acquire matching same-session claims
-before native edits. Use canonical names in guidance (`state_current_read`,
+names, then declare a task-level reservation covering the known file set and
+acquire matching same-session claims before native edits. Use canonical names in
+guidance (`state_current_read`,
 `state_reservation_declare`, `state_claim_acquire`) and switch to runtime-specific
 aliases only when those are the active tool names, such as Codex
 `mcp__stateful__state_reservation_declare` or OMP
@@ -925,9 +926,10 @@ def main() -> int:
     if args.mode == "stateful":
         stateful_instruction = f"""
 Before any file modification, inspect the code enough to identify the production
-file or files you plan to edit, then use the stateful MCP tools to declare
-exact file reservation and acquire same-session file claims for the planned files.
-Do not pass a manual session id; use the current Codex thread session provided
+file or files you plan to edit, then use the stateful MCP tools to declare a
+task-level reservation covering the known file set and acquire same-session file
+claims for the planned files. Do not pass a manual session id; use the current
+Codex thread session provided
 by the stateful hooks. If reservation declaration or claim acquisition fails, stop
 without editing.
 """

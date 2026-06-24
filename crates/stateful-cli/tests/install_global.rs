@@ -558,7 +558,7 @@ fn install_codex_yes_creates_global_command_policy_skill() {
             "Do not run `stateful reservation declare` or `stateful mcp call` through Bash"
         )
     );
-    assert!(command_policy_skill.contains("Reservation declarations add"));
+    assert!(command_policy_skill.contains("task-level file sets"));
     assert!(command_policy_skill.contains("--fs build --network enabled"));
     assert!(command_policy_skill.contains("--write-dir <scratch-purpose>"));
     assert!(command_policy_skill.contains("state_reservation_request"));

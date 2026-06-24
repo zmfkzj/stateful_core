@@ -341,7 +341,7 @@ fn mcp_stale_file_write_call_returns_removed_guidance() {
                 .as_str()
                 .unwrap_or_default()
                 .contains(
-                    "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after exact reservation declaration and a successful same-session file claim"
+                    "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after task-level reservation covers the target and a successful same-session file claim"
                 ),
             "{tool_name}"
         );
@@ -1456,7 +1456,7 @@ fn mcp_tools_list_returns_stateful_tool_descriptors() {
         .expect("reservation tool should be listed");
     assert_eq!(
         reservation_tool["description"],
-        "Declare repo-internal file or directory reservation before repo write actions."
+        "Declare a task-level repo-internal reservation with the known file or directory set before repo write actions."
     );
     assert_eq!(
         reservation_tool["inputSchema"]["required"],

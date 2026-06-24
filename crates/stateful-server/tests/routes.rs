@@ -1065,7 +1065,7 @@ async fn hook_native_write_requires_exact_file_intent_even_with_directory_scope(
         json["required_next_action"]
             .as_str()
             .unwrap_or_default()
-            .contains("exact file reservation")
+            .contains("exact file scope")
     );
 }
 

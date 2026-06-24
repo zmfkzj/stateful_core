@@ -175,11 +175,12 @@ instead of routing `stateful reservation declare` or `stateful mcp call` through
 shell. The usual write flow is:
 
 ```text
-read current state -> declare reservation -> acquire claim -> reread target -> write
+read current state -> declare task reservation with known file set -> acquire exact claim -> reread target -> write
 ```
 
-Reservation and claim are separate on purpose. Reservation declares planned work and the
-scope a session expects to touch. A claim declares active ownership of a scoped
+Reservation and claim are separate on purpose. A reservation groups the task's
+known file and directory scopes under one purpose, and can be expanded when the
+task discovers another target. A claim declares active ownership of one scoped
 resource and expires when the session stops being fresh.
 
 When another active claim blocks a write, the writer can queue for that resource.
@@ -199,7 +200,7 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 
 | Need | Use |
 | --- | --- |
-| Repo file edit | Native edit/write tools after exact reservation and same-session file claim |
+| Repo file edit | Native edit/write tools after task-level reservation and exact same-session file claim |
 | Build or test command | `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` |
 | Command-shaped repo write | `stateful sandbox run --fs write-targets --write-target <file> --command <cmd>` |
 | Local git operation | `stateful sandbox run --fs git --network disabled --command 'git <args>'` |

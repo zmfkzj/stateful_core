@@ -16,7 +16,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     (
         "state_reservation_declare",
         "state.reservation.declare",
-        "Declare repo-internal file or directory reservation before repo write actions.",
+        "Declare a task-level repo-internal reservation with the known file or directory set before repo write actions.",
     ),
     (
         "state_reservation_request",
@@ -26,7 +26,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     (
         "state_reservation_claim",
         "state.reservation.claim",
-        "Claim an active reservation and turn it into write-authorizing reservation.",
+        "Claim a queued reservation so its reserved path becomes write-authorizing for this session.",
     ),
     (
         "state_reservation_cancel",
@@ -36,12 +36,12 @@ const TOOLS: &[(&str, &str, &str)] = &[
     (
         "state_claim_acquire",
         "state.claim.acquire",
-        "Acquire an advisory claim on a repo file or directory resource.",
+        "Acquire a live write-authorizing claim on a repo file or directory resource.",
     ),
     (
         "state_claim_release",
         "state.claim.release",
-        "Release a same-session advisory claim on a repo file or directory resource.",
+        "Release a same-session live claim on a repo file or directory resource.",
     ),
     (
         "state_activity_observe",
@@ -145,10 +145,15 @@ fn input_schema_for(protocol_name: &str) -> Value {
                 (
                     "purpose",
                     string_schema_with_description(
-                        "Required purpose inferred from the user or agent instruction when it is not explicit.",
+                        "Required task purpose inferred from the user or agent instruction when it is not explicit.",
                     ),
                 ),
-                ("files_planned", non_empty_string_array_schema()),
+                (
+                    "files_planned",
+                    non_empty_string_array_schema_with_description(
+                        "Known repo-relative file or directory scopes for this task reservation.",
+                    ),
+                ),
             ],
             ["purpose", "files_planned"],
         ),
@@ -288,6 +293,17 @@ fn non_empty_string_array_schema() -> Value {
         "minItems": 1,
         "items": { "type": "string", "minLength": 1 }
     })
+}
+
+fn non_empty_string_array_schema_with_description(description: &str) -> Value {
+    let mut schema = non_empty_string_array_schema();
+    if let Value::Object(object) = &mut schema {
+        object.insert(
+            "description".to_string(),
+            Value::String(description.to_string()),
+        );
+    }
+    schema
 }
 
 pub fn protocol_tool_name(name: &str) -> Result<&'static str, String> {

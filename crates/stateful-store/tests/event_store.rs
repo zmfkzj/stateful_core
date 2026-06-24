@@ -1870,7 +1870,7 @@ fn active_exact_file_intent_by_same_session_ignores_directory_intent() {
     assert!(
         !store
             .active_exact_file_intent_by_session("w1", "src/auth.ts", "s1")
-            .expect("directory reservation should not count as exact file reservation")
+            .expect("directory scope should not count as exact file scope")
     );
 
     store
@@ -1884,12 +1884,12 @@ fn active_exact_file_intent_by_same_session_ignores_directory_intent() {
     assert!(
         store
             .active_exact_file_intent_by_session("w1", "src/auth.ts", "s1")
-            .expect("exact file reservation should load")
+            .expect("task reservation exact file scope should load")
     );
     assert!(
         !store
             .active_exact_file_intent_by_session("w1", "src/auth.ts", "s2")
-            .expect("other session exact file reservation should not count")
+            .expect("other session task reservation exact file scope should not count")
     );
 }
 

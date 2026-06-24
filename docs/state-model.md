@@ -17,9 +17,9 @@ The model is intentionally narrow:
 These state kinds describe active coordination, not general-purpose memory or
 all durable agent facts.
 
-## Goal, Turn, and Reservation Boundaries
+## Goal, Turn, Task, and Reservation Boundaries
 
-V1 separates the user's work objective from the authorization unit.
+V1 separates the user's work objective from the authorization resource.
 
 `goal` is the user-visible objective that may span multiple agent turns. It is
 used for grouping, handoff, summaries, and context rendering. It does not
@@ -28,12 +28,16 @@ authorize writes.
 `turn_id` identifies one agent execution slice inside a session: one prompt,
 the tool calls that follow, and the final response, pause, or stop. V1 records
 turn identity where available, but write authorization is still enforced by
-session identity plus active reservation.
+session identity plus active reservation and claim.
 
-`reservation` is the write-authorization unit. A write-authorizing reservation belongs to
-one session, expires, and must include matching file or directory scope. Agents
-should declare each additional file or directory scope before acquiring its
-claim, even if the broader goal is unchanged.
+`reservation` is the task-level write scope. A reservation belongs to one
+session, expires, and groups the known file or directory scopes for one task
+purpose. Agents should declare the complete known file set for a task, then add
+scopes to that same task reservation as the target set grows.
+
+`claim` is the live resource-level ownership signal. Each supported write still
+requires a fresh same-session claim for the exact file or directory resource
+being mutated.
 
 The practical hierarchy is:
 
@@ -41,8 +45,10 @@ The practical hierarchy is:
 session
   goal
     turn
-      reservation
-        write actions
+      task reservation
+        file/directory scopes
+          resource claims
+            write actions
 ```
 
 For v1, Codex hooks must treat the current Codex hook `thread_id` as
@@ -237,8 +243,8 @@ original spelling, but conflict checks use canonical paths.
 
 ## Reservation Record
 
-A reservation records what a session plans to do before it performs important
-actions.
+A reservation records the file set a session plans to touch for a task before it
+performs important actions.
 
 ```text
 reservation_id
@@ -257,14 +263,15 @@ status: active | superseded | completed | expired
 ```
 
 Hooks must require an active reservation before allowing supported write tool paths.
-For v1, a write-authorizing reservation must include a non-empty `purpose` plus at
-least one file or directory scope in `files_planned`. The server rejects an empty
-`files_planned` array or empty or normalized-empty path with `missing_scope`.
-Callers must infer purpose from the user or agent instruction when it is not
-explicit; the server does not generate a fallback purpose. Abstract resources in
-`resources_planned`, such as
-`task`, `test`, `port`, or `migration`, can provide context but cannot authorize
-writes.
+For v1, a task reservation that authorizes writes must include a non-empty `purpose` plus at
+least one file or directory scope in `files_planned`. `files_planned` is the
+task's current known file set, not a single-file-only primitive; callers should
+send all known task targets together and redeclare when the task expands. The
+server rejects an empty `files_planned` array or empty or normalized-empty path
+with `missing_scope`. Callers must infer purpose from the user or agent
+instruction when it is not explicit; the server does not generate a fallback
+purpose. Abstract resources in `resources_planned`, such as `task`, `test`,
+`port`, or `migration`, can provide context but cannot authorize writes.
 
 `phase` is shipped for activity records and write authorization. `goal`,
 `resources_planned`, `next_plan`, and `max_expires_at` remain target model
@@ -272,10 +279,10 @@ fields. Shipped authorization is based on active, unexpired scope rows,
 same-session claims, and active phases.
 
 Reservation declarations add to the session's active scope in that workspace. This
-lets a session keep an edit scope and add a `tmp/` build/test scope without
-invalidating the edit claim path. If the same path is declared again, the latest
-matching active declaration supplies the purpose used for future claim
-acquisition.
+lets a session keep one task reservation while adding a newly discovered source
+file or `tmp/` build/test scope without invalidating existing claimed paths. If
+the same path is declared again, the latest matching active declaration supplies
+the purpose used for future claim acquisition.
 
 ## Reservation Scope Matching
 
@@ -381,7 +388,7 @@ waiting session must reread the target. Manual MCP/CLI flows then explicitly
 claim the reservation with `state_reservation_claim` or
 `stateful reservation claim --wait-id <id>`; native edit hooks and sandbox
 `write-targets` authorization can lazy-claim it at the retried write boundary.
-Claiming creates write-authorizing reservation and active same-session claims.
+Claiming creates active reservation scope and active same-session claims.
 The default claimable reservation TTL is 120 seconds. If a claimable reservation
 expires, the server may promote the next eligible FIFO waiter.
 
@@ -474,10 +481,11 @@ the scratch `target` child. Other tool-specific build directories should be
 configured under the same external scratch root.
 
 Source-tree edits should use native edit tools with hook-visible targets, such
-as Codex `apply_patch` or Edit, after exact reservation declaration and a successful
-same-session file claim. Native edit hooks and `sandbox run --fs write-targets`
-release their authorized same-session claims after the write transaction
-completes; subsequent writes must reread and reacquire a claim or claim a
+as Codex `apply_patch` or Edit, after task-level reservation covers the target
+and a successful same-session file claim is active. Native edit hooks and
+`sandbox run --fs write-targets` release their authorized same-session claims
+after the write transaction completes; subsequent writes must reread and
+reacquire a claim or claim a
 claimable reservation. Command-shaped source writes must use exact
 `--write-target` or `--create-target` entries, not the `tmp/` artifact directory
 scope.

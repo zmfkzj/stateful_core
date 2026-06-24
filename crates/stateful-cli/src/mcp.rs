@@ -36,7 +36,7 @@ pub fn call_mcp_tool_in_repo(
     if matches!(tool_name.as_str(), "state_file_write" | "state.file.write") {
         return Ok(error_response(
             410,
-            "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after exact reservation declaration and a successful same-session file claim.",
+            "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after task-level reservation covers the target and a successful same-session file claim.",
         ));
     }
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;

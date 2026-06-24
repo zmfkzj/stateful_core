@@ -321,9 +321,9 @@ state_resume_next (state.resume.next)
 
 Hooks and MCP tools should call the same state server API. Policy must live in
 the state server, not in duplicated hook scripts. Native edit tools with
-hook-visible targets are the repo file edit path after exact reservation declaration
-and a successful file claim; command-shaped shell writes remain outside MCP and
-go through the sandbox-run wrapper.
+hook-visible targets are the repo file edit path after task-level reservation
+covers the target and a successful file claim is active; command-shaped shell
+writes remain outside MCP and go through the sandbox-run wrapper.
 
 Reservation declare and request payloads require a non-empty `purpose`; clients infer
 it from the user or agent instruction and send it explicitly. Reservation declare
@@ -341,9 +341,10 @@ classification, so `functions.bash` is Bash,
 `functions.search` remain native read/search tools.
 
 - Native edit tools such as Codex `apply_patch`, `Edit`, and `Write` or OMP
-  `edit` and `write`: enforce by inspecting hook-exposed targets after exact
-  reservation declaration and a successful same-session file claim. The completed
-  write transaction releases the claim that authorized it.
+  `edit` and `write`: enforce by inspecting hook-exposed targets after
+  task-level reservation covers the target and a successful same-session file
+  claim is active. The completed write transaction releases the claim that
+  authorized it.
 - Command execution: Codex raw Bash is denied with sandbox guidance. OMP raw Bash
   and Python/JavaScript/JS/Ruby/Julia eval-tool execution are denied at host
   approval and hook levels, even when the raw command itself invokes
@@ -421,8 +422,8 @@ The state server is responsible for:
 - promoting FIFO wait queue requests into claimable reservations after explicit
   claim release, session/activity finalization, or claim expiry, and emitting
   notification payloads that carry the stored reservation purpose
-- requiring reservation claim before creating active write-authorizing reservation
-  and active claims from that stored purpose
+- requiring reservation claim before creating active reservation scope and active
+  claims from that stored purpose
 - rendering concise prompt context
 - retaining expired activity as historical evidence
 

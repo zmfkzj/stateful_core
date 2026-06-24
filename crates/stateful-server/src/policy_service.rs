@@ -124,7 +124,7 @@ fn missing_rename_or_move_paths() -> AuthorizationOutcome {
         decision: Decision::deny(
             "missing_rename_paths",
             "Rename or move authorization requires non-empty old_path and new_path.",
-            "Provide both old_path and new_path, declare exact reservation for both paths, and acquire matching claims before writing.",
+            "Provide both old_path and new_path, add exact scopes for both paths to the task reservation, and acquire matching claims before writing.",
         ),
         wait: None,
         reservation: None,
@@ -294,8 +294,8 @@ impl<'a> PolicyService<'a> {
             return Ok(AuthorizationOutcome {
                 decision: Decision::deny(
                     "scope_mismatch",
-                    "Hook file targets require exact active file reservation for every affected path.",
-                    "Declare exact file reservation for every affected path and acquire matching same-session file claims before writing.",
+                    "Hook file targets require active task reservation exact file scope for every affected path.",
+                    "Add exact file scope for every affected path to the task reservation and acquire matching same-session file claims before writing.",
                 ),
                 wait: None,
                 reservation: None,

@@ -170,6 +170,17 @@ fn coordination_write_descriptors_scope_repo_internal_work() {
             "{name} description should scope coordination to repo work"
         );
     }
+
+    let declare = descriptor("state_reservation_declare");
+    assert!(
+        declare.description.contains("task-level"),
+        "reservation declaration should describe task-level grouping"
+    );
+    let acquire = descriptor("state_claim_acquire");
+    assert!(
+        acquire.description.contains("write-authorizing"),
+        "claim acquisition should describe write authorization"
+    );
 }
 
 #[test]

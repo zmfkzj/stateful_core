@@ -142,7 +142,7 @@ path: it returns the first claimable reservation for the session, including its
 stored purpose, after rereading the target, even if the reservation notification
 was already delivered or the client missed the poll response. `/v1/reservation/claim`
 is the explicit reservation claim path; it takes a `wait_id`, uses the stored
-reservation purpose, and creates write-authorizing reservation plus an active
+reservation purpose, and creates active reservation scope plus an active
 claim for the reservation owner. `/v1/authorize` may lazy-claim a claimable
 reservation for hook and sandbox authorization sources after the client rereads
 and retries the write boundary; read-only conflict checks must not claim reservations.
@@ -173,7 +173,9 @@ Current envelope enforcement is limited to `/v1/authorize` and
 `/v1/reservation/declare`, `/v1/reservation/request`, `/v1/reservation/claim`, and
 `/v1/reservation/cancel`. Reservation declare requires non-empty `purpose` and non-empty
 `files_planned`; empty arrays and empty or normalized-empty paths fail with
-`missing_scope`. Reservation request requires non-empty `purpose` and a non-empty
+`missing_scope`. `files_planned` is a task-level target set and may contain every
+known file or directory the task expects to mutate; clients redeclare when that
+set grows. Reservation request requires non-empty `purpose` and a non-empty
 `path`; empty or normalized-empty request paths fail with `missing_scope`.
 Reservation claim clients provide a `wait_id` only; they must not provide a purpose
 because the server uses the stored reservation purpose.
@@ -205,9 +207,10 @@ from `/v1/authorize` does not queue `rename_file` or `move_file`, because those
 actions affect multiple paths and need the target all-or-nothing scheduler.
 
 Native edit tools with hook-visible targets, such as Codex `apply_patch`,
-`Edit`, and `Write` or OMP `edit` and `write`, expose targets to hooks. After
-exact reservation and a successful same-session file claim, hooks call
-`/v1/authorize` with the operation-specific action before allowing the edit,
+`Edit`, and `Write` or OMP `edit` and `write`, expose targets to hooks. After a
+task-level reservation covers the target and a successful same-session file
+claim is active, hooks call `/v1/authorize` with the operation-specific action
+before allowing the edit,
 including `write_file`, `delete_file`, and `move_file` with source `path` /
 `old_path` and destination `new_path`. PreToolUse authorization sends current
 `base_observations` for each affected target when the hook can read the
@@ -310,7 +313,7 @@ MCP/CLI flows then explicitly claim with `state_reservation_claim` or
 `stateful reservation claim --wait-id <id>`; claim uses the stored reservation
 purpose and clients do not provide a claim purpose. Hook and sandbox
 authorization sources may lazy-claim the claimable reservation at the retried
-write boundary. Claiming creates write-authorizing reservation and active
+write boundary. Claiming creates active reservation scope and active
 same-session claims. The default claimable reservation TTL is 120 seconds; the
 default claim TTL is 300 seconds and is refreshed by heartbeat.
 
@@ -670,7 +673,7 @@ Implemented v1 behavior must have tests for:
 - prompt renderer golden output for shipped store-backed rendering
 - heartbeat refresh of activities, capped active reservation TTL, and active claims
   still covered by active reservation
-- background and lazy expiration of stale claims, write-authorizing reservations,
+- background and lazy expiration of stale claims, active reservations,
   and claimable reservations, including FIFO waiter promotion after stale reservation expiry
 - missing purpose and empty `files_planned` rejection
 - SQLite event append plus materialized-view transaction behavior

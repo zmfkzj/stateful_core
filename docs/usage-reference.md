@@ -274,10 +274,7 @@ The v1 authorization API supports:
 - `rename_file`
 - `move_file`
 
-File reservation authorizes writes only to the exact file. Directory reservation authorizes
-only `write_directory` for the exact directory resource. File writes, deletes,
-renames, and moves require exact file reservations for the affected paths. Directory
-reservation does not authorize them.
+Task-level reservation authorizes writes only when its file set includes the exact file or directory resource. Directory scope authorizes only `write_directory` for the exact directory resource. File writes, deletes, renames, and moves require exact file scopes for the affected paths; directory scope does not authorize them.
 
 Writes without matching active reservation are denied. Active claims held by another
 session block conflicting writes. A blocked writer can queue with
@@ -286,7 +283,7 @@ payload carry the stored request purpose, and the session with the claimable
 reservation must reread the target.
 
 Repo file edits should use native edit tools with hook-visible targets after
-exact reservation declaration and a successful same-session file claim. Hooks extract
+task-level reservation covers the target and a successful same-session file claim. Hooks extract
 the native tool target, call `/v1/authorize` with the operation-specific action,
 allow the edit only after an allow decision, and release the authorizing claim
 after the completed write transaction.
@@ -353,7 +350,7 @@ names:
 
 `state_file_write` / `state.file.write` and `state_bash_write` /
 `state.bash.write` were removed. Use native edit tools with hook-visible targets
-for file edits after exact reservation and claim, and use `stateful sandbox run --fs
+for file edits after task-level reservation and exact claim, and use `stateful sandbox run --fs
 write-targets ...` for command-shaped writes.
 
 The `/v1/authorize` endpoint and the reservation declare/request/claim/cancel
