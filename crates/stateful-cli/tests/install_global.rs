@@ -232,8 +232,12 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("stream: \"stdout\""));
     assert!(extension.contains("collapsible: true"));
     assert!(extension.contains("collapseShortcut: \"Ctrl+O\""));
+    assert!(extension.contains("function parseSandboxRunOutput(rawStdout)"));
+    assert!(extension.contains("const parsed = JSON.parse(text)"));
     assert!(extension.contains("stdout = truncateSandboxToolText(stdout + chunk, label)"));
-    assert!(extension.contains("onStdout(chunk)"));
+    assert!(extension.contains("onStdout(commandStdout)"));
+    assert!(!extension.contains("onStdout(chunk)"));
+    assert!(extension.contains("result.details.sandboxRunOutput = sandboxRunOutput"));
     assert!(extension.contains("stderr = truncateSandboxToolText(stderr + chunk, label)"));
     assert!(
         extension.contains("function startSandboxBackgroundTool(pi, params, args, ctx, label)")
