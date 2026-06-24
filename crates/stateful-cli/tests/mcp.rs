@@ -2136,7 +2136,7 @@ fn mcp_lease_acquire_defaults_to_stateful_session_bound_file_over_legacy() {
           "params":{
             "name":"state_claim_acquire",
             "arguments":{
-              "path":"src/auth.ts"
+              "paths":["src/auth.ts", "src/session.ts"]
             }
           }
         }"#,
@@ -2149,7 +2149,10 @@ fn mcp_lease_acquire_defaults_to_stateful_session_bound_file_over_legacy() {
     let body = request_json_body(&request);
     assert_eq!(body["session_id"], "session-a");
     assert_eq!(body["workspace_id"], "workspace-a");
-    assert_eq!(body["path"], "src/auth.ts");
+    assert_eq!(
+        body["paths"],
+        serde_json::json!(["src/auth.ts", "src/session.ts"])
+    );
     let canonical_repo_root = repo_root
         .canonicalize()
         .expect("repo root should canonicalize");

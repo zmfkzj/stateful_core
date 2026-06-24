@@ -384,20 +384,36 @@ fn reservation_cancel_descriptor_exposes_required_input_schema() {
 }
 
 #[test]
-fn lease_descriptors_expose_path_only_schema() {
-    for name in ["state_claim_acquire", "state_claim_release"] {
-        let tool = descriptor(name);
+fn lease_descriptors_expose_batch_acquire_and_path_release_schemas() {
+    let acquire = descriptor("state_claim_acquire");
 
-        assert_eq!(tool.input_schema["type"], "object");
-        assert_injected_session_fields_are_hidden(&tool.input_schema);
-        assert_eq!(tool.input_schema["properties"]["path"]["type"], "string");
-        assert_eq!(
-            tool.input_schema["required"],
-            serde_json::json!(["path"]),
-            "{name} required"
-        );
-        assert_eq!(tool.input_schema["additionalProperties"], false);
-    }
+    assert_eq!(acquire.input_schema["type"], "object");
+    assert_injected_session_fields_are_hidden(&acquire.input_schema);
+    assert_eq!(acquire.input_schema["properties"]["paths"]["type"], "array");
+    assert_eq!(acquire.input_schema["properties"]["paths"]["minItems"], 1);
+    assert_eq!(
+        acquire.input_schema["properties"]["paths"]["items"]["type"],
+        "string"
+    );
+    assert_eq!(
+        acquire.input_schema["properties"]["paths"]["items"]["minLength"],
+        1
+    );
+    assert_eq!(
+        acquire.input_schema["required"],
+        serde_json::json!(["paths"])
+    );
+    assert_eq!(acquire.input_schema["additionalProperties"], false);
+
+    let release = descriptor("state_claim_release");
+    assert_eq!(release.input_schema["type"], "object");
+    assert_injected_session_fields_are_hidden(&release.input_schema);
+    assert_eq!(release.input_schema["properties"]["path"]["type"], "string");
+    assert_eq!(
+        release.input_schema["required"],
+        serde_json::json!(["path"])
+    );
+    assert_eq!(release.input_schema["additionalProperties"], false);
 
     let release = descriptor("state_claim_release");
     assert!(

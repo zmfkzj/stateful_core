@@ -36,7 +36,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     (
         "state_claim_acquire",
         "state.claim.acquire",
-        "Acquire a live write-authorizing claim on a repo file or directory resource.",
+        "Acquire live write-authorizing claims on repo file or directory resources.",
     ),
     (
         "state_claim_release",
@@ -181,9 +181,16 @@ fn input_schema_for(protocol_name: &str) -> Value {
         "state.reservation.cancel" => {
             object_schema([("request_id", string_schema())], ["request_id"])
         }
-        "state.claim.acquire" | "state.claim.release" => {
-            object_schema([("path", string_schema())], ["path"])
-        }
+        "state.claim.acquire" => object_schema(
+            [(
+                "paths",
+                non_empty_string_array_schema_with_description(
+                    "Repo-relative file or directory scopes to claim in one batch.",
+                ),
+            )],
+            ["paths"],
+        ),
+        "state.claim.release" => object_schema([("path", string_schema())], ["path"]),
         "state.conflicts.check" => object_schema(
             [
                 (

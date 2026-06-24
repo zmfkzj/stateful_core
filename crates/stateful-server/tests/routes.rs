@@ -278,6 +278,63 @@ async fn lease_acquire_returns_already_held_for_duplicate_same_session() {
 }
 
 #[tokio::test]
+async fn lease_acquire_accepts_batch_paths() {
+    let app = build_router(ServerConfig::new("secret-token"));
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/reservation/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "Acquire claims for a batch edit.",
+                "files_planned": ["src/auth.ts", "src/session.ts"]
+            }),
+        ))
+        .await
+        .expect("reservation declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "paths": ["src/auth.ts", "src/session.ts"]
+            }),
+        ))
+        .await
+        .expect("batch claim acquire should complete");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["claim_state"], "acquired");
+    assert_eq!(json["acquired"], 2);
+    assert_eq!(json["already_held"], 0);
+    assert_eq!(
+        json["paths"],
+        serde_json::json!(["src/auth.ts", "src/session.ts"])
+    );
+
+    let current = app
+        .oneshot(authorized_get("/v1/current?resource=src/auth.ts"))
+        .await
+        .expect("current request should complete");
+    assert_eq!(current.status(), StatusCode::OK);
+    let current = response_json(current, 4096).await;
+    assert!(current["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["kind"] == "claim"
+                && item["resource"] == "src/auth.ts"
+                && item["session_id"] == "s1"
+        })
+    }));
+}
+
+#[tokio::test]
 async fn lease_release_rejects_missing_same_session_lease() {
     let app = build_router(ServerConfig::new("secret-token"));
 

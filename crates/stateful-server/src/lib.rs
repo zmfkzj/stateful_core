@@ -23,8 +23,8 @@ use stateful_core::{
     normalized_relative_path_is_empty, render_prompt_text,
 };
 use stateful_store::{
-    CurrentStateIdentityFilter, Event, NotificationRecord, OutboxEntry, Store, StoreError,
-    WaitRecord,
+    ClaimBatchAcquireResult, CurrentStateIdentityFilter, Event, NotificationRecord, OutboxEntry,
+    Store, StoreError, WaitRecord,
 };
 use std::{
     collections::VecDeque,
@@ -594,6 +594,45 @@ fn lease_already_held_response() -> (StatusCode, Json<Value>) {
     )
 }
 
+fn batch_acquire_success_response(success: BatchAcquireSuccess) -> (StatusCode, Json<Value>) {
+    let claim_state = if success.result.acquired == 0 {
+        "already_held"
+    } else if success.result.already_held == 0 {
+        "acquired"
+    } else {
+        "partially_already_held"
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "claim_state": claim_state,
+            "paths": success.paths,
+            "acquired": success.result.acquired,
+            "already_held": success.result.already_held
+        })),
+    )
+}
+
+fn first_claimable_reservation(
+    store: &Store,
+    session_id: &str,
+    workspace_id: &str,
+    paths: &[String],
+) -> Result<Option<WaitRecord>, StoreError> {
+    for path in paths {
+        let reservation = if path.ends_with('/') {
+            store.active_reservation_for_directory_by_session(workspace_id, path, session_id)?
+        } else {
+            store.active_reservation_for_path_by_session(workspace_id, path, session_id)?
+        };
+        if reservation.is_some() {
+            return Ok(reservation);
+        }
+    }
+    Ok(None)
+}
+
 fn reservation_claim_required_response(reservation: WaitRecord) -> (StatusCode, Json<Value>) {
     (
         StatusCode::CONFLICT,
@@ -672,7 +711,7 @@ fn require_purpose(purpose: String) -> Result<String, (StatusCode, Json<Value>)>
 async fn lease_acquire(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(input): Json<LeaseRequest>,
+    Json(input): Json<LeaseAcquireRequest>,
 ) -> (StatusCode, Json<Value>) {
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
@@ -680,52 +719,110 @@ async fn lease_acquire(
 
     let result = match config.store.lock() {
         Ok(store) => {
+            let paths = match input.paths() {
+                Ok(paths) => paths,
+                Err(response) => return response,
+            };
             let session_id = input.session_id;
             let workspace_id = input.workspace_id;
-            let path = input.path;
-            let observation = match input.root.as_deref().filter(|root| !root.is_empty()) {
-                Some(root) => match claim_observation_for_path(root, &path) {
-                    Ok(observation) => Some(observation),
-                    Err(error) => return status_response(Err(error)),
-                },
-                None => None,
-            };
-            match store.acquire_claim_with_observation_and_event(
-                &session_id,
-                &workspace_id,
-                &path,
-                observation,
-            ) {
-                Ok(()) => Ok(None),
-                Err(StoreError::ClaimConflict) => {
-                    let reservation = if path.ends_with('/') {
-                        store.active_reservation_for_directory_by_session(
-                            &workspace_id,
-                            &path,
-                            &session_id,
-                        )
-                    } else {
-                        store.active_reservation_for_path_by_session(
-                            &workspace_id,
-                            &path,
-                            &session_id,
-                        )
-                    };
-                    match reservation {
-                        Ok(Some(reservation)) => Ok(Some(reservation)),
-                        Ok(None) => Err(StoreError::ClaimConflict),
-                        Err(error) => Err(error),
+            if paths.len() == 1 {
+                let path = paths[0].clone();
+                let observation = match input.root.as_deref().filter(|root| !root.is_empty()) {
+                    Some(root) => match claim_observation_for_path(root, &path) {
+                        Ok(observation) => Some(observation),
+                        Err(error) => return status_response(Err(error)),
+                    },
+                    None => None,
+                };
+                match store.acquire_claim_with_observation_and_event(
+                    &session_id,
+                    &workspace_id,
+                    &path,
+                    observation,
+                ) {
+                    Ok(()) => Ok(LeaseAcquireOutcome::Acquired),
+                    Err(StoreError::ClaimConflict) => {
+                        let reservation = if path.ends_with('/') {
+                            store.active_reservation_for_directory_by_session(
+                                &workspace_id,
+                                &path,
+                                &session_id,
+                            )
+                        } else {
+                            store.active_reservation_for_path_by_session(
+                                &workspace_id,
+                                &path,
+                                &session_id,
+                            )
+                        };
+                        match reservation {
+                            Ok(Some(reservation)) => {
+                                Ok(LeaseAcquireOutcome::Reservation(reservation))
+                            }
+                            Ok(None) => Err(StoreError::ClaimConflict),
+                            Err(error) => Err(error),
+                        }
                     }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
+            } else {
+                let claims =
+                    match input
+                        .root
+                        .as_deref()
+                        .filter(|root| !root.is_empty())
+                        .map(|root| {
+                            paths
+                                .iter()
+                                .map(|path| {
+                                    claim_observation_for_path(root, path)
+                                        .map(|observation| (path.clone(), Some(observation)))
+                                })
+                                .collect::<Result<Vec<_>, _>>()
+                        }) {
+                        Some(Ok(claims)) => claims,
+                        Some(Err(error)) => return status_response(Err(error)),
+                        None => paths
+                            .iter()
+                            .map(|path| (path.clone(), None))
+                            .collect::<Vec<_>>(),
+                    };
+                match store.acquire_claims_with_observations_and_events(
+                    &session_id,
+                    &workspace_id,
+                    claims,
+                ) {
+                    Ok(result) => Ok(LeaseAcquireOutcome::Batch(BatchAcquireSuccess {
+                        paths,
+                        result,
+                    })),
+                    Err(StoreError::ClaimConflict) => {
+                        match first_claimable_reservation(
+                            &store,
+                            &session_id,
+                            &workspace_id,
+                            &paths,
+                        ) {
+                            Ok(Some(reservation)) => {
+                                Ok(LeaseAcquireOutcome::Reservation(reservation))
+                            }
+                            Ok(None) => Err(StoreError::ClaimConflict),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
             }
         }
         Err(_) => return status_response(Err("store lock poisoned".to_string())),
     };
 
     match result {
-        Ok(Some(reservation)) => reservation_claim_required_response(reservation),
-        Ok(None) => status_response(Ok(())),
+        Ok(LeaseAcquireOutcome::Acquired) => status_response(Ok(())),
+        Ok(LeaseAcquireOutcome::Reservation(reservation)) => {
+            reservation_claim_required_response(reservation)
+        }
+        Ok(LeaseAcquireOutcome::Batch(success)) => batch_acquire_success_response(success),
         Err(StoreError::MissingPurpose) => missing_purpose_response(),
         Err(StoreError::MissingReservation) => missing_reservation_response(),
         Err(StoreError::InvalidClaimPath(path)) => invalid_claim_path_response(path),
@@ -1700,6 +1797,40 @@ struct SessionRequest {
     workspace_id: String,
     #[serde(flatten)]
     identity: WorkspaceIdentityRequest,
+}
+
+enum LeaseAcquireOutcome {
+    Acquired,
+    Reservation(WaitRecord),
+    Batch(BatchAcquireSuccess),
+}
+
+struct BatchAcquireSuccess {
+    paths: Vec<String>,
+    result: ClaimBatchAcquireResult,
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaseAcquireRequest {
+    session_id: String,
+    workspace_id: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    root: Option<String>,
+}
+
+impl LeaseAcquireRequest {
+    fn paths(&self) -> Result<Vec<String>, (StatusCode, Json<Value>)> {
+        let mut paths = Vec::new();
+        if let Some(path) = &self.path {
+            paths.push(path.clone());
+        }
+        paths.extend(self.paths.iter().cloned());
+        require_files_planned(paths)
+    }
 }
 
 #[derive(Debug, Deserialize)]

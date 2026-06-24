@@ -175,13 +175,15 @@ instead of routing `stateful reservation declare` or `stateful mcp call` through
 shell. The usual write flow is:
 
 ```text
-read current state -> declare task reservation with known file set -> acquire exact claim -> reread target -> write
+read current state -> declare task reservation with known file set -> acquire exact claims for reserved paths -> reread targets -> write
 ```
 
 Reservation and claim are separate on purpose. A reservation groups the task's
 known file and directory scopes under one purpose, and can be expanded when the
-task discovers another target. A claim declares active ownership of one scoped
-resource and expires when the session stops being fresh.
+task discovers another target. MCP claim acquisition uses `paths: string[]` so
+callers can acquire a batch from that reservation in one request. Each resulting
+claim still owns one exact file or directory resource and expires when the
+session stops being fresh.
 
 When another active claim blocks a write, the writer can queue for that resource.
 When the resource is released or expires, the server reserves it for the next
@@ -220,7 +222,7 @@ LAN sharing, generated-file, and release notes.
 ```text
 observe session or tool activity
 -> register session and declare reservation
--> acquire or refresh advisory claim
+-> acquire or refresh exact advisory claims for reserved paths
 -> authorize, queue, warn, or block coordination-sensitive actions
 -> record activity and heartbeat
 -> finalize activity and release claims

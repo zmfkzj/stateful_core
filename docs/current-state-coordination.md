@@ -423,6 +423,13 @@ normalized-empty request paths are rejected with `missing_scope`.
 queue. `state_reservation_claim` takes a `wait_id` only and uses the stored
 reservation purpose; callers must not send a claim purpose.
 
+`state_claim_acquire` accepts `paths: string[]` for batch acquisition from
+active reservation scope. Each entry still becomes a claim on one exact file or
+directory resource; directory claims authorize only exact `write_directory`
+resources, not child file writes. Legacy server requests with `path` remain
+accepted for compatibility, while `state_claim_release` still accepts one
+`path`.
+
 Hooks should call the same state server API as MCP tools so policy remains
 centralized. Native edit tools with hook-visible targets are the repo file edit
 path after reservation and claim; sandbox-run remains the Bash wrapper for

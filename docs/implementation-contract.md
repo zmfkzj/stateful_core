@@ -180,6 +180,12 @@ set grows. Reservation request requires non-empty `purpose` and a non-empty
 Reservation claim clients provide a `wait_id` only; they must not provide a purpose
 because the server uses the stored reservation purpose.
 
+`state_claim_acquire` accepts `paths: string[]` and creates one active exact file
+or directory claim per path, after normalizing each entry against active
+reservation scope. Legacy server requests with a single `path` remain accepted
+for compatibility. `state_claim_release` still accepts `path: string` and
+releases one exact resource claim per call.
+
 ## Authorization Input
 
 ```text

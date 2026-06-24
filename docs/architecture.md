@@ -331,6 +331,12 @@ also requires non-empty `files_planned`; empty arrays and empty or normalized-em
 paths fail with `missing_scope`. Reservation request also requires a non-empty
 `path`; empty or normalized-empty request paths fail with `missing_scope`.
 
+Claim acquisition accepts `paths: string[]` so MCP clients can claim a declared
+batch in one request. Each path still creates an exact file or directory claim;
+directory claims do not authorize child file actions. The server still accepts
+legacy claim-acquire requests with `path` for compatibility, and
+`state_claim_release` remains single-resource with `path`.
+
 ## Tool Classification
 
 V1 enforcement is strict about write target extraction:

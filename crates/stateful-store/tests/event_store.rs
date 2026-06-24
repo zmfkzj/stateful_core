@@ -1466,6 +1466,83 @@ fn acquire_claim_reports_already_held_for_same_session_duplicate_exact_file_leas
 }
 
 #[test]
+fn acquire_claims_batch_is_atomic_and_idempotent_for_same_session() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    store
+        .append(Event::reservation_declared(
+            "s1",
+            "w1",
+            "Acquire claims for a batch edit.",
+            ["src/auth.ts", "src/session.ts"],
+        ))
+        .expect("batch reservation should append");
+
+    let result = store
+        .acquire_claims_with_observations_and_events(
+            "s1",
+            "w1",
+            vec![
+                ("src/auth.ts".to_string(), None),
+                ("src/session.ts".to_string(), None),
+            ],
+        )
+        .expect("batch claims should acquire");
+
+    assert_eq!(result.acquired, 2);
+    assert_eq!(result.already_held, 0);
+    assert_eq!(store.lease_count().expect("claim count should load"), 2);
+
+    let result = store
+        .acquire_claims_with_observations_and_events(
+            "s1",
+            "w1",
+            vec![
+                ("src/auth.ts".to_string(), None),
+                ("src/session.ts".to_string(), None),
+            ],
+        )
+        .expect("already-held batch claims should be idempotent");
+
+    assert_eq!(result.acquired, 0);
+    assert_eq!(result.already_held, 2);
+    assert_eq!(store.lease_count().expect("claim count should load"), 2);
+}
+
+#[test]
+fn acquire_claims_batch_rolls_back_when_one_path_conflicts() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
+    store
+        .append(Event::reservation_declared(
+            "s2",
+            "w1",
+            "Acquire claims for a competing batch edit.",
+            ["src/session.ts", "src/auth.ts"],
+        ))
+        .expect("batch reservation should append");
+
+    let error = store
+        .acquire_claims_with_observations_and_events(
+            "s2",
+            "w1",
+            vec![
+                ("src/session.ts".to_string(), None),
+                ("src/auth.ts".to_string(), None),
+            ],
+        )
+        .expect_err("conflicting batch claim should fail");
+
+    assert!(matches!(error, StoreError::ClaimConflict));
+    assert_eq!(store.lease_count().expect("claim count should load"), 1);
+    assert_eq!(
+        store
+            .active_claim_owner("w1", "src/session.ts")
+            .expect("session claim owner should load"),
+        None
+    );
+}
+
+#[test]
 fn acquire_directory_lease_rejects_existing_child_file_claim_conflict() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 

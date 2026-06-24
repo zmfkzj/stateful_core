@@ -185,6 +185,8 @@ Notes:
 - Declarations add to the session's active scope in that workspace.
 - Re-declaring the same path updates the purpose used for future claim
   acquisition.
+- MCP `state_claim_acquire` uses `paths: string[]` to acquire one or more exact
+  file or directory resources from active reservation scope.
 - `request` creates or returns an idempotent queued or claimable (`reserved`)
   write request.
 - `claim` uses the stored reservation purpose; clients do not pass a new claim
@@ -347,6 +349,12 @@ names:
 - `state_reconcile_ack` / `state.reconcile.ack`
 - `state_notifications_poll` / `state.notifications.poll`
 - `state_resume_next` / `state.resume.next`
+
+`state_claim_acquire` takes `paths: string[]`; each path must match active exact
+file or directory reservation scope, and the server creates one exact resource
+claim per entry. Legacy server requests with `path` are still accepted for
+compatibility. `state_claim_release` remains single-resource and takes
+`path: string`.
 
 `state_file_write` / `state.file.write` and `state_bash_write` /
 `state.bash.write` were removed. Use native edit tools with hook-visible targets
