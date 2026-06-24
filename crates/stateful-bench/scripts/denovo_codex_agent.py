@@ -64,6 +64,14 @@ OMP_AGENT_DOCKER_ENV_ALLOWLIST = {
     "STATEFUL_SERVER_URL",
 }
 OMP_AGENT_DOCKER_ENV_PREFIXES = ("OMP_",)
+OMP_AGENT_DOCKER_ARG_VALUE_ENV = {
+    "HOME",
+    "PI_CODING_AGENT_DIR",
+    "STATEFUL_HOME",
+    "STATEFUL_SERVER_URL",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+}
 DIFF_EXCLUDED_PATHS = (
     ".codex",
     ".codex/**",
@@ -782,7 +790,10 @@ def docker_omp_command_for_profile(
         f"type=bind,source={home.resolve()},target={OMP_AGENT_DOCKER_HOME}",
     ]
     for key in sorted(docker_env):
-        command.extend(["--env", f"{key}={docker_env[key]}"])
+        if key in OMP_AGENT_DOCKER_ARG_VALUE_ENV:
+            command.extend(["--env", f"{key}={docker_env[key]}"])
+        else:
+            command.extend(["--env", key])
     command.append(docker_image)
     command.extend(
         omp_command_for_profile(
@@ -872,19 +883,52 @@ def prepare_omp_environment(
     runtime_omp_home: str | None = None,
     omp_bin: str | None = None,
     enable_native_subagent: bool = False,
+    agent_docker_image: str | None = None,
+    docker_bin: str = "docker",
 ) -> None:
     Path(env["PI_CODING_AGENT_DIR"]).mkdir(parents=True, exist_ok=True)
     if enable_native_subagent:
         if omp_bin is None:
             raise StatefulRepoEnableError("OMP subagent:on requires an omp binary to unpack task agents")
-        completed = runner(
-            [omp_bin, "agents", "unpack", "--force"],
-            text=True,
-            check=False,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        if agent_docker_image:
+            completed = runner(
+                [
+                    docker_bin,
+                    "run",
+                    "--rm",
+                    "--mount",
+                    f"type=bind,source={Path(env['HOME']).resolve()},target={OMP_AGENT_DOCKER_HOME}",
+                    "--env",
+                    f"HOME={OMP_AGENT_DOCKER_HOME}",
+                    "--env",
+                    f"PI_CODING_AGENT_DIR={OMP_AGENT_DOCKER_HOME}/.omp/profiles/stateful/agent",
+                    "--env",
+                    f"STATEFUL_HOME={OMP_AGENT_DOCKER_HOME}",
+                    "--env",
+                    f"XDG_CACHE_HOME={OMP_AGENT_DOCKER_HOME}/.cache",
+                    "--env",
+                    f"XDG_CONFIG_HOME={OMP_AGENT_DOCKER_HOME}/.config",
+                    agent_docker_image,
+                    omp_bin,
+                    "agents",
+                    "unpack",
+                    "--force",
+                ],
+                text=True,
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        else:
+            completed = runner(
+                [omp_bin, "agents", "unpack", "--force"],
+                text=True,
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
         if completed.returncode != 0:
             message = (completed.stderr or completed.stdout).strip()
             raise StatefulRepoEnableError(message or f"omp agents unpack exited {completed.returncode}")
@@ -1795,6 +1839,7 @@ async def run_one_instance_async(
                 runtime_omp_home=OMP_AGENT_DOCKER_HOME if args.agent_docker_image else None,
                 omp_bin=args.omp_bin,
                 enable_native_subagent=args.subagent == "on",
+                agent_docker_image=args.agent_docker_image,
             )
             if args.agent_docker_image:
                 command = docker_omp_command_for_profile(

@@ -1833,15 +1833,26 @@ print(json.dumps({{
     );
     assert!(
         env.iter()
-            .any(|value| value.as_str() == Some("OPENAI_API_KEY=sk-test"))
+            .any(|value| value.as_str() == Some("OPENAI_API_KEY"))
     );
     assert!(env.iter().any(|value| {
         value.as_str() == Some("STATEFUL_SERVER_URL=http://host.docker.internal:43873")
     }));
     assert!(
         env.iter()
+            .any(|value| value.as_str() == Some("STATEFUL_SERVER_TOKEN"))
+    );
+    assert!(
+        !env.iter()
+            .any(|value| value.as_str() == Some("OPENAI_API_KEY=sk-test"))
+    );
+    assert!(
+        !env.iter()
             .any(|value| value.as_str() == Some("STATEFUL_SERVER_TOKEN=token-123"))
     );
+    let command_text = serde_json::to_string(command).expect("command should encode");
+    assert!(!command_text.contains("sk-test"));
+    assert!(!command_text.contains("token-123"));
     assert!(
         !env.iter()
             .any(|value| value.as_str() == Some("HOME=/host/home"))
@@ -2080,6 +2091,7 @@ module.prepare_omp_environment(
     runtime_omp_home="/home/stateful",
     omp_bin="/tmp/omp",
     enable_native_subagent=True,
+    agent_docker_image="ghcr.io/stateful/omp-agent:latest",
 )
 stateful_agent = Path(stateful_env["PI_CODING_AGENT_DIR"])
 explicit_stateful_env = module.denovo_omp_environment(
@@ -2219,6 +2231,9 @@ print(json.dumps({{
     let unpack_command = output["unpack_command"]
         .as_array()
         .expect("unpack command should be captured");
+    assert!(command_contains(unpack_command, "docker"));
+    assert!(command_contains(unpack_command, "run"));
+    assert!(command_contains(unpack_command, "ghcr.io/stateful/omp-agent:latest"));
     assert!(command_contains(unpack_command, "/tmp/omp"));
     assert!(command_contains(unpack_command, "agents"));
     assert!(command_contains(unpack_command, "unpack"));
