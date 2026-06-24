@@ -2233,7 +2233,10 @@ print(json.dumps({{
         .expect("unpack command should be captured");
     assert!(command_contains(unpack_command, "docker"));
     assert!(command_contains(unpack_command, "run"));
-    assert!(command_contains(unpack_command, "ghcr.io/stateful/omp-agent:latest"));
+    assert!(command_contains(
+        unpack_command,
+        "ghcr.io/stateful/omp-agent:latest"
+    ));
     assert!(command_contains(unpack_command, "/tmp/omp"));
     assert!(command_contains(unpack_command, "agents"));
     assert!(command_contains(unpack_command, "unpack"));

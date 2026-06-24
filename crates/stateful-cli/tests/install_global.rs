@@ -256,9 +256,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("killSandboxChild(child, \"SIGTERM\")"));
     assert!(extension.contains("killSandboxChild(child, \"SIGKILL\")"));
     assert!(extension.contains("result.details.cancelled = true"));
-    assert!(
-        extension.contains("async function confirmExternalBashGrant(ctx, params, signal)")
-    );
+    assert!(extension.contains("async function confirmExternalBashGrant(ctx, params, signal)"));
     assert!(extension.contains("await Promise.race([confirmPromise, abortPromise])"));
     assert!(extension.contains(
         "async function runSandboxAwaitedTool(params, args, ctx, label, signal, onUpdate)"
