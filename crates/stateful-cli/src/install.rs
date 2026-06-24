@@ -1202,46 +1202,8 @@ fn ensure_omp_extension(mut contents: String, entry: &str) -> String {
 fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow::Result<String> {
     let mut lines: Vec<String> = contents.lines().map(ToString::to_string).collect();
 
-    ensure_omp_child_scalar(
-        &mut lines,
-        "tools",
-        "approvalMode",
-        "write",
-        update_existing,
-    )?;
-    ensure_omp_nested_child_scalar(
-        &mut lines,
-        "tools",
-        "approval",
-        "task",
-        "allow",
-        update_existing,
-    )?;
-    ensure_omp_nested_child_scalar(
-        &mut lines,
-        "tools",
-        "approval",
-        "sandbox_bash",
-        "allow",
-        update_existing,
-    )?;
-    ensure_omp_nested_child_scalar(
-        &mut lines,
-        "tools",
-        "approval",
-        "ext_ro_bash",
-        "allow",
-        update_existing,
-    )?;
-    ensure_omp_nested_child_scalar(
-        &mut lines,
-        "tools",
-        "approval",
-        "ext_rw_bash",
-        "allow",
-        update_existing,
-    )?;
-    remove_omp_nested_child_scalar(&mut lines, "tools", "approval", "external_bash")?;
+    ensure_omp_child_scalar(&mut lines, "tools", "approvalMode", "yolo", update_existing)?;
+    remove_omp_child_mapping(&mut lines, "tools", "approval")?;
     ensure_omp_child_scalar(&mut lines, "eval", "py", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "js", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "rb", "false", update_existing)?;
@@ -1270,35 +1232,22 @@ fn ensure_omp_child_scalar(
     Ok(())
 }
 
-fn ensure_omp_nested_child_scalar(
+fn remove_omp_child_mapping(
     lines: &mut Vec<String>,
     section: &str,
     child: &str,
-    key: &str,
-    value: &str,
-    update_existing: bool,
 ) -> anyhow::Result<()> {
-    let (child_offset, child_end) = ensure_omp_child_mapping(lines, section, child)?;
-    if let Some(offset) = find_omp_yaml_key(lines, child_offset + 1, child_end, 4, key) {
-        if update_existing {
-            lines[offset] = format!("    {key}: {value}");
+    let Some(section_offset) = find_omp_top_level_mapping(lines, section)? else {
+        return Ok(());
+    };
+    let section_end = find_omp_yaml_mapping_end(lines, section_offset, 0, lines.len());
+    if let Some(child_offset) = find_omp_yaml_key(lines, section_offset + 1, section_end, 2, child)
+    {
+        if !omp_yaml_key_is_block_mapping(&lines[child_offset], 2, child) {
+            anyhow::bail!("OMP config `{section}.{child}` must be a block mapping");
         }
-    } else {
-        lines.insert(child_end, format!("    {key}: {value}"));
-    }
-
-    Ok(())
-}
-
-fn remove_omp_nested_child_scalar(
-    lines: &mut Vec<String>,
-    section: &str,
-    child: &str,
-    key: &str,
-) -> anyhow::Result<()> {
-    let (child_offset, child_end) = ensure_omp_child_mapping(lines, section, child)?;
-    if let Some(offset) = find_omp_yaml_key(lines, child_offset + 1, child_end, 4, key) {
-        lines.remove(offset);
+        let child_end = find_omp_yaml_mapping_end(lines, child_offset, 2, section_end);
+        lines.drain(child_offset..child_end);
     }
 
     Ok(())
@@ -1316,24 +1265,6 @@ fn ensure_omp_top_level_mapping(
     lines.push(format!("{section}:"));
     let offset = lines.len() - 1;
     Ok((offset, lines.len()))
-}
-
-fn ensure_omp_child_mapping(
-    lines: &mut Vec<String>,
-    section: &str,
-    child: &str,
-) -> anyhow::Result<(usize, usize)> {
-    let (section_offset, section_end) = ensure_omp_top_level_mapping(lines, section)?;
-    if let Some(offset) = find_omp_yaml_key(lines, section_offset + 1, section_end, 2, child) {
-        if !omp_yaml_key_is_block_mapping(&lines[offset], 2, child) {
-            anyhow::bail!("OMP config `{section}.{child}` must be a block mapping");
-        }
-        let end = find_omp_yaml_mapping_end(lines, offset, 2, section_end);
-        return Ok((offset, end));
-    }
-
-    lines.insert(section_end, format!("  {child}:"));
-    Ok((section_end, section_end + 1))
 }
 
 fn find_omp_top_level_mapping(lines: &[String], section: &str) -> anyhow::Result<Option<usize>> {
@@ -1495,12 +1426,17 @@ function reservationMessage(notification) {{
   const target = payload.relative_path || "the reserved target";
   const waitId = payload.wait_id || "unknown";
   const action = payload.action || "write";
-  return [
+  const purpose = payload.purpose;
+  const lines = [
     "Stateful reservation is ready for " + target + ".",
     "wait_id: " + waitId,
     "action: " + action,
-    "Next: reread the target, then call state_intent_claim with this wait_id before retrying the write.",
-  ].join("\n");
+  ];
+  if (typeof purpose === "string" && purpose.trim().length > 0) {{
+    lines.push("purpose: " + purpose.trim());
+  }}
+  lines.push("Next: reread the target, then call state_intent_claim with this wait_id before retrying the write.");
+  return lines.join("\n");
 }}
 
 function deliverReservationNotification(pi, notification) {{
@@ -1550,6 +1486,7 @@ async function checkReservationResume(pi, stream, signal) {{
           wait_id: body.reservation.wait_id,
           relative_path: body.reservation.relative_path,
           action: body.reservation.action,
+          purpose: body.reservation.purpose,
           reservation_expires_at: body.reservation.reservation_expires_at,
         }},
         required_next_action: body.required_next_action,
@@ -1756,10 +1693,16 @@ function externalBashApprovalMessage(params, args) {{
 }}
 
 function sandboxToolResultText(exitCode, stdout, stderr, error) {{
-  const sections = ["exit_code: " + exitCode];
-  if (stdout) sections.push("stdout:\n" + stdout);
-  if (stderr) sections.push("stderr:\n" + stderr);
-  if (error) sections.push("error:\n" + error);
+  if (!stderr && !error) {{
+    return stdout || "";
+  }}
+  const sections = [];
+  if (stdout) sections.push(stdout);
+  const diagnostics = [];
+  diagnostics.push("exit_code: " + exitCode);
+  if (stderr) diagnostics.push("stderr:\n" + stderr);
+  if (error) diagnostics.push("error:\n" + error);
+  sections.push(diagnostics.join("\n\n"));
   return sections.join("\n\n");
 }}
 
@@ -1771,32 +1714,25 @@ function sandboxToolError(error) {{
   }};
 }}
 
-function emitSandboxToolOutput(onUpdate, stream, chunk) {{
-  if (typeof onUpdate !== "function" || !chunk) {{
-    return;
-  }}
-  const update = {{
-    content: [{{ type: "text", text: chunk }}],
-    details: {{ stream }},
-  }};
-  const emitRawFallback = () => {{
-    try {{
-      const fallback = onUpdate(String(chunk));
-      if (fallback && typeof fallback.catch === "function") {{
-        fallback.catch(() => {{}});
-      }}
-    }} catch (_) {{}}
-  }};
-  try {{
-    const result = onUpdate(update);
-    if (result && typeof result.catch === "function") {{
-      result.catch(emitRawFallback);
-    }}
-  }} catch (_) {{
-    emitRawFallback();
-  }}
+function sandboxBackgroundToolOutputState(result) {{
+  return result.isError ? "failed" : "completed";
 }}
 
+function parseSandboxRunOutput(rawStdout) {{
+  const text = String(rawStdout || "").trim();
+  if (!text || !text.startsWith("{{")) {{
+    return null;
+  }}
+  try {{
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || !("stdout" in parsed) || !("stderr" in parsed)) {{
+      return null;
+    }}
+    return parsed;
+  }} catch (_) {{
+    return null;
+  }}
+}}
 
 function buildSandboxToolResult(params, args, exitCode, stdout, stderr, error) {{
   const text = sandboxToolResultText(exitCode, stdout, stderr, error);
@@ -1818,10 +1754,58 @@ function buildSandboxBackgroundStartResult(jobId, label) {{
   return {{
     content: [{{ type: "text", text: [
       "Background job " + jobId + " started: " + label,
-      "Result will be delivered automatically when complete.",
-      "Continue with another task while this command runs unless its output is blocking.",
+      "The command is running outside the tool call so OMP can continue.",
+      "Stdout will stream as collapsible output (Ctrl+O); stderr and status stay in details unless the command fails.",
     ].join("\n") }}],
     details: {{ async: {{ state: "running", jobId, type: "bash" }} }},
+  }};
+}}
+
+function deliverSandboxStdoutChunk(pi, jobId, label, chunk) {{
+  if (!chunk || typeof pi?.sendMessage !== "function") {{
+    return;
+  }}
+  try {{
+    pi.sendMessage(
+      {{
+        customType: "stateful_sandbox_bash_stdout",
+        content: chunk,
+        display: true,
+        details: {{
+          async: {{ state: "streaming", jobId, type: "bash" }},
+          stream: "stdout",
+          label,
+          collapsible: true,
+          collapseShortcut: "Ctrl+O",
+        }},
+      }},
+      {{ triggerTurn: false }}
+    );
+  }} catch (_) {{}}
+}}
+
+function createSandboxStdoutStreamer(pi, jobId, label) {{
+  let buffer = "";
+  let timer = null;
+  const flush = () => {{
+    if (timer) {{
+      clearTimeout(timer);
+      timer = null;
+    }}
+    if (!buffer) return;
+    const chunk = buffer;
+    buffer = "";
+    deliverSandboxStdoutChunk(pi, jobId, label, chunk);
+  }};
+  return {{
+    push(chunk) {{
+      if (!chunk) return;
+      buffer = truncateSandboxToolText(buffer + chunk, label);
+      if (!timer) {{
+        timer = setTimeout(flush, 200);
+      }}
+    }},
+    flush,
   }};
 }}
 
@@ -1829,12 +1813,16 @@ function deliverSandboxBackgroundResult(pi, jobId, label, result) {{
   if (typeof pi?.sendMessage !== "function") {{
     return;
   }}
-  const state = result.isError ? "failed" : "completed";
+  const state = sandboxBackgroundToolOutputState(result);
+  const diagnostics = [];
+  if (result.isError) {{
+    if (result.details?.stderr) diagnostics.push("stderr:\n" + result.details.stderr);
+    if (result.details?.error) diagnostics.push("error:\n" + result.details.error);
+  }}
   const text = [
     "Background job " + jobId + " " + state + ": " + label,
-    "",
-    result.content?.find((block) => block?.type === "text")?.text || "(no output)",
-  ].join("\n");
+    ...diagnostics,
+  ].filter(Boolean).join("\n");
   try {{
     pi.sendMessage(
       {{
@@ -1848,7 +1836,7 @@ function deliverSandboxBackgroundResult(pi, jobId, label, result) {{
   }} catch (_) {{}}
 }}
 
-function runSandboxToolProcess(params, args, signal, ctx, label, onUpdate, onComplete) {{
+function runSandboxToolProcess(params, args, ctx, label, onStdout, onComplete) {{
   let stdout = "";
   let stderr = "";
   let processError = "";
@@ -1856,7 +1844,17 @@ function runSandboxToolProcess(params, args, signal, ctx, label, onUpdate, onCom
   const finish = (exitCode, error) => {{
     if (settled) return;
     settled = true;
-    const result = buildSandboxToolResult(params, args, exitCode, stdout, stderr, error);
+    const sandboxRunOutput = parseSandboxRunOutput(stdout);
+    const commandStdout = sandboxRunOutput ? String(sandboxRunOutput.stdout || "") : stdout;
+    const commandStderr = sandboxRunOutput ? String(sandboxRunOutput.stderr || "") || stderr : stderr;
+    const commandExitCode = typeof sandboxRunOutput?.exit_code === "number" ? sandboxRunOutput.exit_code : exitCode;
+    if (commandStdout) {{
+      onStdout(commandStdout);
+    }}
+    const result = buildSandboxToolResult(params, args, commandExitCode, commandStdout, commandStderr, error);
+    if (sandboxRunOutput) {{
+      result.details.sandboxRunOutput = sandboxRunOutput;
+    }}
     onComplete(result);
   }};
   let child;
@@ -1864,7 +1862,7 @@ function runSandboxToolProcess(params, args, signal, ctx, label, onUpdate, onCom
     child = spawn(STATEFUL, args, {{
       cwd: ctx.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      ...(signal ? {{ signal }} : {{}}),
+      detached: false,
     }});
   }} catch (error) {{
     finish(1, error instanceof Error ? error.message : String(error));
@@ -1873,12 +1871,10 @@ function runSandboxToolProcess(params, args, signal, ctx, label, onUpdate, onCom
   child.stdout?.setEncoding("utf8");
   child.stderr?.setEncoding("utf8");
   child.stdout?.on("data", (chunk) => {{
-    emitSandboxToolOutput(onUpdate, "stdout", chunk);
     stdout = truncateSandboxToolText(stdout + chunk, label);
   }});
   child.stderr?.on("data", (chunk) => {{
     stderr = truncateSandboxToolText(stderr + chunk, label);
-    emitSandboxToolOutput(onUpdate, "stderr", chunk);
   }});
   child.on("error", (error) => {{
     processError = error instanceof Error ? error.message : String(error);
@@ -1890,16 +1886,14 @@ function runSandboxToolProcess(params, args, signal, ctx, label, onUpdate, onCom
   }});
 }}
 
-function runSandboxTool(params, args, signal, ctx, label, onUpdate) {{
-  return new Promise((resolve) => {{
-    runSandboxToolProcess(params, args, signal, ctx, label, onUpdate, resolve);
-  }});
-}}
-
 function startSandboxBackgroundTool(pi, params, args, ctx, label) {{
   const jobId = nextSandboxJobId(label);
   const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
-  runSandboxToolProcess(params, args, undefined, ctx, label, undefined, (result) => {{
+  const stdoutStreamer = createSandboxStdoutStreamer(pi, jobId, commandLabel);
+  runSandboxToolProcess(params, args, ctx, label, (chunk) => {{
+    stdoutStreamer.push(chunk);
+  }}, (result) => {{
+    stdoutStreamer.flush();
     deliverSandboxBackgroundResult(pi, jobId, commandLabel, result);
   }});
   return buildSandboxBackgroundStartResult(jobId, commandLabel);
@@ -1923,7 +1917,7 @@ export default function statefulOmpExtension(pi) {{
         allow_signal: {{ type: "boolean", description: "Allow the sandboxed command to signal approved processes when the selected profile supports signaling." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Return immediately and deliver the sandbox command result automatically when complete." }},
+        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and stream stdout automatically." }},
       }},
       required: ["fs", "command"],
     }},
@@ -1934,10 +1928,7 @@ export default function statefulOmpExtension(pi) {{
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      if (params.async === true) {{
-        return startSandboxBackgroundTool(pi, params, args, ctx, "sandbox_bash");
-      }}
-      return runSandboxTool(params, args, signal, ctx, "sandbox_bash", _onUpdate);
+      return startSandboxBackgroundTool(pi, params, args, ctx, "sandbox_bash");
     }},
   }});
   pi.registerTool({{
@@ -1951,7 +1942,7 @@ export default function statefulOmpExtension(pi) {{
         command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Return immediately and deliver the external sandbox command result automatically when complete." }},
+        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and stream stdout automatically." }},
       }},
       required: ["purpose", "command"],
     }},
@@ -1962,10 +1953,7 @@ export default function statefulOmpExtension(pi) {{
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      if (params.async === true) {{
-        return startSandboxBackgroundTool(pi, params, args, ctx, "ext_ro_bash");
-      }}
-      return runSandboxTool(params, args, signal, ctx, "ext_ro_bash", _onUpdate);
+      return startSandboxBackgroundTool(pi, params, args, ctx, "ext_ro_bash");
     }},
   }});
   pi.registerTool({{
@@ -1984,7 +1972,7 @@ export default function statefulOmpExtension(pi) {{
         allow_signal: {{ type: "boolean", description: "Optionally allow the sandboxed command to signal approved external processes." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Return immediately and deliver the external sandbox command result automatically when complete." }},
+        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and stream stdout automatically." }},
       }},
       required: ["purpose", "command"],
     }},
@@ -2013,10 +2001,7 @@ export default function statefulOmpExtension(pi) {{
           details: {{ blocked: true }},
         }};
       }}
-      if (params.async === true) {{
-        return startSandboxBackgroundTool(pi, params, args, ctx, "ext_rw_bash");
-      }}
-      return runSandboxTool(params, args, signal, ctx, "ext_rw_bash", _onUpdate);
+      return startSandboxBackgroundTool(pi, params, args, ctx, "ext_rw_bash");
     }},
   }});
   pi.on("session_start", async (event, ctx) => {{

@@ -114,12 +114,14 @@ blocked -> queued -> reserved -> claimed -> active
 A conflicting writer is blocked by the active lease and can enter a FIFO wait
 queue. When the active lease is released or the owning activity finalizes, each
 eligible waiter whose requested resource no longer conflicts receives a short
-reservation in FIFO order. The reserved session must reread the target. Manual
-MCP/CLI flows then call `state_intent_claim` /
+reservation in FIFO order. The reservation notification payload and resume result
+carry the wait queue row's stored, non-empty purpose. The reserved session must
+reread the target. Manual MCP/CLI flows then call `state_intent_claim` /
 `stateful intent claim --wait-id <id>`; native edit hooks and sandbox
 `write-targets` authorization can lazy-claim the reservation when the write is
-retried. Claiming creates write-authorizing intent and the active same-session
-lease. The default reservation TTL is 120 seconds.
+retried. Claiming uses that stored reservation purpose to create
+write-authorizing intent and the active same-session lease; clients do not
+provide a claim purpose. The default reservation TTL is 120 seconds.
 
 Detailed queue states, lease expiry behavior, and promotion rules are covered
 in the state model and implementation contract docs.
@@ -206,13 +208,12 @@ Install the OMP integration when you want stateful OMP hooks, MCP, and
 generated sandbox command tools in the isolated `stateful` profile. This leaves
 the default/global OMP profile alone. The installer merges `config.yml` instead
 of replacing it and rejects invalid YAML. Its target keys are
-`tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
-`eval.js: false`, `eval.rb: false`, `eval.jl: false`,
-`tools.approval.task: allow`, `tools.approval.sandbox_bash: allow`,
-`tools.approval.ext_ro_bash: allow`, and
-`tools.approval.ext_rw_bash: allow`; without `--update`, existing values are
-preserved and only missing keys are inserted. With `--update`
-(`stateful install --agent omp --yes --update`), existing values for those keys
+`tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
+`eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
+`tools.approval` from the stateful profile because yolo mode delegates safety to
+Stateful hooks. Without `--update`, existing scalar values are preserved and
+only missing keys are inserted. With `--update`
+(`stateful install --agent omp --yes --update`), existing target scalar values
 are updated.
 It also installs `rules/stateful-required.md` and
 `skills/stateful-command-policy/SKILL.md` under that isolated agent directory:
@@ -221,10 +222,12 @@ procedure.
 Raw Bash and eval tool calls are denied by stateful hooks; use `sandbox_bash`
 for non-external `stateful sandbox run` profiles, `ext_ro_bash` for read-only
 `--fs external` purpose-and-command operations without OMP UI confirmation, and
-`ext_rw_bash` for external writes that declare write/create/dir scope and ask
-OMP UI confirmation. Generated command tools accept optional `async: true`;
-async calls return immediately with a background-job start message and deliver
-completion back into OMP when the sandboxed command exits.
+`ext_rw_bash` for external writes that declare write/create/dir scope and ask for
+OMP UI confirmation. Generated OMP `*_bash` tools start sandbox commands in
+the background, return a background-job start result immediately, stream stdout
+back into OMP as collapsible output, and keep stderr/status in details unless
+the command fails; the deprecated `async` parameter is accepted as a
+compatibility no-op.
 
 Install with:
 
@@ -354,14 +357,12 @@ installation health.
   `skills/stateful-command-policy/SKILL.md` into the OMP `stateful` profile
   agent directory (`~/.omp/profiles/stateful/agent`) and merges `config.yml`
   instead of replacing it, rejecting invalid YAML. Its target keys are
-  `tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
-  `eval.js: false`, `eval.rb: false`, `eval.jl: false`,
-  `tools.approval.task: allow`, `tools.approval.sandbox_bash: allow`,
-  `tools.approval.ext_ro_bash: allow`, and
-  `tools.approval.ext_rw_bash: allow`; without `--update`, existing values
-  are preserved and only missing OMP keys are inserted. With `--update`, existing
-  values for those keys are updated. Raw Bash and eval tool calls are denied by
-  stateful hooks.
+  `tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
+  `eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
+  `tools.approval` from the stateful profile because yolo mode delegates safety
+  to Stateful hooks. Without `--update`, existing scalar values are preserved
+  and only missing OMP keys are inserted. With `--update`, existing target scalar
+  values are updated. Raw Bash and eval tool calls are denied by stateful hooks.
 - `stateful enable [--repo <path>]`, `stateful disable`, and
   `stateful repos list` manage the repo allowlist used by global hooks.
 - `stateful tools list`, `stateful tools allow <tool>`, and
@@ -398,14 +399,16 @@ installation health.
   reservation expires requeues the same waiter instead of creating a duplicate.
   The path must be non-empty after normalization.
 - `stateful intent claim --wait-id <id>` manually claims a reserved request
-  after the session rereads the target; native edit hooks and sandbox
+  after the session rereads the target, using the stored reservation purpose;
+  clients do not pass a new claim purpose. Native edit hooks and sandbox
   `write-targets` authorization may lazy-claim a reserved request at the retry
   write boundary.
 - `stateful intent cancel --request-id <id>` cancels a queued or reserved
   request owned by the active session.
-- `stateful notifications poll` reads pending coordination notifications.
+- `stateful notifications poll` reads pending coordination notifications;
+  reservation notifications include the stored purpose in their payload.
 - `stateful resume next` reads the next reservation available to the active
-  session.
+  session, including its stored purpose.
 - `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`
   runs build or test commands with disposable artifact writes under
   `/tmp/stateful/<session>/<scratch-purpose>/`. The profile is language-independent for
@@ -417,20 +420,24 @@ installation health.
   runs command-shaped repo file writes after exact file intent and a successful
   same-session file lease for that file. Use `--write-dir <repo-dir>` only after
   exact directory intent and a same-session directory lease for that directory.
-  In OMP, invoke `write-targets` through the generated `sandbox_bash` tool;
-  optional `async: true` returns immediately and delivers completion later.
+  In OMP, invoke `write-targets` through the generated `sandbox_bash` tool; it
+  starts the sandbox command in the background, returns a background-job start
+  result immediately, streams stdout back into OMP as collapsible output, and
+  keeps stderr/status in details unless the command fails.
 - `stateful sandbox run --fs external --purpose <purpose> --command <cmd>`
   runs repo-external shell operations through the external sandbox profile.
   Purpose and command are required. Codex prompts before direct use. In OMP,
   read-only/no-write-scope external commands use `ext_ro_bash` without OMP UI
   confirmation; external writes use `ext_rw_bash`, require at least one
-  write target, create target, or write dir scope, and ask OMP UI confirmation
-  before foreground or async execution. Optional `async: true` returns
-  immediately and delivers completion later. Absolute target paths supplied for
-  external writes must resolve outside the repo and do not require repo intent
-  or a same-session lease. Repo-relative write targets, create targets, and
-  write dirs are authorized through the normal Stateful intent and lease flow
-  for repo writes.
+  write target, create target, or write dir scope, and ask for OMP UI
+  confirmation before the background sandbox command is started. Generated OMP
+  tools return a background-job start result immediately, stream stdout back into
+  OMP as collapsible output, and keep stderr/status in details unless the command
+  fails.
+  Absolute target paths supplied for external writes must resolve outside the repo
+  and do not require repo intent or a same-session lease. Repo-relative write
+  targets, create targets, and write dirs are authorized through the normal
+  Stateful intent and lease flow for repo writes.
 - `stateful sandbox run --fs git --network disabled --command 'git <args>'`
   runs a single local git command with the repo worktree and Git internals
   writable inside the OS sandbox. The wrapper rejects shell-dispatching git
@@ -484,28 +491,27 @@ for hooks and MCP. `stateful install --agent omp [--yes] [--update]` installs
 the OMP extension, MCP config, always-apply `stateful-required` rule, and
 `stateful-command-policy` skill into the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) and merges `config.yml` instead of replacing
-it; invalid YAML is
-rejected. Its target keys are `tools.approvalMode: write`,
+it; invalid YAML is rejected. Its target keys are `tools.approvalMode: yolo`,
 `bash.enabled: false`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
-`eval.jl: false`, `tools.approval.task: allow`,
-`tools.approval.sandbox_bash: allow`, `tools.approval.ext_ro_bash: allow`, and
-`tools.approval.ext_rw_bash: allow`; without `--update`, existing values are
-preserved and only missing OMP keys are inserted. With `--update`, existing
-values for those keys are updated, leaving the global/default OMP profile
-untouched. The generated OMP extension registers `sandbox_bash` for non-external
-sandbox runs, `ext_ro_bash` for read-only `--fs external` shell work, and
-`ext_rw_bash` for external writes. In the default foreground mode, these tools
-stream stdout and stderr chunks to OMP while the command is still running, then
-return the final exit code and captured output. They also accept optional
-`async: true`: they return immediately with a background-job start message, keep
-the command process running, and deliver an automatic completion message back
-into OMP when the command exits. `sandbox_bash` invokes the trusted stateful
-binary as `stateful sandbox run --fs <profile> ... --command <cmd>` for
-read-only, write-targets, build, git, and github-pr profiles, including common
-sandbox flags; it rejects `--fs external` with guidance to use `ext_ro_bash` or
+and `eval.jl: false`; it removes `tools.approval` from the stateful profile
+because yolo mode delegates safety to Stateful hooks. Without `--update`,
+existing scalar values are preserved and only missing OMP keys are inserted.
+With `--update`, existing target scalar values are updated, leaving the
+global/default OMP profile untouched. The generated OMP extension registers
+`sandbox_bash` for non-external sandbox runs, `ext_ro_bash` for read-only
+`--fs external` shell work, and `ext_rw_bash` for external writes. These
+generated OMP `*_bash` tools always start the sandbox command in the background,
+return a background-job start result immediately, stream stdout back into OMP as
+collapsible output while it runs, and keep stderr/status in details unless the
+command fails. The deprecated `async`
+parameter is accepted only as a compatibility no-op; it no longer selects
+background execution. `sandbox_bash` invokes the trusted stateful binary as
+`stateful sandbox run --fs <profile> ... --command <cmd>` for read-only,
+write-targets, build, git, and github-pr profiles, including common sandbox
+flags; it rejects `--fs external` with guidance to use `ext_ro_bash` or
 `ext_rw_bash`. `ext_ro_bash` runs purpose-and-command-only external reads
 without OMP UI confirmation. `ext_rw_bash` asks for OMP UI confirmation before
-foreground or async execution, then invokes the trusted stateful binary with
+starting the background command, then invokes the trusted stateful binary with
 `sandbox run --fs external` so the external sandbox profile can validate
 absolute scope for external writes or authorize repo-relative write scopes
 through Stateful intent and leases.
@@ -513,7 +519,8 @@ Other stateful hook allows become OMP allows; denials or unavailable authorizati
 remain hard OMP blocks even if OMP yolo metadata is present.
 When a queued Stateful reservation becomes claimable, the generated extension
 subscribes to the server's SSE notification stream and injects a next-turn OMP
-message with the `wait_id`; the agent must still reread and claim before writing.
+message with the `wait_id` and stored, non-empty payload `purpose`; the agent
+must still reread and claim before writing.
 OMP built-ins that do not write repo files, including `ask`, `ast_grep`, `job`,
 `irc`, `task`, `todo`, `report_tool_issue`, `generate_image`, and native
 read/search tools, are allowed by default. Other unclassified OMP-origin tools
@@ -580,10 +587,11 @@ deletes, renames, and moves require exact file intents for the affected paths;
 directory intent does not authorize them. Writes without matching active intent
 are denied, and active leases held by another session block conflicting writes.
 A blocked writer can queue with `queue_on_conflict`; after promotion, the
-reserved session must reread the target. Manual MCP/CLI flows claim with
-`state_intent_claim` / `stateful intent claim --wait-id <id>`, while native edit
-hooks and sandbox `write-targets` authorization can lazy-claim during the
-retried write.
+reservation notification and resume payload carry the stored request purpose and
+the reserved session must reread the target. Manual MCP/CLI flows claim with
+`state_intent_claim` / `stateful intent claim --wait-id <id>`, using that stored
+purpose; native edit hooks and sandbox `write-targets` authorization can
+lazy-claim during the retried write.
 
 Repo file edits should use native edit tools with hook-visible targets, such as
 Codex `apply_patch`, Edit, or `Write`, after exact intent declaration and a
@@ -681,10 +689,12 @@ lease. Codex prompts on
 `stateful sandbox run --fs external --purpose ...` before execution. In OMP,
 `ext_ro_bash` runs read-only purpose-and-command-only external operations without
 UI confirmation. `ext_rw_bash` requires at least one write target, create target,
-or write dir scope, asks for UI confirmation before foreground or async
-execution, then runs through the sandbox and prints the sandbox command result
-as JSON; with optional `async: true`, the tool returns immediately with a
-background-job start message and later delivers completion back into OMP.
+or write dir scope, asks for UI confirmation before the background external
+sandbox command is started, and returns a background-job start result
+immediately. Generated OMP `*_bash` tools stream stdout back into OMP as
+collapsible output while the command runs and keep stderr/status in details
+unless the command fails; the deprecated `async` parameter is accepted only as a
+compatibility no-op.
 
 ## HTTP And MCP Surface
 
@@ -741,6 +751,9 @@ infer it from the user or agent instruction and send it explicitly. Intent
 declare payloads also require non-empty `files_planned`; empty arrays and empty
 or normalized-empty paths are rejected with `missing_scope`. Intent request
 payloads also reject empty or normalized-empty `path` with `missing_scope`.
+Intent claim payloads carry only the `wait_id`; the server uses the stored
+reservation purpose. Reservation notifications and resume payloads include that
+stored purpose.
 
 ## Sandboxed Tests
 

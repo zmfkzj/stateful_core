@@ -197,8 +197,9 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("stateful-omp-extension.js"));
     assert!(config.contains(
-        "tools:\n  approvalMode: write\n  approval:\n    task: allow\n    sandbox_bash: allow\n    ext_ro_bash: allow\n    ext_rw_bash: allow\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: false\n",
+        "tools:\n  approvalMode: yolo\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: false\n",
     ));
+    assert!(!config.contains("approval:"));
     assert!(
         fs::read_to_string(&omp_mcp)
             .expect("omp mcp should read")
@@ -218,27 +219,47 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
     assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
-    assert!(
-        extension.contains("function runSandboxTool(params, args, signal, ctx, label, onUpdate)")
-    );
-    assert!(extension.contains("return new Promise((resolve) =>"));
+    assert!(extension.contains(
+        "function runSandboxToolProcess(params, args, ctx, label, onStdout, onComplete)"
+    ));
+    assert!(!extension.contains("function runSandboxTool(params"));
     assert!(extension.contains("spawn(STATEFUL, args"));
-    assert!(extension.contains("function emitSandboxToolOutput(onUpdate, stream, chunk)"));
-    assert!(extension.contains("onUpdate(update)"));
-    assert!(extension.contains("details: { stream }"));
-    assert!(extension.contains("emitSandboxToolOutput(onUpdate, \"stdout\", chunk)"));
-    assert!(extension.contains("emitSandboxToolOutput(onUpdate, \"stderr\", chunk)"));
+    assert!(extension.contains(
+        "Stdout will stream as collapsible output (Ctrl+O); stderr and status stay in details unless the command fails."
+    ));
+    assert!(extension.contains("function deliverSandboxStdoutChunk(pi, jobId, label, chunk)"));
+    assert!(extension.contains("customType: \"stateful_sandbox_bash_stdout\""));
+    assert!(extension.contains("stream: \"stdout\""));
+    assert!(extension.contains("collapsible: true"));
+    assert!(extension.contains("collapseShortcut: \"Ctrl+O\""));
+    assert!(extension.contains("function parseSandboxRunOutput(rawStdout)"));
+    assert!(extension.contains("const parsed = JSON.parse(text)"));
+    assert!(extension.contains("stdout = truncateSandboxToolText(stdout + chunk, label)"));
+    assert!(extension.contains("onStdout(commandStdout)"));
+    assert!(!extension.contains("onStdout(chunk)"));
+    assert!(extension.contains("result.details.sandboxRunOutput = sandboxRunOutput"));
+    assert!(extension.contains("stderr = truncateSandboxToolText(stderr + chunk, label)"));
     assert!(
         extension.contains("function startSandboxBackgroundTool(pi, params, args, ctx, label)")
     );
-    assert!(extension.contains("params.async === true"));
+    assert!(
+        extension.contains("Deprecated compatibility field; commands always run in background")
+    );
+    assert!(!extension.contains("params.async === true"));
+    assert!(
+        extension
+            .contains("return startSandboxBackgroundTool(pi, params, args, ctx, \"sandbox_bash\")")
+    );
     assert!(extension.contains("pi.sendMessage"));
     assert!(extension.contains("display: true"));
     assert!(extension.contains("triggerTurn: true"));
-    assert!(extension.contains("Result will be delivered automatically when complete."));
+    assert!(extension.contains("triggerTurn: false"));
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?session_id="));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));
+    assert!(extension.contains("purpose: \" + purpose.trim()"));
+    assert!(extension.contains("const purpose = payload.purpose"));
+    assert!(extension.contains("typeof purpose === \"string\" && purpose.trim().length > 0"));
     assert!(extension.contains("startReservationStream(pi, result?.notifications_stream)"));
     assert!(extension.contains("stopReservationStream();"));
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", fs]"));
@@ -326,11 +347,8 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert_eq!(count(&config, "stateful-omp-extension.js"), 1);
-    assert_eq!(count(&config, "approvalMode: write"), 1);
-    assert_eq!(count(&config, "\n    task: allow"), 1);
-    assert_eq!(count(&config, "\n    sandbox_bash: allow"), 1);
-    assert_eq!(count(&config, "ext_ro_bash: allow"), 1);
-    assert_eq!(count(&config, "ext_rw_bash: allow"), 1);
+    assert_eq!(count(&config, "approvalMode: yolo"), 1);
+    assert_eq!(count(&config, "approval:"), 0);
     assert_eq!(count(&config, "external_bash:"), 0);
     assert_eq!(count(&config, "\n  py: false"), 1);
     assert_eq!(count(&config, "\n  js: false"), 1);
@@ -350,7 +368,7 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
 }
 
 #[test]
-fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
+fn install_omp_yes_preserves_existing_config_and_uses_yolo_approval() {
     let fixture = TestFixture::new("omp-install-existing");
     let omp_agent_dir = fixture.omp_agent_dir();
     fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
@@ -367,11 +385,12 @@ fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
     assert!(config.contains("model: gpt-5.5"));
     assert!(config.contains("existing-extension.js"));
     assert!(config.contains("stateful-omp-extension.js"));
-    assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n    task: allow\n"));
-    assert!(config.contains("task: allow"));
-    assert!(config.contains("sandbox_bash: allow"));
-    assert!(config.contains("ext_ro_bash: allow"));
-    assert!(config.contains("ext_rw_bash: allow"));
+    assert!(config.contains("tools:\n  approvalMode: yolo\n"));
+    assert!(!config.contains("approval:"));
+    assert!(!config.contains("task: allow"));
+    assert!(!config.contains("sandbox_bash: allow"));
+    assert!(!config.contains("ext_ro_bash: allow"));
+    assert!(!config.contains("ext_rw_bash: allow"));
     assert!(!config.contains("external_bash:"));
     assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
     assert!(config.contains("bash:\n  enabled: false\n"));
@@ -386,7 +405,7 @@ fn install_omp_yes_preserves_existing_config_and_uses_write_approval() {
 }
 
 #[test]
-fn install_omp_yes_preserves_existing_tool_values_without_update() {
+fn install_omp_yes_removes_existing_tool_approval_without_update() {
     let fixture = TestFixture::new("omp-install-tools-preserve");
     let omp_agent_dir = fixture.omp_agent_dir();
     fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
@@ -400,24 +419,24 @@ fn install_omp_yes_preserves_existing_tool_values_without_update() {
     apply_omp_install(fixture.omp_options(true)).expect("omp install should apply");
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
-    assert!(config.contains("tools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n"));
-    assert!(config.contains("bash: prompt"));
-    assert!(config.contains("edit: prompt"));
+    assert!(config.contains("tools:\n  approvalMode: yolo\n"));
+    assert!(!config.contains("approval:"));
+    assert!(!config.contains("task: prompt"));
+    assert!(!config.contains("bash: prompt"));
+    assert!(!config.contains("edit: prompt"));
     assert!(!config.contains("task: allow"));
-    assert!(config.contains("sandbox_bash: allow"));
-    assert!(config.contains("ext_ro_bash: allow"));
-    assert!(config.contains("ext_rw_bash: allow"));
+    assert!(!config.contains("sandbox_bash: allow"));
+    assert!(!config.contains("ext_ro_bash: allow"));
+    assert!(!config.contains("ext_rw_bash: allow"));
     assert!(!config.contains("external_bash:"));
     assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
     assert!(config.contains("bash:\n  enabled: false\n"));
     assert_eq!(count(&config, "approvalMode:"), 1);
-    assert_eq!(count(&config, "\n    sandbox_bash: allow"), 1);
-    assert_eq!(count(&config, "ext_ro_bash: allow"), 1);
-    assert_eq!(count(&config, "ext_rw_bash: allow"), 1);
+    assert_eq!(count(&config, "approval:"), 0);
 }
 
 #[test]
-fn install_omp_update_replaces_existing_stateful_tool_values() {
+fn install_omp_update_removes_existing_tool_approval() {
     let fixture = TestFixture::new("omp-install-tools-update");
     let omp_agent_dir = fixture.omp_agent_dir();
     fs::create_dir_all(&omp_agent_dir).expect("omp dir should create");
@@ -433,20 +452,18 @@ fn install_omp_update_replaces_existing_stateful_tool_values() {
     apply_omp_install(options).expect("omp install with --update should apply");
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
-    assert!(config.contains("tools:\n  approvalMode: write\n  approval:\n    task: allow\n"));
-    assert!(config.contains("task: allow"));
-    assert!(config.contains("sandbox_bash: allow"));
-    assert!(config.contains("ext_ro_bash: allow"));
-    assert!(config.contains("ext_rw_bash: allow"));
+    assert!(config.contains("tools:\n  approvalMode: yolo\n"));
+    assert!(!config.contains("approval:"));
+    assert!(!config.contains("task: allow"));
+    assert!(!config.contains("sandbox_bash: allow"));
+    assert!(!config.contains("ext_ro_bash: allow"));
+    assert!(!config.contains("ext_rw_bash: allow"));
     assert!(!config.contains("external_bash:"));
-    assert!(config.contains("edit: prompt"));
+    assert!(!config.contains("edit: prompt"));
     assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
     assert!(config.contains("bash:\n  enabled: false\n"));
-    assert_eq!(count(&config, "approvalMode: write"), 1);
-    assert_eq!(count(&config, "task: allow"), 1);
-    assert_eq!(count(&config, "sandbox_bash: allow"), 1);
-    assert_eq!(count(&config, "ext_ro_bash: allow"), 1);
-    assert_eq!(count(&config, "ext_rw_bash: allow"), 1);
+    assert_eq!(count(&config, "approvalMode: yolo"), 1);
+    assert_eq!(count(&config, "approval:"), 0);
 }
 
 #[test]

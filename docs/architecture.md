@@ -117,13 +117,12 @@ The prototype supports user-level installation with repo allowlist gating.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) and ensures the target keys
-`tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
-`eval.js: false`, `eval.rb: false`, `eval.jl: false`,
-`tools.approval.task: allow`, `tools.approval.sandbox_bash: allow`,
-`tools.approval.ext_ro_bash: allow`, and
-`tools.approval.ext_rw_bash: allow`. Without `--update`, existing values are
-preserved and only missing keys are inserted; with `--update`, existing target
-values are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
+`tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
+`eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
+`tools.approval` from the stateful profile because yolo mode delegates safety to
+Stateful hooks. Without `--update`, existing scalar values are preserved and
+only missing keys are inserted; with `--update`, existing target scalar values
+are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
 tools are denied at the host approval and hook levels. The installer also writes
 `rules/stateful-required.md` and `skills/stateful-command-policy/SKILL.md` under
 that isolated agent directory:
@@ -133,8 +132,13 @@ generated extension registers `sandbox_bash` for read-only, write-targets,
 build, git, and github-pr sandbox runs, including common sandbox flags,
 registers `ext_ro_bash` for read-only `--fs external` commands, and registers
 `ext_rw_bash` for external writes that require write/create/dir scope and OMP UI
-confirmation. `sandbox_bash` rejects `--fs external` with guidance to use
-`ext_ro_bash` or `ext_rw_bash`. Raw Bash and Python/JavaScript/JS/Ruby/Julia
+confirmation. All three generated `*_bash` tools start sandbox commands in the
+background, immediately return a background-job start result, stream stdout back
+into OMP as collapsible output while the command runs, and keep stderr/status in
+details unless the command fails; their `async` input is a deprecated
+compatibility no-op that does not select execution mode. `sandbox_bash` rejects
+`--fs external` with guidance to use `ext_ro_bash` or `ext_rw_bash`. Raw Bash and
+Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
 are blocked even if their command text
 invokes `stateful sandbox run`. The OMP
@@ -185,8 +189,11 @@ reconciliation fail closed; read/search/diff remains allowed.
 For OMP, the generated `sandbox_bash` tool owns non-external sandbox command
 execution for read-only, write-targets, build, git, and github-pr profiles;
 `ext_ro_bash` owns read-only external commands without OMP UI confirmation; and
-`ext_rw_bash` owns external writes with OMP UI confirmation. Other stateful
-allows translate to OMP allow. Stateful deny or unavailable server
+`ext_rw_bash` owns external writes with OMP UI confirmation. Each generated tool
+always starts the sandbox command in the background, returns only the
+background-job start result immediately, streams stdout back into OMP as
+collapsible output, and keeps stderr/status in details unless the command fails.
+Other stateful allows translate to OMP allow. Stateful deny or unavailable server
 translates to a hard block, even when OMP yolo metadata is present.
 
 Hook scripts should resolve paths from the git root. Envelope-enforced routes
@@ -342,6 +349,9 @@ classification, so `functions.bash` is Bash,
   `sandbox_bash` for read-only, write-targets, build, git, and github-pr
   profiles, `ext_ro_bash` for read-only `--fs external` commands without OMP UI
   confirmation, and `ext_rw_bash` for external writes with OMP UI confirmation.
+  These tools always run sandbox commands in the background, return only a
+  background-job start result immediately, stream stdout back into OMP as
+  collapsible output, and keep stderr/status in details unless the command fails.
   Ordinary read work should use native read/search/diff tools when available.
   Read-only command-shaped inspection that genuinely needs a shell uses
   `--fs read-only --network disabled`; process inspection uses
@@ -407,9 +417,10 @@ The state server is responsible for:
   implicit heartbeat events within a 60-minute rolling maximum
 - evaluating conflict policy
 - promoting FIFO wait queue reservations after explicit lease release,
-  session/activity finalization, or lease expiry
+  session/activity finalization, or lease expiry, and emitting notification
+  payloads that carry the stored reservation purpose
 - requiring reservation claim before creating active write-authorizing intent
-  and active leases
+  and active leases from that stored purpose
 - rendering concise prompt context
 - retaining expired activity as historical evidence
 

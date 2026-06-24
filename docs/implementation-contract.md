@@ -135,14 +135,17 @@ GET  /v1/runtime/identity
 engine and must not create leases or write-authorizing state.
 `/v1/notifications/poll` returns pending coordination notifications for a
 session and marks returned notifications as delivered so a later poll does not
-redeliver the same notification. `/v1/resume/next` is the durable recovery path:
-it returns the first active reservation that the session can claim after
-rereading the target, even if the reservation notification was already delivered
-or the client missed the poll response. `/v1/intent/claim` is the explicit
-reservation claim path; it creates write-authorizing intent and an active lease
-for the reservation owner. `/v1/authorize` may lazy-claim an active reservation
-for hook and sandbox authorization sources after the client rereads and retries
-the write boundary; read-only conflict checks must not claim reservations.
+redeliver the same notification. Reservation notification payloads include the
+stored, non-empty reservation purpose. `/v1/resume/next` is the durable recovery
+path: it returns the first active reservation that the session can claim,
+including its stored purpose, after rereading the target, even if the
+reservation notification was already delivered or the client missed the poll
+response. `/v1/intent/claim` is the explicit reservation claim path; it takes a
+`wait_id`, uses the stored reservation purpose, and creates write-authorizing
+intent plus an active lease for the reservation owner. `/v1/authorize` may
+lazy-claim an active reservation for hook and sandbox authorization sources
+after the client rereads and retries the write boundary; read-only conflict
+checks must not claim reservations.
 `/v1/lease/acquire` records the target existence and content hash when `root` is
 supplied; hook-originated native file writes compare that observation before
 authorization. `/v1/lease/refresh-observation` refreshes the same-session exact
@@ -171,6 +174,8 @@ Current envelope enforcement is limited to `/v1/authorize` and
 `files_planned`; empty arrays and empty or normalized-empty paths fail with
 `missing_scope`. Intent request requires non-empty `purpose` and a non-empty
 `path`; empty or normalized-empty request paths fail with `missing_scope`.
+Intent claim clients provide a `wait_id` only; they must not provide a purpose
+because the server uses the stored reservation purpose.
 
 ## Authorization Input
 
@@ -236,17 +241,22 @@ at host approval and hook levels, even when the raw command itself invokes
 sandbox command execution uses generated custom tools: `sandbox_bash` invokes
 the trusted stateful binary for read-only, write-targets, build, git, and
 github-pr profiles, including common sandbox flags, and rejects `--fs external`
-with guidance to use `ext_ro_bash` or `ext_rw_bash`; `ext_ro_bash` runs
+with guidance to use `ext_ro_bash` or `ext_rw_bash`; `ext_ro_bash` starts
 purpose-and-command-only external reads without OMP UI confirmation; `ext_rw_bash`
-asks OMP UI confirmation before spawning the trusted stateful binary with
+asks OMP UI confirmation before starting the trusted stateful binary with
 `sandbox run --fs external --purpose ...` for external writes that declare at
-least one write target, create target, or write dir. The external sandbox
-profile requires purpose and command; read-only/no-declared-scope operations may
+least one write target, create target, or write dir. All generated `*_bash` tools
+start sandbox commands in the background, immediately return a background-job
+start result, stream stdout back into OMP as collapsible output while the command
+runs, and keep stderr/status in details unless the command fails; their `async`
+input is a deprecated compatibility no-op that does not select execution mode.
+The external sandbox profile requires
+purpose and command; read-only/no-declared-scope operations may
 omit targets, while supplied external write scopes are validated as absolute
 paths outside the repo. On macOS, external profile runs also allow
 trust/identity Mach lookups for `trustd` and DirectoryService so Go TLS clients
-such as `gh` can verify certificates. It runs through the sandbox after Codex
-approval, `ext_ro_bash` execution, or `ext_rw_bash` confirmation and does not
+such as `gh` can verify certificates. It starts through the sandbox after Codex
+approval, `ext_ro_bash` invocation, or `ext_rw_bash` confirmation and does not
 require repo intent or lease unless repo-relative write scope is supplied.
 Local git operations use `<absolute-stateful-binary> sandbox run --fs git
 --network disabled --command 'git <args>'`; use `--network enabled` only for
@@ -290,16 +300,18 @@ per wait request, and a request is reservable only when that requested resource
 is available. Promotion is triggered by explicit lease release, session or
 activity finalization, lease/reservation expiry, or current-state materialization
 that finds an already-unblocked queued waiter. Promotion creates short
-reservations and pending notifications for the waiting sessions.
+reservations and pending notifications whose payloads carry the waiting row's
+stored, non-empty purpose.
 
 Promotion creates reservations first. A reservation is not active write
 authority. Each waiting session must reread the target. Manual MCP/CLI flows
 then explicitly claim with `state_intent_claim` or
-`stateful intent claim --wait-id <id>`. Hook and sandbox authorization sources
-may lazy-claim the reservation at the retried write boundary. Claiming creates
-write-authorizing intent and active same-session leases. The default reservation
-TTL is 120 seconds; the default lease TTL is 300 seconds and is refreshed by
-heartbeat.
+`stateful intent claim --wait-id <id>`; claim uses the stored reservation
+purpose and clients do not provide a claim purpose. Hook and sandbox
+authorization sources may lazy-claim the reservation at the retried write
+boundary. Claiming creates write-authorizing intent and active same-session
+leases. The default reservation TTL is 120 seconds; the default lease TTL is 300
+seconds and is refreshed by heartbeat.
 
 The target multi-resource model is atomic all-or-nothing: a multi-resource
 request is reservable only when it is the head entry for every requested resource
@@ -568,9 +580,13 @@ verification.
 `stateful
 install --agent omp --yes` registers `sandbox_bash` for read-only,
 write-targets, build, git, and github-pr sandbox profiles, `ext_ro_bash` for
-read-only external commands, and `ext_rw_bash` for external writes. `ext_ro_bash`
-does not ask OMP UI confirmation; `ext_rw_bash` asks before spawning the trusted
-stateful binary with the external profile. Raw OMP Bash and
+read-only external commands, and `ext_rw_bash` for external writes. All three
+generated `*_bash` tools start sandbox commands in the background, immediately
+return a background-job start result, stream stdout back into OMP as collapsible
+output, and keep stderr/status in details unless the command fails; the
+compatibility `async` input is a no-op.
+`ext_ro_bash` does not ask OMP UI confirmation; `ext_rw_bash` asks before
+starting the trusted stateful binary with the external profile. Raw OMP Bash and
 Python/JavaScript/JS/Ruby/Julia eval-tool sandbox invocations are denied.
 OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
 extension events to `stateful hook omp session-start`, `pre-tool-use`,
@@ -677,14 +693,13 @@ The prototype supports user-level installation with repo allowlist gating.
 always-apply `rules/stateful-required.md` rule,
 `skills/stateful-command-policy/SKILL.md` manual, and OMP config under the
 `stateful` profile agent directory (`~/.omp/profiles/stateful/agent`) with
-`tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
-`eval.js: false`, `eval.rb: false`, `eval.jl: false`,
-`tools.approval.sandbox_bash: allow`, `tools.approval.ext_ro_bash: allow`, and
-`tools.approval.ext_rw_bash: allow`, so that profile carries the stateful
-approval context, denies raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool
-execution at host approval, allows sandbox runs through `sandbox_bash`,
-`ext_ro_bash`, or `ext_rw_bash`, and keeps the trusted external write approval
-prompt inside `ext_rw_bash`. `stateful enable`
+`tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
+`eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
+`tools.approval` from the stateful profile because yolo mode delegates safety to
+Stateful hooks. Raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution
+is still denied at host approval and hook levels, sandbox runs still go through
+`sandbox_bash`, `ext_ro_bash`, or `ext_rw_bash`, and the trusted external write
+approval prompt stays inside `ext_rw_bash`. `stateful enable`
 opts the current repo into enforcement. Repo-local packaging and managed hooks
 must reuse the same hook adapter library and HTTP protocol.
 

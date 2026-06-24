@@ -3898,6 +3898,7 @@ impl Store {
                     "relative_path": waiter.relative_path,
                     "action": waiter.action,
                     "reservation_expires_at": waiter.reservation_expires_at,
+                    "purpose": waiter.purpose,
                 }),
             )?;
         }

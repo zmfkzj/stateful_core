@@ -168,34 +168,37 @@ triggers makes the requested resource available:
 
 Each promoted waiter receives a short reservation. Reservations prevent a later
 session from taking the same resource ahead of an earlier conflicting waiter, but
-they are not active write authority. The reserved session must reread the
-target. Manual MCP/CLI flows then call `state_intent_claim` /
-`stateful intent claim --wait-id <id>` before writing; native edit hooks and
-sandbox `write-targets` authorization can lazy-claim the reservation when the
-write is retried. Claiming creates write-authorizing intent and the active
-same-session lease. The default reservation TTL is 120 seconds. If a reservation
-expires without being claimed, the server may promote the next eligible FIFO
-waiter.
+they are not active write authority. The promotion records a pending notification
+payload containing the wait queue row's stored, non-empty purpose. The reserved
+session must reread the target. Manual MCP/CLI flows then call
+`state_intent_claim` / `stateful intent claim --wait-id <id>` before writing;
+the claim uses the stored reservation purpose, and clients do not provide a new
+claim purpose. Native edit hooks and sandbox `write-targets` authorization can
+lazy-claim the reservation when the write is retried. Claiming creates
+write-authorizing intent and the active same-session lease. The default
+reservation TTL is 120 seconds. If a reservation expires without being claimed,
+the server may promote the next eligible FIFO waiter.
 
 Resume is notification-driven rather than process-driven. The state server
-records a pending notification when it promotes a reservation. Agents and
-orchestrators discover that signal by polling notifications, asking for the
-next resumable reservation, or receiving that context from a lifecycle hook.
-Polling returns each pending notification once and marks it delivered; callers
-that miss or discard a poll response should use `stateful resume next` /
-`state_resume_next` to rediscover any still-active reservation.
-The state server does not wake a sleeping Codex process by itself; external
-orchestration can build on the notification and resume APIs.
+records a pending notification with the stored purpose when it promotes a
+reservation. Agents and orchestrators discover that signal by polling
+notifications, asking for the next resumable reservation, or receiving that
+context from a lifecycle hook. Polling returns each pending notification once and
+marks it delivered; callers that miss or discard a poll response should use
+`stateful resume next` / `state_resume_next` to rediscover any still-active
+reservation and its stored purpose. The state server does not wake a sleeping
+Codex process by itself; external orchestration can build on the notification
+and resume APIs.
 
 Full scheduling works through immediate request/response plus polling. Intent
 request APIs return `queued`, `reserved`, `claimed`, `canceled`, or `expired`
 state without blocking indefinitely. Immediate availability creates a `reserved` request state;
 the session must still reread the target. Manual MCP/CLI flows claim with
-`state_intent_claim` / `stateful intent claim --wait-id <id>` before retrying,
-while native edit hooks and sandbox `write-targets` authorization can
-lazy-claim at the retry write boundary.
-Waiting is handled by polling `stateful notifications poll` or
-`stateful resume next`.
+`state_intent_claim` / `stateful intent claim --wait-id <id>` before retrying;
+the server uses the stored reservation purpose. Native edit hooks and sandbox
+`write-targets` authorization can lazy-claim at the retry write boundary.
+Waiting is handled by polling `stateful notifications poll` or `stateful resume
+next`; both reservation surfaces expose the stored purpose.
 `stateful intent wait --timeout` is not part of the v1 hardening implementation.
 
 `request_id` and non-empty `purpose` are required for idempotency and live state
@@ -250,13 +253,12 @@ The prototype supports user-level installation with repo allowlist gating.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) and ensures the target keys
-`tools.approvalMode: write`, `bash.enabled: false`, `eval.py: false`,
-`eval.js: false`, `eval.rb: false`, `eval.jl: false`,
-`tools.approval.task: allow`, `tools.approval.sandbox_bash: allow`,
-`tools.approval.ext_ro_bash: allow`, and
-`tools.approval.ext_rw_bash: allow`. Without `--update`, existing values are
-preserved and only missing keys are inserted; with `--update`, existing target
-values are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
+`tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
+`eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
+`tools.approval` from the stateful profile because yolo mode delegates safety to
+Stateful hooks. Without `--update`, existing scalar values are preserved and
+only missing keys are inserted; with `--update`, existing target scalar values
+are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
 tools are denied at the host approval and hook levels. The installer also writes
 `rules/stateful-required.md` and `skills/stateful-command-policy/SKILL.md` under
 that isolated agent directory:
@@ -266,8 +268,13 @@ generated extension registers `sandbox_bash` for read-only, write-targets,
 build, git, and github-pr sandbox runs, including common sandbox flags,
 registers `ext_ro_bash` for read-only `--fs external` commands, and registers
 `ext_rw_bash` for external writes that require write/create/dir scope and OMP UI
-confirmation. `sandbox_bash` rejects `--fs external` with guidance to use
-`ext_ro_bash` or `ext_rw_bash`. Raw Bash and Python/JavaScript/JS/Ruby/Julia
+confirmation. All three generated `*_bash` tools start sandbox commands in the
+background, immediately return a background-job start result, stream stdout back
+into OMP as collapsible output while the command runs, and keep stderr/status in
+details unless the command fails; their `async` input is a deprecated
+compatibility no-op that does not select execution mode. `sandbox_bash` rejects
+`--fs external` with guidance to use `ext_ro_bash` or `ext_rw_bash`. Raw Bash and
+Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
 are blocked even if their command text
 invokes `stateful sandbox run`. The OMP
@@ -316,8 +323,11 @@ OMP adapters preserve stateful hard blocks: `sandbox_bash` owns non-external
 sandbox command execution for read-only, write-targets, build, git, and
 github-pr profiles; `ext_ro_bash` owns read-only external commands without OMP
 UI confirmation; `ext_rw_bash` owns external writes with OMP UI confirmation;
-stateful allow maps to allow; and stateful denial or
-unavailable state maps to block even when OMP yolo metadata is present.
+all generated `*_bash` tools start the sandbox command in the background, return
+a background-job start result immediately, stream stdout back into OMP as
+collapsible output, and keep stderr/status in details unless the command fails;
+stateful allow maps to allow; and stateful denial or unavailable state maps to
+block even when OMP yolo metadata is present.
 
 ### Hook Responsibilities
 
@@ -401,12 +411,13 @@ state_resume_next (state.resume.next)
 `state_intent_declare` and `state_intent_request` require a non-empty `purpose`.
 The caller must infer that purpose from the user or agent instruction when it is
 not explicit; the server must not synthesize a fallback purpose.
-`state_intent_declare` also requires non-empty `files_planned`; empty arrays
-and empty or normalized-empty entries are rejected with `missing_scope`.
+`state_intent_declare` also requires non-empty `files_planned`; empty arrays and
+empty or normalized-empty entries are rejected with `missing_scope`.
 `state_intent_request` also requires a non-empty `path`; empty or
 normalized-empty request paths are rejected with `missing_scope`.
 `state_intent_request` and `state_intent_cancel` expose the explicit scheduling
-queue. `state_intent_claim` is the explicit reservation claim path.
+queue. `state_intent_claim` takes a `wait_id` only and uses the stored
+reservation purpose; callers must not send a claim purpose.
 
 Hooks should call the same state server API as MCP tools so policy remains
 centralized. Native edit tools with hook-visible targets are the repo file edit
