@@ -131,7 +131,8 @@ stateful install --yes
 ### Codex
 
 Install Codex integration when you want global Codex hooks, MCP, and the
-stateful command-policy skill:
+installed `skills/stateful-command-policy/SKILL.md` and
+`skills/dispatching-parallel-agents/SKILL.md` skills:
 
 ```bash
 stateful install --agent codex --yes
@@ -142,7 +143,9 @@ stateful codex
 ### OMP
 
 Install OMP integration when you want the isolated OMP `stateful` profile,
-stateful hooks, MCP, and generated sandbox command tools:
+stateful hooks, MCP, generated sandbox command tools, and the installed
+`skills/stateful-command-policy/SKILL.md` and
+`skills/dispatching-parallel-agents/SKILL.md` skills:
 
 ```bash
 stateful install --agent omp --yes

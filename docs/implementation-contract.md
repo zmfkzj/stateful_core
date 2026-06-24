@@ -20,16 +20,20 @@ design targets unless a section below says they are implemented.
 
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --yes` installs stateful global files only. `stateful install
---agent codex --yes` configures global Codex hooks and MCP. `stateful install
+--agent codex --yes` configures global Codex hooks and MCP, and writes
+`skills/stateful-command-policy/SKILL.md` and
+`skills/dispatching-parallel-agents/SKILL.md`. `stateful install
 --agent omp --yes` configures the isolated OMP `stateful` profile with stateful
 hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `ext_ro_bash`
 for read-only `--fs external`, `ext_rw_bash` for scoped-grant external writes,
 and approval entries that deny raw Bash while setting
 Python/JavaScript/JS/Ruby/Julia eval tools to false. The OMP installer also
-writes `rules/stateful-required.md` and
-`skills/stateful-command-policy/SKILL.md` under that isolated agent directory:
-the always-apply rule owns model-facing activation, the skill owns detailed
-procedure, and hooks remain the enforcement boundary. `stateful enable` opts the
+writes `rules/stateful-required.md`,
+`skills/stateful-command-policy/SKILL.md`, and
+`skills/dispatching-parallel-agents/SKILL.md` under that isolated agent
+directory: the always-apply rule owns model-facing activation, the
+`stateful-command-policy` manual owns detailed procedure, and hooks remain the
+boundary. `stateful enable` opts the
 current repo into enforcement.
 For OMP, the extension prefers the actual OMP runtime session id from
 `event.sessionId` or `ctx.sessionManager.session.id`, stores it in
@@ -701,10 +705,13 @@ pieces into `stateful-core` without duplicating product policy in adapters.
 
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --yes` installs stateful global files only. `stateful install
---agent codex --yes` configures global Codex hooks and MCP. `stateful install
+--agent codex --yes` configures global Codex hooks and MCP, and writes
+`skills/stateful-command-policy/SKILL.md` and
+`skills/dispatching-parallel-agents/SKILL.md`. `stateful install
 --agent omp --yes` installs the OMP extension entry point, MCP config,
 always-apply `rules/stateful-required.md` rule,
-`skills/stateful-command-policy/SKILL.md` manual, and OMP config under the
+`skills/stateful-command-policy/SKILL.md` manual,
+`skills/dispatching-parallel-agents/SKILL.md` skill, and OMP config under the
 `stateful` profile agent directory (`~/.omp/profiles/stateful/agent`) with
 `tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
 `eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
