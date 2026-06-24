@@ -240,6 +240,8 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("import { fileURLToPath } from \"node:url\""));
     assert!(extension.contains("function resolveSkillInternalUrl(rawUrl)"));
     assert!(extension.contains("function expandSkillInternalUrlsInCommand(command)"));
+    assert!(extension.contains("function singleQuoteEscape(value)"));
+    assert!(extension.contains("quote === \"'\" ? singleQuoteEscape(resolved)"));
     assert!(
         extension.contains(
             "args.push(\"--command\", expandSkillInternalUrlsInCommand(params.command));"

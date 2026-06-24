@@ -1649,6 +1649,10 @@ function shellQuote(value) {{
   return "'" + value.replace(/'/g, "'\\''") + "'";
 }}
 
+function singleQuoteEscape(value) {{
+  return value.replace(/'/g, "'\\''");
+}}
+
 function doubleQuoteEscape(value) {{
   return value.replace(/["\\$`]/g, "\\$&");
 }}
@@ -1708,7 +1712,7 @@ function expandSkillInternalUrlsInCommand(command) {{
     const end = skillUrlTokenEnd(command, index, quote);
     const resolved = resolveSkillInternalUrl(command.slice(index, end));
     result += command.slice(cursor, index);
-    result += quote === "'" ? resolved : quote === "\"" ? doubleQuoteEscape(resolved) : shellQuote(resolved);
+    result += quote === "'" ? singleQuoteEscape(resolved) : quote === "\"" ? doubleQuoteEscape(resolved) : shellQuote(resolved);
     cursor = end;
     index = end - 1;
   }}
