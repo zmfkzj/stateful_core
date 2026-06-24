@@ -219,15 +219,21 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
     assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
-    assert!(
-        extension.contains("function runSandboxToolProcess(params, args, ctx, label, onComplete)")
-    );
+    assert!(extension.contains(
+        "function runSandboxToolProcess(params, args, ctx, label, onStdout, onComplete)"
+    ));
     assert!(!extension.contains("function runSandboxTool(params"));
     assert!(extension.contains("spawn(STATEFUL, args"));
-    assert!(
-        extension.contains("Captured stdout/stderr will be delivered automatically when complete.")
-    );
+    assert!(extension.contains(
+        "Stdout will stream as collapsible output (Ctrl+O); stderr and status stay in details unless the command fails."
+    ));
+    assert!(extension.contains("function deliverSandboxStdoutChunk(pi, jobId, label, chunk)"));
+    assert!(extension.contains("customType: \"stateful_sandbox_bash_stdout\""));
+    assert!(extension.contains("stream: \"stdout\""));
+    assert!(extension.contains("collapsible: true"));
+    assert!(extension.contains("collapseShortcut: \"Ctrl+O\""));
     assert!(extension.contains("stdout = truncateSandboxToolText(stdout + chunk, label)"));
+    assert!(extension.contains("onStdout(chunk)"));
     assert!(extension.contains("stderr = truncateSandboxToolText(stderr + chunk, label)"));
     assert!(
         extension.contains("function startSandboxBackgroundTool(pi, params, args, ctx, label)")
@@ -243,9 +249,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("pi.sendMessage"));
     assert!(extension.contains("display: true"));
     assert!(extension.contains("triggerTurn: true"));
-    assert!(
-        extension.contains("Captured stdout/stderr will be delivered automatically when complete.")
-    );
+    assert!(extension.contains("triggerTurn: false"));
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?session_id="));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));

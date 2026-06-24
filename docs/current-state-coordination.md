@@ -266,10 +266,10 @@ build, git, and github-pr sandbox runs, including common sandbox flags,
 registers `ext_ro_bash` for read-only `--fs external` commands, and registers
 `ext_rw_bash` for external writes that require write/create/dir scope and OMP UI
 confirmation. All three generated `*_bash` tools start sandbox commands in the
-background, immediately return a background-job start result, capture
-stdout/stderr in memory, and deliver final status/output automatically through
-OMP; their `async` input is a deprecated compatibility no-op that does not
-select execution mode. `sandbox_bash` rejects
+background, immediately return a background-job start result, stream stdout back
+into OMP as collapsible output while the command runs, and keep stderr/status in
+details unless the command fails; their `async` input is a deprecated
+compatibility no-op that does not select execution mode. `sandbox_bash` rejects
 `--fs external` with guidance to use `ext_ro_bash` or `ext_rw_bash`. Raw Bash and
 Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
@@ -321,10 +321,10 @@ sandbox command execution for read-only, write-targets, build, git, and
 github-pr profiles; `ext_ro_bash` owns read-only external commands without OMP
 UI confirmation; `ext_rw_bash` owns external writes with OMP UI confirmation;
 all generated `*_bash` tools start the sandbox command in the background, return
-a background-job start result immediately, capture stdout/stderr in memory, and
-deliver final status/output automatically through OMP; stateful allow maps to
-allow; and stateful denial or unavailable state maps to block even when OMP yolo
-metadata is present.
+a background-job start result immediately, stream stdout back into OMP as
+collapsible output, and keep stderr/status in details unless the command fails;
+stateful allow maps to allow; and stateful denial or unavailable state maps to
+block even when OMP yolo metadata is present.
 
 ### Hook Responsibilities
 

@@ -133,10 +133,10 @@ build, git, and github-pr sandbox runs, including common sandbox flags,
 registers `ext_ro_bash` for read-only `--fs external` commands, and registers
 `ext_rw_bash` for external writes that require write/create/dir scope and OMP UI
 confirmation. All three generated `*_bash` tools start sandbox commands in the
-background, immediately return a background-job start result, capture
-stdout/stderr in memory, and deliver final status/output automatically through
-OMP; their `async` input is a deprecated compatibility no-op that does not
-select execution mode. `sandbox_bash` rejects
+background, immediately return a background-job start result, stream stdout back
+into OMP as collapsible output while the command runs, and keep stderr/status in
+details unless the command fails; their `async` input is a deprecated
+compatibility no-op that does not select execution mode. `sandbox_bash` rejects
 `--fs external` with guidance to use `ext_ro_bash` or `ext_rw_bash`. Raw Bash and
 Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
@@ -191,9 +191,9 @@ execution for read-only, write-targets, build, git, and github-pr profiles;
 `ext_ro_bash` owns read-only external commands without OMP UI confirmation; and
 `ext_rw_bash` owns external writes with OMP UI confirmation. Each generated tool
 always starts the sandbox command in the background, returns only the
-background-job start result immediately, captures stdout/stderr in memory, and
-relies on automatic OMP completion delivery for the final status/output. Other
-stateful allows translate to OMP allow. Stateful deny or unavailable server
+background-job start result immediately, streams stdout back into OMP as
+collapsible output, and keeps stderr/status in details unless the command fails.
+Other stateful allows translate to OMP allow. Stateful deny or unavailable server
 translates to a hard block, even when OMP yolo metadata is present.
 
 Hook scripts should resolve paths from the git root. Envelope-enforced routes
@@ -350,8 +350,8 @@ classification, so `functions.bash` is Bash,
   profiles, `ext_ro_bash` for read-only `--fs external` commands without OMP UI
   confirmation, and `ext_rw_bash` for external writes with OMP UI confirmation.
   These tools always run sandbox commands in the background, return only a
-  background-job start result immediately, capture stdout/stderr in memory, and
-  deliver final status/output automatically through OMP.
+  background-job start result immediately, stream stdout back into OMP as
+  collapsible output, and keep stderr/status in details unless the command fails.
   Ordinary read work should use native read/search/diff tools when available.
   Read-only command-shaped inspection that genuinely needs a shell uses
   `--fs read-only --network disabled`; process inspection uses

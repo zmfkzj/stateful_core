@@ -1687,10 +1687,16 @@ function externalBashApprovalMessage(params, args) {{
 }}
 
 function sandboxToolResultText(exitCode, stdout, stderr, error) {{
-  const sections = ["exit_code: " + exitCode];
-  if (stdout) sections.push("stdout:\n" + stdout);
-  if (stderr) sections.push("stderr:\n" + stderr);
-  if (error) sections.push("error:\n" + error);
+  if (!stderr && !error) {{
+    return stdout || "";
+  }}
+  const sections = [];
+  if (stdout) sections.push(stdout);
+  const diagnostics = [];
+  diagnostics.push("exit_code: " + exitCode);
+  if (stderr) diagnostics.push("stderr:\n" + stderr);
+  if (error) diagnostics.push("error:\n" + error);
+  sections.push(diagnostics.join("\n\n"));
   return sections.join("\n\n");
 }}
 
@@ -1705,7 +1711,6 @@ function sandboxToolError(error) {{
 function sandboxBackgroundToolOutputState(result) {{
   return result.isError ? "failed" : "completed";
 }}
-
 
 function buildSandboxToolResult(params, args, exitCode, stdout, stderr, error) {{
   const text = sandboxToolResultText(exitCode, stdout, stderr, error);
@@ -1728,9 +1733,57 @@ function buildSandboxBackgroundStartResult(jobId, label) {{
     content: [{{ type: "text", text: [
       "Background job " + jobId + " started: " + label,
       "The command is running outside the tool call so OMP can continue.",
-      "Captured stdout/stderr will be delivered automatically when complete.",
+      "Stdout will stream as collapsible output (Ctrl+O); stderr and status stay in details unless the command fails.",
     ].join("\n") }}],
     details: {{ async: {{ state: "running", jobId, type: "bash" }} }},
+  }};
+}}
+
+function deliverSandboxStdoutChunk(pi, jobId, label, chunk) {{
+  if (!chunk || typeof pi?.sendMessage !== "function") {{
+    return;
+  }}
+  try {{
+    pi.sendMessage(
+      {{
+        customType: "stateful_sandbox_bash_stdout",
+        content: chunk,
+        display: true,
+        details: {{
+          async: {{ state: "streaming", jobId, type: "bash" }},
+          stream: "stdout",
+          label,
+          collapsible: true,
+          collapseShortcut: "Ctrl+O",
+        }},
+      }},
+      {{ triggerTurn: false }}
+    );
+  }} catch (_) {{}}
+}}
+
+function createSandboxStdoutStreamer(pi, jobId, label) {{
+  let buffer = "";
+  let timer = null;
+  const flush = () => {{
+    if (timer) {{
+      clearTimeout(timer);
+      timer = null;
+    }}
+    if (!buffer) return;
+    const chunk = buffer;
+    buffer = "";
+    deliverSandboxStdoutChunk(pi, jobId, label, chunk);
+  }};
+  return {{
+    push(chunk) {{
+      if (!chunk) return;
+      buffer = truncateSandboxToolText(buffer + chunk, label);
+      if (!timer) {{
+        timer = setTimeout(flush, 200);
+      }}
+    }},
+    flush,
   }};
 }}
 
@@ -1739,11 +1792,17 @@ function deliverSandboxBackgroundResult(pi, jobId, label, result) {{
     return;
   }}
   const state = sandboxBackgroundToolOutputState(result);
+  const stdout = result.details?.stdout || "";
+  const diagnostics = [];
+  if (result.isError) {{
+    if (result.details?.stderr) diagnostics.push("stderr:\n" + result.details.stderr);
+    if (result.details?.error) diagnostics.push("error:\n" + result.details.error);
+  }}
   const text = [
     "Background job " + jobId + " " + state + ": " + label,
-    "",
-    result.content?.find((block) => block?.type === "text")?.text || "(no output)",
-  ].join("\n");
+    stdout ? "" : "(no stdout captured)",
+    ...diagnostics,
+  ].filter(Boolean).join("\n");
   try {{
     pi.sendMessage(
       {{
@@ -1757,7 +1816,7 @@ function deliverSandboxBackgroundResult(pi, jobId, label, result) {{
   }} catch (_) {{}}
 }}
 
-function runSandboxToolProcess(params, args, ctx, label, onComplete) {{
+function runSandboxToolProcess(params, args, ctx, label, onStdout, onComplete) {{
   let stdout = "";
   let stderr = "";
   let processError = "";
@@ -1783,6 +1842,7 @@ function runSandboxToolProcess(params, args, ctx, label, onComplete) {{
   child.stderr?.setEncoding("utf8");
   child.stdout?.on("data", (chunk) => {{
     stdout = truncateSandboxToolText(stdout + chunk, label);
+    onStdout(chunk);
   }});
   child.stderr?.on("data", (chunk) => {{
     stderr = truncateSandboxToolText(stderr + chunk, label);
@@ -1800,7 +1860,11 @@ function runSandboxToolProcess(params, args, ctx, label, onComplete) {{
 function startSandboxBackgroundTool(pi, params, args, ctx, label) {{
   const jobId = nextSandboxJobId(label);
   const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
-  runSandboxToolProcess(params, args, ctx, label, (result) => {{
+  const stdoutStreamer = createSandboxStdoutStreamer(pi, jobId, commandLabel);
+  runSandboxToolProcess(params, args, ctx, label, (chunk) => {{
+    stdoutStreamer.push(chunk);
+  }}, (result) => {{
+    stdoutStreamer.flush();
     deliverSandboxBackgroundResult(pi, jobId, commandLabel, result);
   }});
   return buildSandboxBackgroundStartResult(jobId, commandLabel);
@@ -1824,7 +1888,7 @@ export default function statefulOmpExtension(pi) {{
         allow_signal: {{ type: "boolean", description: "Allow the sandboxed command to signal approved processes when the selected profile supports signaling." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and deliver captured output automatically." }},
+        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and stream stdout automatically." }},
       }},
       required: ["fs", "command"],
     }},
@@ -1849,7 +1913,7 @@ export default function statefulOmpExtension(pi) {{
         command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and deliver captured output automatically." }},
+        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and stream stdout automatically." }},
       }},
       required: ["purpose", "command"],
     }},
@@ -1879,7 +1943,7 @@ export default function statefulOmpExtension(pi) {{
         allow_signal: {{ type: "boolean", description: "Optionally allow the sandboxed command to signal approved external processes." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and deliver captured output automatically." }},
+        async: {{ type: "boolean", description: "Deprecated compatibility field; commands always run in background and stream stdout automatically." }},
       }},
       required: ["purpose", "command"],
     }},

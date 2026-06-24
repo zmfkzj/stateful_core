@@ -222,9 +222,10 @@ for non-external `stateful sandbox run` profiles, `ext_ro_bash` for read-only
 `--fs external` purpose-and-command operations without OMP UI confirmation, and
 `ext_rw_bash` for external writes that declare write/create/dir scope and ask for
 OMP UI confirmation. Generated OMP `*_bash` tools start sandbox commands in
-the background, return a background-job start result immediately, capture
-stdout/stderr, and deliver completion back into OMP when the sandboxed command
-exits; the deprecated `async` parameter is accepted as a compatibility no-op.
+the background, return a background-job start result immediately, stream stdout
+back into OMP as collapsible output, and keep stderr/status in details unless
+the command fails; the deprecated `async` parameter is accepted as a
+compatibility no-op.
 
 Install with:
 
@@ -417,8 +418,8 @@ installation health.
   exact directory intent and a same-session directory lease for that directory.
   In OMP, invoke `write-targets` through the generated `sandbox_bash` tool; it
   starts the sandbox command in the background, returns a background-job start
-  result immediately, captures stdout/stderr, and delivers completion
-  automatically when the command exits.
+  result immediately, streams stdout back into OMP as collapsible output, and
+  keeps stderr/status in details unless the command fails.
 - `stateful sandbox run --fs external --purpose <purpose> --command <cmd>`
   runs repo-external shell operations through the external sandbox profile.
   Purpose and command are required. Codex prompts before direct use. In OMP,
@@ -426,8 +427,9 @@ installation health.
   confirmation; external writes use `ext_rw_bash`, require at least one
   write target, create target, or write dir scope, and ask for OMP UI
   confirmation before the background sandbox command is started. Generated OMP
-  tools return a background-job start result immediately, capture stdout/stderr,
-  and deliver completion automatically when the sandboxed command exits.
+  tools return a background-job start result immediately, stream stdout back into
+  OMP as collapsible output, and keep stderr/status in details unless the command
+  fails.
   Absolute target paths supplied for external writes must resolve outside the repo
   and do not require repo intent or a same-session lease. Repo-relative write
   targets, create targets, and write dirs are authorized through the normal
@@ -495,9 +497,9 @@ global/default OMP profile untouched. The generated OMP extension registers
 `sandbox_bash` for non-external sandbox runs, `ext_ro_bash` for read-only
 `--fs external` shell work, and `ext_rw_bash` for external writes. These
 generated OMP `*_bash` tools always start the sandbox command in the background,
-return a background-job start result immediately, capture stdout/stderr while it
-runs, and deliver an automatic completion message back into OMP with the exit
-status and captured output when the command exits. The deprecated `async`
+return a background-job start result immediately, stream stdout back into OMP as
+collapsible output while it runs, and keep stderr/status in details unless the
+command fails. The deprecated `async`
 parameter is accepted only as a compatibility no-op; it no longer selects
 background execution. `sandbox_bash` invokes the trusted stateful binary as
 `stateful sandbox run --fs <profile> ... --command <cmd>` for read-only,
@@ -683,10 +685,10 @@ lease. Codex prompts on
 UI confirmation. `ext_rw_bash` requires at least one write target, create target,
 or write dir scope, asks for UI confirmation before the background external
 sandbox command is started, and returns a background-job start result
-immediately. Generated OMP `*_bash` tools capture stdout/stderr and deliver an
-automatic completion message back into OMP with the exit status and captured
-output when the command exits; the deprecated `async` parameter is accepted only
-as a compatibility no-op.
+immediately. Generated OMP `*_bash` tools stream stdout back into OMP as
+collapsible output while the command runs and keep stderr/status in details
+unless the command fails; the deprecated `async` parameter is accepted only as a
+compatibility no-op.
 
 ## HTTP And MCP Surface
 

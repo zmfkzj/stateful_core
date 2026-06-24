@@ -152,9 +152,9 @@ without OMP UI confirmation. `ext_rw_bash` asks for OMP UI confirmation before
 starting the background command for external writes that declare at least one
 write target, create target, or write dir. Generated OMP `*_bash` tools always
 start sandbox commands in the background, return a background-job start result
-immediately, capture stdout/stderr, and deliver an automatic completion message
-back into OMP with the exit status and captured output when the command exits.
-The deprecated `async` parameter is accepted only as a compatibility no-op. The
+immediately, stream stdout back into OMP as collapsible output while the command
+runs, and keep stderr/status in details unless the command fails. The deprecated
+`async` parameter is accepted only as a compatibility no-op. The
 generated extension also subscribes to Stateful SSE reservation
 notifications and injects a next-turn OMP message when a queued `wait_id`
 becomes claimable; the claim and write still use the normal Stateful tools.
