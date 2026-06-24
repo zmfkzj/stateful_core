@@ -269,8 +269,9 @@ keeps the detailed procedure, and hooks remain the enforcement boundary. The
 generated extension registers `sandbox_bash` for read-only, write-targets,
 build, git, and github-pr sandbox runs, including common sandbox flags,
 registers `ext_ro_bash` for read-only `--fs external` commands, and registers
-`ext_rw_bash` for external writes that require write/create/dir scope and OMP UI
-confirmation. All three generated `*_bash` tools wait for the sandbox command
+`ext_rw_bash` for external writes that require write/create/dir scope plus a
+scoped OMP UI grant. That grant omits raw command text, shows purpose and
+declared scope, and can cover matching calls until expiry or max uses. All three generated `*_bash` tools wait for the sandbox command
 to finish before returning the tool result, so final stdout/stderr/status are
 available before the agent can end the turn. They emit stdout through inline OMP
 tool updates so it renders in the tool output panel, and OMP abort/ESC cancels
@@ -326,8 +327,8 @@ authorization still uses the v1 envelope.
 OMP adapters preserve stateful hard blocks: `sandbox_bash` owns non-external
 sandbox command execution for read-only, write-targets, build, git, and
 github-pr profiles; `ext_ro_bash` owns read-only external commands without OMP
-UI confirmation; `ext_rw_bash` owns external writes with OMP UI confirmation;
-all generated `*_bash` tools wait for the sandbox command to finish before
+UI confirmation; `ext_rw_bash` owns external writes through reusable scoped
+purpose grants; all generated `*_bash` tools wait for the sandbox command to finish before
 returning, emit stdout through inline OMP tool updates, and return final
 stdout/stderr/exit status in tool details;
 stateful allow maps to allow; and stateful denial or unavailable state maps to
@@ -360,7 +361,7 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   non-external sandbox command work must use `sandbox_bash`, read-only
   repo-external command-shaped work must use `ext_ro_bash` without OMP UI
   confirmation, and external writes must use `ext_rw_bash` with write/create/dir
-  scope and OMP UI confirmation.
+  scope plus a scoped purpose grant.
 - check whether requested files or resources conflict with active claims
 - deny, warn, or add context based on policy
 
@@ -500,7 +501,7 @@ test execution -> run through sandbox run --fs build --network enabled with
   --write-dir <scratch-purpose>; scratch lives under /tmp/stateful/<session>/
 Codex raw Bash, OMP raw Bash, or OMP Python/JavaScript/JS/Ruby/Julia eval tools
   -> deny
-repo-external OMP command-shaped work -> require `ext_ro_bash` for reads or `ext_rw_bash` for writes
+repo-external OMP command-shaped work -> require `ext_ro_bash` for reads or `ext_rw_bash` with a scoped purpose grant for writes
 ```
 
 Bash denial should tell the agent to use native read/search/diff tools for
@@ -513,7 +514,7 @@ OMP `sandbox_bash` for read-only, write-targets, build, git, and github-pr
 sandbox runs,
 Codex `<absolute-stateful-binary> sandbox run --fs external --purpose ...
 --command <cmd>`, OMP `ext_ro_bash` for read-only external work, or OMP
-`ext_rw_bash` for approved repo-external writes,
+`ext_rw_bash` with a scoped purpose grant for approved repo-external writes,
 and native edit tools for repo file edits.
 
 The read-only sandbox profile is a write-confinement profile. It does not
@@ -557,8 +558,8 @@ Initial policy should prefer advisory claims:
 - OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution: deny at
   host approval and hook levels, even when the raw command invokes
   `stateful sandbox run`; use `sandbox_bash` for non-external sandbox profiles,
-  `ext_ro_bash` for read-only `--fs external`, and `ext_rw_bash` for external
-  writes
+  `ext_ro_bash` for read-only `--fs external`, and `ext_rw_bash` with a scoped
+  purpose grant for external writes
 - directory reservation and directory claim authorize only `write_directory` for the
   exact directory resource; they do not authorize `write_file`, delete, rename,
   or move actions on child paths
@@ -731,8 +732,8 @@ non-Bash read/search/diff path: allow
 At the OMP adapter boundary, a stateful hook deny or unavailable result is
 returned as block, not warning, regardless of OMP yolo metadata. Non-external
 sandbox runs must use `sandbox_bash`, repo-external command-shaped reads must
-use `ext_ro_bash`, external writes must use `ext_rw_bash`, and raw OMP Bash plus
-Python/JavaScript/JS/Ruby/Julia
+use `ext_ro_bash`, external writes must use `ext_rw_bash` with a scoped purpose
+grant, and raw OMP Bash plus Python/JavaScript/JS/Ruby/Julia
 eval-tool sandbox invocations are denied.
 
 When the state server is unavailable:
@@ -840,7 +841,7 @@ supported write action + target outside reservation scope -> deny
 Codex raw Bash -> deny; OMP raw Bash plus Python/JavaScript/JS/Ruby/Julia
   eval tools -> deny even when the command invokes `stateful sandbox run`; use
   `sandbox_bash` for non-external sandbox profiles, `ext_ro_bash` for read-only
-  external work, and `ext_rw_bash` for external writes
+  external work, and `ext_rw_bash` with a scoped purpose grant for external writes
 delete action + non-exact file scope -> deny
 rename/move action + non-exact source or destination scope -> deny
 active write claim in hard conflict domain -> deny

@@ -23,8 +23,8 @@ The prototype supports user-level installation with repo allowlist gating.
 --agent codex --yes` configures global Codex hooks and MCP. `stateful install
 --agent omp --yes` configures the isolated OMP `stateful` profile with stateful
 hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `ext_ro_bash`
-for read-only `--fs external`, `ext_rw_bash` for external writes, and approval
-entries that deny raw Bash while setting
+for read-only `--fs external`, `ext_rw_bash` for scoped-grant external writes,
+and approval entries that deny raw Bash while setting
 Python/JavaScript/JS/Ruby/Julia eval tools to false. The OMP installer also
 writes `rules/stateful-required.md` and
 `skills/stateful-command-policy/SKILL.md` under that isolated agent directory:
@@ -253,9 +253,12 @@ the trusted stateful binary for read-only, write-targets, build, git, and
 github-pr profiles, including common sandbox flags, and rejects `--fs external`
 with guidance to use `ext_ro_bash` or `ext_rw_bash`; `ext_ro_bash` starts
 purpose-and-command-only external reads without OMP UI confirmation; `ext_rw_bash`
-asks OMP UI confirmation before starting the trusted stateful binary with
-`sandbox run --fs external --purpose ...` for external writes that declare at
-least one write target, create target, or write dir. All generated `*_bash` tools
+asks OMP UI confirmation for a scoped purpose grant before starting the trusted
+stateful binary with `sandbox run --fs external --purpose ...` for external
+writes that declare at least one write target, create target, or write dir. The
+grant prompt shows purpose, declared scope, examples, max uses, and expiry rather
+than raw command text, and matching calls reuse the grant until it expires or
+reaches its use limit. All generated `*_bash` tools
 wait for sandbox commands to finish before returning the tool result, so final
 stdout/stderr/status are available before the agent can end the turn. They emit
 stdout through inline OMP tool updates and cancel on OMP abort/ESC; their
@@ -266,7 +269,7 @@ omit targets, while supplied external write scopes are validated as absolute
 paths outside the repo. On macOS, external profile runs also allow
 trust/identity Mach lookups for `trustd` and DirectoryService so Go TLS clients
 such as `gh` can verify certificates. It starts through the sandbox after Codex
-approval, `ext_ro_bash` invocation, or `ext_rw_bash` confirmation and does not
+approval, `ext_ro_bash` invocation, or `ext_rw_bash` scoped-grant approval and does not
 require repo reservation or claim unless repo-relative write scope is supplied.
 Local git operations use `<absolute-stateful-binary> sandbox run --fs git
 --network disabled --command 'git <args>'`; use `--network enabled` only for
@@ -590,13 +593,13 @@ verification.
 `stateful
 install --agent omp --yes` registers `sandbox_bash` for read-only,
 write-targets, build, git, and github-pr sandbox profiles, `ext_ro_bash` for
-read-only external commands, and `ext_rw_bash` for external writes. All three
-generated `*_bash` tools wait for sandbox commands to finish before returning,
-emit stdout through inline OMP tool updates, cancel on OMP abort, and return
-final stdout/stderr/exit status in tool details; the compatibility `async` input
-is a no-op.
-`ext_ro_bash` does not ask OMP UI confirmation; `ext_rw_bash` asks before
-starting the trusted stateful binary with the external profile. Raw OMP Bash and
+read-only external commands, and `ext_rw_bash` for external writes with scoped
+purpose grants. All three generated `*_bash` tools wait for sandbox commands to
+finish before returning, emit stdout through inline OMP tool updates, cancel on
+OMP abort, and return final stdout/stderr/exit status in tool details; the
+compatibility `async` input is a no-op.
+`ext_ro_bash` does not ask OMP UI confirmation; `ext_rw_bash` asks for the grant
+before starting the trusted stateful binary with the external profile. Raw OMP Bash and
 Python/JavaScript/JS/Ruby/Julia eval-tool sandbox invocations are denied.
 OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
 extension events to `stateful hook omp session-start`, `pre-tool-use`,
@@ -709,7 +712,7 @@ always-apply `rules/stateful-required.md` rule,
 Stateful hooks. Raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution
 is still denied at host approval and hook levels, sandbox runs still go through
 `sandbox_bash`, `ext_ro_bash`, or `ext_rw_bash`, and the trusted external write
-approval prompt stays inside `ext_rw_bash`. `stateful enable`
+grant prompt stays inside `ext_rw_bash`. `stateful enable`
 opts the current repo into enforcement. Repo-local packaging and managed hooks
 must reuse the same hook adapter library and HTTP protocol.
 

@@ -1563,6 +1563,12 @@ const SANDBOX_BASH_FS_PROFILES = new Set(["read-only", "write-targets", "build",
 
 let sandboxJobCounter = 0;
 
+const EXTERNAL_GRANT_DEFAULT_MAX_USES = 5;
+const EXTERNAL_GRANT_MAX_USES_LIMIT = 20;
+const EXTERNAL_GRANT_DEFAULT_TTL_MS = 10 * 60 * 1000;
+const EXTERNAL_GRANT_MAX_TTL_MS = 60 * 60 * 1000;
+const externalBashGrants = new Map();
+
 function nextSandboxJobId(label) {{
   sandboxJobCounter += 1;
   return label.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() + "-" + Date.now().toString(36) + "-" + sandboxJobCounter.toString(36);
@@ -1670,42 +1676,97 @@ function externalReadWriteBashArgs(params) {{
   return args;
 }}
 
-function externalBashApprovalMessage(params, args) {{
+function normalizedStringList(value) {{
+  return stringList(value).map((item) => item.trim()).sort();
+}}
+
+function externalGrantSettings(params) {{
+  const requestedMaxUses = params.grant_max_uses ?? params.grantMaxUses;
+  const requestedTtlSeconds = params.grant_expires_seconds ?? params.grantExpiresSeconds;
+  let maxUses = EXTERNAL_GRANT_DEFAULT_MAX_USES;
+  if (requestedMaxUses !== undefined) {{
+    if (!Number.isInteger(requestedMaxUses) || requestedMaxUses < 1 || requestedMaxUses > EXTERNAL_GRANT_MAX_USES_LIMIT) {{
+      throw new Error("ext_rw_bash grant_max_uses must be an integer from 1 to " + EXTERNAL_GRANT_MAX_USES_LIMIT);
+    }}
+    maxUses = requestedMaxUses;
+  }}
+  let ttlMs = EXTERNAL_GRANT_DEFAULT_TTL_MS;
+  if (requestedTtlSeconds !== undefined) {{
+    if (!Number.isInteger(requestedTtlSeconds) || requestedTtlSeconds < 1 || requestedTtlSeconds > EXTERNAL_GRANT_MAX_TTL_MS / 1000) {{
+      throw new Error("ext_rw_bash grant_expires_seconds must be an integer from 1 to " + (EXTERNAL_GRANT_MAX_TTL_MS / 1000));
+    }}
+    ttlMs = requestedTtlSeconds * 1000;
+  }}
+  return {{ maxUses, ttlMs }};
+}}
+
+function externalGrantDescriptor(params) {{
+  return {{
+    purpose: params.purpose.trim(),
+    write_targets: normalizedStringList(params.write_targets),
+    create_targets: normalizedStringList(params.create_targets),
+    write_dirs: normalizedStringList(params.write_dirs),
+    connect_sockets: normalizedStringList(params.connect_sockets),
+    allow_signal: params.allow_signal === true,
+    network: typeof params.network === "string" ? params.network : "default",
+  }};
+}}
+
+function externalGrantKey(params) {{
+  return JSON.stringify(externalGrantDescriptor(params));
+}}
+
+function pruneExternalBashGrants(now) {{
+  for (const [key, grant] of externalBashGrants) {{
+    if (grant.expiresAt <= now || grant.uses >= grant.maxUses) {{
+      externalBashGrants.delete(key);
+    }}
+  }}
+}}
+
+function externalBashApprovalMessage(params) {{
+  const descriptor = externalGrantDescriptor(params);
+  const settings = externalGrantSettings(params);
   const scope = [
-    ...stringList(params.write_targets).map((path) => "write-target: " + path),
-    ...stringList(params.create_targets).map((path) => "create-target: " + path),
-    ...stringList(params.write_dirs).map((path) => "write-dir: " + path),
-    ...stringList(params.connect_sockets).map((path) => "connect-socket: " + path),
-    ...(params.allow_signal === true ? ["allow-signal"] : []),
+    ...descriptor.write_targets.map((path) => "write-target: " + path),
+    ...descriptor.create_targets.map((path) => "create-target: " + path),
+    ...descriptor.write_dirs.map((path) => "write-dir: " + path),
+    ...descriptor.connect_sockets.map((path) => "connect-socket: " + path),
+    ...(descriptor.allow_signal ? ["allow-signal"] : []),
+    "network: " + descriptor.network,
   ];
+  const examples = stringList(params.approval_examples);
   return [
-    "Stateful is requesting a read/write repo-external sandbox operation.",
+    "Stateful is requesting a scoped repo-external sandbox grant.",
     "",
     "Purpose:",
-    params.purpose,
+    descriptor.purpose,
     "",
-    "Declared external write/socket/signal scope:",
+    "Allowed external write/socket/signal scope:",
     scope.length ? scope.join("\n") : "No declared external write/socket/signal scope.",
     "",
-    "Command:",
-    params.command,
+    "Grant limits:",
+    "max uses: " + settings.maxUses,
+    "expires in seconds: " + Math.floor(settings.ttlMs / 1000),
     "",
-    "Sandbox invocation:",
-    STATEFUL + " " + args.join(" "),
+    "Command examples:",
+    examples.length ? examples.map((example) => "- " + example).join("\n") : "- Commands may vary, but must stay within the purpose and scope above.",
+    "",
+    "Raw command text is intentionally hidden from this approval prompt.",
   ].join("\n");
 }}
 
-async function confirmExternalBashCommand(ctx, params, args, signal) {{
-  if (signal?.aborted) return null;
+async function confirmExternalBashGrant(ctx, params, signal) {{
+  if (signal?.aborted) return false;
   let abortHandler;
   const abortPromise = signal ? new Promise((resolve) => {{
-    abortHandler = () => resolve(null);
+    abortHandler = () => resolve(false);
     signal.addEventListener("abort", abortHandler, {{ once: true }});
   }}) : undefined;
   try {{
     const confirmPromise = ctx.ui.confirm(
-      "Approve external sandbox command",
-      externalBashApprovalMessage(params, args)
+      "Approve external sandbox grant",
+      externalBashApprovalMessage(params)
     );
     return abortPromise
       ? await Promise.race([confirmPromise, abortPromise])
@@ -1715,6 +1776,27 @@ async function confirmExternalBashCommand(ctx, params, args, signal) {{
       signal.removeEventListener("abort", abortHandler);
     }}
   }}
+}}
+
+async function ensureExternalBashGrant(ctx, params, signal) {{
+  const now = Date.now();
+  pruneExternalBashGrants(now);
+  const key = externalGrantKey(params);
+  const existing = externalBashGrants.get(key);
+  if (existing && existing.expiresAt > now && existing.uses < existing.maxUses) {{
+    existing.uses += 1;
+    return true;
+  }}
+  const settings = externalGrantSettings(params);
+  const approved = await confirmExternalBashGrant(ctx, params, signal);
+  if (!approved) return false;
+  const approvedAt = Date.now();
+  externalBashGrants.set(key, {{
+    expiresAt: approvedAt + settings.ttlMs,
+    maxUses: settings.maxUses,
+    uses: 1,
+  }});
+  return true;
 }}
 
 function sandboxToolResultText(exitCode, stdout, stderr, error) {{
@@ -2038,7 +2120,7 @@ export default function statefulOmpExtension(pi) {{
   pi.registerTool({{
     name: "ext_rw_bash",
     label: "External Read/write Bash",
-    description: "Run a command through stateful sandbox run --fs external after explicit OMP UI approval. At least one write_targets, create_targets, or write_dirs entry is required.",
+    description: "Run a command through stateful sandbox run --fs external after explicit OMP UI approval of a scoped purpose grant. At least one write_targets, create_targets, or write_dirs entry is required.",
     parameters: {{
       type: "object",
       properties: {{
@@ -2049,6 +2131,9 @@ export default function statefulOmpExtension(pi) {{
         write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Repo-relative directories or absolute external directories the command may write under. At least one write/create/directory scope is required." }},
         connect_sockets: {{ type: "array", items: {{ type: "string" }}, description: "Optional absolute Unix socket paths the sandbox may connect to." }},
         allow_signal: {{ type: "boolean", description: "Optionally allow the sandboxed command to signal approved external processes." }},
+        approval_examples: {{ type: "array", items: {{ type: "string" }}, description: "Optional example command classes to show in the approval prompt; raw command text is not shown." }},
+        grant_max_uses: {{ type: "number", description: "Maximum executions covered by the approved purpose/scope grant, from 1 to 20. Defaults to 5." }},
+        grant_expires_seconds: {{ type: "number", description: "Grant lifetime in seconds, from 1 to 3600. Defaults to 600." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
         async: {{ type: "boolean", description: "Deprecated compatibility field; commands now wait for completion before returning." }},
@@ -2069,7 +2154,12 @@ export default function statefulOmpExtension(pi) {{
           details: {{ error: "confirmation_unavailable" }},
         }};
       }}
-      const approved = await confirmExternalBashCommand(ctx, params, args, signal);
+      let approved;
+      try {{
+        approved = await ensureExternalBashGrant(ctx, params, signal);
+      }} catch (error) {{
+        return sandboxToolError(error);
+      }}
       if (!approved) {{
         return {{
           isError: true,

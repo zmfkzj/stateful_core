@@ -85,7 +85,10 @@ Generated OMP tools:
 - `ext_ro_bash` for read-only `--fs external` purpose-and-command operations
   without OMP UI confirmation
 - `ext_rw_bash` for external writes that declare write/create/dir scope and ask
-  for OMP UI confirmation
+  for a scoped purpose grant. The approval prompt omits raw command text and
+  grants matching calls keyed by purpose plus write/create/write-dir/socket/
+  signal/network scope until expiry or max uses; defaults are 5 uses and 600
+  seconds.
 
 Generated OMP bash tools wait for sandbox commands to finish before returning,
 emit stdout through inline OMP tool updates, include final stdout/stderr/status

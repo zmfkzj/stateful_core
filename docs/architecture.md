@@ -131,9 +131,11 @@ keeps the detailed procedure, and hooks remain the enforcement boundary. The
 generated extension registers `sandbox_bash` for read-only, write-targets,
 build, git, and github-pr sandbox runs, including common sandbox flags,
 registers `ext_ro_bash` for read-only `--fs external` commands, and registers
-`ext_rw_bash` for external writes that require write/create/dir scope and OMP UI
-confirmation. All three generated `*_bash` tools wait for the sandbox command
-to finish before returning the tool result, so final stdout/stderr/status are
+`ext_rw_bash` for external writes that require write/create/dir scope plus a
+scoped OMP UI approval grant. That grant shows purpose, declared
+write/socket/signal scope, network mode, examples, max uses, and expiry instead
+of raw command text, and matching calls can reuse it until the limit is reached.
+All three generated `*_bash` tools wait for the sandbox command to finish before returning the tool result, so final stdout/stderr/status are
 available before the agent can end the turn. They emit stdout through inline OMP
 tool updates so it renders in the tool output panel, and OMP abort/ESC cancels
 the foreground tool while the sandbox runner cleans up its child process group.
@@ -191,9 +193,9 @@ reconciliation fail closed; read/search/diff remains allowed.
 For OMP, the generated `sandbox_bash` tool owns non-external sandbox command
 execution for read-only, write-targets, build, git, and github-pr profiles;
 `ext_ro_bash` owns read-only external commands without OMP UI confirmation; and
-`ext_rw_bash` owns external writes with OMP UI confirmation. Each generated tool
-waits for the sandbox command to finish before returning, emits stdout through
-inline OMP tool updates, cancels on OMP abort, and returns final
+`ext_rw_bash` owns external writes through reusable scoped purpose grants. Each
+generated tool waits for the sandbox command to finish before returning, emits
+stdout through inline OMP tool updates, cancels on OMP abort, and returns final
 stdout/stderr/exit status in the tool details.
 Other stateful allows translate to OMP allow. Stateful deny or unavailable server
 translates to a hard block, even when OMP yolo metadata is present.
@@ -259,7 +261,7 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   levels, even when the raw command invokes `stateful sandbox run`; non-external
   sandbox command work must use `sandbox_bash`, read-only repo-external shell
   work must use `ext_ro_bash` without OMP UI confirmation, and external writes
-  must use `ext_rw_bash` with write/create/dir scope and OMP UI confirmation.
+  must use `ext_rw_bash` with write/create/dir scope plus a scoped purpose grant.
   Hook-mediated command execution outside OMP custom tools must be a single
   strict invocation of the trusted absolute `stateful` binary running
   `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
@@ -357,9 +359,9 @@ classification, so `functions.bash` is Bash,
   `stateful sandbox run`. OMP command-shaped sandbox work uses generated tools:
   `sandbox_bash` for read-only, write-targets, build, git, and github-pr
   profiles, `ext_ro_bash` for read-only `--fs external` commands without OMP UI
-  confirmation, and `ext_rw_bash` for external writes with OMP UI confirmation.
-  These tools wait for sandbox commands to finish before returning, emit stdout
-  through inline OMP tool updates, cancel on OMP abort, and return final
+  confirmation, and `ext_rw_bash` for external writes with a scoped purpose
+  grant. These tools wait for sandbox commands to finish before returning, emit
+  stdout through inline OMP tool updates, cancel on OMP abort, and return final
   stdout/stderr/exit status in tool details.
   Ordinary read work should use native read/search/diff tools when available.
   Read-only command-shaped inspection that genuinely needs a shell uses
@@ -369,7 +371,8 @@ classification, so `functions.bash` is Bash,
   `--create-target <file>` values and target authorization. External operations
   use `--fs external` with no repo reservation or claim, and Codex approval or OMP
   `ext_ro_bash` for read-only/no-write-scope commands; OMP external writes use
-  `ext_rw_bash` with at least one write target, create target, or write dir. On
+  `ext_rw_bash` with at least one write target, create target, or write dir and a
+  scoped purpose grant. On
   macOS, the external profile permits `trustd` and DirectoryService Mach lookups
   so Go TLS clients such as `gh` can verify certificates.
 - Test execution: run only through sandboxed test actions such as

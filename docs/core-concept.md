@@ -150,9 +150,11 @@ tools instead. `sandbox_bash` invokes the trusted stateful binary for read-only,
 write-targets, build, git, and github-pr sandbox profiles, including common
 sandbox flags, and rejects `--fs external` with guidance to use `ext_ro_bash` or
 `ext_rw_bash`. `ext_ro_bash` runs purpose-and-command-only external reads
-without OMP UI confirmation. `ext_rw_bash` asks for OMP UI confirmation before
+without OMP UI confirmation. `ext_rw_bash` asks for a scoped OMP UI grant before
 running external writes that declare at least one write target, create target, or
-write dir. Generated OMP `*_bash` tools wait for sandbox commands to finish
+write dir; the prompt shows purpose, declared scope, examples, max uses, and
+expiry rather than raw command text, and matching calls reuse the grant until it
+expires or reaches its use limit. Generated OMP `*_bash` tools wait for sandbox commands to finish
 before returning the tool result, so final stdout/stderr/status arrive before
 the agent can end the turn. They emit stdout through inline OMP tool updates and
 cancel on OMP abort/ESC. The deprecated `async` parameter is accepted only
@@ -170,8 +172,8 @@ profile. Command-shaped repo writes must use the wrapper with
 same-session claim; in OMP, use `sandbox_bash`. Repo-external operations use
 `--fs external` with purpose and command; read-only external commands may omit
 targets and use OMP `ext_ro_bash`, while external writes must declare
-write/create/dir scope and use OMP `ext_rw_bash`. Raw Bash test commands are
-not allowlisted; use
+write/create/dir scope and use OMP `ext_rw_bash` with a scoped purpose grant.
+Raw Bash test commands are not allowlisted; use
 `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
 --command <cmd>` so build artifacts go under
 `/tmp/stateful/<session>/<scratch-purpose>/`; in OMP, use `sandbox_bash`.

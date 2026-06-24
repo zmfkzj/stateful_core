@@ -208,11 +208,11 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 | Local git operation | `stateful sandbox run --fs git --network disabled --command 'git <args>'` |
 | Remote git operation | Git sandbox profile with `--network enabled` |
 | GitHub PR list/view/status/create | `stateful sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` |
-| Repo-external shell operation | `stateful sandbox run --fs external --purpose <purpose> --command <cmd>` |
+| Repo-external shell operation | `stateful sandbox run --fs external --purpose <purpose> --command <cmd>` for reads; add exact `--write-target`, `--create-target`, or `--write-dir` scopes for writes |
 
 In OMP, use the generated tools instead of raw Bash: `sandbox_bash` for
 non-external sandbox profiles, `ext_ro_bash` for read-only external shell work,
-and `ext_rw_bash` for external writes with declared scope.
+and `ext_rw_bash` for external writes with a scoped purpose grant and declared scope.
 
 See [Usage reference](docs/usage-reference.md) for detailed CLI, hook, sandbox,
 LAN sharing, generated-file, and release notes.
