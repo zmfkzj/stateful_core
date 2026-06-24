@@ -87,6 +87,9 @@ Generated OMP tools:
 - `ext_rw_bash` for external writes that declare write/create/dir scope and ask
   for OMP UI confirmation
 
+Generated OMP bash tools wait for sandbox commands to finish before returning,
+so final stdout/stderr/status are available before the agent can end the turn.
+
 Raw Bash and eval tool calls are denied by stateful hooks; use the generated
 OMP tools instead.
 

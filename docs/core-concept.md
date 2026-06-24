@@ -149,12 +149,12 @@ write-targets, build, git, and github-pr sandbox profiles, including common
 sandbox flags, and rejects `--fs external` with guidance to use `ext_ro_bash` or
 `ext_rw_bash`. `ext_ro_bash` runs purpose-and-command-only external reads
 without OMP UI confirmation. `ext_rw_bash` asks for OMP UI confirmation before
-starting the background command for external writes that declare at least one
-write target, create target, or write dir. Generated OMP `*_bash` tools always
-start sandbox commands in the background, return a background-job start result
-immediately, stream stdout back into OMP as collapsible output while the command
-runs, and keep stderr/status in details unless the command fails. The deprecated
-`async` parameter is accepted only as a compatibility no-op. The
+running external writes that declare at least one write target, create target, or
+write dir. Generated OMP `*_bash` tools wait for sandbox commands to finish
+before returning the tool result, so final stdout/stderr/status arrive before
+the agent can end the turn. They emit stdout to OMP as a collapsible message
+before returning. The deprecated `async` parameter is accepted only
+as a compatibility no-op. The
 generated extension also subscribes to Stateful SSE reservation
 notifications and injects a next-turn OMP message when a queued `wait_id`
 becomes claimable; the claim and write still use the normal Stateful tools.

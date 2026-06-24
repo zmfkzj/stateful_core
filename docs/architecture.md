@@ -132,11 +132,11 @@ generated extension registers `sandbox_bash` for read-only, write-targets,
 build, git, and github-pr sandbox runs, including common sandbox flags,
 registers `ext_ro_bash` for read-only `--fs external` commands, and registers
 `ext_rw_bash` for external writes that require write/create/dir scope and OMP UI
-confirmation. All three generated `*_bash` tools start sandbox commands in the
-background, immediately return a background-job start result, stream stdout back
-into OMP as collapsible output while the command runs, and keep stderr/status in
-details unless the command fails; their `async` input is a deprecated
-compatibility no-op that does not select execution mode. `sandbox_bash` rejects
+confirmation. All three generated `*_bash` tools wait for the sandbox command
+to finish before returning the tool result, so final stdout/stderr/status are
+available before the agent can end the turn. They emit stdout to OMP as a
+collapsible message before returning; their `async` input is a deprecated
+compatibility no-op that does not select background execution. `sandbox_bash` rejects
 `--fs external` with guidance to use `ext_ro_bash` or `ext_rw_bash`. Raw Bash and
 Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
@@ -190,9 +190,9 @@ For OMP, the generated `sandbox_bash` tool owns non-external sandbox command
 execution for read-only, write-targets, build, git, and github-pr profiles;
 `ext_ro_bash` owns read-only external commands without OMP UI confirmation; and
 `ext_rw_bash` owns external writes with OMP UI confirmation. Each generated tool
-always starts the sandbox command in the background, returns only the
-background-job start result immediately, streams stdout back into OMP as
-collapsible output, and keeps stderr/status in details unless the command fails.
+waits for the sandbox command to finish before returning, emits stdout to OMP as
+a collapsible message before return, and keeps stderr/status in the returned tool
+details unless the command fails.
 Other stateful allows translate to OMP allow. Stateful deny or unavailable server
 translates to a hard block, even when OMP yolo metadata is present.
 
@@ -349,9 +349,9 @@ classification, so `functions.bash` is Bash,
   `sandbox_bash` for read-only, write-targets, build, git, and github-pr
   profiles, `ext_ro_bash` for read-only `--fs external` commands without OMP UI
   confirmation, and `ext_rw_bash` for external writes with OMP UI confirmation.
-  These tools always run sandbox commands in the background, return only a
-  background-job start result immediately, stream stdout back into OMP as
-  collapsible output, and keep stderr/status in details unless the command fails.
+  These tools wait for sandbox commands to finish before returning, emit stdout
+  to OMP as a collapsible message before return, and keep stderr/status in
+  returned tool details unless the command fails.
   Ordinary read work should use native read/search/diff tools when available.
   Read-only command-shaped inspection that genuinely needs a shell uses
   `--fs read-only --network disabled`; process inspection uses

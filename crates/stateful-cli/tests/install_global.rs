@@ -219,13 +219,13 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
     assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
-    assert!(extension.contains(
-        "function runSandboxToolProcess(params, args, ctx, label, onStdout, onComplete)"
-    ));
+    assert!(
+        extension.contains("function runSandboxToolProcess(params, args, ctx, label, onStdout)")
+    );
     assert!(!extension.contains("function runSandboxTool(params"));
     assert!(extension.contains("spawn(STATEFUL, args"));
     assert!(extension.contains(
-        "Stdout will stream as collapsible output (Ctrl+O); stderr and status stay in details unless the command fails."
+        "Deprecated compatibility field; commands now wait for completion before returning."
     ));
     assert!(extension.contains("function deliverSandboxStdoutChunk(pi, jobId, label, chunk)"));
     assert!(extension.contains("customType: \"stateful_sandbox_bash_stdout\""));
@@ -240,15 +240,19 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("result.details.sandboxRunOutput = sandboxRunOutput"));
     assert!(extension.contains("stderr = truncateSandboxToolText(stderr + chunk, label)"));
     assert!(
-        extension.contains("function startSandboxBackgroundTool(pi, params, args, ctx, label)")
+        extension.contains("async function runSandboxAwaitedTool(pi, params, args, ctx, label)")
     );
-    assert!(
-        extension.contains("Deprecated compatibility field; commands always run in background")
-    );
+    assert!(extension.contains("await runSandboxToolProcess(params, args, ctx, label"));
+    assert!(extension.contains("await stdoutStreamer.drain();"));
+    assert!(extension.contains("await Promise.allSettled(deliveries);"));
+    assert!(!extension.contains("function startSandboxBackgroundTool"));
+    assert!(!extension.contains("Background job "));
+    assert!(!extension.contains("stateful_sandbox_bash_result"));
     assert!(!extension.contains("params.async === true"));
     assert!(
-        extension
-            .contains("return startSandboxBackgroundTool(pi, params, args, ctx, \"sandbox_bash\")")
+        extension.contains(
+            "return await runSandboxAwaitedTool(pi, params, args, ctx, \"sandbox_bash\")"
+        )
     );
     assert!(extension.contains("pi.sendMessage"));
     assert!(extension.contains("display: true"));
