@@ -820,10 +820,10 @@ fn hook_legacy_pre_tool_use_command_is_rejected() {
 }
 
 #[test]
-fn intent_declare_command_parses_file_scopes() {
+fn reservation_declare_command_parses_file_scopes() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "intent",
+        "reservation",
         "declare",
         "--session-id",
         "s1",
@@ -834,11 +834,11 @@ fn intent_declare_command_parses_file_scopes() {
         "src/auth.ts",
         "src/session/",
     ])
-    .expect("intent declare command should parse");
+    .expect("reservation declare command should parse");
 
     assert!(matches!(
         cli.command,
-        Command::Intent(stateful_cli::IntentCommand::Declare {
+        Command::Reservation(stateful_cli::ReservationCommand::Declare {
             ref session_id,
             ref workspace_id,
             ref purpose,
@@ -851,20 +851,20 @@ fn intent_declare_command_parses_file_scopes() {
 }
 
 #[test]
-fn intent_declare_command_can_default_session_and_workspace() {
+fn reservation_declare_command_can_default_session_and_workspace() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "intent",
+        "reservation",
         "declare",
         "--purpose",
         "Fix auth validation behavior.",
         "src/auth.ts",
     ])
-    .expect("intent declare command should parse without explicit session flags");
+    .expect("reservation declare command should parse without explicit session flags");
 
     assert!(matches!(
         cli.command,
-        Command::Intent(stateful_cli::IntentCommand::Declare {
+        Command::Reservation(stateful_cli::ReservationCommand::Declare {
             session_id: None,
             workspace_id: None,
             ref purpose,
@@ -875,15 +875,15 @@ fn intent_declare_command_can_default_session_and_workspace() {
 }
 
 #[test]
-fn intent_declare_command_requires_at_least_one_file() {
+fn reservation_declare_command_requires_at_least_one_file() {
     let error = Cli::try_parse_from([
         "stateful",
-        "intent",
+        "reservation",
         "declare",
         "--purpose",
         "Fix auth validation behavior.",
     ])
-    .expect_err("intent declare without files should fail");
+    .expect_err("reservation declare without files should fail");
 
     assert!(
         error.to_string().contains("files_planned") || error.to_string().contains("FILES_PLANNED"),
@@ -892,10 +892,10 @@ fn intent_declare_command_requires_at_least_one_file() {
 }
 
 #[test]
-fn intent_claim_command_parses_wait_id() {
+fn reservation_claim_command_parses_wait_id() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "intent",
+        "reservation",
         "claim",
         "--session-id",
         "s1",
@@ -904,11 +904,11 @@ fn intent_claim_command_parses_wait_id() {
         "--wait-id",
         "wait-1",
     ])
-    .expect("intent claim command should parse");
+    .expect("reservation claim command should parse");
 
     assert!(matches!(
         cli.command,
-        Command::Intent(stateful_cli::IntentCommand::Claim {
+        Command::Reservation(stateful_cli::ReservationCommand::Claim {
             ref session_id,
             ref workspace_id,
             ref wait_id,
@@ -919,10 +919,10 @@ fn intent_claim_command_parses_wait_id() {
 }
 
 #[test]
-fn intent_request_command_parses_request_id_action_and_path() {
+fn reservation_request_command_parses_request_id_action_and_path() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "intent",
+        "reservation",
         "request",
         "--session-id",
         "s1",
@@ -937,11 +937,11 @@ fn intent_request_command_parses_request_id_action_and_path() {
         "--purpose",
         "Queue auth file changes.",
     ])
-    .expect("intent request command should parse");
+    .expect("reservation request command should parse");
 
     assert!(matches!(
         cli.command,
-        Command::Intent(stateful_cli::IntentCommand::Request {
+        Command::Reservation(stateful_cli::ReservationCommand::Request {
             ref session_id,
             ref workspace_id,
             ref request_id,
@@ -958,10 +958,10 @@ fn intent_request_command_parses_request_id_action_and_path() {
 }
 
 #[test]
-fn intent_cancel_command_parses_request_id() {
+fn reservation_cancel_command_parses_request_id() {
     let cli = Cli::try_parse_from([
         "stateful",
-        "intent",
+        "reservation",
         "cancel",
         "--session-id",
         "s1",
@@ -970,11 +970,11 @@ fn intent_cancel_command_parses_request_id() {
         "--request-id",
         "request-1",
     ])
-    .expect("intent cancel command should parse");
+    .expect("reservation cancel command should parse");
 
     assert!(matches!(
         cli.command,
-        Command::Intent(stateful_cli::IntentCommand::Cancel {
+        Command::Reservation(stateful_cli::ReservationCommand::Cancel {
             ref session_id,
             ref workspace_id,
             ref request_id,

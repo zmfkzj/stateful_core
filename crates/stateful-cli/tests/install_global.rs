@@ -144,7 +144,7 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     );
     assert!(
         !first_config.contains(
-            "[mcp_servers.stateful.tools.state_lease_acquire]\napproval_mode = \"approve\""
+            "[mcp_servers.stateful.tools.state_claim_acquire]\napproval_mode = \"approve\""
         )
     );
     assert!(first_config.contains("hook codex pre-tool-use"));
@@ -550,21 +550,22 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     assert_eq!(command_policy_skill, source_command_policy_skill);
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
     assert!(command_policy_skill.contains("Use canonical Stateful MCP tool names"));
-    assert!(command_policy_skill.contains("state_intent_declare"));
-    assert!(command_policy_skill.contains("state_lease_acquire"));
+    assert!(command_policy_skill.contains("state_reservation_declare"));
+    assert!(command_policy_skill.contains("state_claim_acquire"));
     assert!(command_policy_skill.contains("runtime-specific tool names"));
     assert!(
-        command_policy_skill
-            .contains("Do not run `stateful intent declare` or `stateful mcp call` through Bash")
+        command_policy_skill.contains(
+            "Do not run `stateful reservation declare` or `stateful mcp call` through Bash"
+        )
     );
-    assert!(command_policy_skill.contains("Intent declarations add"));
+    assert!(command_policy_skill.contains("Reservation declarations add"));
     assert!(command_policy_skill.contains("--fs build --network enabled"));
     assert!(command_policy_skill.contains("--write-dir <scratch-purpose>"));
-    assert!(command_policy_skill.contains("state_intent_request"));
+    assert!(command_policy_skill.contains("state_reservation_request"));
     assert!(command_policy_skill.contains("state_notifications_poll"));
     assert!(command_policy_skill.contains("state_resume_next"));
-    assert!(command_policy_skill.contains("state_intent_claim"));
-    assert!(!command_policy_skill.contains("Intent declarations replace"));
+    assert!(command_policy_skill.contains("state_reservation_claim"));
+    assert!(!command_policy_skill.contains("Reservation declarations replace"));
     assert!(
         !command_policy_skill.contains("--fs write-targets --network enabled --write-dir target")
     );

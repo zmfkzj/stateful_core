@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use serde_json::json;
 use stateful_core::{AuthorizationInput, CurrentEvidenceKind, CurrentItemKind, DecisionKind};
-use stateful_store::{Event, IntentRequestInput, OutboxEntry, Store, StoreError};
+use stateful_store::{Event, OutboxEntry, ReservationRequestInput, Store, StoreError};
 use std::fs;
 use std::sync::mpsc;
 use std::thread;
@@ -9,27 +9,28 @@ use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 use time::{Duration as TimeDuration, OffsetDateTime};
 
 fn acquire_test_lease(store: &Store, session_id: &str, workspace_id: &str, path: &str) {
-    let has_matching_intent = store
+    let has_matching_reservation = store
         .live_current_state(Some(path))
         .expect("live current state should load")
         .items
         .iter()
         .any(|item| {
-            item.kind == CurrentItemKind::Intent && item.session_id.as_deref() == Some(session_id)
+            item.kind == CurrentItemKind::Reservation
+                && item.session_id.as_deref() == Some(session_id)
         });
-    if !has_matching_intent {
+    if !has_matching_reservation {
         store
-            .append(Event::intent_declared(
+            .append(Event::reservation_declared(
                 session_id,
                 workspace_id,
-                format!("Acquire test lease for {path}."),
+                format!("Acquire test claim for {path}."),
                 [path],
             ))
-            .expect("lease intent should append");
+            .expect("claim reservation should append");
     }
     store
-        .acquire_lease(session_id, workspace_id, path)
-        .expect("lease should acquire");
+        .acquire_claim(session_id, workspace_id, path)
+        .expect("claim should acquire");
 }
 
 fn query_ids(conn: &Connection, sql: &str) -> Vec<String> {
@@ -127,17 +128,17 @@ fn outbox_entry_persists_full_sync_evidence() {
 }
 
 #[test]
-fn intent_declared_materializes_active_policy_state() {
+fn reservation_declared_materializes_active_policy_state() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Fix auth validation behavior.",
             ["src/auth.ts"],
         ))
-        .expect("intent event should append");
+        .expect("reservation event should append");
 
     let state = store
         .policy_state_for_session("s1", "w1")
@@ -149,18 +150,18 @@ fn intent_declared_materializes_active_policy_state() {
 }
 
 #[test]
-fn intent_declared_rejects_empty_or_normalized_empty_scopes() {
+fn reservation_declared_rejects_empty_or_normalized_empty_scopes() {
     for files in [Vec::<&str>::new(), vec!["./"], vec!["../"], vec!["/"]] {
         let store = Store::open_in_memory().expect("in-memory store should open");
 
         let error = store
-            .append(Event::intent_declared(
+            .append(Event::reservation_declared(
                 "s1",
                 "w1",
-                "Reject empty intent scope.",
+                "Reject empty reservation scope.",
                 files,
             ))
-            .expect_err("empty intent scopes should reject");
+            .expect_err("empty reservation scopes should reject");
 
         assert!(matches!(error, StoreError::MissingScope));
         assert_eq!(store.event_count().expect("event count should load"), 0);
@@ -168,14 +169,14 @@ fn intent_declared_rejects_empty_or_normalized_empty_scopes() {
             store
                 .current_summary()
                 .expect("current summary should load")
-                .active_intent_count,
+                .active_reservation_count,
             0
         );
     }
 }
 
 #[test]
-fn intent_declared_rejects_raw_normalized_empty_scope_payloads() {
+fn reservation_declared_rejects_raw_normalized_empty_scope_payloads() {
     for (kind, path) in [
         ("file", "./"),
         ("file", "../"),
@@ -183,17 +184,17 @@ fn intent_declared_rejects_raw_normalized_empty_scope_payloads() {
         ("directory", "/"),
     ] {
         let store = Store::open_in_memory().expect("in-memory store should open");
-        let mut event = Event::intent_declared(
+        let mut event = Event::reservation_declared(
             "s1",
             "w1",
-            "Reject raw normalized-empty intent scope.",
+            "Reject raw normalized-empty reservation scope.",
             ["src/auth.ts"],
         );
         event.payload["scopes"] = serde_json::json!([{ "kind": kind, "path": path }]);
 
         let error = store
             .append(event)
-            .expect_err("raw normalized-empty intent scope should reject");
+            .expect_err("raw normalized-empty reservation scope should reject");
 
         assert!(matches!(error, StoreError::MissingScope));
         assert_eq!(store.event_count().expect("event count should load"), 0);
@@ -201,7 +202,7 @@ fn intent_declared_rejects_raw_normalized_empty_scope_payloads() {
             store
                 .current_summary()
                 .expect("current summary should load")
-                .active_intent_count,
+                .active_reservation_count,
             0
         );
     }
@@ -212,21 +213,21 @@ fn intent_declarations_preserve_existing_scope_in_same_workspace() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Fix auth validation behavior.",
             ["src/auth.ts"],
         ))
-        .expect("w1 intent should append");
+        .expect("w1 reservation should append");
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w2",
             "Update the public guide.",
             ["docs/guide.md"],
         ))
-        .expect("w2 intent should append");
+        .expect("w2 reservation should append");
 
     let w1_state = store
         .policy_state_for_session("s1", "w1")
@@ -243,13 +244,13 @@ fn intent_declarations_preserve_existing_scope_in_same_workspace() {
     assert_eq!(w2_decision.decision, DecisionKind::Allow);
 
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Fix session behavior.",
             ["src/session.ts"],
         ))
-        .expect("replacement w1 intent should append");
+        .expect("replacement w1 reservation should append");
 
     let w1_state = store
         .policy_state_for_session("s1", "w1")
@@ -276,28 +277,28 @@ fn intent_declarations_allow_edit_and_artifact_scopes_to_coexist() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Fix auth validation behavior.",
             ["src/auth.ts"],
         ))
-        .expect("edit intent should append");
+        .expect("edit reservation should append");
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Run the workspace test suite.",
             ["tmp/test-suite/"],
         ))
-        .expect("artifact intent should append");
+        .expect("artifact reservation should append");
 
     store
-        .acquire_lease("s1", "w1", "src/auth.ts")
-        .expect("edit lease should still be authorized");
+        .acquire_claim("s1", "w1", "src/auth.ts")
+        .expect("edit claim should still be authorized");
     store
-        .acquire_lease("s1", "w1", "tmp/test-suite/")
-        .expect("artifact lease should be authorized");
+        .acquire_claim("s1", "w1", "tmp/test-suite/")
+        .expect("artifact claim should be authorized");
 
     let live = store
         .live_current_state(None)
@@ -317,17 +318,17 @@ fn intent_declarations_allow_edit_and_artifact_scopes_to_coexist() {
 #[test]
 fn expired_intent_is_not_write_authorizing_or_counted_active() {
     let store = Store::open_in_memory().expect("in-memory store should open");
-    let mut stale_intent = Event::intent_declared(
+    let mut stale_reservation = Event::reservation_declared(
         "stale-session",
         "w1",
         "Fix stale auth behavior.",
         ["src/auth.ts"],
     );
-    stale_intent.created_at = "1970-01-01T00:00:00Z".to_string();
+    stale_reservation.created_at = "1970-01-01T00:00:00Z".to_string();
 
     store
-        .append(stale_intent)
-        .expect("stale intent event should append");
+        .append(stale_reservation)
+        .expect("stale reservation event should append");
 
     let state = store
         .policy_state_for_session("stale-session", "w1")
@@ -337,8 +338,8 @@ fn expired_intent_is_not_write_authorizing_or_counted_active() {
     let summary = store.current_summary().expect("summary should load");
 
     assert_eq!(decision.decision, DecisionKind::Deny);
-    assert_eq!(decision.reason_code, "missing_intent");
-    assert_eq!(summary.active_intent_count, 0);
+    assert_eq!(decision.reason_code, "missing_reservation");
+    assert_eq!(summary.active_reservation_count, 0);
 }
 
 #[test]
@@ -591,8 +592,8 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
         let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
         conn.execute_batch(
             "
-            CREATE TABLE intents (
-                intent_id TEXT PRIMARY KEY,
+            CREATE TABLE reservations (
+                reservation_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
                 scopes_json TEXT NOT NULL,
@@ -601,8 +602,8 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
                 expires_at TEXT
             );
 
-            INSERT INTO intents (
-                intent_id,
+            INSERT INTO reservations (
+                reservation_id,
                 session_id,
                 workspace_id,
                 scopes_json,
@@ -610,7 +611,7 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
                 declared_at,
                 expires_at
             ) VALUES (
-                'legacy-intent-1',
+                'legacy-reservation-1',
                 'legacy-session',
                 'legacy-workspace',
                 '[]',
@@ -653,8 +654,8 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
                 'legacy-session'
             );
 
-            CREATE TABLE leases (
-                lease_id TEXT PRIMARY KEY,
+            CREATE TABLE claims (
+                claim_id TEXT PRIMARY KEY,
                 session_id TEXT,
                 workspace_id TEXT NOT NULL,
                 repo_id TEXT,
@@ -664,8 +665,8 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
                 expires_at TEXT
             );
 
-            INSERT INTO leases (
-                lease_id,
+            INSERT INTO claims (
+                claim_id,
                 session_id,
                 workspace_id,
                 repo_id,
@@ -674,7 +675,7 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
                 status,
                 expires_at
             ) VALUES (
-                'legacy-lease-1',
+                'legacy-claim-1',
                 'legacy-session',
                 'legacy-workspace',
                 NULL,
@@ -693,27 +694,27 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
         .live_current_state(None)
         .expect("legacy purpose-less rows should not break live current state");
 
-    assert_eq!(live.summary.active_intent_count, 0);
+    assert_eq!(live.summary.active_reservation_count, 0);
     assert!(live.items.is_empty());
 
     drop(store);
     let conn = rusqlite::Connection::open(&db_path).expect("migrated db should reopen");
     let intent_count: u64 = conn
-        .query_row("SELECT COUNT(*) FROM intents", [], |row| row.get(0))
-        .expect("intent count should load");
+        .query_row("SELECT COUNT(*) FROM reservations", [], |row| row.get(0))
+        .expect("reservation count should load");
     let waiter_count: u64 = conn
         .query_row("SELECT COUNT(*) FROM wait_queue", [], |row| row.get(0))
         .expect("waiter count should load");
-    let active_lease_count: u64 = conn
+    let active_claim_count: u64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM leases WHERE status = 'active'",
+            "SELECT COUNT(*) FROM claims WHERE status = 'active'",
             [],
             |row| row.get(0),
         )
-        .expect("active lease count should load");
+        .expect("active claim count should load");
     assert_eq!(intent_count, 0);
     assert_eq!(waiter_count, 0);
-    assert_eq!(active_lease_count, 0);
+    assert_eq!(active_claim_count, 0);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -735,8 +736,8 @@ fn failed_materialization_rolls_back_event_insert_and_allows_future_appends() {
         let conn = rusqlite::Connection::open(&db_path).expect("db should open");
         conn.execute_batch(
             "
-            CREATE TABLE intents (
-                intent_id TEXT PRIMARY KEY,
+            CREATE TABLE reservations (
+                reservation_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
                 scopes_json TEXT NOT NULL,
@@ -746,29 +747,29 @@ fn failed_materialization_rolls_back_event_insert_and_allows_future_appends() {
             );
 
             CREATE TRIGGER fail_intent_materialization
-            BEFORE INSERT ON intents
+            BEFORE INSERT ON reservations
             BEGIN
-                SELECT RAISE(FAIL, 'forced intent materialization failure');
+                SELECT RAISE(FAIL, 'forced reservation materialization failure');
             END;
             ",
         )
-        .expect("failing intent trigger should be created");
+        .expect("failing reservation trigger should be created");
     }
 
     let store = Store::open(&db_path).expect("store should open");
 
     let error = store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Fix auth validation behavior.",
             ["src/auth.ts"],
         ))
-        .expect_err("intent materialization should fail");
+        .expect_err("reservation materialization should fail");
     assert!(
         error
             .to_string()
-            .contains("forced intent materialization failure"),
+            .contains("forced reservation materialization failure"),
         "unexpected error: {error}"
     );
     assert_eq!(store.event_count().expect("event count should load"), 0);
@@ -782,25 +783,25 @@ fn failed_materialization_rolls_back_event_insert_and_allows_future_appends() {
 }
 
 #[test]
-fn current_summary_counts_sessions_events_and_active_intents() {
+fn current_summary_counts_sessions_events_and_active_reservations() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
         .append(Event::session_registered("s1", "w1"))
         .expect("session event should append");
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Fix auth validation behavior.",
             ["src/auth.ts"],
         ))
-        .expect("intent event should append");
+        .expect("reservation event should append");
 
     let summary = store.current_summary().expect("summary should load");
 
     assert_eq!(summary.session_count, 1);
-    assert_eq!(summary.active_intent_count, 1);
+    assert_eq!(summary.active_reservation_count, 1);
     assert_eq!(summary.event_count, 2);
 }
 
@@ -809,22 +810,22 @@ fn live_current_state_reports_active_items_with_purpose() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Fix auth validation behavior.",
             ["src/auth.ts"],
         ))
-        .expect("intent should append");
+        .expect("reservation should append");
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
     store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
             session_id: "s2",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
-            purpose: "Update the same auth file after the active lease clears.",
+            purpose: "Update the same auth file after the active claim clears.",
             blocking_session_id: Some("s1"),
         })
         .expect("waiter should enqueue");
@@ -833,26 +834,26 @@ fn live_current_state_reports_active_items_with_purpose() {
         .live_current_state(Some("src/auth.ts"))
         .expect("live current state should load");
 
-    assert_eq!(live.summary.active_intent_count, 1);
-    let intent = live
+    assert_eq!(live.summary.active_reservation_count, 1);
+    let reservation = live
         .items
         .iter()
-        .find(|item| item.kind == CurrentItemKind::Intent)
-        .expect("intent item should exist");
-    assert_eq!(intent.resource, "src/auth.ts");
-    assert_eq!(intent.purpose, "Fix auth validation behavior.");
+        .find(|item| item.kind == CurrentItemKind::Reservation)
+        .expect("reservation item should exist");
+    assert_eq!(reservation.resource, "src/auth.ts");
+    assert_eq!(reservation.purpose, "Fix auth validation behavior.");
     assert_eq!(
-        intent.evidence_kind,
-        Some(CurrentEvidenceKind::DeclaredIntent)
+        reservation.evidence_kind,
+        Some(CurrentEvidenceKind::DeclaredReservation)
     );
 
-    let lease = live
+    let claim = live
         .items
         .iter()
-        .find(|item| item.kind == CurrentItemKind::Lease)
-        .expect("lease item should exist");
-    assert_eq!(lease.purpose, "Fix auth validation behavior.");
-    assert_eq!(lease.evidence_kind, Some(CurrentEvidenceKind::LeaseOnly));
+        .find(|item| item.kind == CurrentItemKind::Claim)
+        .expect("claim item should exist");
+    assert_eq!(claim.purpose, "Fix auth validation behavior.");
+    assert_eq!(claim.evidence_kind, Some(CurrentEvidenceKind::ClaimOnly));
 
     let waiter = live
         .items
@@ -861,7 +862,7 @@ fn live_current_state_reports_active_items_with_purpose() {
         .expect("wait queue item should exist");
     assert_eq!(
         waiter.purpose,
-        "Update the same auth file after the active lease clears."
+        "Update the same auth file after the active claim clears."
     );
     assert_eq!(waiter.evidence_kind, Some(CurrentEvidenceKind::WaitQueue));
 }
@@ -871,33 +872,33 @@ fn live_current_state_uses_lease_acquisition_purpose_after_intent_redeclare() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Fix auth validation behavior.",
             ["src/auth.ts"],
         ))
-        .expect("first intent should append");
+        .expect("first reservation should append");
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Run the workspace test suite.",
             ["target/"],
         ))
-        .expect("second intent should append");
+        .expect("second reservation should append");
 
     let live = store
         .live_current_state(Some("src/auth.ts"))
         .expect("live current state should load");
-    let lease = live
+    let claim = live
         .items
         .iter()
-        .find(|item| item.kind == CurrentItemKind::Lease)
-        .expect("lease item should exist");
+        .find(|item| item.kind == CurrentItemKind::Claim)
+        .expect("claim item should exist");
 
-    assert_eq!(lease.purpose, "Fix auth validation behavior.");
+    assert_eq!(claim.purpose, "Fix auth validation behavior.");
 }
 
 #[test]
@@ -905,28 +906,28 @@ fn live_current_state_preserves_directory_lease_resource_shape() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Run build artifacts under target.",
             ["target/"],
         ))
-        .expect("directory intent should append");
+        .expect("directory reservation should append");
     store
-        .acquire_lease("s1", "w1", "target/")
-        .expect("directory lease should acquire");
+        .acquire_claim("s1", "w1", "target/")
+        .expect("directory claim should acquire");
 
     let live = store
         .live_current_state(Some("target/"))
         .expect("live current state should load");
-    let lease = live
+    let claim = live
         .items
         .iter()
-        .find(|item| item.kind == CurrentItemKind::Lease)
-        .expect("lease item should exist");
+        .find(|item| item.kind == CurrentItemKind::Claim)
+        .expect("claim item should exist");
 
-    assert_eq!(lease.resource, "target/");
-    assert_eq!(lease.summary, "s1 has an active write lease on target/.");
+    assert_eq!(claim.resource, "target/");
+    assert_eq!(claim.summary, "s1 has an active write claim on target/.");
 }
 
 #[test]
@@ -938,8 +939,13 @@ fn event_records_return_recent_audit_events() {
         .expect("first event should append");
     store
         .append(
-            Event::intent_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"])
-                .with_event_id("event-2"),
+            Event::reservation_declared(
+                "s1",
+                "w1",
+                "Fix auth validation behavior.",
+                ["src/auth.ts"],
+            )
+            .with_event_id("event-2"),
         )
         .expect("second event should append");
 
@@ -947,7 +953,7 @@ fn event_records_return_recent_audit_events() {
 
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].event_id, "event-2");
-    assert_eq!(events[0].event_type, "IntentDeclared");
+    assert_eq!(events[0].event_type, "ReservationDeclared");
     assert_eq!(events[1].event_id, "event-1");
 }
 
@@ -973,16 +979,18 @@ fn event_records_preserve_repo_identity_when_present() {
 #[test]
 fn session_heartbeat_does_not_revive_expired_intent() {
     let store = Store::open_in_memory().expect("in-memory store should open");
-    let mut intent =
-        Event::intent_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
-    intent.created_at = "2999-01-01T00:00:00Z".to_string();
-    store.append(intent).expect("intent should append");
+    let mut reservation =
+        Event::reservation_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
+    reservation.created_at = "2999-01-01T00:00:00Z".to_string();
+    store
+        .append(reservation)
+        .expect("reservation should append");
 
     let mut heartbeat = Event::session_heartbeat("s1", "w1");
     heartbeat.created_at = "2999-01-01T00:16:00Z".to_string();
     store
         .append(heartbeat)
-        .expect("heartbeat should append without reviving expired intent");
+        .expect("heartbeat should append without reviving expired reservation");
 
     let live = store
         .live_current_state(Some("src/auth.ts"))
@@ -990,11 +998,11 @@ fn session_heartbeat_does_not_revive_expired_intent() {
     assert!(
         live.items
             .iter()
-            .all(|item| item.kind != CurrentItemKind::Intent),
-        "expired intent should not remain live: {:?}",
+            .all(|item| item.kind != CurrentItemKind::Reservation),
+        "expired reservation should not remain live: {:?}",
         live.items
     );
-    assert_eq!(live.summary.active_intent_count, 0);
+    assert_eq!(live.summary.active_reservation_count, 0);
 }
 
 #[test]
@@ -1004,7 +1012,7 @@ fn session_heartbeat_expires_stale_lease_and_promotes_waiter() {
         .expect("clock should be after unix epoch")
         .as_nanos();
     let temp_root =
-        std::env::temp_dir().join(format!("stateful-store-heartbeat-expired-lease-{unique}"));
+        std::env::temp_dir().join(format!("stateful-store-heartbeat-expired-claim-{unique}"));
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
     let db_path = temp_root.join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
@@ -1023,10 +1031,10 @@ fn session_heartbeat_expires_stale_lease_and_promotes_waiter() {
 
     let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
     conn.execute(
-        "UPDATE leases SET expires_at = ?1 WHERE session_id = ?2",
+        "UPDATE claims SET expires_at = ?1 WHERE session_id = ?2",
         ["2999-01-01T00:05:00Z", "s1"],
     )
-    .expect("lease expiry should update");
+    .expect("claim expiry should update");
     drop(conn);
 
     let store = Store::open(&db_path).expect("file store should reopen");
@@ -1034,18 +1042,18 @@ fn session_heartbeat_expires_stale_lease_and_promotes_waiter() {
     heartbeat.created_at = "2999-01-01T00:10:00Z".to_string();
     store
         .append(heartbeat)
-        .expect("heartbeat should expire stale lease and promote waiter");
+        .expect("heartbeat should expire stale claim and promote waiter");
 
     assert_eq!(
         store
-            .active_lease_owner("w1", "src/auth.ts")
-            .expect("lease owner should load"),
+            .active_claim_owner("w1", "src/auth.ts")
+            .expect("claim owner should load"),
         None
     );
     let reservation = store
         .active_reservation("w1", "src/auth.ts")
         .expect("reservation lookup should succeed")
-        .expect("expired lease should promote waiting session");
+        .expect("expired claim should promote waiting session");
     assert_eq!(reservation.wait_id, waiter.wait_id);
     assert_eq!(reservation.session_id, "s2");
 
@@ -1053,45 +1061,49 @@ fn session_heartbeat_expires_stale_lease_and_promotes_waiter() {
 }
 
 #[test]
-fn session_heartbeat_extends_active_intent_expiry() {
+fn session_heartbeat_extends_active_reservation_expiry() {
     let store = Store::open_in_memory().expect("in-memory store should open");
-    let mut intent =
-        Event::intent_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
-    intent.created_at = "2999-01-01T00:00:00Z".to_string();
-    store.append(intent).expect("intent should append");
+    let mut reservation =
+        Event::reservation_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
+    reservation.created_at = "2999-01-01T00:00:00Z".to_string();
+    store
+        .append(reservation)
+        .expect("reservation should append");
 
     let before = store
         .live_current_state(Some("src/auth.ts"))
         .expect("live current state should load")
         .items
         .into_iter()
-        .find(|item| item.kind == CurrentItemKind::Intent)
-        .expect("intent item should exist");
+        .find(|item| item.kind == CurrentItemKind::Reservation)
+        .expect("reservation item should exist");
     assert_eq!(before.expires_at.as_deref(), Some("2999-01-01T00:15:00Z"));
 
     let mut heartbeat = Event::session_heartbeat("s1", "w1");
     heartbeat.created_at = "2999-01-01T00:10:00Z".to_string();
     store
         .append(heartbeat)
-        .expect("heartbeat should append and refresh intent");
+        .expect("heartbeat should append and refresh reservation");
 
     let after = store
         .live_current_state(Some("src/auth.ts"))
         .expect("live current state should load")
         .items
         .into_iter()
-        .find(|item| item.kind == CurrentItemKind::Intent)
-        .expect("intent item should exist");
+        .find(|item| item.kind == CurrentItemKind::Reservation)
+        .expect("reservation item should exist");
     assert_eq!(after.expires_at.as_deref(), Some("2999-01-01T00:25:00Z"));
 }
 
 #[test]
-fn session_heartbeat_caps_active_intent_expiry_at_max_lifetime() {
+fn session_heartbeat_caps_active_reservation_expiry_at_max_lifetime() {
     let store = Store::open_in_memory().expect("in-memory store should open");
-    let mut intent =
-        Event::intent_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
-    intent.created_at = "2999-01-01T00:00:00Z".to_string();
-    store.append(intent).expect("intent should append");
+    let mut reservation =
+        Event::reservation_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
+    reservation.created_at = "2999-01-01T00:00:00Z".to_string();
+    store
+        .append(reservation)
+        .expect("reservation should append");
 
     for heartbeat_at in [
         "2999-01-01T00:10:00Z",
@@ -1103,46 +1115,51 @@ fn session_heartbeat_caps_active_intent_expiry_at_max_lifetime() {
         heartbeat.created_at = heartbeat_at.to_string();
         store
             .append(heartbeat)
-            .expect("heartbeat should append and refresh intent");
+            .expect("heartbeat should append and refresh reservation");
     }
 
-    let intent = store
+    let reservation = store
         .live_current_state(Some("src/auth.ts"))
         .expect("live current state should load")
         .items
         .into_iter()
-        .find(|item| item.kind == CurrentItemKind::Intent)
-        .expect("intent item should exist");
-    assert_eq!(intent.expires_at.as_deref(), Some("2999-01-01T01:00:00Z"));
+        .find(|item| item.kind == CurrentItemKind::Reservation)
+        .expect("reservation item should exist");
+    assert_eq!(
+        reservation.expires_at.as_deref(),
+        Some("2999-01-01T01:00:00Z")
+    );
 }
 
 #[test]
-fn session_heartbeat_fails_closed_for_malformed_intent_declared_at() {
+fn session_heartbeat_fails_closed_for_malformed_reservation_declared_at() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after unix epoch")
         .as_nanos();
     let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-heartbeat-malformed-intent-{unique}"
+        "stateful-store-heartbeat-malformed-reservation-{unique}"
     ));
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
     let db_path = temp_root.join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
-    let mut intent =
-        Event::intent_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
+    let mut reservation =
+        Event::reservation_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
     let now = OffsetDateTime::now_utc();
     let heartbeat_at = test_timestamp(now - TimeDuration::minutes(5));
     let current_expires_at = test_timestamp(now + TimeDuration::minutes(5));
-    intent.created_at = test_timestamp(now - TimeDuration::minutes(10));
-    store.append(intent).expect("intent should append");
+    reservation.created_at = test_timestamp(now - TimeDuration::minutes(10));
+    store
+        .append(reservation)
+        .expect("reservation should append");
     drop(store);
 
     let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
     conn.execute(
-        "UPDATE intents SET declared_at = ?1, expires_at = ?2 WHERE session_id = ?3",
+        "UPDATE reservations SET declared_at = ?1, expires_at = ?2 WHERE session_id = ?3",
         ["not-a-timestamp", current_expires_at.as_str(), "s1"],
     )
-    .expect("intent timestamp should corrupt");
+    .expect("reservation timestamp should corrupt");
     drop(conn);
 
     let store = Store::open(&db_path).expect("file store should reopen");
@@ -1150,7 +1167,7 @@ fn session_heartbeat_fails_closed_for_malformed_intent_declared_at() {
     heartbeat.created_at = heartbeat_at;
     let error = store
         .append(heartbeat)
-        .expect_err("heartbeat should fail closed for malformed intent timestamp");
+        .expect_err("heartbeat should fail closed for malformed reservation timestamp");
     assert!(
         error.to_string().contains("invalid timestamp"),
         "unexpected error: {error}"
@@ -1160,11 +1177,11 @@ fn session_heartbeat_fails_closed_for_malformed_intent_declared_at() {
     let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
     let expires_at: String = conn
         .query_row(
-            "SELECT expires_at FROM intents WHERE session_id = ?1",
+            "SELECT expires_at FROM reservations WHERE session_id = ?1",
             ["s1"],
             |row| row.get(0),
         )
-        .expect("intent expiry should load");
+        .expect("reservation expiry should load");
     assert_eq!(expires_at, current_expires_at);
     let event_count: u64 = conn
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
@@ -1175,15 +1192,15 @@ fn session_heartbeat_fails_closed_for_malformed_intent_declared_at() {
 }
 
 #[test]
-fn intent_declared_fails_closed_for_malformed_created_at() {
+fn reservation_declared_fails_closed_for_malformed_created_at() {
     let store = Store::open_in_memory().expect("in-memory store should open");
-    let mut intent =
-        Event::intent_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
-    intent.created_at = "not-a-timestamp".to_string();
+    let mut reservation =
+        Event::reservation_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
+    reservation.created_at = "not-a-timestamp".to_string();
 
     let error = store
-        .append(intent)
-        .expect_err("malformed intent timestamp should fail closed");
+        .append(reservation)
+        .expect_err("malformed reservation timestamp should fail closed");
 
     assert!(
         error.to_string().contains("invalid timestamp"),
@@ -1200,13 +1217,13 @@ fn intent_declared_fails_closed_for_malformed_created_at() {
 }
 
 #[test]
-fn session_heartbeat_extends_active_lease_expiry() {
+fn session_heartbeat_extends_active_claim_expiry() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after unix epoch")
         .as_nanos();
     let temp_root =
-        std::env::temp_dir().join(format!("stateful-store-heartbeat-live-lease-{unique}"));
+        std::env::temp_dir().join(format!("stateful-store-heartbeat-live-claim-{unique}"));
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
     let db_path = temp_root.join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
@@ -1215,15 +1232,15 @@ fn session_heartbeat_extends_active_lease_expiry() {
 
     let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
     conn.execute(
-        "UPDATE leases SET expires_at = ?1 WHERE session_id = ?2",
+        "UPDATE claims SET expires_at = ?1 WHERE session_id = ?2",
         ["2999-01-01T00:11:00Z", "s1"],
     )
-    .expect("lease expiry should update");
+    .expect("claim expiry should update");
     conn.execute(
-        "UPDATE intents SET declared_at = ?1, expires_at = ?2 WHERE session_id = ?3",
+        "UPDATE reservations SET declared_at = ?1, expires_at = ?2 WHERE session_id = ?3",
         ["2999-01-01T00:00:00Z", "2999-01-01T00:20:00Z", "s1"],
     )
-    .expect("intent expiry should update");
+    .expect("reservation expiry should update");
     drop(conn);
 
     let store = Store::open(&db_path).expect("file store should reopen");
@@ -1231,43 +1248,43 @@ fn session_heartbeat_extends_active_lease_expiry() {
     heartbeat.created_at = "2999-01-01T00:10:00Z".to_string();
     store
         .append(heartbeat)
-        .expect("heartbeat should append and refresh lease");
+        .expect("heartbeat should append and refresh claim");
 
-    let lease = store
+    let claim = store
         .live_current_state(Some("src/auth.ts"))
         .expect("live current state should load")
         .items
         .into_iter()
-        .find(|item| item.kind == CurrentItemKind::Lease)
-        .expect("lease item should exist");
-    assert_eq!(lease.expires_at.as_deref(), Some("2999-01-01T00:15:00Z"));
+        .find(|item| item.kind == CurrentItemKind::Claim)
+        .expect("claim item should exist");
+    assert_eq!(claim.expires_at.as_deref(), Some("2999-01-01T00:15:00Z"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn session_heartbeat_does_not_extend_lease_without_matching_active_intent() {
+fn session_heartbeat_does_not_extend_lease_without_matching_active_reservation() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after unix epoch")
         .as_nanos();
     let temp_root =
-        std::env::temp_dir().join(format!("stateful-store-heartbeat-uncovered-lease-{unique}"));
+        std::env::temp_dir().join(format!("stateful-store-heartbeat-uncovered-claim-{unique}"));
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
     let db_path = temp_root.join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
     store
-        .complete_session_intents("s1", "w1")
-        .expect("intent should complete");
+        .complete_session_reservations("s1", "w1")
+        .expect("reservation should complete");
     drop(store);
 
     let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
     conn.execute(
-        "UPDATE leases SET expires_at = ?1 WHERE session_id = ?2",
+        "UPDATE claims SET expires_at = ?1 WHERE session_id = ?2",
         ["2999-01-01T00:11:00Z", "s1"],
     )
-    .expect("lease expiry should update");
+    .expect("claim expiry should update");
     drop(conn);
 
     let store = Store::open(&db_path).expect("file store should reopen");
@@ -1275,55 +1292,55 @@ fn session_heartbeat_does_not_extend_lease_without_matching_active_intent() {
     heartbeat.created_at = "2999-01-01T00:10:00Z".to_string();
     store
         .append(heartbeat)
-        .expect("heartbeat should append without refreshing uncovered lease");
+        .expect("heartbeat should append without refreshing uncovered claim");
 
-    let lease = store
+    let claim = store
         .live_current_state(Some("src/auth.ts"))
         .expect("live current state should load")
         .items
         .into_iter()
-        .find(|item| item.kind == CurrentItemKind::Lease)
-        .expect("lease item should still exist");
-    assert_eq!(lease.expires_at.as_deref(), Some("2999-01-01T00:11:00Z"));
+        .find(|item| item.kind == CurrentItemKind::Claim)
+        .expect("claim item should still exist");
+    assert_eq!(claim.expires_at.as_deref(), Some("2999-01-01T00:11:00Z"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn acquire_lease_requires_matching_active_intent() {
+fn acquire_claim_requires_matching_active_reservation() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     let error = store
-        .acquire_lease("s1", "w1", "src/auth.ts")
-        .expect_err("lease without matching intent should fail");
+        .acquire_claim("s1", "w1", "src/auth.ts")
+        .expect_err("claim without matching reservation should fail");
 
-    assert!(matches!(error, StoreError::MissingIntent));
-    assert_eq!(store.lease_count().expect("lease count should load"), 0);
+    assert!(matches!(error, StoreError::MissingReservation));
+    assert_eq!(store.lease_count().expect("claim count should load"), 0);
 }
 
 #[test]
-fn acquire_lease_rejects_direct_tmp_resource_even_with_matching_intent() {
+fn acquire_claim_rejects_direct_tmp_resource_even_with_matching_reservation() {
     for path in ["tmp", "tmp/"] {
         let store = Store::open_in_memory().expect("in-memory store should open");
         store
-            .append(Event::intent_declared(
+            .append(Event::reservation_declared(
                 "s1",
                 "w1",
                 "Run test artifacts in a scoped tmp path.",
                 [path],
             ))
-            .expect("tmp intent should append");
+            .expect("tmp reservation should append");
 
         let error = store
-            .acquire_lease("s1", "w1", path)
-            .expect_err("direct tmp lease should be rejected");
+            .acquire_claim("s1", "w1", path)
+            .expect_err("direct tmp claim should be rejected");
         assert!(
             error
                 .to_string()
-                .contains("direct tmp leases are not allowed"),
+                .contains("direct tmp claims are not allowed"),
             "unexpected error: {error}"
         );
-        assert_eq!(store.lease_count().expect("lease count should load"), 0);
+        assert_eq!(store.lease_count().expect("claim count should load"), 0);
     }
 }
 
@@ -1332,62 +1349,62 @@ fn acquire_directory_lease_rejects_file_intent_with_same_normalized_path() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Acquire file target.",
             ["target"],
         ))
-        .expect("file intent should append");
+        .expect("file reservation should append");
 
     let error = store
-        .acquire_lease("s1", "w1", "target/")
-        .expect_err("directory lease with file intent should fail");
+        .acquire_claim("s1", "w1", "target/")
+        .expect_err("directory claim with file reservation should fail");
 
-    assert!(matches!(error, StoreError::MissingIntent));
-    assert_eq!(store.lease_count().expect("lease count should load"), 0);
+    assert!(matches!(error, StoreError::MissingReservation));
+    assert_eq!(store.lease_count().expect("claim count should load"), 0);
 }
 
 #[test]
-fn acquire_lease_rejects_existing_active_file_lease_conflict() {
+fn acquire_claim_rejects_existing_active_file_claim_conflict() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s2",
             "w1",
-            "Update the same auth file after the active lease clears.",
+            "Update the same auth file after the active claim clears.",
             ["src/auth.ts"],
         ))
-        .expect("second intent should append");
+        .expect("second reservation should append");
 
     let error = store
-        .acquire_lease("s2", "w1", "src/auth.ts")
-        .expect_err("conflicting active file lease should reject");
+        .acquire_claim("s2", "w1", "src/auth.ts")
+        .expect_err("conflicting active file claim should reject");
 
-    assert!(matches!(error, StoreError::LeaseConflict));
-    assert_eq!(store.lease_count().expect("lease count should load"), 1);
+    assert!(matches!(error, StoreError::ClaimConflict));
+    assert_eq!(store.lease_count().expect("claim count should load"), 1);
 }
 #[test]
-fn acquire_lease_allows_same_path_in_different_workspaces() {
+fn acquire_claim_allows_same_path_in_different_workspaces() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
     acquire_test_lease(&store, "s2", "w2", "src/auth.ts");
 
-    assert_eq!(store.lease_count().expect("lease count should load"), 2);
+    assert_eq!(store.lease_count().expect("claim count should load"), 2);
     assert_eq!(
         store
-            .active_lease_owner("w1", "src/auth.ts")
-            .expect("w1 lease owner should load")
+            .active_claim_owner("w1", "src/auth.ts")
+            .expect("w1 claim owner should load")
             .as_deref(),
         Some("s1")
     );
     assert_eq!(
         store
-            .active_lease_owner("w2", "src/auth.ts")
-            .expect("w2 lease owner should load")
+            .active_claim_owner("w2", "src/auth.ts")
+            .expect("w2 claim owner should load")
             .as_deref(),
         Some("s2")
     );
@@ -1398,80 +1415,80 @@ fn same_session_can_acquire_exact_file_lease_under_directory_lease() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Acquire source directory.",
             ["src/"],
         ))
-        .expect("directory intent should append");
+        .expect("directory reservation should append");
     store
-        .acquire_lease("s1", "w1", "src/")
-        .expect("directory lease should acquire");
+        .acquire_claim("s1", "w1", "src/")
+        .expect("directory claim should acquire");
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Acquire exact auth file for native edit.",
             ["src/auth.ts"],
         ))
-        .expect("file intent should append");
+        .expect("file reservation should append");
 
     store
-        .acquire_lease("s1", "w1", "src/auth.ts")
-        .expect("same-session exact file lease should acquire under directory lease");
+        .acquire_claim("s1", "w1", "src/auth.ts")
+        .expect("same-session exact file claim should acquire under directory claim");
 
     assert!(
         store
-            .active_lease_covers_path_by_session("w1", "src/auth.ts", "s1")
+            .active_claim_covers_path_by_session("w1", "src/auth.ts", "s1")
             .expect("file coverage should load")
     );
     assert!(
         store
             .active_exact_file_lease_by_session("w1", "src/auth.ts", "s1")
-            .expect("exact file lease should load")
+            .expect("exact file claim should load")
     );
-    assert_eq!(store.lease_count().expect("lease count should load"), 2);
+    assert_eq!(store.lease_count().expect("claim count should load"), 2);
 }
 
 #[test]
-fn acquire_lease_reports_already_held_for_same_session_duplicate_exact_file_lease() {
+fn acquire_claim_reports_already_held_for_same_session_duplicate_exact_file_lease() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
 
     let error = store
-        .acquire_lease("s1", "w1", "src/auth.ts")
-        .expect_err("duplicate exact file lease should report already held");
+        .acquire_claim("s1", "w1", "src/auth.ts")
+        .expect_err("duplicate exact file claim should report already held");
 
-    assert!(matches!(error, StoreError::LeaseAlreadyHeld));
-    assert_eq!(store.lease_count().expect("lease count should load"), 1);
+    assert!(matches!(error, StoreError::ClaimAlreadyHeld));
+    assert_eq!(store.lease_count().expect("claim count should load"), 1);
 }
 
 #[test]
-fn acquire_directory_lease_rejects_existing_child_file_lease_conflict() {
+fn acquire_directory_lease_rejects_existing_child_file_claim_conflict() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "target/out.txt");
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s2",
             "w1",
             "Rewrite build artifacts under target.",
             ["target/"],
         ))
-        .expect("directory intent should append");
+        .expect("directory reservation should append");
 
     let error = store
-        .acquire_lease("s2", "w1", "target/")
-        .expect_err("conflicting active child file lease should reject");
+        .acquire_claim("s2", "w1", "target/")
+        .expect_err("conflicting active child file claim should reject");
 
-    assert!(matches!(error, StoreError::LeaseConflict));
-    assert_eq!(store.lease_count().expect("lease count should load"), 1);
+    assert!(matches!(error, StoreError::ClaimConflict));
+    assert_eq!(store.lease_count().expect("claim count should load"), 1);
 }
 
 #[test]
-fn acquire_lease_rejects_existing_active_file_reservation_conflict() {
+fn acquire_claim_rejects_existing_active_file_reservation_conflict() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     let wait = store
@@ -1488,34 +1505,34 @@ fn acquire_lease_rejects_existing_active_file_reservation_conflict() {
         .promote_next_waiter("w1", "src/auth.ts")
         .expect("waiter should promote");
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s2",
             "w1",
             "Update auth while reservation is active.",
             ["src/auth.ts"],
         ))
-        .expect("second intent should append");
+        .expect("second reservation should append");
 
     let error = store
-        .acquire_lease("s2", "w1", "src/auth.ts")
-        .expect_err("reserved file should reject direct lease acquire");
+        .acquire_claim("s2", "w1", "src/auth.ts")
+        .expect_err("reserved file should reject direct claim acquire");
 
-    assert!(matches!(error, StoreError::LeaseConflict));
-    assert_eq!(store.lease_count().expect("lease count should load"), 0);
+    assert!(matches!(error, StoreError::ClaimConflict));
+    assert_eq!(store.lease_count().expect("claim count should load"), 0);
     store
         .claim_reservation(&wait.wait_id, "s1")
         .expect("owner should claim reservation");
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Claim reserved auth update.",
             ["src/auth.ts"],
         ))
-        .expect("claim owner intent should append");
+        .expect("claim owner reservation should append");
     store
-        .acquire_lease("s1", "w1", "src/auth.ts")
-        .expect("claimed reservation owner should acquire lease");
+        .acquire_claim("s1", "w1", "src/auth.ts")
+        .expect("claimed reservation owner should acquire claim");
 }
 
 #[test]
@@ -1536,20 +1553,20 @@ fn acquire_directory_lease_rejects_existing_child_file_reservation_conflict() {
         .promote_next_waiter("w1", "target/out.txt")
         .expect("waiter should promote");
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s2",
             "w1",
             "Rewrite build artifacts while child reservation is active.",
             ["target/"],
         ))
-        .expect("directory intent should append");
+        .expect("directory reservation should append");
 
     let error = store
-        .acquire_lease("s2", "w1", "target/")
-        .expect_err("reserved child file should reject directory lease acquire");
+        .acquire_claim("s2", "w1", "target/")
+        .expect_err("reserved child file should reject directory claim acquire");
 
-    assert!(matches!(error, StoreError::LeaseConflict));
-    assert_eq!(store.lease_count().expect("lease count should load"), 0);
+    assert!(matches!(error, StoreError::ClaimConflict));
+    assert_eq!(store.lease_count().expect("claim count should load"), 0);
 }
 
 #[test]
@@ -1557,37 +1574,37 @@ fn file_lease_with_directory_name_does_not_cover_descendants() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Acquire file target.",
             ["target"],
         ))
-        .expect("file intent should append");
+        .expect("file reservation should append");
     store
-        .acquire_lease("s1", "w1", "target")
-        .expect("file lease should acquire");
+        .acquire_claim("s1", "w1", "target")
+        .expect("file claim should acquire");
 
     assert_eq!(
         store
-            .active_lease_conflict_owner_for_path("w1", "target/debug/out.txt", "s2")
-            .expect("path lease conflict should load"),
+            .active_claim_conflict_owner_for_path("w1", "target/debug/out.txt", "s2")
+            .expect("path claim conflict should load"),
         None
     );
     assert!(
         !store
-            .active_lease_covers_path_by_session("w1", "target/debug/out.txt", "s1")
+            .active_claim_covers_path_by_session("w1", "target/debug/out.txt", "s1")
             .expect("descendant file coverage should load")
     );
     assert!(
         !store
-            .active_lease_covers_directory_by_session("w1", "target/", "s1")
+            .active_claim_covers_directory_by_session("w1", "target/", "s1")
             .expect("directory coverage should load")
     );
     assert!(
         store
             .active_exact_file_lease_by_session("w1", "target", "s1")
-            .expect("exact file lease should load")
+            .expect("exact file claim should load")
     );
 }
 
@@ -1599,194 +1616,194 @@ fn directory_lease_same_normalized_path_does_not_conflict_with_file_path() {
 
     assert_eq!(
         store
-            .active_lease_conflict_owner_for_path("w1", "target", "s1")
-            .expect("path lease conflict should load"),
+            .active_claim_conflict_owner_for_path("w1", "target", "s1")
+            .expect("path claim conflict should load"),
         None
     );
     assert_eq!(
         store
-            .active_lease_conflict_owner_for_directory("w1", "target/", "s1")
-            .expect("directory lease conflict should load"),
+            .active_claim_conflict_owner_for_directory("w1", "target/", "s1")
+            .expect("directory claim conflict should load"),
         Some("s2".to_string())
     );
 }
 
 #[test]
-fn release_lease_matches_requested_path_shape_when_file_and_directory_paths_overlap() {
+fn release_claim_matches_requested_path_shape_when_file_and_directory_paths_overlap() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Acquire file target.",
             ["target"],
         ))
-        .expect("file intent should append");
+        .expect("file reservation should append");
     store
-        .acquire_lease("s1", "w1", "target")
-        .expect("file lease should acquire");
+        .acquire_claim("s1", "w1", "target")
+        .expect("file claim should acquire");
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Acquire directory target.",
             ["target/"],
         ))
-        .expect("directory intent should append");
+        .expect("directory reservation should append");
     store
-        .acquire_lease("s1", "w1", "target/")
-        .expect("directory lease should acquire");
+        .acquire_claim("s1", "w1", "target/")
+        .expect("directory claim should acquire");
 
     store
-        .release_lease("s1", "w1", "target")
-        .expect("file lease should release");
+        .release_claim("s1", "w1", "target")
+        .expect("file claim should release");
 
     assert!(
         !store
             .active_exact_file_lease_by_session("w1", "target", "s1")
-            .expect("exact file lease should load")
+            .expect("exact file claim should load")
     );
     assert!(
         store
-            .active_lease_covers_directory_by_session("w1", "target/", "s1")
+            .active_claim_covers_directory_by_session("w1", "target/", "s1")
             .expect("directory coverage should load")
     );
 }
 
 #[test]
-fn release_lease_rejects_other_session_owner() {
+fn release_claim_rejects_other_session_owner() {
     let store = Store::open_in_memory().expect("in-memory store should open");
     acquire_test_lease(&store, "s1", "w1", "target/");
 
     let error = store
-        .release_lease("s2", "w1", "target/")
-        .expect_err("other session should not release lease");
+        .release_claim("s2", "w1", "target/")
+        .expect_err("other session should not release claim");
 
-    assert!(error.to_string().contains("lease owner mismatch"));
+    assert!(error.to_string().contains("claim owner mismatch"));
     assert!(
         store
-            .active_lease_covers_directory_by_session("w1", "target/", "s1")
+            .active_claim_covers_directory_by_session("w1", "target/", "s1")
             .expect("directory coverage should load")
     );
 }
 
 #[test]
-fn release_lease_rejects_missing_same_session_lease() {
+fn release_claim_rejects_missing_same_session_lease() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     let error = store
-        .release_lease("s1", "w1", "target/")
-        .expect_err("missing lease should not report success");
+        .release_claim("s1", "w1", "target/")
+        .expect_err("missing claim should not report success");
 
-    assert!(error.to_string().contains("lease not found"));
+    assert!(error.to_string().contains("claim not found"));
 }
 
 #[test]
-fn active_lease_owner_uses_normalized_relative_paths() {
+fn active_claim_owner_uses_normalized_relative_paths() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "src/./auth.ts");
 
     assert_eq!(
         store
-            .active_lease_owner("w1", "src/auth.ts")
-            .expect("lease owner should load"),
+            .active_claim_owner("w1", "src/auth.ts")
+            .expect("claim owner should load"),
         Some("s1".to_string())
     );
 }
 
 #[test]
-fn active_lease_conflict_for_directory_matches_subtree_paths() {
+fn active_claim_conflict_for_directory_matches_subtree_paths() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s2", "w1", "target/debug/out.txt");
 
     assert_eq!(
         store
-            .active_lease_conflict_owner_for_directory("w1", "target/", "s1")
-            .expect("directory lease conflict should load"),
+            .active_claim_conflict_owner_for_directory("w1", "target/", "s1")
+            .expect("directory claim conflict should load"),
         Some("s2".to_string())
     );
     assert_eq!(
         store
-            .active_lease_conflict_owner_for_directory("w1", "target/", "s2")
-            .expect("same-session directory lease should not conflict"),
+            .active_claim_conflict_owner_for_directory("w1", "target/", "s2")
+            .expect("same-session directory claim should not conflict"),
         None
     );
     assert_eq!(
         store
-            .active_lease_conflict_owner_for_directory("w1", "target-other/", "s1")
+            .active_claim_conflict_owner_for_directory("w1", "target-other/", "s1")
             .expect("sibling directory should not conflict"),
         None
     );
 }
 
 #[test]
-fn active_lease_conflict_for_directory_matches_ancestor_directory_paths() {
+fn active_claim_conflict_for_directory_matches_ancestor_directory_paths() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s2", "w1", "target/");
 
     assert_eq!(
         store
-            .active_lease_conflict_owner_for_directory("w1", "target/debug/", "s1")
-            .expect("ancestor directory lease conflict should load"),
+            .active_claim_conflict_owner_for_directory("w1", "target/debug/", "s1")
+            .expect("ancestor directory claim conflict should load"),
         Some("s2".to_string())
     );
 }
 
 #[test]
-fn active_lease_covers_directory_by_same_session_matches_exact_or_ancestor_paths() {
+fn active_claim_covers_directory_by_same_session_matches_exact_or_ancestor_paths() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "target/");
 
     assert!(
         store
-            .active_lease_covers_directory_by_session("w1", "target/", "s1")
-            .expect("directory lease coverage should load")
+            .active_claim_covers_directory_by_session("w1", "target/", "s1")
+            .expect("directory claim coverage should load")
     );
     assert!(
         store
-            .active_lease_covers_directory_by_session("w1", "target/debug/", "s1")
-            .expect("ancestor directory lease coverage should load")
+            .active_claim_covers_directory_by_session("w1", "target/debug/", "s1")
+            .expect("ancestor directory claim coverage should load")
     );
     assert!(
         !store
-            .active_lease_covers_directory_by_session("w1", "target/", "s2")
-            .expect("other session directory lease coverage should load")
+            .active_claim_covers_directory_by_session("w1", "target/", "s2")
+            .expect("other session directory claim coverage should load")
     );
 }
 
 #[test]
-fn active_lease_conflict_for_path_matches_ancestor_directory_paths() {
+fn active_claim_conflict_for_path_matches_ancestor_directory_paths() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s2", "w1", "target/");
 
     assert_eq!(
         store
-            .active_lease_conflict_owner_for_path("w1", "target/debug/out.txt", "s1")
-            .expect("path lease conflict should load"),
+            .active_claim_conflict_owner_for_path("w1", "target/debug/out.txt", "s1")
+            .expect("path claim conflict should load"),
         Some("s2".to_string())
     );
     assert_eq!(
         store
-            .active_lease_conflict_owner_for_path("w1", "target/debug/out.txt", "s2")
-            .expect("same-session directory lease should not conflict"),
+            .active_claim_conflict_owner_for_path("w1", "target/debug/out.txt", "s2")
+            .expect("same-session directory claim should not conflict"),
         None
     );
     assert_eq!(
         store
-            .active_lease_conflict_owner_for_path("w1", "target-other/out.txt", "s1")
+            .active_claim_conflict_owner_for_path("w1", "target-other/out.txt", "s1")
             .expect("sibling directory should not conflict"),
         None
     );
 }
 
 #[test]
-fn active_lease_covers_path_by_same_session_matches_exact_or_ancestor_paths() {
+fn active_claim_covers_path_by_same_session_matches_exact_or_ancestor_paths() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "target/");
@@ -1794,23 +1811,23 @@ fn active_lease_covers_path_by_same_session_matches_exact_or_ancestor_paths() {
 
     assert!(
         store
-            .active_lease_covers_path_by_session("w1", "src/auth.ts", "s1")
-            .expect("exact file lease coverage should load")
+            .active_claim_covers_path_by_session("w1", "src/auth.ts", "s1")
+            .expect("exact file claim coverage should load")
     );
     assert!(
         store
-            .active_lease_covers_path_by_session("w1", "target/debug/out.txt", "s1")
-            .expect("ancestor directory lease coverage should load")
+            .active_claim_covers_path_by_session("w1", "target/debug/out.txt", "s1")
+            .expect("ancestor directory claim coverage should load")
     );
     assert!(
         !store
-            .active_lease_covers_path_by_session("w1", "target-other/out.txt", "s1")
-            .expect("sibling path lease coverage should load")
+            .active_claim_covers_path_by_session("w1", "target-other/out.txt", "s1")
+            .expect("sibling path claim coverage should load")
     );
     assert!(
         !store
-            .active_lease_covers_path_by_session("w1", "src/auth.ts", "s2")
-            .expect("other session file lease coverage should load")
+            .active_claim_covers_path_by_session("w1", "src/auth.ts", "s2")
+            .expect("other session file claim coverage should load")
     );
 }
 
@@ -1824,17 +1841,17 @@ fn active_exact_file_lease_by_same_session_ignores_ancestor_directory_lease() {
     assert!(
         store
             .active_exact_file_lease_by_session("w1", "src/auth.ts", "s1")
-            .expect("exact file lease should load")
+            .expect("exact file claim should load")
     );
     assert!(
         !store
             .active_exact_file_lease_by_session("w1", "target/debug/out.txt", "s1")
-            .expect("ancestor directory lease should not count as exact file lease")
+            .expect("ancestor directory claim should not count as exact file claim")
     );
     assert!(
         !store
             .active_exact_file_lease_by_session("w1", "src/auth.ts", "s2")
-            .expect("other session file lease should not count")
+            .expect("other session file claim should not count")
     );
 }
 
@@ -1843,36 +1860,36 @@ fn active_exact_file_intent_by_same_session_ignores_directory_intent() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Edit files under src.",
             ["src/"],
         ))
-        .expect("directory intent should append");
+        .expect("directory reservation should append");
     assert!(
         !store
             .active_exact_file_intent_by_session("w1", "src/auth.ts", "s1")
-            .expect("directory intent should not count as exact file intent")
+            .expect("directory reservation should not count as exact file reservation")
     );
 
     store
-        .append(Event::intent_declared(
+        .append(Event::reservation_declared(
             "s1",
             "w1",
             "Fix auth validation behavior.",
             ["src/auth.ts"],
         ))
-        .expect("file intent should append");
+        .expect("file reservation should append");
     assert!(
         store
             .active_exact_file_intent_by_session("w1", "src/auth.ts", "s1")
-            .expect("exact file intent should load")
+            .expect("exact file reservation should load")
     );
     assert!(
         !store
             .active_exact_file_intent_by_session("w1", "src/auth.ts", "s2")
-            .expect("other session exact file intent should not count")
+            .expect("other session exact file reservation should not count")
     );
 }
 
@@ -1883,7 +1900,7 @@ fn expired_lease_is_not_returned_as_active_owner() {
         .expect("clock should be after epoch")
         .as_nanos();
     let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-expired-lease-{}-{unique}",
+        "stateful-store-expired-claim-{}-{unique}",
         std::process::id()
     ));
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
@@ -1893,15 +1910,15 @@ fn expired_lease_is_not_returned_as_active_owner() {
     drop(store);
 
     let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
-    conn.execute("UPDATE leases SET expires_at = '1970-01-01T00:00:00Z'", [])
-        .expect("lease should be made stale");
+    conn.execute("UPDATE claims SET expires_at = '1970-01-01T00:00:00Z'", [])
+        .expect("claim should be made stale");
     drop(conn);
 
     let store = Store::open(&db_path).expect("file store should reopen");
     assert_eq!(
         store
-            .active_lease_owner("w1", "src/auth.ts")
-            .expect("lease owner should load"),
+            .active_claim_owner("w1", "src/auth.ts")
+            .expect("claim owner should load"),
         None
     );
 
@@ -1935,8 +1952,8 @@ fn released_lease_promotes_first_waiter_to_reservation() {
         .expect("second waiter should enqueue");
 
     store
-        .release_lease("s1", "w1", "src/auth.ts")
-        .expect("lease should release");
+        .release_claim("s1", "w1", "src/auth.ts")
+        .expect("claim should release");
 
     let reservation = store
         .active_reservation("w1", "src/auth.ts")
@@ -1954,12 +1971,12 @@ fn released_lease_promotes_first_waiter_to_reservation() {
 }
 
 #[test]
-fn intent_request_rejects_normalized_empty_relative_path() {
+fn reservation_request_rejects_normalized_empty_relative_path() {
     for path in ["./", "../", "/", "a/.."] {
         let store = Store::open_in_memory().expect("in-memory store should open");
 
         let error = store
-            .enqueue_intent_request(IntentRequestInput {
+            .enqueue_reservation_request(ReservationRequestInput {
                 request_id: "request-1",
                 session_id: "s1",
                 workspace_id: "w1",
@@ -1968,7 +1985,7 @@ fn intent_request_rejects_normalized_empty_relative_path() {
                 purpose: "Reserve path before writing.",
                 blocking_session_id: None,
             })
-            .expect_err("normalized-empty intent request should reject");
+            .expect_err("normalized-empty reservation request should reject");
 
         assert!(matches!(error, StoreError::MissingScope));
         assert!(
@@ -1981,11 +1998,11 @@ fn intent_request_rejects_normalized_empty_relative_path() {
 }
 
 #[test]
-fn intent_request_id_is_idempotent_for_wait_queue_records() {
+fn reservation_request_id_is_idempotent_for_wait_queue_records() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     let first = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
             session_id: "s2",
             workspace_id: "w1",
@@ -1994,9 +2011,9 @@ fn intent_request_id_is_idempotent_for_wait_queue_records() {
             purpose: "Fix auth validation behavior.",
             blocking_session_id: Some("s1"),
         })
-        .expect("intent request should enqueue");
+        .expect("reservation request should enqueue");
     let repeated = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
             session_id: "s2",
             workspace_id: "w1",
@@ -2005,7 +2022,7 @@ fn intent_request_id_is_idempotent_for_wait_queue_records() {
             purpose: "A different retry purpose should not replace the original.",
             blocking_session_id: Some("s1"),
         })
-        .expect("intent request retry should load existing waiter");
+        .expect("reservation request retry should load existing waiter");
 
     assert_eq!(repeated.wait_id, first.wait_id);
     assert_eq!(repeated.status, "queued");
@@ -2019,11 +2036,11 @@ fn intent_request_id_is_idempotent_for_wait_queue_records() {
 }
 
 #[test]
-fn expired_intent_request_retry_requeues_same_waiter_with_original_fifo_position() {
+fn expired_reservation_request_retry_requeues_same_waiter_with_original_fifo_position() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     let first = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
             session_id: "s2",
             workspace_id: "w1",
@@ -2034,7 +2051,7 @@ fn expired_intent_request_retry_requeues_same_waiter_with_original_fifo_position
         })
         .expect("first request should enqueue");
     let second = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-2",
             session_id: "s3",
             workspace_id: "w1",
@@ -2055,7 +2072,7 @@ fn expired_intent_request_retry_requeues_same_waiter_with_original_fifo_position
         .expect("second request should reserve");
 
     let retried = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
             session_id: "s2",
             workspace_id: "w1",
@@ -2066,7 +2083,7 @@ fn expired_intent_request_retry_requeues_same_waiter_with_original_fifo_position
         })
         .expect("expired request retry should requeue");
     let third = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-3",
             session_id: "s4",
             workspace_id: "w1",
@@ -2105,10 +2122,10 @@ fn expired_intent_request_retry_requeues_same_waiter_with_original_fifo_position
 }
 
 #[test]
-fn canceling_reserved_intent_request_promotes_next_waiter() {
+fn canceling_reserved_reservation_request_promotes_next_waiter() {
     let store = Store::open_in_memory().expect("in-memory store should open");
     let first = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
             session_id: "s2",
             workspace_id: "w1",
@@ -2119,7 +2136,7 @@ fn canceling_reserved_intent_request_promotes_next_waiter() {
         })
         .expect("first request should enqueue");
     let second = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-2",
             session_id: "s3",
             workspace_id: "w1",
@@ -2134,7 +2151,7 @@ fn canceling_reserved_intent_request_promotes_next_waiter() {
         .expect("first waiter should promote");
 
     let canceled = store
-        .cancel_intent_request("request-1", "s2", "w1")
+        .cancel_reservation_request("request-1", "s2", "w1")
         .expect("first request should cancel");
 
     assert_eq!(canceled.wait_id, first.wait_id);
@@ -2151,7 +2168,7 @@ fn canceling_reserved_intent_request_promotes_next_waiter() {
 fn finalizing_session_cancels_queued_and_reserved_waiters_and_promotes_next() {
     let store = Store::open_in_memory().expect("in-memory store should open");
     let reserved = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-reserved",
             session_id: "s2",
             workspace_id: "w1",
@@ -2162,7 +2179,7 @@ fn finalizing_session_cancels_queued_and_reserved_waiters_and_promotes_next() {
         })
         .expect("reserved session request should enqueue");
     let next = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-next",
             session_id: "s3",
             workspace_id: "w1",
@@ -2173,7 +2190,7 @@ fn finalizing_session_cancels_queued_and_reserved_waiters_and_promotes_next() {
         })
         .expect("next request should enqueue");
     let queued = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-queued",
             session_id: "s2",
             workspace_id: "w1",
@@ -2218,7 +2235,7 @@ fn finalizing_session_cancels_queued_and_reserved_waiters_and_promotes_next() {
 }
 
 #[test]
-fn cancel_intent_request_rolls_back_when_next_reservation_notification_fails() {
+fn cancel_reservation_request_rolls_back_when_next_reservation_notification_fails() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after unix epoch")
@@ -2232,7 +2249,7 @@ fn cancel_intent_request_rolls_back_when_next_reservation_notification_fails() {
     let store = Store::open(&db_path).expect("file store should open");
 
     let first = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
             session_id: "s2",
             workspace_id: "w1",
@@ -2243,7 +2260,7 @@ fn cancel_intent_request_rolls_back_when_next_reservation_notification_fails() {
         })
         .expect("first request should enqueue");
     let second = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-2",
             session_id: "s3",
             workspace_id: "w1",
@@ -2269,7 +2286,7 @@ fn cancel_intent_request_rolls_back_when_next_reservation_notification_fails() {
         .expect("failure trigger should install");
 
     let error = store
-        .cancel_intent_request("request-1", "s2", "w1")
+        .cancel_reservation_request("request-1", "s2", "w1")
         .expect_err("cancel should surface notification failure");
     assert!(
         error
@@ -2384,8 +2401,8 @@ fn released_child_lease_promotes_directory_waiter_to_reservation() {
         .expect("directory waiter should enqueue");
 
     store
-        .release_lease("s1", "w1", "target/out.txt")
-        .expect("child lease should release");
+        .release_claim("s1", "w1", "target/out.txt")
+        .expect("child claim should release");
 
     let reservation = store
         .active_reservation("w1", "target")
@@ -2408,7 +2425,7 @@ fn released_child_lease_promotes_directory_waiter_to_reservation() {
 }
 
 #[test]
-fn release_lease_rolls_back_when_reservation_notification_fails() {
+fn release_claim_rolls_back_when_reservation_notification_fails() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after unix epoch")
@@ -2445,7 +2462,7 @@ fn release_lease_rolls_back_when_reservation_notification_fails() {
         .expect("failure trigger should install");
 
     let error = store
-        .release_lease("s1", "w1", "target/out.txt")
+        .release_claim("s1", "w1", "target/out.txt")
         .expect_err("release should surface notification failure");
     assert!(
         error.to_string().contains("simulated notification failure"),
@@ -2453,8 +2470,8 @@ fn release_lease_rolls_back_when_reservation_notification_fails() {
     );
 
     let owner = store
-        .active_lease_conflict_owner_for_path("w1", "target/out.txt", "s2")
-        .expect("active lease owner lookup should succeed");
+        .active_claim_conflict_owner_for_path("w1", "target/out.txt", "s2")
+        .expect("active claim owner lookup should succeed");
     assert_eq!(owner.as_deref(), Some("s1"));
     assert_eq!(
         store
@@ -2476,7 +2493,7 @@ fn release_lease_rolls_back_when_reservation_notification_fails() {
 }
 
 #[test]
-fn release_session_leases_rolls_back_when_reservation_notification_fails() {
+fn release_session_claims_rolls_back_when_reservation_notification_fails() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after unix epoch")
@@ -2513,7 +2530,7 @@ fn release_session_leases_rolls_back_when_reservation_notification_fails() {
         .expect("failure trigger should install");
 
     let error = store
-        .release_session_leases("s1", "w1")
+        .release_session_claims("s1", "w1")
         .expect_err("session release should surface notification failure");
     assert!(
         error
@@ -2523,8 +2540,8 @@ fn release_session_leases_rolls_back_when_reservation_notification_fails() {
     );
 
     let owner = store
-        .active_lease_conflict_owner_for_path("w1", "target/out.txt", "s2")
-        .expect("active lease owner lookup should succeed");
+        .active_claim_conflict_owner_for_path("w1", "target/out.txt", "s2")
+        .expect("active claim owner lookup should succeed");
     assert_eq!(owner.as_deref(), Some("s1"));
     assert_eq!(
         store
@@ -2563,8 +2580,8 @@ fn released_child_lease_does_not_promote_directory_waiter_while_another_child_le
         .expect("directory waiter should enqueue");
 
     store
-        .release_lease("s1", "w1", "target/out.txt")
-        .expect("first child lease should release");
+        .release_claim("s1", "w1", "target/out.txt")
+        .expect("first child claim should release");
 
     assert!(
         store
@@ -2580,13 +2597,13 @@ fn released_child_lease_does_not_promote_directory_waiter_while_another_child_le
     );
 
     store
-        .release_lease("s3", "w1", "target/other.txt")
-        .expect("second child lease should release");
+        .release_claim("s3", "w1", "target/other.txt")
+        .expect("second child claim should release");
 
     let reservation = store
         .active_reservation("w1", "target")
         .expect("reservation lookup should succeed")
-        .expect("directory waiter should be reserved after all child leases release");
+        .expect("directory waiter should be reserved after all child claims release");
     assert_eq!(reservation.wait_id, wait.wait_id);
 }
 
@@ -2617,8 +2634,8 @@ fn released_child_lease_promotes_earlier_directory_waiter_before_later_child_wai
         .expect("child waiter should enqueue");
 
     store
-        .release_lease("s1", "w1", "target/out.txt")
-        .expect("child lease should release");
+        .release_claim("s1", "w1", "target/out.txt")
+        .expect("child claim should release");
 
     let reservation = store
         .active_reservation("w1", "target")
@@ -2650,8 +2667,8 @@ fn released_directory_lease_promotes_child_file_waiter_to_reservation() {
         .expect("child file waiter should enqueue");
 
     store
-        .release_lease("s1", "w1", "target/")
-        .expect("directory lease should release");
+        .release_claim("s1", "w1", "target/")
+        .expect("directory claim should release");
 
     let reservation = store
         .active_reservation("w1", "target/out.txt")
@@ -2694,8 +2711,8 @@ fn released_directory_lease_promotes_all_non_conflicting_child_file_waiters() {
         .expect("second child file waiter should enqueue");
 
     store
-        .release_lease("s1", "w1", "target/")
-        .expect("directory lease should release");
+        .release_claim("s1", "w1", "target/")
+        .expect("directory claim should release");
 
     let first_reservation = store
         .active_reservation("w1", "target/a.txt")
@@ -2715,7 +2732,7 @@ fn released_directory_lease_keeps_same_session_conflicting_waiter_queued() {
 
     acquire_test_lease(&store, "s1", "w1", "target/");
     let first = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
             session_id: "s2",
             workspace_id: "w1",
@@ -2726,7 +2743,7 @@ fn released_directory_lease_keeps_same_session_conflicting_waiter_queued() {
         })
         .expect("first child file waiter should enqueue");
     let second = store
-        .enqueue_intent_request(IntentRequestInput {
+        .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-2",
             session_id: "s2",
             workspace_id: "w1",
@@ -2738,8 +2755,8 @@ fn released_directory_lease_keeps_same_session_conflicting_waiter_queued() {
         .expect("second child file waiter should enqueue");
 
     store
-        .release_lease("s1", "w1", "target/")
-        .expect("directory lease should release");
+        .release_claim("s1", "w1", "target/")
+        .expect("directory claim should release");
 
     let reservation = store
         .active_reservation("w1", "target/a.txt")
@@ -2865,8 +2882,8 @@ fn released_directory_lease_promotes_child_directory_waiter_to_reservation() {
         .expect("child directory waiter should enqueue");
 
     store
-        .release_lease("s1", "w1", "target/")
-        .expect("directory lease should release");
+        .release_claim("s1", "w1", "target/")
+        .expect("directory claim should release");
 
     let reservation = store
         .active_reservation("w1", "target/debug")
@@ -3442,9 +3459,9 @@ fn migrations_create_contract_tables_and_indexes() {
         "idx_events_session_sequence",
         "idx_sessions_workspace_session",
         "idx_activities_workspace_expires_at",
-        "idx_intents_session_status_expires_at",
-        "idx_leases_workspace_absolute_status_expires_at",
-        "idx_leases_repo_relative_status_expires_at",
+        "idx_reservations_session_status_expires_at",
+        "idx_claims_workspace_absolute_status_expires_at",
+        "idx_claims_repo_relative_status_expires_at",
         "idx_conflicts_session_checked_at",
         "idx_reconciliations_session_created_at",
         "idx_outbox_session_sequence_sync_status",

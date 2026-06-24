@@ -78,12 +78,20 @@ fn all_v1_mcp_tools_map_to_http_endpoints() {
     let cases = [
         ("state.session.register", "POST", "/v1/session/register"),
         ("state.session.heartbeat", "POST", "/v1/session/heartbeat"),
-        ("state.intent.declare", "POST", "/v1/intent/declare"),
-        ("state.intent.request", "POST", "/v1/intent/request"),
-        ("state.intent.claim", "POST", "/v1/intent/claim"),
-        ("state.intent.cancel", "POST", "/v1/intent/cancel"),
-        ("state.lease.acquire", "POST", "/v1/lease/acquire"),
-        ("state.lease.release", "POST", "/v1/lease/release"),
+        (
+            "state.reservation.declare",
+            "POST",
+            "/v1/reservation/declare",
+        ),
+        (
+            "state.reservation.request",
+            "POST",
+            "/v1/reservation/request",
+        ),
+        ("state.reservation.claim", "POST", "/v1/reservation/claim"),
+        ("state.reservation.cancel", "POST", "/v1/reservation/cancel"),
+        ("state.claim.acquire", "POST", "/v1/claim/acquire"),
+        ("state.claim.release", "POST", "/v1/claim/release"),
         ("state.activity.observe", "POST", "/v1/activity/observe"),
         ("state.activity.finalize", "POST", "/v1/activity/finalize"),
         ("state.conflicts.check", "POST", "/v1/conflicts/check"),
@@ -107,20 +115,20 @@ fn all_v1_mcp_tools_map_to_http_endpoints() {
 #[test]
 fn codex_tool_names_map_to_stateful_protocol_names() {
     assert_eq!(
-        protocol_tool_name("state_intent_declare").expect("tool should map"),
-        "state.intent.declare"
+        protocol_tool_name("state_reservation_declare").expect("tool should map"),
+        "state.reservation.declare"
     );
     assert_eq!(
-        protocol_tool_name("state_intent_claim").expect("tool should map"),
-        "state.intent.claim"
+        protocol_tool_name("state_reservation_claim").expect("tool should map"),
+        "state.reservation.claim"
     );
     assert_eq!(
-        protocol_tool_name("state_intent_request").expect("tool should map"),
-        "state.intent.request"
+        protocol_tool_name("state_reservation_request").expect("tool should map"),
+        "state.reservation.request"
     );
     assert_eq!(
-        protocol_tool_name("state_intent_cancel").expect("tool should map"),
-        "state.intent.cancel"
+        protocol_tool_name("state_reservation_cancel").expect("tool should map"),
+        "state.reservation.cancel"
     );
     assert_eq!(
         protocol_tool_name("state_current_read").expect("tool should map"),
@@ -133,10 +141,10 @@ fn tool_descriptors_expose_codex_friendly_names() {
     let tools = tool_descriptors();
     let names = tools.iter().map(|tool| tool.name).collect::<Vec<_>>();
 
-    assert!(names.contains(&"state_intent_declare"));
-    assert!(names.contains(&"state_intent_request"));
-    assert!(names.contains(&"state_intent_claim"));
-    assert!(names.contains(&"state_intent_cancel"));
+    assert!(names.contains(&"state_reservation_declare"));
+    assert!(names.contains(&"state_reservation_request"));
+    assert!(names.contains(&"state_reservation_claim"));
+    assert!(names.contains(&"state_reservation_cancel"));
     assert!(names.contains(&"state_current_read"));
     assert!(names.contains(&"state_events_read"));
     assert!(!names.contains(&"state_file_write"));
@@ -150,10 +158,10 @@ fn tool_descriptors_expose_codex_friendly_names() {
 #[test]
 fn coordination_write_descriptors_scope_repo_internal_work() {
     for name in [
-        "state_intent_declare",
-        "state_intent_request",
-        "state_lease_acquire",
-        "state_lease_release",
+        "state_reservation_declare",
+        "state_reservation_request",
+        "state_claim_acquire",
+        "state_claim_release",
         "state_conflicts_check",
     ] {
         let tool = descriptor(name);
@@ -202,12 +210,12 @@ fn session_bound_descriptor_schemas_hide_injected_session_fields() {
     for name in [
         "state_session_register",
         "state_session_heartbeat",
-        "state_intent_declare",
-        "state_intent_request",
-        "state_intent_claim",
-        "state_intent_cancel",
-        "state_lease_acquire",
-        "state_lease_release",
+        "state_reservation_declare",
+        "state_reservation_request",
+        "state_reservation_claim",
+        "state_reservation_cancel",
+        "state_claim_acquire",
+        "state_claim_release",
         "state_activity_observe",
         "state_activity_finalize",
         "state_conflicts_check",
@@ -245,8 +253,8 @@ fn run_bound_descriptor_schemas_are_empty() {
 }
 
 #[test]
-fn intent_declare_descriptor_exposes_required_input_schema() {
-    let tool = descriptor("state_intent_declare");
+fn reservation_declare_descriptor_exposes_required_input_schema() {
+    let tool = descriptor("state_reservation_declare");
 
     assert_eq!(tool.input_schema["type"], "object");
     assert_injected_session_fields_are_hidden(&tool.input_schema);
@@ -309,8 +317,8 @@ fn reconcile_ack_descriptor_does_not_require_non_empty_files_reread() {
 }
 
 #[test]
-fn intent_claim_descriptor_exposes_required_input_schema() {
-    let tool = descriptor("state_intent_claim");
+fn reservation_claim_descriptor_exposes_required_input_schema() {
+    let tool = descriptor("state_reservation_claim");
 
     assert_eq!(tool.input_schema["type"], "object");
     assert_injected_session_fields_are_hidden(&tool.input_schema);
@@ -323,8 +331,8 @@ fn intent_claim_descriptor_exposes_required_input_schema() {
 }
 
 #[test]
-fn intent_request_descriptor_exposes_required_input_schema() {
-    let tool = descriptor("state_intent_request");
+fn reservation_request_descriptor_exposes_required_input_schema() {
+    let tool = descriptor("state_reservation_request");
 
     assert_eq!(tool.input_schema["type"], "object");
     assert_injected_session_fields_are_hidden(&tool.input_schema);
@@ -348,8 +356,8 @@ fn intent_request_descriptor_exposes_required_input_schema() {
 }
 
 #[test]
-fn intent_cancel_descriptor_exposes_required_input_schema() {
-    let tool = descriptor("state_intent_cancel");
+fn reservation_cancel_descriptor_exposes_required_input_schema() {
+    let tool = descriptor("state_reservation_cancel");
 
     assert_eq!(tool.input_schema["type"], "object");
     assert_injected_session_fields_are_hidden(&tool.input_schema);
@@ -366,7 +374,7 @@ fn intent_cancel_descriptor_exposes_required_input_schema() {
 
 #[test]
 fn lease_descriptors_expose_path_only_schema() {
-    for name in ["state_lease_acquire", "state_lease_release"] {
+    for name in ["state_claim_acquire", "state_claim_release"] {
         let tool = descriptor(name);
 
         assert_eq!(tool.input_schema["type"], "object");
@@ -380,7 +388,7 @@ fn lease_descriptors_expose_path_only_schema() {
         assert_eq!(tool.input_schema["additionalProperties"], false);
     }
 
-    let release = descriptor("state_lease_release");
+    let release = descriptor("state_claim_release");
     assert!(
         release.description.contains("same-session"),
         "release tool should make ownership constraints explicit"

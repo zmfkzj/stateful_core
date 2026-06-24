@@ -155,7 +155,20 @@ def file_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def canonical_system_temp_prefix(path: Path) -> Path:
+    if sys.platform != "darwin" or not path.is_absolute():
+        return path
+    raw = str(path)
+    for public, canonical in (("/tmp", "/private/tmp"), ("/var", "/private/var")):
+        if raw == public:
+            return Path(canonical)
+        if raw.startswith(f"{public}/"):
+            return Path(canonical) / raw[len(public) + 1 :]
+    return path
+
+
 def ensure_safe_directory(path: Path) -> bool:
+    path = canonical_system_temp_prefix(path)
     cursor = Path(path.anchor) if path.is_absolute() else Path()
     parts = path.parts[1:] if path.is_absolute() else path.parts
     for part in parts:
@@ -256,7 +269,7 @@ def main() -> int:
         "--coordination-profile",
         choices=[
             "no_state",
-            "stateful_without_lease",
+            "stateful_without_claim",
             "stateful_without_replay",
             "stateful_without_resume",
             "stateful_without_commit_tracking",
@@ -279,10 +292,10 @@ def main() -> int:
         coordination_profile = "stateful_full" if args.mode == "stateful" else "no_state"
 
     if args.mode == "stateful":
-        if coordination_profile == "stateful_without_lease":
+        if coordination_profile == "stateful_without_claim":
             stateful_instruction = f"""
-Stateful coordination ablation profile: stateful_without_lease.
-- Do not declare file intent before modifying doc.txt.
+Stateful coordination ablation profile: stateful_without_claim.
+- Do not declare file reservation before modifying doc.txt.
 - Still use the stateful hooks and observe whether the write is blocked or loses a peer edit.
 - If a write is denied, stop without repairing the document.
 """
@@ -291,7 +304,7 @@ Stateful coordination ablation profile: stateful_without_lease.
 Stateful coordination:
 - Before your first modification to doc.txt, run exactly:
 
-    {args.stateful_binary} intent declare --session-id {args.session_id} --workspace-id {args.workspace_id} --purpose "coordinate chaos benchmark edit" doc.txt
+    {args.stateful_binary} reservation declare --session-id {args.session_id} --workspace-id {args.workspace_id} --purpose "coordinate chaos benchmark edit" doc.txt
 
 - Use this exact session id and workspace id.
 - If a write is denied, read doc.txt again, run the declaration again, and retry once while preserving already visible content.
@@ -359,7 +372,7 @@ Trace constraints:
 - Use apply_patch for edits. Do not use shell redirection, Python, Perl, sed, tee, or other shell write tricks to modify doc.txt or persisted_doc.txt.
 - Operation kind notes: full_overwrite replaces the whole document; insert_after inserts one line after an anchor and may include an occurrence field for duplicate anchors; delete_line removes exact matching lines; replace_line replaces an exact line with replacement; move_line moves an exact line after another line; replay_many applies the same op_id count times in no-state but once in stateful; noop only observes.
 - In no-state mode, execute your operation as a stale/replayed delivery trace: if your stale snapshot exists, base your write on it even when live doc.txt has changed.
-- In stateful mode, declare intent, read live doc.txt immediately before writing, preserve visible peer edits, make duplicate op_id replays idempotent, and preserve inserts whose anchor was concurrently deleted.
+- In stateful mode, declare reservation, read live doc.txt immediately before writing, preserve visible peer edits, make duplicate op_id replays idempotent, and preserve inserts whose anchor was concurrently deleted.
 - If {persisted_doc} exists in stateful mode, keep it converged with live doc.txt after your write.
 {chaos_instruction}
 When finished, leave only the requested chaos trace document changes.

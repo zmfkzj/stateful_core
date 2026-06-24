@@ -12,9 +12,9 @@ use axum::{
     routing::{get, post},
 };
 use policy_service::{
-    AuthorizationOutcome, AuthorizeWriteInput, BaseObservation, CancelIntentInput,
-    CancelIntentOutcome, ClaimIntentInput, ClaimIntentOutcome, PolicyService, RequestIntentInput,
-    RequestIntentOutcome, WaitQueueInfo, lease_observation_for_path,
+    AuthorizationOutcome, AuthorizeWriteInput, BaseObservation, CancelReservationInput,
+    CancelReservationOutcome, ClaimReservationInput, ClaimReservationOutcome, PolicyService,
+    RequestReservationInput, RequestReservationOutcome, WaitQueueInfo, claim_observation_for_path,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -78,16 +78,16 @@ pub fn build_router(config: ServerConfig) -> Router {
         .route("/v1/runtime/identity", get(runtime_identity))
         .route("/v1/session/register", post(session_register))
         .route("/v1/session/heartbeat", post(session_heartbeat))
-        .route("/v1/intent/declare", post(intent_declare))
-        .route("/v1/intent/request", post(intent_request))
-        .route("/v1/intent/claim", post(intent_claim))
-        .route("/v1/intent/cancel", post(intent_cancel))
-        .route("/v1/lease/acquire", post(lease_acquire))
+        .route("/v1/reservation/declare", post(reservation_declare))
+        .route("/v1/reservation/request", post(reservation_request))
+        .route("/v1/reservation/claim", post(reservation_claim))
+        .route("/v1/reservation/cancel", post(reservation_cancel))
+        .route("/v1/claim/acquire", post(lease_acquire))
         .route(
-            "/v1/lease/refresh-observation",
+            "/v1/claim/refresh-observation",
             post(lease_refresh_observation),
         )
-        .route("/v1/lease/release", post(lease_release))
+        .route("/v1/claim/release", post(lease_release))
         .route("/v1/activity/observe", post(activity_observe))
         .route("/v1/activity/finalize", post(activity_finalize))
         .route("/v1/authorize", post(authorize))
@@ -341,7 +341,7 @@ async fn authorize(
     (StatusCode::OK, Json(authorization_json(outcome)))
 }
 
-async fn intent_declare(
+async fn reservation_declare(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
     Json(input): Json<Value>,
@@ -359,7 +359,7 @@ async fn intent_declare(
         Ok(envelope) => envelope,
         Err(error) => return error.response(),
     };
-    let payload: IntentDeclarePayload = match serde_json::from_value(envelope.payload) {
+    let payload: ReservationDeclarePayload = match serde_json::from_value(envelope.payload) {
         Ok(payload) => payload,
         Err(_) => return protocol::protocol_mismatch_response(),
     };
@@ -381,7 +381,7 @@ async fn intent_declare(
     append_event_response(
         &config.store,
         with_request_identity(
-            Event::intent_declared(
+            Event::reservation_declared(
                 envelope.request.session.session_id,
                 envelope.request.workspace.workspace_id,
                 purpose,
@@ -392,7 +392,7 @@ async fn intent_declare(
     )
 }
 
-async fn intent_request(
+async fn reservation_request(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
     Json(input): Json<Value>,
@@ -405,7 +405,7 @@ async fn intent_request(
         Ok(envelope) => envelope,
         Err(error) => return error.response(),
     };
-    let payload: IntentRequestPayload = match serde_json::from_value(envelope.payload) {
+    let payload: ReservationRequestPayload = match serde_json::from_value(envelope.payload) {
         Ok(payload) => payload,
         Err(_) => return protocol::protocol_mismatch_response(),
     };
@@ -418,7 +418,7 @@ async fn intent_request(
         Err(response) => return response,
     };
 
-    let input = RequestIntentInput {
+    let input = RequestReservationInput {
         session_id: envelope.request.session.session_id,
         workspace_id: envelope.request.workspace.workspace_id,
         request_id: payload.request_id,
@@ -433,7 +433,7 @@ async fn intent_request(
 
     match request_intent_with_policy(&config.store, input) {
         Ok(outcome) => (StatusCode::OK, Json(request_intent_json(outcome))),
-        Err(RequestIntentError::RequestFailed(message)) => (
+        Err(RequestReservationError::RequestFailed(message)) => (
             StatusCode::CONFLICT,
             Json(json!({
                 "status": "error",
@@ -441,7 +441,7 @@ async fn intent_request(
                 "message": message
             })),
         ),
-        Err(RequestIntentError::State(message)) => (
+        Err(RequestReservationError::State(message)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
                 "status": "error",
@@ -452,7 +452,7 @@ async fn intent_request(
     }
 }
 
-async fn intent_claim(
+async fn reservation_claim(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
     Json(input): Json<Value>,
@@ -470,7 +470,7 @@ async fn intent_claim(
         Err(_) => return protocol::protocol_mismatch_response(),
     };
 
-    let input = ClaimIntentInput {
+    let input = ClaimReservationInput {
         session_id: envelope.request.session.session_id,
         workspace_id: envelope.request.workspace.workspace_id,
         wait_id: payload.wait_id,
@@ -493,7 +493,7 @@ async fn intent_claim(
     }
 }
 
-async fn intent_cancel(
+async fn reservation_cancel(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
     Json(input): Json<Value>,
@@ -511,7 +511,7 @@ async fn intent_cancel(
         Err(_) => return protocol::protocol_mismatch_response(),
     };
 
-    let input = CancelIntentInput {
+    let input = CancelReservationInput {
         session_id: envelope.request.session.session_id,
         workspace_id: envelope.request.workspace.workspace_id,
         request_id: payload.request_id,
@@ -544,41 +544,41 @@ fn missing_purpose_response() -> (StatusCode, Json<Value>) {
         Json(json!({
             "status": "error",
             "reason_code": "missing_purpose",
-            "message": "Intent purpose is required and must be inferred from the user or agent instruction when it is not explicit."
+            "message": "Reservation purpose is required and must be inferred from the user or agent instruction when it is not explicit."
         })),
     )
 }
 
-fn missing_intent_response() -> (StatusCode, Json<Value>) {
+fn missing_reservation_response() -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({
             "status": "error",
-            "reason_code": "missing_intent",
-            "message": "Lease acquisition requires an active intent covering the requested path."
+            "reason_code": "missing_reservation",
+            "message": "Claim acquisition requires an active reservation covering the requested path."
         })),
     )
 }
 
-fn invalid_lease_path_response(path: String) -> (StatusCode, Json<Value>) {
+fn invalid_claim_path_response(path: String) -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({
             "status": "error",
-            "reason_code": "invalid_lease_path",
-            "message": format!("Invalid lease path `{path}`: direct tmp leases are not allowed; lease a file or subdirectory under tmp instead.")
+            "reason_code": "invalid_claim_path",
+            "message": format!("Invalid claim path `{path}`: direct tmp claims are not allowed; claim a file or subdirectory under tmp instead.")
         })),
     )
 }
 
-fn lease_conflict_response() -> (StatusCode, Json<Value>) {
+fn claim_conflict_response() -> (StatusCode, Json<Value>) {
     (
         StatusCode::CONFLICT,
         Json(json!({
             "status": "error",
-            "reason_code": "lease_conflict",
-            "message": "Requested lease conflicts with an active lease or reserved request.",
-            "required_next_action": "To wait for this path, call state.intent.request with action, path, purpose, and request_id. Then poll state.notifications.poll or state.resume.next; when reserved, reread the target and call state.intent.claim with the wait_id before retrying the write."
+            "reason_code": "claim_conflict",
+            "message": "Requested claim conflicts with an active claim or reserved request.",
+            "required_next_action": "To wait for this path, call state.reservation.request with action, path, purpose, and request_id. Then poll state.notifications.poll or state.resume.next; when reserved, reread the target and call state.reservation.claim with the wait_id before retrying the write."
         })),
     )
 }
@@ -588,8 +588,8 @@ fn lease_already_held_response() -> (StatusCode, Json<Value>) {
         StatusCode::OK,
         Json(json!({
             "status": "ok",
-            "lease_state": "already_held",
-            "message": "Session already holds an active lease for this path."
+            "claim_state": "already_held",
+            "message": "Session already holds an active claim for this path."
         })),
     )
 }
@@ -600,31 +600,31 @@ fn reservation_claim_required_response(reservation: WaitRecord) -> (StatusCode, 
         Json(json!({
             "status": "error",
             "reason_code": "reservation_claim_required",
-            "message": "A reservation for this session must be claimed before acquiring the lease.",
+            "message": "A reservation for this session must be claimed before acquiring the claim.",
             "reservation": reservation,
-            "required_next_action": "Reread the target, then call state.intent.claim with the wait_id before retrying the write."
+            "required_next_action": "Reread the target, then call state.reservation.claim with the wait_id before retrying the write."
         })),
     )
 }
 
-fn lease_owner_mismatch_response() -> (StatusCode, Json<Value>) {
+fn claim_owner_mismatch_response() -> (StatusCode, Json<Value>) {
     (
         StatusCode::CONFLICT,
         Json(json!({
             "status": "error",
-            "reason_code": "lease_owner_mismatch",
-            "message": "Cannot release a lease owned by another session; wait for the lease to release, or coordinate with the lease owner."
+            "reason_code": "claim_owner_mismatch",
+            "message": "Cannot release a claim owned by another session; wait for the claim to release, or coordinate with the claim owner."
         })),
     )
 }
 
-fn lease_not_found_response() -> (StatusCode, Json<Value>) {
+fn claim_not_found_response() -> (StatusCode, Json<Value>) {
     (
         StatusCode::NOT_FOUND,
         Json(json!({
             "status": "error",
-            "reason_code": "lease_not_found",
-            "message": "No active same-session lease matched the requested path, workspace, and lease type."
+            "reason_code": "claim_not_found",
+            "message": "No active same-session claim matched the requested path, workspace, and claim type."
         })),
     )
 }
@@ -635,7 +635,7 @@ fn missing_scope_response() -> (StatusCode, Json<Value>) {
         Json(json!({
             "status": "error",
             "reason_code": "missing_scope",
-            "message": "Intent scope paths must be non-empty after normalization."
+            "message": "Reservation scope paths must be non-empty after normalization."
         })),
     )
 }
@@ -684,20 +684,20 @@ async fn lease_acquire(
             let workspace_id = input.workspace_id;
             let path = input.path;
             let observation = match input.root.as_deref().filter(|root| !root.is_empty()) {
-                Some(root) => match lease_observation_for_path(root, &path) {
+                Some(root) => match claim_observation_for_path(root, &path) {
                     Ok(observation) => Some(observation),
                     Err(error) => return status_response(Err(error)),
                 },
                 None => None,
             };
-            match store.acquire_lease_with_observation_and_event(
+            match store.acquire_claim_with_observation_and_event(
                 &session_id,
                 &workspace_id,
                 &path,
                 observation,
             ) {
                 Ok(()) => Ok(None),
-                Err(StoreError::LeaseConflict) => {
+                Err(StoreError::ClaimConflict) => {
                     let reservation = if path.ends_with('/') {
                         store.active_reservation_for_directory_by_session(
                             &workspace_id,
@@ -713,7 +713,7 @@ async fn lease_acquire(
                     };
                     match reservation {
                         Ok(Some(reservation)) => Ok(Some(reservation)),
-                        Ok(None) => Err(StoreError::LeaseConflict),
+                        Ok(None) => Err(StoreError::ClaimConflict),
                         Err(error) => Err(error),
                     }
                 }
@@ -727,10 +727,10 @@ async fn lease_acquire(
         Ok(Some(reservation)) => reservation_claim_required_response(reservation),
         Ok(None) => status_response(Ok(())),
         Err(StoreError::MissingPurpose) => missing_purpose_response(),
-        Err(StoreError::MissingIntent) => missing_intent_response(),
-        Err(StoreError::InvalidLeasePath(path)) => invalid_lease_path_response(path),
-        Err(StoreError::LeaseAlreadyHeld) => lease_already_held_response(),
-        Err(StoreError::LeaseConflict) => lease_conflict_response(),
+        Err(StoreError::MissingReservation) => missing_reservation_response(),
+        Err(StoreError::InvalidClaimPath(path)) => invalid_claim_path_response(path),
+        Err(StoreError::ClaimAlreadyHeld) => lease_already_held_response(),
+        Err(StoreError::ClaimConflict) => claim_conflict_response(),
         Err(error) => status_response(Err(error.to_string())),
     }
 }
@@ -748,17 +748,17 @@ async fn lease_refresh_observation(
         Some(root) => root,
         None => {
             return status_response(Err(
-                "root is required to refresh lease observations".to_string()
+                "root is required to refresh claim observations".to_string()
             ));
         }
     };
-    let observation = match lease_observation_for_path(root, &input.path) {
+    let observation = match claim_observation_for_path(root, &input.path) {
         Ok(observation) => observation,
         Err(error) => return status_response(Err(error)),
     };
 
     let result = match config.store.lock() {
-        Ok(store) => store.refresh_exact_file_lease_observation(
+        Ok(store) => store.refresh_exact_file_claim_observation(
             input.session_id,
             input.workspace_id,
             input.path,
@@ -769,8 +769,8 @@ async fn lease_refresh_observation(
 
     match result {
         Ok(()) => status_response(Ok(())),
-        Err(StoreError::LeaseOwnerMismatch) => lease_owner_mismatch_response(),
-        Err(StoreError::LeaseNotFound) => lease_not_found_response(),
+        Err(StoreError::ClaimOwnerMismatch) => claim_owner_mismatch_response(),
+        Err(StoreError::ClaimNotFound) => claim_not_found_response(),
         Err(error) => status_response(Err(error.to_string())),
     }
 }
@@ -785,14 +785,14 @@ async fn lease_release(
     }
 
     let result = match config.store.lock() {
-        Ok(store) => store.release_lease(input.session_id, input.workspace_id, input.path),
+        Ok(store) => store.release_claim(input.session_id, input.workspace_id, input.path),
         Err(_) => return status_response(Err("store lock poisoned".to_string())),
     };
 
     match result {
         Ok(()) => status_response(Ok(())),
-        Err(StoreError::LeaseOwnerMismatch) => lease_owner_mismatch_response(),
-        Err(StoreError::LeaseNotFound) => lease_not_found_response(),
+        Err(StoreError::ClaimOwnerMismatch) => claim_owner_mismatch_response(),
+        Err(StoreError::ClaimNotFound) => claim_not_found_response(),
         Err(error) => status_response(Err(error.to_string())),
     }
 }
@@ -833,12 +833,12 @@ async fn activity_finalize(
         });
 
     match result {
-        Ok((released_leases, completed_intents)) => (
+        Ok((released_claims, completed_reservations)) => (
             StatusCode::OK,
             Json(json!({
                 "status": "ok",
-                "released_leases": released_leases,
-                "completed_intents": completed_intents
+                "released_claims": released_claims,
+                "completed_reservations": completed_reservations
             })),
         ),
         Err(message) => (
@@ -1149,7 +1149,9 @@ fn notification_sse_stream(
 
 fn notification_sse_event(notification: NotificationRecord) -> SseEvent {
     let required_next_action = if notification.kind == "reservation_granted" {
-        Some("Reread the target, then call state.intent.claim for the reservation before writing.")
+        Some(
+            "Reread the target, then call state.reservation.claim for the reservation before writing.",
+        )
     } else {
         None
     };
@@ -1195,7 +1197,7 @@ async fn resume_next(
                 "status": "ok",
                 "resume_available": true,
                 "reservation": reservation,
-                "required_next_action": "Reread the target, then call state.intent.claim for the reservation before writing."
+                "required_next_action": "Reread the target, then call state.reservation.claim for the reservation before writing."
             })),
         ),
         Ok(None) => (
@@ -1266,15 +1268,15 @@ fn authorize_heartbeat_event(input: &AuthorizeWriteInput) -> Option<Event> {
 
 fn claim_intent_with_policy_and_audit(
     store: &SharedStore,
-    input: ClaimIntentInput,
-) -> Result<ClaimIntentOutcome, String> {
+    input: ClaimReservationInput,
+) -> Result<ClaimReservationOutcome, String> {
     let store = store
         .lock()
         .map_err(|_| "store lock poisoned".to_string())?;
     store.transaction(
         |store| {
             let outcome = PolicyService::new(store).claim_intent(input)?;
-            let audit = intent_claimed_audit_event(&outcome);
+            let audit = reservation_claimed_audit_event(&outcome);
             store.append(audit).map_err(|error| error.to_string())?;
             Ok(outcome)
         },
@@ -1284,36 +1286,36 @@ fn claim_intent_with_policy_and_audit(
 
 fn request_intent_with_policy(
     store: &SharedStore,
-    input: RequestIntentInput,
-) -> Result<RequestIntentOutcome, RequestIntentError> {
+    input: RequestReservationInput,
+) -> Result<RequestReservationOutcome, RequestReservationError> {
     let audit_input = input.clone();
     let store = store
         .lock()
-        .map_err(|_| RequestIntentError::State("store lock poisoned".to_string()))?;
+        .map_err(|_| RequestReservationError::State("store lock poisoned".to_string()))?;
     store.transaction(
         |store| {
             let outcome = PolicyService::new(store)
                 .request_intent(input)
-                .map_err(RequestIntentError::RequestFailed)?;
-            let audit = intent_requested_audit_event(&audit_input, &outcome);
+                .map_err(RequestReservationError::RequestFailed)?;
+            let audit = reservation_requested_audit_event(&audit_input, &outcome);
             store
                 .append(audit)
-                .map_err(|error| RequestIntentError::State(error.to_string()))?;
+                .map_err(|error| RequestReservationError::State(error.to_string()))?;
             Ok(outcome)
         },
-        |error| RequestIntentError::State(error.to_string()),
+        |error| RequestReservationError::State(error.to_string()),
     )
 }
 
-enum RequestIntentError {
+enum RequestReservationError {
     RequestFailed(String),
     State(String),
 }
 
 fn cancel_intent_with_policy_and_audit(
     store: &SharedStore,
-    input: CancelIntentInput,
-) -> Result<CancelIntentOutcome, String> {
+    input: CancelReservationInput,
+) -> Result<CancelReservationOutcome, String> {
     let request_id = input.request_id.clone();
     let store = store
         .lock()
@@ -1321,7 +1323,7 @@ fn cancel_intent_with_policy_and_audit(
     store.transaction(
         |store| {
             let outcome = PolicyService::new(store).cancel_intent(input)?;
-            let audit = intent_canceled_audit_event(&request_id, &outcome);
+            let audit = reservation_canceled_audit_event(&request_id, &outcome);
             store.append(audit).map_err(|error| error.to_string())?;
             Ok(outcome)
         },
@@ -1389,9 +1391,9 @@ fn with_wait_identity(mut event: Event, wait: &WaitRecord) -> Event {
     event
 }
 
-fn intent_requested_audit_event(
-    input: &RequestIntentInput,
-    outcome: &RequestIntentOutcome,
+fn reservation_requested_audit_event(
+    input: &RequestReservationInput,
+    outcome: &RequestReservationOutcome,
 ) -> Event {
     let wait_id = outcome
         .wait
@@ -1416,7 +1418,7 @@ fn intent_requested_audit_event(
         });
 
     with_request_identity(
-        Event::intent_requested(
+        Event::reservation_requested(
             input.session_id.clone(),
             input.workspace_id.clone(),
             outcome.request_id.clone(),
@@ -1437,10 +1439,10 @@ fn intent_requested_audit_event(
     )
 }
 
-fn intent_claimed_audit_event(outcome: &ClaimIntentOutcome) -> Event {
+fn reservation_claimed_audit_event(outcome: &ClaimReservationOutcome) -> Event {
     let reservation = &outcome.reservation;
     with_wait_identity(
-        Event::intent_claimed(
+        Event::reservation_claimed(
             reservation.session_id.clone(),
             reservation.workspace_id.clone(),
             reservation.wait_id.clone(),
@@ -1452,10 +1454,10 @@ fn intent_claimed_audit_event(outcome: &ClaimIntentOutcome) -> Event {
     )
 }
 
-fn intent_canceled_audit_event(request_id: &str, outcome: &CancelIntentOutcome) -> Event {
+fn reservation_canceled_audit_event(request_id: &str, outcome: &CancelReservationOutcome) -> Event {
     let wait = &outcome.wait;
     with_wait_identity(
-        Event::intent_canceled(
+        Event::reservation_canceled(
             wait.session_id.clone(),
             wait.workspace_id.clone(),
             request_id.to_string(),
@@ -1568,7 +1570,7 @@ fn authorization_json(outcome: AuthorizationOutcome) -> Value {
     value
 }
 
-fn claim_intent_json(outcome: ClaimIntentOutcome) -> Value {
+fn claim_intent_json(outcome: ClaimReservationOutcome) -> Value {
     let reservation = outcome.reservation;
     json!({
         "status": "ok",
@@ -1584,7 +1586,7 @@ fn claim_intent_json(outcome: ClaimIntentOutcome) -> Value {
     })
 }
 
-fn request_intent_json(outcome: RequestIntentOutcome) -> Value {
+fn request_intent_json(outcome: RequestReservationOutcome) -> Value {
     let mut value = json!({
         "status": "ok",
         "request_id": outcome.request_id,
@@ -1601,7 +1603,7 @@ fn request_intent_json(outcome: RequestIntentOutcome) -> Value {
     value
 }
 
-fn cancel_intent_json(outcome: CancelIntentOutcome) -> Value {
+fn cancel_intent_json(outcome: CancelReservationOutcome) -> Value {
     let request_state = outcome.wait.status.clone();
     json!({
         "status": "ok",
@@ -1669,13 +1671,13 @@ struct CurrentQuery {
 }
 
 #[derive(Debug, Deserialize)]
-struct IntentDeclarePayload {
+struct ReservationDeclarePayload {
     purpose: String,
     files_planned: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct IntentRequestPayload {
+struct ReservationRequestPayload {
     request_id: String,
     action: String,
     path: String,

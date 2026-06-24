@@ -157,39 +157,40 @@ run the printed join command as-is; it includes the matching workspace id.
 ## Manual Coordination Commands
 
 In active Codex or OMP sessions, prefer MCP tools over shelling out to
-`stateful intent ...` or `stateful mcp call ...`; lifecycle hooks bind the active
+`stateful reservation ...` or `stateful mcp call ...`; lifecycle hooks bind the active
 runtime session as the Stateful session id.
 
 Manual CLI use outside active hooks can pass session and workspace explicitly:
 
 ```bash
-stateful intent declare \
+stateful reservation declare \
   --session-id demo \
   --workspace-id <workspace> \
   --purpose "Update README content requested by the user." \
   README.md
 ```
 
-Intent commands:
+Reservation commands:
 
 ```bash
-stateful intent declare --purpose <purpose> <paths...>
-stateful intent request --request-id <id> --action write_file|write_directory --path <path> --purpose <purpose>
-stateful intent claim --wait-id <id>
-stateful intent cancel --request-id <id>
+stateful reservation declare --purpose <purpose> <paths...>
+stateful reservation request --request-id <id> --action write_file|write_directory --path <path> --purpose <purpose>
+stateful reservation claim --wait-id <id>
+stateful reservation cancel --request-id <id>
 ```
 
 Notes:
 
 - `declare` requires at least one non-empty path and a non-empty purpose.
 - Declarations add to the session's active scope in that workspace.
-- Re-declaring the same path updates the purpose used for future lease
+- Re-declaring the same path updates the purpose used for future claim
   acquisition.
-- `request` creates or returns an idempotent queued/reserved write request.
+- `request` creates or returns an idempotent queued or claimable (`reserved`)
+  write request.
 - `claim` uses the stored reservation purpose; clients do not pass a new claim
   purpose.
 - Native edit hooks and sandbox `write-targets` authorization may lazy-claim a
-  reserved request at the retry write boundary.
+  claimable request at the retry write boundary.
 
 Resume commands:
 
@@ -211,7 +212,7 @@ Common commands:
 - `stateful tools list`, `stateful tools allow <tool>`, `stateful tools deny <tool>`
 - `stateful server start|restart|status|stop|join`
 - `stateful status`, `stateful doctor`, `stateful current`, `stateful events`
-- `stateful intent declare|request|claim|cancel`
+- `stateful reservation declare|request|claim|cancel`
 - `stateful notifications poll`
 - `stateful resume next`
 - `stateful sandbox run ...`
@@ -247,9 +248,9 @@ current-state context.
 `PreToolUse` authorizes supported tool actions. Server-side authorization records
 an implicit session heartbeat for the checked session. `PostToolUse` records
 activity or heartbeats; Codex `PostToolUse` also releases same-session repo-write
-leases after completed native edit and `write-targets` transactions. `Stop` posts
+claims after completed native edit and `write-targets` transactions. `Stop` posts
 `state_activity_finalize`, finalizing activity and releasing the session's
-leases.
+claims.
 
 Hooks write `.stateful_core/runtime/sessions/<session_id>.json` plus the current
 session alias `.stateful_core/runtime/session.json`. Session-bound callers use
@@ -273,21 +274,21 @@ The v1 authorization API supports:
 - `rename_file`
 - `move_file`
 
-File intent authorizes writes only to the exact file. Directory intent authorizes
+File reservation authorizes writes only to the exact file. Directory reservation authorizes
 only `write_directory` for the exact directory resource. File writes, deletes,
-renames, and moves require exact file intents for the affected paths. Directory
-intent does not authorize them.
+renames, and moves require exact file reservations for the affected paths. Directory
+reservation does not authorize them.
 
-Writes without matching active intent are denied. Active leases held by another
+Writes without matching active reservation are denied. Active claims held by another
 session block conflicting writes. A blocked writer can queue with
 `queue_on_conflict`; after promotion, the reservation notification and resume
-payload carry the stored request purpose and the reserved session must reread the
-target.
+payload carry the stored request purpose, and the session with the claimable
+reservation must reread the target.
 
 Repo file edits should use native edit tools with hook-visible targets after
-exact intent declaration and a successful same-session file lease. Hooks extract
+exact reservation declaration and a successful same-session file claim. Hooks extract
 the native tool target, call `/v1/authorize` with the operation-specific action,
-allow the edit only after an allow decision, and release the authorizing lease
+allow the edit only after an allow decision, and release the authorizing claim
 after the completed write transaction.
 
 ## Sandbox Profiles
@@ -299,7 +300,7 @@ sandbox profile that matches the command.
 | --- | --- |
 | `read-only` | Shell-based read-only repo inspection when native read/search tools are insufficient. Network must be disabled. |
 | `build` | Build/test/package commands that write disposable artifacts under `/tmp/stateful/<session>/<scratch-purpose>/`. |
-| `write-targets` | Command-shaped repo writes after matching intent and same-session file or directory lease. |
+| `write-targets` | Command-shaped repo writes after matching reservation and same-session file or directory claim. |
 | `git` | Local or remote `git ...` operations. Use `--network enabled` only for remote git operations. |
 | `github-pr` | Non-interactive `gh pr list|view|status|create` commands. |
 | `external` | Repo-external shell operations with a purpose; add explicit external write/create/dir scope only when needed. |
@@ -325,8 +326,8 @@ stateful sandbox process find --contains denovo_codex_agent
 
 The HTTP server exposes `/health`, `/v1/current`, `/v1/events`,
 `/v1/runtime/identity`, and POST endpoints for session registration,
-heartbeats, intent declaration, intent request, intent claim, intent cancel,
-leases, activity observation/finalization, authorization, conflict checks,
+heartbeats, reservation declaration, reservation request, reservation claim, reservation cancel,
+claims, activity observation/finalization, authorization, conflict checks,
 context rendering, reconciliation ack, notifications, resume, and outbox sync.
 
 The MCP adapter exposes agent-friendly tool names mapped to dotted protocol
@@ -334,12 +335,12 @@ names:
 
 - `state_session_register` / `state.session.register`
 - `state_session_heartbeat` / `state.session.heartbeat`
-- `state_intent_declare` / `state.intent.declare`
-- `state_intent_request` / `state.intent.request`
-- `state_intent_claim` / `state.intent.claim`
-- `state_intent_cancel` / `state.intent.cancel`
-- `state_lease_acquire` / `state.lease.acquire`
-- `state_lease_release` / `state.lease.release`
+- `state_reservation_declare` / `state.reservation.declare`
+- `state_reservation_request` / `state.reservation.request`
+- `state_reservation_claim` / `state.reservation.claim`
+- `state_reservation_cancel` / `state.reservation.cancel`
+- `state_claim_acquire` / `state.claim.acquire`
+- `state_claim_release` / `state.claim.release`
 - `state_activity_observe` / `state.activity.observe`
 - `state_activity_finalize` / `state.activity.finalize`
 - `state_conflicts_check` / `state.conflicts.check`
@@ -352,10 +353,10 @@ names:
 
 `state_file_write` / `state.file.write` and `state_bash_write` /
 `state.bash.write` were removed. Use native edit tools with hook-visible targets
-for file edits after exact intent and lease, and use `stateful sandbox run --fs
+for file edits after exact reservation and claim, and use `stateful sandbox run --fs
 write-targets ...` for command-shaped writes.
 
-The `/v1/authorize` endpoint and the intent declare/request/claim/cancel
+The `/v1/authorize` endpoint and the reservation declare/request/claim/cancel
 endpoints require the `stateful.v1` request envelope with `payload`. Flat legacy
 bodies are rejected with `protocol_mismatch` for those paths. Other POST routes
 still accept their current flat request bodies.
@@ -422,7 +423,7 @@ command lines.
 
 Benchmark artifacts live under `.stateful_bench/` and are intentionally ignored.
 
-## Versioning And Releases
+## Versioning And Reclaims
 
 PR titles are the release input. Keep squash merge enabled and set GitHub's
 squash commit message default to the PR title, so the commit that lands on
@@ -433,7 +434,7 @@ Use these PR title forms:
 ```text
 fix(hook): reject stateful coordination through Bash
 feat(cli): add sandboxed git status support
-feat(mcp)!: rename the lease acquisition method
+feat(mcp)!: rename the claim acquisition method
 docs: clarify sandbox write targets
 chore: update release automation
 ```

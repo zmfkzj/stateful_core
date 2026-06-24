@@ -10,7 +10,7 @@ This creates avoidable coordination failures:
 
 - two agents edit the same file without knowing it
 - one session repeats investigation another session already started
-- an agent writes a file that changed in the shared checkout after its lease was
+- an agent writes a file that changed in the shared checkout after its claim was
   acquired
 - stale memory is mistaken for current activity
 - an interrupted session leaves no structured handoff state
@@ -65,10 +65,10 @@ Examples:
 - An agent session is exploring auth validation.
 - A subagent is editing under its own session identity while sharing the
   workspace-level coordination model.
-- A session intends to edit `src/auth.ts`.
-- A file has an active advisory lease.
+- A session plans to edit `src/auth.ts`.
+- A file has an active advisory claim.
 - A session is testing after a change.
-- A file changed after an agent acquired its exact file lease, or a future
+- A file changed after an agent acquired its exact file claim, or a future
   observer/IDE integration reports nearby human editing activity.
 - A session finalized as `done`, `failed`, or `blocked`.
 
@@ -76,7 +76,7 @@ Current state must be compact enough to render into an agent prompt and precise
 enough to drive conflict checks before important tool calls.
 
 The shipped v1 prototype observes Codex and OMP sessions, supported tool
-effects, MCP calls, exact file lease freshness, and explicit reconciliation
+effects, MCP calls, exact file claim freshness, and explicit reconciliation
 acknowledgements.
 It does not automatically watch human editor buffers or filesystem saves.
 
@@ -93,8 +93,8 @@ Current state decays quickly. Every active claim needs a freshness model:
 Expired state can remain useful as historical evidence, but it should not block
 new work as if it were still active.
 
-V1 intent freshness uses a 15-minute default TTL. Heartbeats can extend active
-intent while the phase is `exploring`, `editing`, or `testing`, but never beyond
+V1 reservation freshness uses a 15-minute default TTL. Heartbeats can extend active
+reservation while the phase is `exploring`, `editing`, or `testing`, but never beyond
 60 minutes from declaration. Blocked or finalized work is visible but does not
 authorize writes.
 
@@ -104,16 +104,16 @@ The first protocol is intentionally small:
 
 ```text
 1. register session
-2. declare intent
-3. acquire advisory lease
+2. declare reservation
+3. acquire advisory claim
 4. send heartbeat while active
 5. observe tool effects
-6. update phase and next intent
+6. update phase and next reservation
 7. finalize as done, failed, or blocked
-8. release or expire lease
+8. release or expire claim
 ```
 
-Start-only reporting creates stale locks. End-only reporting fails to prevent
+Start-only reporting creates stale blocking state. End-only reporting fails to prevent
 collisions while work is happening. The protocol needs both.
 
 ## Enforcement Boundary
@@ -122,21 +122,21 @@ The system should not rely only on prompting agents to update state. Important
 actions should pass through a coordination check:
 
 ```text
-before important action -> check intent and conflicts
+before important action -> check reservation and conflicts
 after important action  -> observe effects and refresh state
 before turn stops       -> require final status
 ```
 
-For v1, supported write actions are blocked unless the session has active intent
+For v1, supported write actions are blocked unless the session has active reservation
 with matching file or directory scope. Abstract task, test, port, or migration
-intent can provide context but does not permit writes. Codex lifecycle hooks and
+reservation can provide context but does not permit writes. Codex lifecycle hooks and
 the OMP extension provide the enforcement surface. This is a coordination
 guardrail, not a complete sandbox or security boundary.
 
 V1 only authorizes writes through tool paths with reliable target extraction.
 Repo file edits use hook-visible native edit tools such as Codex `apply_patch`,
-`Edit`, and `Write`, or OMP `edit` and `write`, after exact intent and a
-successful same-session file lease; the lease is released after the completed
+`Edit`, and `Write`, or OMP `edit` and `write`, after exact reservation and a
+successful same-session file claim; the claim is released after the completed
 write transaction. Bash command text alone is never a repo-internal
 authorization source. Runtime tool names are classified by their leaf segment,
 so `functions.bash` follows Bash rules, `functions.python` follows Python
@@ -157,15 +157,15 @@ cancel on OMP abort/ESC. The deprecated `async` parameter is accepted only
 as a compatibility no-op. The
 generated extension also subscribes to Stateful SSE reservation
 notifications and injects a next-turn OMP message when a queued `wait_id`
-becomes claimable; the claim and write still use the normal Stateful tools.
+becomes a `claimable_reservation`; the claim and write still use the normal Stateful tools.
 Ordinary read work should use agent-native read, search, or diff tools when
 available.
 Read-only inspection that genuinely needs a shell must use the trusted absolute
 `stateful` wrapper: `<absolute-stateful-binary> sandbox run --fs read-only
 --network disabled --command <cmd>`; in OMP, use `sandbox_bash` for that
 profile. Command-shaped repo writes must use the wrapper with
-`--fs write-targets` and explicit repo-relative target flags after intent and
-same-session lease; in OMP, use `sandbox_bash`. Repo-external operations use
+`--fs write-targets` and explicit repo-relative target flags after reservation and
+same-session claim; in OMP, use `sandbox_bash`. Repo-external operations use
 `--fs external` with purpose and command; read-only external commands may omit
 targets and use OMP `ext_ro_bash`, while external writes must declare
 write/create/dir scope and use OMP `ext_rw_bash`. Raw Bash test commands are
@@ -180,8 +180,8 @@ The product is useful when an agent can answer:
 
 - Who else is active in this workspace?
 - Is this activity from a root agent, subagent, human, or system runner?
-- Which files or resources are currently leased?
+- Which files or resources are currently claimed?
 - What does another actor plan to do next?
-- Is my intended edit likely to conflict?
+- Is my planned edit likely to conflict?
 - Is the conflicting state fresh, stale, or expired?
 - What final status did the previous session leave behind?

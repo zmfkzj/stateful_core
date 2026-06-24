@@ -48,7 +48,7 @@ one implementation and avoids policy drift.
 
 The `stateful.v1` envelope is the target request shape for side-effecting
 protocol calls. The current implementation enforces it for `/v1/authorize` and
-the intent declare/request/claim/cancel endpoints. Session, lease, activity,
+the reservation declare/request/claim/cancel endpoints. Session, claim, activity,
 conflicts/check, context, reconciliation, notification, resume, outbox, and read
 endpoints still use their current flat request bodies.
 
@@ -111,13 +111,13 @@ GET  /v1/current
 GET  /v1/events
 POST /v1/session/register
 POST /v1/session/heartbeat
-POST /v1/intent/declare
-POST /v1/intent/request
-POST /v1/intent/claim
-POST /v1/intent/cancel
-POST /v1/lease/acquire
-POST /v1/lease/refresh-observation
-POST /v1/lease/release
+POST /v1/reservation/declare
+POST /v1/reservation/request
+POST /v1/reservation/claim
+POST /v1/reservation/cancel
+POST /v1/claim/acquire
+POST /v1/claim/refresh-observation
+POST /v1/claim/release
 POST /v1/activity/observe
 POST /v1/activity/finalize
 POST /v1/authorize
@@ -125,6 +125,7 @@ POST /v1/conflicts/check
 POST /v1/context/render
 POST /v1/reconcile/ack
 POST /v1/notifications/poll
+GET  /v1/notifications/stream
 POST /v1/resume/next
 POST /v1/outbox/sync
 GET  /v1/runtime/identity
@@ -132,29 +133,29 @@ GET  /v1/runtime/identity
 
 `/v1/authorize` is the single policy entry point for supported tool actions.
 `/v1/conflicts/check` is a read-only dry-run wrapper around the same policy
-engine and must not create leases or write-authorizing state.
+engine and must not create claims or write-authorizing state.
 `/v1/notifications/poll` returns pending coordination notifications for a
 session and marks returned notifications as delivered so a later poll does not
 redeliver the same notification. Reservation notification payloads include the
 stored, non-empty reservation purpose. `/v1/resume/next` is the durable recovery
-path: it returns the first active reservation that the session can claim,
-including its stored purpose, after rereading the target, even if the
-reservation notification was already delivered or the client missed the poll
-response. `/v1/intent/claim` is the explicit reservation claim path; it takes a
-`wait_id`, uses the stored reservation purpose, and creates write-authorizing
-intent plus an active lease for the reservation owner. `/v1/authorize` may
-lazy-claim an active reservation for hook and sandbox authorization sources
-after the client rereads and retries the write boundary; read-only conflict
-checks must not claim reservations.
-`/v1/lease/acquire` records the target existence and content hash when `root` is
+path: it returns the first claimable reservation for the session, including its
+stored purpose, after rereading the target, even if the reservation notification
+was already delivered or the client missed the poll response. `/v1/reservation/claim`
+is the explicit reservation claim path; it takes a `wait_id`, uses the stored
+reservation purpose, and creates write-authorizing reservation plus an active
+claim for the reservation owner. `/v1/authorize` may lazy-claim a claimable
+reservation for hook and sandbox authorization sources after the client rereads
+and retries the write boundary; read-only conflict checks must not claim reservations.
+`/v1/claim/acquire` records the target existence and content hash when `root` is
 supplied; hook-originated native file writes compare that observation before
-authorization. `/v1/lease/refresh-observation` refreshes the same-session exact
-file lease observation while a lease remains active. Completed native edit and
-`write-targets` hook flows release their authorizing lease instead of carrying
-it forward, so later writes must reread and acquire a fresh lease or claim an
-eligible reservation. `/v1/intent/request`
-creates or returns an idempotent queued or reserved request by `request_id`;
-`/v1/intent/cancel` cancels queued or reserved requests owned by the caller.
+authorization. `/v1/claim/refresh-observation` refreshes the same-session exact
+file claim observation while a claim remains active. Completed native edit and
+`write-targets` hook flows release their authorizing claim instead of carrying
+it forward, so later writes must reread and acquire a fresh claim or claim a
+claimable reservation. `/v1/reservation/request`
+creates or returns an idempotent queued or claimable (`reserved`) request by
+`request_id`; `/v1/reservation/cancel` cancels queued or claimable (`reserved`)
+requests owned by the caller.
 `/v1/runtime/identity` is an authenticated server identity endpoint used by
 `stateful server stop` to verify that the runtime file and process id describe
 the same stateful server.
@@ -164,17 +165,17 @@ policy branches; they validate tool arguments, resolve the current session from
 explicit arguments, `STATEFUL_SESSION_ID`, or hook-persisted current-session
 files as appropriate, call the HTTP API, and return the server result. The OMP
 current-session path supports `state_session_register` ->
-`state_intent_declare` -> `state_lease_acquire` without a caller-supplied env
+`state_reservation_declare` -> `state_claim_acquire` without a caller-supplied env
 override after `stateful hook omp session-start` has persisted the active
 session.
 
 Current envelope enforcement is limited to `/v1/authorize` and
-`/v1/intent/declare`, `/v1/intent/request`, `/v1/intent/claim`, and
-`/v1/intent/cancel`. Intent declare requires non-empty `purpose` and non-empty
+`/v1/reservation/declare`, `/v1/reservation/request`, `/v1/reservation/claim`, and
+`/v1/reservation/cancel`. Reservation declare requires non-empty `purpose` and non-empty
 `files_planned`; empty arrays and empty or normalized-empty paths fail with
-`missing_scope`. Intent request requires non-empty `purpose` and a non-empty
+`missing_scope`. Reservation request requires non-empty `purpose` and a non-empty
 `path`; empty or normalized-empty request paths fail with `missing_scope`.
-Intent claim clients provide a `wait_id` only; they must not provide a purpose
+Reservation claim clients provide a `wait_id` only; they must not provide a purpose
 because the server uses the stored reservation purpose.
 
 ## Authorization Input
@@ -198,23 +199,23 @@ The richer `targets[]` policy model, read/search/diff actions,
 command/override-instruction authorization, and reconciliation actions are target
 model vocabulary, not accepted `/v1/authorize` payload fields in the shipped v1
 server. Unknown or unsupported actions fail closed with `unsupported_action`.
-The shipped `/v1/intent/request` scheduling API accepts only `write_file` and
+The shipped `/v1/reservation/request` scheduling API accepts only `write_file` and
 `write_directory` requests with one `path`. Opportunistic `queue_on_conflict`
 from `/v1/authorize` does not queue `rename_file` or `move_file`, because those
 actions affect multiple paths and need the target all-or-nothing scheduler.
 
 Native edit tools with hook-visible targets, such as Codex `apply_patch`,
 `Edit`, and `Write` or OMP `edit` and `write`, expose targets to hooks. After
-exact intent and a successful same-session file lease, hooks call
+exact reservation and a successful same-session file claim, hooks call
 `/v1/authorize` with the operation-specific action before allowing the edit,
 including `write_file`, `delete_file`, and `move_file` with source `path` /
 `old_path` and destination `new_path`. PreToolUse authorization sends current
 `base_observations` for each affected target when the hook can read the
 workspace file state. PostToolUse observes completed native edits and sandbox
 `write-targets` transactions, records the result, and releases the same-session
-leases that authorized the completed write boundary. Released leases leave the
+claims that authorized the completed write boundary. Released claims leave the
 live context render and do not authorize a later write; the session must reread
-and reacquire a lease, or lazy-claim an eligible reservation, before retrying.
+and reacquire a claim, or lazy-claim a claimable reservation, before retrying.
 For Bash, command text alone never authorizes tool use.
 `/v1/authorize` accepts optional `base_observations` for OCC-style freshness
 checks. When supplied, each observation is compared against the current
@@ -257,7 +258,7 @@ paths outside the repo. On macOS, external profile runs also allow
 trust/identity Mach lookups for `trustd` and DirectoryService so Go TLS clients
 such as `gh` can verify certificates. It starts through the sandbox after Codex
 approval, `ext_ro_bash` invocation, or `ext_rw_bash` confirmation and does not
-require repo intent or lease unless repo-relative write scope is supplied.
+require repo reservation or claim unless repo-relative write scope is supplied.
 Local git operations use `<absolute-stateful-binary> sandbox run --fs git
 --network disabled --command 'git <args>'`; use `--network enabled` only for
 remote git operations. GitHub pull request list/view/status/create commands use
@@ -289,7 +290,7 @@ vocabulary. The shipped `/v1/authorize` response returns allow/deny/error plus
 `wait` or `reservation` details when applicable, and it appends
 `AuthorizationDenied` events for deny decisions.
 
-For scheduling APIs, a hard conflict decision may produce a queued intent
+For scheduling APIs, a hard conflict decision may produce a queued reservation
 request instead of an immediate reservation. V1 queues only hard
 conflicts in the same `workspace_id` and normalized `relative_path`. Soft
 repo-relative conflicts remain warning context because they signal future
@@ -297,25 +298,25 @@ integration risk rather than immediate physical file overwrite.
 
 Queued requests are promoted FIFO. The shipped queue stores one requested path
 per wait request, and a request is reservable only when that requested resource
-is available. Promotion is triggered by explicit lease release, session or
-activity finalization, lease/reservation expiry, or current-state materialization
-that finds an already-unblocked queued waiter. Promotion creates short
+is available. Promotion is triggered by explicit claim release, session or
+activity finalization, claim/reservation expiry, or current-state materialization
+that finds an already-unblocked queued waiter. Promotion creates short claimable
 reservations and pending notifications whose payloads carry the waiting row's
 stored, non-empty purpose.
 
-Promotion creates reservations first. A reservation is not active write
-authority. Each waiting session must reread the target. Manual MCP/CLI flows
-then explicitly claim with `state_intent_claim` or
-`stateful intent claim --wait-id <id>`; claim uses the stored reservation
+Promotion creates claimable reservations first. A claimable reservation is not
+active write authority. Each waiting session must reread the target. Manual
+MCP/CLI flows then explicitly claim with `state_reservation_claim` or
+`stateful reservation claim --wait-id <id>`; claim uses the stored reservation
 purpose and clients do not provide a claim purpose. Hook and sandbox
-authorization sources may lazy-claim the reservation at the retried write
-boundary. Claiming creates write-authorizing intent and active same-session
-leases. The default reservation TTL is 120 seconds; the default lease TTL is 300
-seconds and is refreshed by heartbeat.
+authorization sources may lazy-claim the claimable reservation at the retried
+write boundary. Claiming creates write-authorizing reservation and active
+same-session claims. The default claimable reservation TTL is 120 seconds; the
+default claim TTL is 300 seconds and is refreshed by heartbeat.
 
 The target multi-resource model is atomic all-or-nothing: a multi-resource
 request is reservable only when it is the head entry for every requested resource
-queue and none of those resources has an active lease, and the server must not
+queue and none of those resources has an active claim, and the server must not
 partially reserve it. `request_id` is the idempotency key for shipped single-path
 requests: repeating a request with the same id returns the existing state and
 must not enqueue a duplicate. Repeating an expired request requeues the same
@@ -324,10 +325,10 @@ reservation and claim before writing.
 
 Full scheduling APIs return immediately with request state. Blocking waits can
 be implemented as a future client convenience by polling notifications or resume
-endpoints. Queued and reserved request cancellation is explicit through
-`intent/cancel`; shipped session or activity finalization also cancels that
-session's queued and reserved requests. Explicit user overrides do not reorder
-the wait queue or transfer reservations.
+endpoints. Queued and claimable (`reserved`) request cancellation is explicit
+through `reservation/cancel`; shipped session or activity finalization also
+cancels that session's queued and claimable (`reserved`) requests. Explicit user
+overrides do not reorder the wait queue or transfer reservations.
 
 ## SQLite Storage
 
@@ -352,8 +353,8 @@ schema_migrations
 events
 sessions
 activities
-intents
-leases
+reservations
+claims
 wait_queue
 notifications
 conflicts
@@ -364,9 +365,9 @@ outbox
 ```
 
 `events` is append-only audit history for shipped coordination events. Accepted
-session and intent declaration events materialize current-state rows in the same
-transaction as the event append. Lifecycle mutation APIs such as lease release,
-intent claim, intent cancel, and activity finalize update materialized tables
+session and reservation declaration events materialize current-state rows in the same
+transaction as the event append. Lifecycle mutation APIs such as claim release,
+reservation claim, reservation cancel, and activity finalize update materialized tables
 directly and append their audit events in the same transaction. If the audit
 append or event-backed materialization fails, the surrounding mutation rolls
 back.
@@ -378,9 +379,9 @@ events(workspace_id, created_at)
 events(session_id, created_at)
 sessions(workspace_id, session_id)
 activities(workspace_id, expires_at)
-intents(session_id, status, expires_at)
-leases(workspace_id, relative_path, status)
-leases(repo_id, relative_path, status, expires_at)
+reservations(session_id, status, expires_at)
+claims(workspace_id, relative_path, status)
+claims(repo_id, relative_path, status, expires_at)
 wait_queue(workspace_id, relative_path, status)
 wait_queue(session_id, status)
 notifications(target_session_id, status)
@@ -390,16 +391,16 @@ outbox(session_id, sequence, sync_status)
 ```
 
 The shipped schema may retain legacy or target-model columns and indexes such
-as `events.sequence` and `leases.absolute_path`; current v1 authorization and
+as `events.sequence` and `claims.absolute_path`; current v1 authorization and
 event queries must not rely on them until those columns are populated.
 
-`SessionHeartbeat` materialization refreshes the session timestamp, active lease
-expiry, active activity expiry, and active intent expiry. Intent refresh is
+`SessionHeartbeat` materialization refreshes the session timestamp, active claim
+expiry, active activity expiry, and active reservation expiry. Reservation refresh is
 capped at 60 minutes from `declared_at`.
 
 The shipped state server runs a background expiration loop while serving and
 also triggers expiration lazily from read/write paths. Expiration covers stale
-leases, stale reservations, and stale intent state, promotes eligible FIFO
+claims, stale reservations, and stale reservation state, promotes eligible FIFO
 waiters, and must be transactionally equivalent in both paths.
 
 The same maintenance loop prunes old historical evidence after the built-in
@@ -475,7 +476,7 @@ process isolation or managed hooks.
 CLI join never sends the bearer token to a non-loopback plain `http://` base
 URL. Use an SSH tunnel and join the loopback endpoint for remote runtimes.
 
-If the token is missing or invalid, write, reconciliation, intent, and lease
+If the token is missing or invalid, write, reconciliation, reservation, and claim
 paths fail closed. Read-only paths may return a minimal unauthorized error.
 
 ## Hook Adapter Contract
@@ -494,7 +495,7 @@ append outbox evidence when observation cannot reach the server
 ```
 
 Adapter-local policy is limited to fail-closed tool classification and trusted
-wrapper validation for command-shaped execution. Conflict, lease, intent,
+wrapper validation for command-shaped execution. Conflict, claim, reservation,
 freshness, queue, and reconciliation decisions belong to the state server.
 
 Suggested hook timeouts:
@@ -535,7 +536,7 @@ for the same `outbox_id` as the same event. Sync preserves sequence order per
 session.
 
 The outbox cannot authorize writes, clear reconciliation blocks, or extend
-leases while the state server is unavailable.
+claims while the state server is unavailable.
 
 ## CLI Surface
 
@@ -558,7 +559,7 @@ stateful events
 stateful doctor
 stateful sandbox run --fs read-only|write-targets|build|git|github-pr ...
 stateful sandbox process find <selector>
-stateful intent declare [--session-id <id>] [--workspace-id <id>] --purpose <purpose> <paths...>
+stateful reservation declare [--session-id <id>] [--workspace-id <id>] --purpose <purpose> <paths...>
 stateful notifications poll [--session-id <id>] [--workspace-id <id>]
 stateful resume next [--session-id <id>] [--workspace-id <id>]
 stateful mcp call <tool> [arguments-json]
@@ -628,7 +629,7 @@ or enabling a repository.
 protocol_version: stateful.v1
 intent_ttl_seconds: 900
 intent_max_seconds: 3600
-lease_ttl_seconds: 300
+claim_ttl_seconds: 300
 reservation_ttl_seconds: 120
 directory_scope_depth: 2
 delete_requires_exact_file_scope: true
@@ -638,7 +639,7 @@ event_retention_days: 14
 ```
 
 The current implementation writes these keys as target repo-level defaults but
-does not load them at runtime. Intent, lease, reservation, directory-scope, and
+does not load them at runtime. Reservation, claim, reservation, directory-scope, and
 retention windows are built-in Rust constants today. The shipped server uses
 the built-in 14-day retention window for historical pruning; configurable
 runtime loading is future hardening work.
@@ -658,8 +659,8 @@ after glob expansion.
 Implemented v1 behavior must have tests for:
 
 - policy decisions as table-driven unit tests
-- intent scope matching, including depth-2 directory behavior
-- directory lease conflict behavior, including whole-subtree fencing for
+- reservation scope matching, including depth-2 directory behavior
+- directory claim conflict behavior, including whole-subtree fencing for
   `write_directory` command-shaped writes
 - exact file scope for delete, rename, and move
 - Bash full-deny classification and sandbox-gated hook authorization
@@ -667,10 +668,10 @@ Implemented v1 behavior must have tests for:
   `codex-benchmark` cargo feature is enabled
 - native edit hook authorization plus Bash sandbox fixtures
 - prompt renderer golden output for shipped store-backed rendering
-- heartbeat refresh of activities, capped active intent TTL, and active leases
-  still covered by active intent
-- background and lazy expiration of stale leases, reservations, and intents,
-  including FIFO waiter promotion after stale reservation expiry
+- heartbeat refresh of activities, capped active reservation TTL, and active claims
+  still covered by active reservation
+- background and lazy expiration of stale claims, write-authorizing reservations,
+  and claimable reservations, including FIFO waiter promotion after stale reservation expiry
 - missing purpose and empty `files_planned` rejection
 - SQLite event append plus materialized-view transaction behavior
 - sandbox-run execution with artifact writes limited to an authorized directory

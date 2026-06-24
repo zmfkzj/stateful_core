@@ -1,10 +1,10 @@
 use stateful_core::{
-    IntentScope, ScopeSet, normalize_relative_path, normalized_relative_path_is_empty,
+    ReservationScope, ScopeSet, normalize_relative_path, normalized_relative_path_is_empty,
 };
 
 #[test]
 fn directory_scope_does_not_allow_file_writes() {
-    let scope = IntentScope::directory("src/");
+    let scope = ReservationScope::directory("src/");
 
     assert!(!scope.allows_write("src/auth.ts"));
     assert!(!scope.allows_write("src/auth/nested.ts"));
@@ -12,7 +12,7 @@ fn directory_scope_does_not_allow_file_writes() {
 
 #[test]
 fn write_directory_requires_exact_directory_scope() {
-    let scope = IntentScope::directory("target/");
+    let scope = ReservationScope::directory("target/");
 
     assert!(scope.allows_write_directory("target/"));
     assert!(scope.allows_write_directory("target"));
@@ -22,7 +22,7 @@ fn write_directory_requires_exact_directory_scope() {
 
 #[test]
 fn file_scope_allows_only_exact_file_write() {
-    let scope = IntentScope::file("src/auth.ts");
+    let scope = ReservationScope::file("src/auth.ts");
 
     assert!(scope.allows_write("src/auth.ts"));
     assert!(!scope.allows_write("src/session.ts"));
@@ -30,8 +30,8 @@ fn file_scope_allows_only_exact_file_write() {
 
 #[test]
 fn delete_requires_exact_file_scope() {
-    let directory = IntentScope::directory("src/");
-    let file = IntentScope::file("src/auth.ts");
+    let directory = ReservationScope::directory("src/");
+    let file = ReservationScope::file("src/auth.ts");
 
     assert!(!directory.allows_delete("src/auth.ts"));
     assert!(file.allows_delete("src/auth.ts"));
@@ -40,8 +40,8 @@ fn delete_requires_exact_file_scope() {
 #[test]
 fn rename_requires_exact_source_and_destination_file_scope() {
     let scopes = ScopeSet::new(vec![
-        IntentScope::file("src/old.ts"),
-        IntentScope::file("src/new.ts"),
+        ReservationScope::file("src/old.ts"),
+        ReservationScope::file("src/new.ts"),
     ]);
 
     assert!(scopes.allows_rename("src/old.ts", "src/new.ts"));

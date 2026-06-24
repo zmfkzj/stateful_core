@@ -77,8 +77,8 @@ def empty_stats() -> dict[str, Any]:
         "subagent_used_count": 0,
         "orchestration_trace_observed": 0,
         "orchestration_trace_captured": 0,
-        "orchestration_intent_events": 0,
-        "orchestration_lease_events": 0,
+        "orchestration_reservation_events": 0,
+        "orchestration_claim_events": 0,
         "orchestration_conflict_events": 0,
     }
 
@@ -89,8 +89,8 @@ def add_orchestration_trace(stats: dict[str, Any], trace: Any) -> None:
     stats["orchestration_trace_observed"] += 1
     if trace.get("trace_captured") is True:
         stats["orchestration_trace_captured"] += 1
-    stats["orchestration_intent_events"] += int_or_zero(trace.get("intent_events"))
-    stats["orchestration_lease_events"] += int_or_zero(trace.get("lease_events"))
+    stats["orchestration_reservation_events"] += int_or_zero(trace.get("reservation_events"))
+    stats["orchestration_claim_events"] += int_or_zero(trace.get("claim_events"))
     stats["orchestration_conflict_events"] += int_or_zero(trace.get("conflict_events"))
 
 
@@ -139,11 +139,11 @@ def add_summary(stats: dict[str, Any], summary: dict[str, Any]) -> None:
     stats["orchestration_trace_captured"] += int_or_zero(
         summary.get("orchestration_trace_captured")
     )
-    stats["orchestration_intent_events"] += int_or_zero(
-        summary.get("orchestration_intent_events")
+    stats["orchestration_reservation_events"] += int_or_zero(
+        summary.get("orchestration_reservation_events")
     )
-    stats["orchestration_lease_events"] += int_or_zero(
-        summary.get("orchestration_lease_events")
+    stats["orchestration_claim_events"] += int_or_zero(
+        summary.get("orchestration_claim_events")
     )
     stats["orchestration_conflict_events"] += int_or_zero(
         summary.get("orchestration_conflict_events")
@@ -172,8 +172,8 @@ def finalized_stats(
         ),
         "orchestration_trace_observed": stats["orchestration_trace_observed"],
         "orchestration_trace_captured": stats["orchestration_trace_captured"],
-        "orchestration_intent_events": stats["orchestration_intent_events"],
-        "orchestration_lease_events": stats["orchestration_lease_events"],
+        "orchestration_reservation_events": stats["orchestration_reservation_events"],
+        "orchestration_claim_events": stats["orchestration_claim_events"],
         "orchestration_conflict_events": stats["orchestration_conflict_events"],
         "progress_rate": (
             rows / expected_instances_per_condition
@@ -280,11 +280,11 @@ def summarize_report(
         "orchestration_trace_captured": int_or_zero(
             report.get("orchestration_trace_captured")
         ),
-        "orchestration_intent_events": int_or_zero(
-            report.get("orchestration_intent_events")
+        "orchestration_reservation_events": int_or_zero(
+            report.get("orchestration_reservation_events")
         ),
-        "orchestration_lease_events": int_or_zero(
-            report.get("orchestration_lease_events")
+        "orchestration_claim_events": int_or_zero(
+            report.get("orchestration_claim_events")
         ),
         "orchestration_conflict_events": int_or_zero(
             report.get("orchestration_conflict_events")
@@ -368,12 +368,12 @@ def format_orchestration_trace(summary: dict[str, Any]) -> str:
     captured = int_or_zero(summary.get("orchestration_trace_captured"))
     if not observed:
         return "-"
-    intent_events = int_or_zero(summary.get("orchestration_intent_events"))
-    lease_events = int_or_zero(summary.get("orchestration_lease_events"))
+    reservation_events = int_or_zero(summary.get("orchestration_reservation_events"))
+    claim_events = int_or_zero(summary.get("orchestration_claim_events"))
     conflict_events = int_or_zero(summary.get("orchestration_conflict_events"))
     return (
         f"{captured}/{observed} captured; "
-        f"intent={intent_events}, lease={lease_events}, conflict={conflict_events}"
+        f"reservation={reservation_events}, claim={claim_events}, conflict={conflict_events}"
     )
 
 

@@ -1459,8 +1459,8 @@ def summarize_orchestration_events(
     event_types = [str(event.get("event_type", "")) for event in matching]
     return {
         "event_count": len(matching),
-        "intent_events": sum(1 for event_type in event_types if event_type.startswith("Intent")),
-        "lease_events": sum(1 for event_type in event_types if event_type.startswith("Lease")),
+        "reservation_events": sum(1 for event_type in event_types if event_type.startswith("Reservation")),
+        "claim_events": sum(1 for event_type in event_types if event_type.startswith("Claim")),
         "conflict_events": sum(
             1
             for event_type in event_types
@@ -1515,8 +1515,8 @@ def write_orchestration_trace(
     return {
         "trace_path": relative_trace_path,
         "trace_captured": trace["trace_captured"],
-        "intent_events": trace.get("intent_events", 0),
-        "lease_events": trace.get("lease_events", 0),
+        "reservation_events": trace.get("reservation_events", 0),
+        "claim_events": trace.get("claim_events", 0),
         "conflict_events": trace.get("conflict_events", 0),
     }
 

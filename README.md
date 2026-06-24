@@ -37,16 +37,16 @@ another agent, another session, or a human is doing in the same repository right
 now. That creates avoidable failures:
 
 - two agents edit the same file without seeing each other
-- a file changes in a shared checkout while an agent still holds a lease on it
+- a file changes in a shared checkout while an agent still holds a claim on it
 - an interrupted session leaves no structured handoff state
 - stale memory is treated as active truth
 - a tool writes before the session has declared its intended scope
 - test execution or reconciliation happens outside the coordination loop
 
-`stateful_core` provides a small protocol for declaring intent, tracking active
-leases, recording session activity, reading current-state summaries, queuing
+`stateful_core` provides a small protocol for declaring reservation, tracking active
+claims, recording session activity, reading current-state summaries, queuing
 blocked writers, and blocking supported writes that have no matching active
-intent.
+reservation.
 
 ## When To Use It
 
@@ -74,7 +74,7 @@ here right now?"
 ## What It Provides
 
 - A `stateful` CLI for installation, repo enablement, status/current-state
-  inspection, intent declaration, MCP, hooks, sandboxed command profiles, outbox
+  inspection, reservation declaration, MCP, hooks, sandboxed command profiles, outbox
   sync, and server lifecycle management.
 - A local HTTP state server with token-protected non-health endpoints.
 - A SQLite event store and materialized current-state summary.
@@ -166,28 +166,28 @@ Manual CLI use outside an active agent session can declare scope and inspect the
 current state:
 
 ```bash
-stateful intent declare --purpose "Update README content requested by the user." README.md
+stateful reservation declare --purpose "Update README content requested by the user." README.md
 stateful current
 ```
 
 Inside an active Codex or OMP session, use the Stateful MCP tools directly
-instead of routing `stateful intent declare` or `stateful mcp call` through a
+instead of routing `stateful reservation declare` or `stateful mcp call` through a
 shell. The usual write flow is:
 
 ```text
-read current state -> declare intent -> acquire lease -> reread target -> write
+read current state -> declare reservation -> acquire claim -> reread target -> write
 ```
 
-Intent and lease are separate on purpose. Intent declares planned work and the
-scope a session expects to touch. A lease declares active ownership of a scoped
+Reservation and claim are separate on purpose. Reservation declares planned work and the
+scope a session expects to touch. A claim declares active ownership of a scoped
 resource and expires when the session stops being fresh.
 
-When another active lease blocks a write, the writer can queue for that resource.
+When another active claim blocks a write, the writer can queue for that resource.
 When the resource is released or expires, the server reserves it for the next
 eligible waiter and sends a resume notification. The reserved session rereads the
 target, claims or lazy-claims the reservation, then retries the write.
 
-Detailed queue states, lease expiry behavior, and promotion rules are documented
+Detailed queue states, claim expiry behavior, and promotion rules are documented
 in [State model](docs/state-model.md),
 [Current-state coordination](docs/current-state-coordination.md), and
 [Concurrency control spec](docs/concurrency-control-spec.md).
@@ -199,7 +199,7 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 
 | Need | Use |
 | --- | --- |
-| Repo file edit | Native edit/write tools after exact intent and same-session file lease |
+| Repo file edit | Native edit/write tools after exact reservation and same-session file claim |
 | Build or test command | `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` |
 | Command-shaped repo write | `stateful sandbox run --fs write-targets --write-target <file> --command <cmd>` |
 | Local git operation | `stateful sandbox run --fs git --network disabled --command 'git <args>'` |
@@ -218,11 +218,11 @@ LAN sharing, generated-file, and release notes.
 
 ```text
 observe session or tool activity
--> register session and declare intent
--> acquire or refresh advisory lease
+-> register session and declare reservation
+-> acquire or refresh advisory claim
 -> authorize, queue, warn, or block coordination-sensitive actions
 -> record activity and heartbeat
--> finalize activity and release leases
+-> finalize activity and release claims
 -> reserve released resources for queued waiters
 -> notify reserved sessions so they can resume
 ```
@@ -312,7 +312,7 @@ env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo test --workspace
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution expectations and
-[Usage reference](docs/usage-reference.md#versioning-and-releases) for the local
+[Usage reference](docs/usage-reference.md#versioning-and-reclaims) for the local
 release workflow notes.
 
 ## Documentation

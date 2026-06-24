@@ -341,7 +341,7 @@ fn mcp_stale_file_write_call_returns_removed_guidance() {
                 .as_str()
                 .unwrap_or_default()
                 .contains(
-                    "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after exact intent declaration and a successful same-session file lease"
+                    "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after exact reservation declaration and a successful same-session file claim"
                 ),
             "{tool_name}"
         );
@@ -366,8 +366,8 @@ fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command(
     fs::write(repo_root.join("src/allowed.ts"), "old\n").expect("allowed file should seed");
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Target is outside active intent scope.","required_next_action":"Declare matching intent."}"#,
-        r#"{"status":"ok","current":{"active_intent_count":1},"prompt_text":"Your Active Scope\n- [info] src/allowed.ts: This session has active scope for src/allowed.ts."}"#,
+        r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Target is outside active reservation scope.","required_next_action":"Declare matching reservation."}"#,
+        r#"{"status":"ok","current":{"active_reservation_count":1},"prompt_text":"Your Active Scope\n- [info] src/allowed.ts: This session has active scope for src/allowed.ts."}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -502,7 +502,7 @@ fn sandbox_run_write_dir_authorizes_directory_and_allows_artifact_write() {
 }
 
 #[test]
-fn sandbox_run_write_targets_releases_file_lease_after_command() {
+fn sandbox_run_write_targets_reclaims_file_lease_after_command() {
     if macos_stateful_sandbox_is_active() {
         return;
     }
@@ -557,7 +557,7 @@ fn sandbox_run_write_targets_releases_file_lease_after_command() {
     let release = rx
         .recv_timeout(Duration::from_secs(1))
         .expect("release request should arrive after command completes");
-    assert!(release.contains("POST /v1/lease/release HTTP/1.1"));
+    assert!(release.contains("POST /v1/claim/release HTTP/1.1"));
     let body = request_json_body(&release);
     assert_eq!(body["session_id"], "s-current");
     assert_eq!(body["workspace_id"], "w1");
@@ -1282,7 +1282,7 @@ fn sandbox_run_external_profile_authorizes_repo_relative_targets() {
     let release = rx
         .recv_timeout(Duration::from_secs(1))
         .expect("release request should arrive after command completes");
-    assert!(release.contains("POST /v1/lease/release HTTP/1.1"));
+    assert!(release.contains("POST /v1/claim/release HTTP/1.1"));
     assert_eq!(
         fs::read_to_string(repo_root.join("src/allowed.ts")).expect("allowed file should read"),
         "changed"
@@ -1446,36 +1446,36 @@ fn mcp_tools_list_returns_stateful_tool_descriptors() {
     assert!(
         tools
             .iter()
-            .any(|tool| tool["name"] == "state_intent_declare")
+            .any(|tool| tool["name"] == "state_reservation_declare")
     );
     assert!(!tools.iter().any(|tool| tool["name"] == "state_file_write"));
     assert!(!tools.iter().any(|tool| tool["name"] == "state_bash_write"));
-    let intent_tool = tools
+    let reservation_tool = tools
         .iter()
-        .find(|tool| tool["name"] == "state_intent_declare")
-        .expect("intent tool should be listed");
+        .find(|tool| tool["name"] == "state_reservation_declare")
+        .expect("reservation tool should be listed");
     assert_eq!(
-        intent_tool["description"],
-        "Declare repo-internal file or directory intent before repo write actions."
+        reservation_tool["description"],
+        "Declare repo-internal file or directory reservation before repo write actions."
     );
     assert_eq!(
-        intent_tool["inputSchema"]["required"],
+        reservation_tool["inputSchema"]["required"],
         serde_json::json!(["purpose", "files_planned"])
     );
     assert_eq!(
-        intent_tool["inputSchema"]["properties"]["purpose"]["type"],
+        reservation_tool["inputSchema"]["properties"]["purpose"]["type"],
         "string"
     );
     assert_eq!(
-        intent_tool["inputSchema"]["properties"]["purpose"]["minLength"],
+        reservation_tool["inputSchema"]["properties"]["purpose"]["minLength"],
         1
     );
     assert_eq!(
-        intent_tool["inputSchema"]["properties"]["files_planned"]["items"]["type"],
+        reservation_tool["inputSchema"]["properties"]["files_planned"]["items"]["type"],
         "string"
     );
     assert_eq!(
-        intent_tool["inputSchema"]["properties"]["files_planned"]["minItems"],
+        reservation_tool["inputSchema"]["properties"]["files_planned"]["minItems"],
         1
     );
     let reconcile_tool = tools
@@ -1530,7 +1530,7 @@ fn mcp_stale_bash_write_call_returns_removed_guidance() {
                 .as_str()
                 .unwrap_or_default()
                 .contains(
-                    "state_bash_write was removed; use stateful sandbox run --fs write-targets --write-target <repo-path> ... --command <cmd> after repo intent/lease, or stateful sandbox run --fs external --purpose <purpose> [--write-target <repo-path-or-absolute-external-path>] [--create-target <repo-path-or-absolute-external-path>] [--write-dir <repo-path-or-absolute-external-dir>] [--connect-socket <absolute-socket>] [--allow-signal] [--network disabled|enabled] --command <cmd> for approved external commands; repo-relative scopes still require repo intent/lease."
+                    "state_bash_write was removed; use stateful sandbox run --fs write-targets --write-target <repo-path> ... --command <cmd> after repo reservation/claim, or stateful sandbox run --fs external --purpose <purpose> [--write-target <repo-path-or-absolute-external-path>] [--create-target <repo-path-or-absolute-external-path>] [--write-dir <repo-path-or-absolute-external-dir>] [--connect-socket <absolute-socket>] [--allow-signal] [--network disabled|enabled] --command <cmd> for approved external commands; repo-relative scopes still require repo reservation/claim."
                 ),
             "{tool_name}"
         );
@@ -1623,8 +1623,8 @@ fn mcp_context_render_defaults_to_current_session_workspace() {
 }
 
 #[test]
-fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
-    let temp_root = temp_root("stateful-mcp-intent-declare");
+fn mcp_tools_call_for_reservation_declare_posts_to_state_server() {
+    let temp_root = temp_root("stateful-mcp-reservation-declare");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -1643,7 +1643,7 @@ fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
           "id":2,
           "method":"tools/call",
           "params":{
-            "name":"state_intent_declare",
+            "name":"state_reservation_declare",
             "arguments":{
               "session_id":"s1",
               "workspace_id":"w1",
@@ -1655,7 +1655,7 @@ fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
     );
 
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
+    assert!(request.contains("POST /v1/reservation/declare HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v1");
@@ -1713,8 +1713,8 @@ fn mcp_tools_call_for_intent_declare_posts_to_state_server() {
 }
 
 #[test]
-fn intent_declare_command_posts_repo_identity() {
-    let temp_root = temp_root("stateful-cli-intent-identity");
+fn reservation_declare_command_posts_repo_identity() {
+    let temp_root = temp_root("stateful-cli-reservation-identity");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -1728,7 +1728,7 @@ fn intent_declare_command_posts_repo_identity() {
         &repo_root,
         &paths,
         &[
-            "intent",
+            "reservation",
             "declare",
             "--purpose",
             "Fix auth validation behavior.",
@@ -1738,11 +1738,11 @@ fn intent_declare_command_posts_repo_identity() {
 
     assert!(
         output.status.success(),
-        "stateful intent declare failed: {}",
+        "stateful reservation declare failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
+    assert!(request.contains("POST /v1/reservation/declare HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v1");
     assert_eq!(body["session"]["session_id"], "s-current");
@@ -1781,8 +1781,8 @@ fn intent_declare_command_posts_repo_identity() {
 }
 
 #[test]
-fn intent_request_command_prints_wait_id_from_server_response() {
-    let temp_root = temp_root("stateful-cli-intent-request-wait-id");
+fn reservation_request_command_prints_wait_id_from_server_response() {
+    let temp_root = temp_root("stateful-cli-reservation-request-wait-id");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -1798,7 +1798,7 @@ fn intent_request_command_prints_wait_id_from_server_response() {
         &repo_root,
         &paths,
         &[
-            "intent",
+            "reservation",
             "request",
             "--request-id",
             "request-1",
@@ -1813,13 +1813,13 @@ fn intent_request_command_prints_wait_id_from_server_response() {
 
     assert!(
         output.status.success(),
-        "stateful intent request failed: {}",
+        "stateful reservation request failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"wait_id\":\"wait-123\""));
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/intent/request HTTP/1.1"));
+    assert!(request.contains("POST /v1/reservation/request HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["session"]["session_id"], "s-current");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
@@ -1831,8 +1831,8 @@ fn intent_request_command_prints_wait_id_from_server_response() {
 }
 
 #[test]
-fn mcp_intent_declare_defaults_to_current_hook_session() {
-    let temp_root = temp_root("stateful-mcp-intent-current-session");
+fn mcp_reservation_declare_defaults_to_current_hook_session() {
+    let temp_root = temp_root("stateful-mcp-reservation-current-session");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -1855,7 +1855,7 @@ fn mcp_intent_declare_defaults_to_current_hook_session() {
           "id":3,
           "method":"tools/call",
           "params":{
-            "name":"state_intent_declare",
+            "name":"state_reservation_declare",
             "arguments":{
               "purpose":"Fix auth validation behavior.",
               "files_planned":["src/auth.ts"]
@@ -1939,7 +1939,7 @@ fn mcp_session_intent_lease_sequence_uses_omp_current_session_without_env() {
           "id":41,
           "method":"tools/call",
           "params":{
-            "name":"state_intent_declare",
+            "name":"state_reservation_declare",
             "arguments":{
               "purpose":"Implement benchmark package files.",
               "files_planned":["src/auth.ts"]
@@ -1947,23 +1947,28 @@ fn mcp_session_intent_lease_sequence_uses_omp_current_session_without_env() {
           }
         }"#,
     );
-    let intent = rx.recv().expect("intent declare request should arrive");
-    assert!(intent.contains("POST /v1/intent/declare HTTP/1.1"));
-    let intent_body = request_json_body(&intent);
-    assert_eq!(intent_body["session"]["session_id"], "omp-actual-session");
-    assert_eq!(intent_body["workspace"]["workspace_id"], "w1");
+    let reservation = rx
+        .recv()
+        .expect("reservation declare request should arrive");
+    assert!(reservation.contains("POST /v1/reservation/declare HTTP/1.1"));
+    let reservation_body = request_json_body(&reservation);
     assert_eq!(
-        intent_body["payload"],
+        reservation_body["session"]["session_id"],
+        "omp-actual-session"
+    );
+    assert_eq!(reservation_body["workspace"]["workspace_id"], "w1");
+    assert_eq!(
+        reservation_body["payload"],
         serde_json::json!({
             "purpose": "Implement benchmark package files.",
             "files_planned": ["src/auth.ts"]
         })
     );
     let json: serde_json::Value =
-        serde_json::from_str(&intent_response).expect("intent response should be json");
+        serde_json::from_str(&intent_response).expect("reservation response should be json");
     assert_eq!(json["result"]["isError"], false);
 
-    let lease_response = run_mcp_jsonrpc_in_repo_with_env(
+    let claim_response = run_mcp_jsonrpc_in_repo_with_env(
         &repo_root,
         &paths,
         &runtime_env,
@@ -1972,29 +1977,29 @@ fn mcp_session_intent_lease_sequence_uses_omp_current_session_without_env() {
           "id":42,
           "method":"tools/call",
           "params":{
-            "name":"state_lease_acquire",
+            "name":"state_claim_acquire",
             "arguments":{
               "path":"src/auth.ts"
             }
           }
         }"#,
     );
-    let lease = rx.recv().expect("lease acquire request should arrive");
-    assert!(lease.contains("POST /v1/lease/acquire HTTP/1.1"));
-    let lease_body = request_json_body(&lease);
-    assert_eq!(lease_body["session_id"], "omp-actual-session");
-    assert_eq!(lease_body["workspace_id"], "w1");
-    assert_eq!(lease_body["path"], "src/auth.ts");
+    let claim = rx.recv().expect("claim acquire request should arrive");
+    assert!(claim.contains("POST /v1/claim/acquire HTTP/1.1"));
+    let claim_body = request_json_body(&claim);
+    assert_eq!(claim_body["session_id"], "omp-actual-session");
+    assert_eq!(claim_body["workspace_id"], "w1");
+    assert_eq!(claim_body["path"], "src/auth.ts");
     let json: serde_json::Value =
-        serde_json::from_str(&lease_response).expect("lease response should be json");
+        serde_json::from_str(&claim_response).expect("claim response should be json");
     assert_eq!(json["result"]["isError"], false);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn mcp_intent_declare_bootstraps_missing_session_bound_file_from_env() {
-    let temp_root = temp_root("stateful-mcp-intent-bootstrap-session");
+fn mcp_reservation_declare_bootstraps_missing_session_bound_file_from_env() {
+    let temp_root = temp_root("stateful-mcp-reservation-bootstrap-session");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2011,7 +2016,7 @@ fn mcp_intent_declare_bootstraps_missing_session_bound_file_from_env() {
           "id":30,
           "method":"tools/call",
           "params":{
-            "name":"state_intent_declare",
+            "name":"state_reservation_declare",
             "arguments":{
               "purpose":"Fix auth validation behavior.",
               "files_planned":["src/auth.ts"]
@@ -2022,8 +2027,8 @@ fn mcp_intent_declare_bootstraps_missing_session_bound_file_from_env() {
 
     let request = rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("intent declare request should arrive");
-    assert!(request.contains("POST /v1/intent/declare HTTP/1.1"));
+        .expect("reservation declare request should arrive");
+    assert!(request.contains("POST /v1/reservation/declare HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["session"]["session_id"], "s-bootstrap");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
@@ -2053,8 +2058,8 @@ fn mcp_intent_declare_bootstraps_missing_session_bound_file_from_env() {
 }
 
 #[test]
-fn mcp_intent_declare_refuses_session_id_that_differs_from_current_session() {
-    let temp_root = temp_root("stateful-mcp-intent-session-mismatch");
+fn mcp_reservation_declare_refuses_session_id_that_differs_from_current_session() {
+    let temp_root = temp_root("stateful-mcp-reservation-session-mismatch");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2075,7 +2080,7 @@ fn mcp_intent_declare_refuses_session_id_that_differs_from_current_session() {
           "id":4,
           "method":"tools/call",
           "params":{
-            "name":"state_intent_declare",
+            "name":"state_reservation_declare",
             "arguments":{
               "session_id":"s-other",
               "workspace_id":"w1",
@@ -2102,7 +2107,7 @@ fn mcp_intent_declare_refuses_session_id_that_differs_from_current_session() {
 
 #[test]
 fn mcp_lease_acquire_defaults_to_stateful_session_bound_file_over_legacy() {
-    let temp_root = temp_root("stateful-mcp-session-lease-session");
+    let temp_root = temp_root("stateful-mcp-session-claim-session");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2129,7 +2134,7 @@ fn mcp_lease_acquire_defaults_to_stateful_session_bound_file_over_legacy() {
           "id":9,
           "method":"tools/call",
           "params":{
-            "name":"state_lease_acquire",
+            "name":"state_claim_acquire",
             "arguments":{
               "path":"src/auth.ts"
             }
@@ -2139,8 +2144,8 @@ fn mcp_lease_acquire_defaults_to_stateful_session_bound_file_over_legacy() {
 
     let request = rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("lease acquire request should arrive");
-    assert!(request.contains("POST /v1/lease/acquire HTTP/1.1"));
+        .expect("claim acquire request should arrive");
+    assert!(request.contains("POST /v1/claim/acquire HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["session_id"], "session-a");
     assert_eq!(body["workspace_id"], "workspace-a");
@@ -2160,7 +2165,7 @@ fn mcp_lease_acquire_defaults_to_stateful_session_bound_file_over_legacy() {
 
 #[test]
 fn mcp_lease_acquire_prefers_codex_thread_id_over_stateful_session_id() {
-    let temp_root = temp_root("stateful-mcp-session-lease-codex-thread");
+    let temp_root = temp_root("stateful-mcp-session-claim-codex-thread");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2197,7 +2202,7 @@ fn mcp_lease_acquire_prefers_codex_thread_id_over_stateful_session_id() {
           "id":15,
           "method":"tools/call",
           "params":{
-            "name":"state_lease_acquire",
+            "name":"state_claim_acquire",
             "arguments":{
               "path":"src/auth.ts"
             }
@@ -2207,8 +2212,8 @@ fn mcp_lease_acquire_prefers_codex_thread_id_over_stateful_session_id() {
 
     let request = rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("lease acquire request should arrive");
-    assert!(request.contains("POST /v1/lease/acquire HTTP/1.1"));
+        .expect("claim acquire request should arrive");
+    assert!(request.contains("POST /v1/claim/acquire HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["session_id"], "thread-a");
     assert_eq!(body["workspace_id"], "workspace-thread");
@@ -2224,7 +2229,7 @@ fn mcp_lease_acquire_prefers_codex_thread_id_over_stateful_session_id() {
 
 #[test]
 fn mcp_lease_acquire_prefers_verified_legacy_session_for_codex_run_when_thread_env_is_absent() {
-    let temp_root = temp_root("stateful-mcp-session-lease-codex-run-legacy");
+    let temp_root = temp_root("stateful-mcp-session-claim-codex-run-legacy");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2260,7 +2265,7 @@ fn mcp_lease_acquire_prefers_verified_legacy_session_for_codex_run_when_thread_e
           "id":16,
           "method":"tools/call",
           "params":{
-            "name":"state_lease_acquire",
+            "name":"state_claim_acquire",
             "arguments":{
               "path":"src/auth.ts"
             }
@@ -2270,8 +2275,8 @@ fn mcp_lease_acquire_prefers_verified_legacy_session_for_codex_run_when_thread_e
 
     let request = rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("lease acquire request should arrive");
-    assert!(request.contains("POST /v1/lease/acquire HTTP/1.1"));
+        .expect("claim acquire request should arrive");
+    assert!(request.contains("POST /v1/claim/acquire HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["session_id"], "thread-a");
     assert_eq!(body["workspace_id"], "workspace-thread");
@@ -2287,7 +2292,7 @@ fn mcp_lease_acquire_prefers_verified_legacy_session_for_codex_run_when_thread_e
 
 #[test]
 fn mcp_lease_acquire_rejects_legacy_session_when_stateful_session_is_bound_elsewhere() {
-    let temp_root = temp_root("stateful-mcp-session-lease-mismatch");
+    let temp_root = temp_root("stateful-mcp-session-claim-mismatch");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2314,7 +2319,7 @@ fn mcp_lease_acquire_rejects_legacy_session_when_stateful_session_is_bound_elsew
           "id":10,
           "method":"tools/call",
           "params":{
-            "name":"state_lease_acquire",
+            "name":"state_claim_acquire",
             "arguments":{
               "session_id":"session-b",
               "workspace_id":"workspace-b",
@@ -2333,7 +2338,7 @@ fn mcp_lease_acquire_rejects_legacy_session_when_stateful_session_is_bound_elsew
             .as_str()
             .unwrap_or_default()
             .contains(
-                "state.lease.acquire cannot use session_id `session-b` while the current stateful session uses `session-a`"
+                "state.claim.acquire cannot use session_id `session-b` while the current stateful session uses `session-a`"
             )
     );
     assert!(
@@ -2367,7 +2372,7 @@ fn mcp_lease_acquire_with_stateful_session_id_bootstraps_session_bound_file() {
           "id":11,
           "method":"tools/call",
           "params":{
-            "name":"state_lease_acquire",
+            "name":"state_claim_acquire",
             "arguments":{
               "path":"src/auth.ts"
             }
@@ -2377,8 +2382,8 @@ fn mcp_lease_acquire_with_stateful_session_id_bootstraps_session_bound_file() {
 
     let request = rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("lease acquire request should arrive");
-    assert!(request.contains("POST /v1/lease/acquire HTTP/1.1"));
+        .expect("claim acquire request should arrive");
+    assert!(request.contains("POST /v1/claim/acquire HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["session_id"], "missing-session");
     assert_eq!(body["workspace_id"], "w1");
@@ -2439,7 +2444,7 @@ fn mcp_lease_acquire_uses_codex_thread_id_without_stateful_session_id() {
           "id":12,
           "method":"tools/call",
           "params":{
-            "name":"state_lease_acquire",
+            "name":"state_claim_acquire",
             "arguments":{
               "path":"src/auth.ts"
             }
@@ -2449,8 +2454,8 @@ fn mcp_lease_acquire_uses_codex_thread_id_without_stateful_session_id() {
 
     let request = rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("lease acquire request should arrive");
-    assert!(request.contains("POST /v1/lease/acquire HTTP/1.1"));
+        .expect("claim acquire request should arrive");
+    assert!(request.contains("POST /v1/claim/acquire HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["session_id"], "thread-a");
     assert_eq!(body["workspace_id"], "workspace-a");
@@ -2492,7 +2497,7 @@ fn mcp_lease_acquire_without_stateful_session_id_uses_verified_legacy_session() 
           "id":13,
           "method":"tools/call",
           "params":{
-            "name":"state_lease_acquire",
+            "name":"state_claim_acquire",
             "arguments":{
               "path":"src/auth.ts"
             }
@@ -2502,8 +2507,8 @@ fn mcp_lease_acquire_without_stateful_session_id_uses_verified_legacy_session() 
 
     let request = rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("lease acquire request should arrive");
-    assert!(request.contains("POST /v1/lease/acquire HTTP/1.1"));
+        .expect("claim acquire request should arrive");
+    assert!(request.contains("POST /v1/claim/acquire HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["session_id"], "session-a");
     assert_eq!(body["workspace_id"], "workspace-a");
@@ -2551,7 +2556,7 @@ fn mcp_lease_acquire_without_stateful_session_id_uses_verified_legacy_session_wi
           "id":14,
           "method":"tools/call",
           "params":{
-            "name":"state_lease_acquire",
+            "name":"state_claim_acquire",
             "arguments":{
               "path":"src/auth.ts"
             }
@@ -2561,8 +2566,8 @@ fn mcp_lease_acquire_without_stateful_session_id_uses_verified_legacy_session_wi
 
     let request = rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("lease acquire request should arrive");
-    assert!(request.contains("POST /v1/lease/acquire HTTP/1.1"));
+        .expect("claim acquire request should arrive");
+    assert!(request.contains("POST /v1/claim/acquire HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["session_id"], "session-a");
     assert_eq!(body["workspace_id"], "workspace-a");
@@ -2598,7 +2603,7 @@ fn mcp_lease_acquire_without_stateful_session_id_rejects_unverified_legacy_sessi
           "id":13,
           "method":"tools/call",
           "params":{
-            "name":"state_lease_acquire",
+            "name":"state_claim_acquire",
             "arguments":{
               "path":"src/auth.ts"
             }
@@ -2625,8 +2630,8 @@ fn mcp_lease_acquire_without_stateful_session_id_rejects_unverified_legacy_sessi
 }
 
 #[test]
-fn mcp_tools_call_for_intent_claim_posts_to_state_server() {
-    let temp_root = temp_root("stateful-mcp-intent-claim");
+fn mcp_tools_call_for_reservation_claim_posts_to_state_server() {
+    let temp_root = temp_root("stateful-mcp-reservation-claim");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2645,7 +2650,7 @@ fn mcp_tools_call_for_intent_claim_posts_to_state_server() {
           "id":5,
           "method":"tools/call",
           "params":{
-            "name":"state_intent_claim",
+            "name":"state_reservation_claim",
             "arguments":{
               "session_id":"s1",
               "workspace_id":"w1",
@@ -2656,15 +2661,15 @@ fn mcp_tools_call_for_intent_claim_posts_to_state_server() {
     );
 
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/intent/claim HTTP/1.1"));
+    assert!(request.contains("POST /v1/reservation/claim HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v1");
     assert_eq!(body["session"]["session_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert_eq!(body["source"]["kind"], "mcp");
-    assert_eq!(body["source"]["event"], "intent_claim");
-    assert_eq!(body["source"]["source_ref"], "state.intent.claim");
+    assert_eq!(body["source"]["event"], "reservation_claim");
+    assert_eq!(body["source"]["source_ref"], "state.reservation.claim");
     assert_eq!(
         body["payload"],
         serde_json::json!({
@@ -2681,8 +2686,8 @@ fn mcp_tools_call_for_intent_claim_posts_to_state_server() {
 }
 
 #[test]
-fn mcp_tools_call_for_intent_request_posts_to_state_server() {
-    let temp_root = temp_root("stateful-mcp-intent-request");
+fn mcp_tools_call_for_reservation_request_posts_to_state_server() {
+    let temp_root = temp_root("stateful-mcp-reservation-request");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2701,7 +2706,7 @@ fn mcp_tools_call_for_intent_request_posts_to_state_server() {
           "id":6,
           "method":"tools/call",
           "params":{
-            "name":"state_intent_request",
+            "name":"state_reservation_request",
             "arguments":{
               "session_id":"s1",
               "workspace_id":"w1",
@@ -2715,15 +2720,15 @@ fn mcp_tools_call_for_intent_request_posts_to_state_server() {
     );
 
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/intent/request HTTP/1.1"));
+    assert!(request.contains("POST /v1/reservation/request HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v1");
     assert_eq!(body["session"]["session_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert_eq!(body["source"]["kind"], "mcp");
-    assert_eq!(body["source"]["event"], "intent_request");
-    assert_eq!(body["source"]["source_ref"], "state.intent.request");
+    assert_eq!(body["source"]["event"], "reservation_request");
+    assert_eq!(body["source"]["source_ref"], "state.reservation.request");
     assert_eq!(
         body["payload"],
         serde_json::json!({
@@ -2743,8 +2748,8 @@ fn mcp_tools_call_for_intent_request_posts_to_state_server() {
 }
 
 #[test]
-fn mcp_tools_call_for_intent_cancel_posts_to_state_server() {
-    let temp_root = temp_root("stateful-mcp-intent-cancel");
+fn mcp_tools_call_for_reservation_cancel_posts_to_state_server() {
+    let temp_root = temp_root("stateful-mcp-reservation-cancel");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2763,7 +2768,7 @@ fn mcp_tools_call_for_intent_cancel_posts_to_state_server() {
           "id":7,
           "method":"tools/call",
           "params":{
-            "name":"state_intent_cancel",
+            "name":"state_reservation_cancel",
             "arguments":{
               "session_id":"s1",
               "workspace_id":"w1",
@@ -2774,15 +2779,15 @@ fn mcp_tools_call_for_intent_cancel_posts_to_state_server() {
     );
 
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/intent/cancel HTTP/1.1"));
+    assert!(request.contains("POST /v1/reservation/cancel HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v1");
     assert_eq!(body["session"]["session_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert_eq!(body["source"]["kind"], "mcp");
-    assert_eq!(body["source"]["event"], "intent_cancel");
-    assert_eq!(body["source"]["source_ref"], "state.intent.cancel");
+    assert_eq!(body["source"]["event"], "reservation_cancel");
+    assert_eq!(body["source"]["source_ref"], "state.reservation.cancel");
     assert_eq!(
         body["payload"],
         serde_json::json!({

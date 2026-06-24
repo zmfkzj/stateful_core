@@ -14,34 +14,34 @@ const TOOLS: &[(&str, &str, &str)] = &[
         "Record a heartbeat for the active coding session.",
     ),
     (
-        "state_intent_declare",
-        "state.intent.declare",
-        "Declare repo-internal file or directory intent before repo write actions.",
+        "state_reservation_declare",
+        "state.reservation.declare",
+        "Declare repo-internal file or directory reservation before repo write actions.",
     ),
     (
-        "state_intent_request",
-        "state.intent.request",
+        "state_reservation_request",
+        "state.reservation.request",
         "Request a repo-internal write reservation explicitly, returning queued or reserved state.",
     ),
     (
-        "state_intent_claim",
-        "state.intent.claim",
-        "Claim an active reservation and turn it into write-authorizing intent.",
+        "state_reservation_claim",
+        "state.reservation.claim",
+        "Claim an active reservation and turn it into write-authorizing reservation.",
     ),
     (
-        "state_intent_cancel",
-        "state.intent.cancel",
+        "state_reservation_cancel",
+        "state.reservation.cancel",
         "Cancel a queued or reserved write reservation request owned by the session.",
     ),
     (
-        "state_lease_acquire",
-        "state.lease.acquire",
-        "Acquire an advisory lease on a repo file or directory resource.",
+        "state_claim_acquire",
+        "state.claim.acquire",
+        "Acquire an advisory claim on a repo file or directory resource.",
     ),
     (
-        "state_lease_release",
-        "state.lease.release",
-        "Release a same-session advisory lease on a repo file or directory resource.",
+        "state_claim_release",
+        "state.claim.release",
+        "Release a same-session advisory claim on a repo file or directory resource.",
     ),
     (
         "state_activity_observe",
@@ -140,7 +140,7 @@ fn input_schema_for(protocol_name: &str) -> Value {
         | "state.activity.finalize"
         | "state.notifications.poll"
         | "state.resume.next" => empty_object_schema(),
-        "state.intent.declare" => object_schema(
+        "state.reservation.declare" => object_schema(
             [
                 (
                     "purpose",
@@ -152,7 +152,7 @@ fn input_schema_for(protocol_name: &str) -> Value {
             ],
             ["purpose", "files_planned"],
         ),
-        "state.intent.request" => object_schema(
+        "state.reservation.request" => object_schema(
             [
                 ("request_id", string_schema()),
                 (
@@ -172,9 +172,11 @@ fn input_schema_for(protocol_name: &str) -> Value {
             ],
             ["request_id", "action", "path", "purpose"],
         ),
-        "state.intent.claim" => object_schema([("wait_id", string_schema())], ["wait_id"]),
-        "state.intent.cancel" => object_schema([("request_id", string_schema())], ["request_id"]),
-        "state.lease.acquire" | "state.lease.release" => {
+        "state.reservation.claim" => object_schema([("wait_id", string_schema())], ["wait_id"]),
+        "state.reservation.cancel" => {
+            object_schema([("request_id", string_schema())], ["request_id"])
+        }
+        "state.claim.acquire" | "state.claim.release" => {
             object_schema([("path", string_schema())], ["path"])
         }
         "state.conflicts.check" => object_schema(
@@ -302,12 +304,12 @@ pub fn map_tool_to_http(tool: ToolCall) -> Result<HttpToolRequest, String> {
     let (method, path) = match protocol_name {
         "state.session.register" => ("POST", "/v1/session/register"),
         "state.session.heartbeat" => ("POST", "/v1/session/heartbeat"),
-        "state.intent.declare" => ("POST", "/v1/intent/declare"),
-        "state.intent.request" => ("POST", "/v1/intent/request"),
-        "state.intent.claim" => ("POST", "/v1/intent/claim"),
-        "state.intent.cancel" => ("POST", "/v1/intent/cancel"),
-        "state.lease.acquire" => ("POST", "/v1/lease/acquire"),
-        "state.lease.release" => ("POST", "/v1/lease/release"),
+        "state.reservation.declare" => ("POST", "/v1/reservation/declare"),
+        "state.reservation.request" => ("POST", "/v1/reservation/request"),
+        "state.reservation.claim" => ("POST", "/v1/reservation/claim"),
+        "state.reservation.cancel" => ("POST", "/v1/reservation/cancel"),
+        "state.claim.acquire" => ("POST", "/v1/claim/acquire"),
+        "state.claim.release" => ("POST", "/v1/claim/release"),
         "state.activity.observe" => ("POST", "/v1/activity/observe"),
         "state.activity.finalize" => ("POST", "/v1/activity/finalize"),
         "state.conflicts.check" => ("POST", "/v1/conflicts/check"),

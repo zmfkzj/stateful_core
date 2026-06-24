@@ -12,12 +12,12 @@ same codebase right now.
 The practical v1 need is current-state coordination:
 
 - active session status
-- declared intent
-- advisory resource leases
+- declared reservation
+- advisory resource claims
 - root agent, subagent, human, and system actor attribution
 - next planned action
 - freshness through heartbeat and TTL
-- intent and conflict checks before important tool calls
+- reservation and conflict checks before important tool calls
 - final status for handoff
 
 ## Decision
@@ -37,11 +37,11 @@ Codex lifecycle hooks
 Long-term memory can provide background context, but it does not own live
 coordination truth and cannot directly authorize or block actions.
 
-V1 blocks supported write actions unless the session has active intent with
-matching file or directory scope. Abstract task, test, port, or migration intent
+V1 blocks supported write actions unless the session has active reservation with
+matching file or directory scope. Abstract task, test, port, or migration reservation
 can be recorded as context but does not authorize writes.
 
-The default intent TTL is 15 minutes. Heartbeats may extend active intent up to
+The default reservation TTL is 15 minutes. Heartbeats may extend active reservation up to
 a 60-minute maximum from declaration. Blocked or finalized work does not
 authorize writes.
 
@@ -51,9 +51,9 @@ implementation supersedes that target: Codex raw Bash is denied with sandbox
 guidance, and OMP raw Bash is blocked unless it uses the trusted wrapper.
 Repo-external shell work must use `stateful sandbox run --fs external --purpose ...`.
 Repo file edit authorization starts with native edit tools such as Codex `apply_patch` or Edit after exact
-intent and a successful same-session file lease, where target paths can be
+reservation and a successful same-session file claim, where target paths can be
 checked before writing, or with `--fs write-targets` wrapper calls that declare
-explicit repo-relative targets after intent and same-session lease. Raw Bash test
+explicit repo-relative targets after reservation and same-session claim. Raw Bash test
 commands are not allowlisted;
 use
 `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`
@@ -62,11 +62,11 @@ so disposable artifacts stay under `/tmp/stateful/<session>/<purpose>/`.
 Overrides are never automatic. A blocked write can proceed only when the user
 explicitly instructs the current session to allow a specific resource override.
 The user owns the judgment and responsibility for that exception.
-Overrides apply only to active lease conflicts and are scoped to the current
+Overrides apply only to active claim conflicts and are scoped to the current
 session, current turn, and specific resource.
 
-Subagents may write only within the parent session's active valid intent scope,
-but their activity and leases are attributed to the subagent actor.
+Subagents may write only within the parent session's active valid reservation scope,
+but their activity and claims are attributed to the subagent actor.
 
 ## Consequences
 
@@ -75,7 +75,7 @@ Positive:
 - Clear v1 product boundary.
 - Direct value for multi-agent and multi-session coding.
 - Freshness is explicit through TTL and heartbeat.
-- Intent and conflict checks can run before supported Codex tool calls.
+- Reservation and conflict checks can run before supported Codex tool calls.
 - Forking Codex can be delayed until hook limitations are proven.
 
 Negative:
@@ -83,8 +83,8 @@ Negative:
 - The model is narrower than a generic state control plane.
 - Codex hooks are a guardrail, not a complete enforcement boundary.
 - Human activity requires additional observation beyond Codex hooks.
-- Advisory leases reduce collisions but do not guarantee exclusive access.
-- Requiring intent before writes adds workflow friction.
+- Advisory claims reduce collisions but do not guarantee exclusive access.
+- Requiring reservation before writes adds workflow friction.
 - Override handling requires clear audit records because the user is taking
   explicit responsibility for the exception.
 

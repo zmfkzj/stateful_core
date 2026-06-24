@@ -393,7 +393,7 @@ pub fn run_sandbox_in_repo(
                     )
                     .to_string();
                     if let Some(release_context) = &release_after_run {
-                        release_sandbox_write_leases(runtime, release_context);
+                        release_sandbox_write_claims(runtime, release_context);
                     }
                     return Err(SandboxAuthorizationDenied::new(body).into());
                 }
@@ -483,7 +483,7 @@ pub fn run_sandbox_in_repo(
                 )
                 .to_string();
                 if let Some(release_context) = &release_after_run {
-                    release_sandbox_write_leases(runtime, release_context);
+                    release_sandbox_write_claims(runtime, release_context);
                 }
                 return Err(SandboxAuthorizationDenied::new(body).into());
             }
@@ -574,7 +574,7 @@ pub fn run_sandbox_in_repo(
     if let Some(release_context) = &release_after_run
         && let Some(runtime) = runtime.as_ref()
     {
-        release_sandbox_write_leases(runtime, release_context);
+        release_sandbox_write_claims(runtime, release_context);
     }
     let result = result?;
 
@@ -3214,7 +3214,7 @@ fn sandbox_content_hash(bytes: &[u8]) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
-fn release_sandbox_write_leases(runtime: &ServerRuntime, context: &SandboxLeaseReleaseContext) {
+fn release_sandbox_write_claims(runtime: &ServerRuntime, context: &SandboxLeaseReleaseContext) {
     let mut paths = BTreeSet::new();
     for path in &context.paths {
         paths.insert(path);
@@ -3226,7 +3226,7 @@ fn release_sandbox_write_leases(runtime: &ServerRuntime, context: &SandboxLeaseR
             "workspace_id": context.workspace_id,
             "path": path,
         });
-        let Ok(response) = post_json(runtime, "/v1/lease/release", &body) else {
+        let Ok(response) = post_json(runtime, "/v1/claim/release", &body) else {
             continue;
         };
         if !(200..300).contains(&response.status_code) {

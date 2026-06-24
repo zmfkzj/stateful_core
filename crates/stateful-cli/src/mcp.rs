@@ -11,12 +11,12 @@ use crate::runtime::{
     write_current_session_file_for_explicit_session,
 };
 use crate::{
-    CurrentSession, GlobalPaths, HttpResponse, IntentCancelArgs, IntentClaimArgs,
-    IntentDeclareArgs, IntentRequestArgs, RepoGate, RepoIdentity, ServerRuntime,
+    CurrentSession, GlobalPaths, HttpResponse, RepoGate, RepoIdentity, ReservationCancelArgs,
+    ReservationClaimArgs, ReservationDeclareArgs, ReservationRequestArgs, ServerRuntime,
     discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server, get_json,
-    intent_cancel_protocol_body, intent_claim_protocol_body, intent_declare_protocol_body,
-    intent_request_protocol_body, post_json, repo_gate, repo_identity_for_enabled_repo,
-    runtime_env_override_is_configured,
+    post_json, repo_gate, repo_identity_for_enabled_repo, reservation_cancel_protocol_body,
+    reservation_claim_protocol_body, reservation_declare_protocol_body,
+    reservation_request_protocol_body, runtime_env_override_is_configured,
 };
 
 pub fn call_mcp_tool_in_repo(
@@ -30,13 +30,13 @@ pub fn call_mcp_tool_in_repo(
     if matches!(tool_name.as_str(), "state_bash_write" | "state.bash.write") {
         return Ok(error_response(
             410,
-            "state_bash_write was removed; use stateful sandbox run --fs write-targets --write-target <repo-path> ... --command <cmd> after repo intent/lease, or stateful sandbox run --fs external --purpose <purpose> [--write-target <repo-path-or-absolute-external-path>] [--create-target <repo-path-or-absolute-external-path>] [--write-dir <repo-path-or-absolute-external-dir>] [--connect-socket <absolute-socket>] [--allow-signal] [--network disabled|enabled] --command <cmd> for approved external commands; repo-relative scopes still require repo intent/lease.",
+            "state_bash_write was removed; use stateful sandbox run --fs write-targets --write-target <repo-path> ... --command <cmd> after repo reservation/claim, or stateful sandbox run --fs external --purpose <purpose> [--write-target <repo-path-or-absolute-external-path>] [--create-target <repo-path-or-absolute-external-path>] [--write-dir <repo-path-or-absolute-external-dir>] [--connect-socket <absolute-socket>] [--allow-signal] [--network disabled|enabled] --command <cmd> for approved external commands; repo-relative scopes still require repo reservation/claim.",
         ));
     }
     if matches!(tool_name.as_str(), "state_file_write" | "state.file.write") {
         return Ok(error_response(
             410,
-            "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after exact intent declaration and a successful same-session file lease.",
+            "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after exact reservation declaration and a successful same-session file claim.",
         ));
     }
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;
@@ -229,14 +229,14 @@ fn call_mcp_tool(
     match request.method {
         "GET" => get_json(runtime, request.path),
         "POST" => {
-            let body = if protocol_name == "state.intent.declare" {
-                intent_declare_mcp_body(runtime, request.body)?
-            } else if protocol_name == "state.intent.request" {
-                intent_request_mcp_body(runtime, request.body)?
-            } else if protocol_name == "state.intent.claim" {
-                intent_claim_mcp_body(runtime, request.body)?
-            } else if protocol_name == "state.intent.cancel" {
-                intent_cancel_mcp_body(runtime, request.body)?
+            let body = if protocol_name == "state.reservation.declare" {
+                reservation_declare_mcp_body(runtime, request.body)?
+            } else if protocol_name == "state.reservation.request" {
+                reservation_request_mcp_body(runtime, request.body)?
+            } else if protocol_name == "state.reservation.claim" {
+                reservation_claim_mcp_body(runtime, request.body)?
+            } else if protocol_name == "state.reservation.cancel" {
+                reservation_cancel_mcp_body(runtime, request.body)?
             } else {
                 request.body
             };
@@ -319,12 +319,12 @@ fn is_session_bound_mcp_tool(protocol_name: &str) -> bool {
         protocol_name,
         "state.session.register"
             | "state.session.heartbeat"
-            | "state.intent.declare"
-            | "state.intent.request"
-            | "state.intent.claim"
-            | "state.intent.cancel"
-            | "state.lease.acquire"
-            | "state.lease.release"
+            | "state.reservation.declare"
+            | "state.reservation.request"
+            | "state.reservation.claim"
+            | "state.reservation.cancel"
+            | "state.claim.acquire"
+            | "state.claim.release"
             | "state.activity.observe"
             | "state.activity.finalize"
             | "state.context.render"
@@ -346,26 +346,26 @@ fn error_response(status_code: u16, message: impl Into<String>) -> HttpResponse 
     }
 }
 
-fn intent_declare_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
+fn reservation_declare_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
     let Value::Object(mut object) = body else {
-        anyhow::bail!("state.intent.declare arguments must be an object");
+        anyhow::bail!("state.reservation.declare arguments must be an object");
     };
 
     let files_planned = object
         .remove("files_planned")
-        .ok_or_else(|| anyhow::anyhow!("state.intent.declare requires files_planned"))
+        .ok_or_else(|| anyhow::anyhow!("state.reservation.declare requires files_planned"))
         .and_then(|value| serde_json::from_value::<Vec<String>>(value).map_err(Into::into))?;
     let purpose = take_string(&mut object, "purpose")
-        .ok_or_else(|| anyhow::anyhow!("state.intent.declare requires purpose"))?;
+        .ok_or_else(|| anyhow::anyhow!("state.reservation.declare requires purpose"))?;
     let session_id = take_string(&mut object, "session_id")
         .unwrap_or_else(|| format!("stateful-mcp:{}", runtime.pid));
     let workspace_id =
         take_string(&mut object, "workspace_id").unwrap_or_else(|| runtime.workspace_id.clone());
     let identity = repo_identity_from_object(&mut object);
 
-    Ok(intent_declare_protocol_body(
+    Ok(reservation_declare_protocol_body(
         runtime,
-        IntentDeclareArgs {
+        ReservationDeclareArgs {
             session_id,
             workspace_id,
             purpose,
@@ -373,58 +373,58 @@ fn intent_declare_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Resu
             identity,
         },
         "mcp",
-        "state.intent.declare",
+        "state.reservation.declare",
     ))
 }
 
-fn intent_claim_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
+fn reservation_claim_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
     let Value::Object(mut object) = body else {
-        anyhow::bail!("state.intent.claim arguments must be an object");
+        anyhow::bail!("state.reservation.claim arguments must be an object");
     };
 
     let wait_id = take_string(&mut object, "wait_id")
-        .ok_or_else(|| anyhow::anyhow!("state.intent.claim requires wait_id"))?;
+        .ok_or_else(|| anyhow::anyhow!("state.reservation.claim requires wait_id"))?;
     let session_id = take_string(&mut object, "session_id")
         .unwrap_or_else(|| format!("stateful-mcp:{}", runtime.pid));
     let workspace_id =
         take_string(&mut object, "workspace_id").unwrap_or_else(|| runtime.workspace_id.clone());
     let identity = repo_identity_from_object(&mut object);
 
-    Ok(intent_claim_protocol_body(
+    Ok(reservation_claim_protocol_body(
         runtime,
-        IntentClaimArgs {
+        ReservationClaimArgs {
             session_id,
             workspace_id,
             wait_id,
             identity,
         },
         "mcp",
-        "state.intent.claim",
+        "state.reservation.claim",
     ))
 }
 
-fn intent_request_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
+fn reservation_request_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
     let Value::Object(mut object) = body else {
-        anyhow::bail!("state.intent.request arguments must be an object");
+        anyhow::bail!("state.reservation.request arguments must be an object");
     };
 
     let request_id = take_string(&mut object, "request_id")
-        .ok_or_else(|| anyhow::anyhow!("state.intent.request requires request_id"))?;
+        .ok_or_else(|| anyhow::anyhow!("state.reservation.request requires request_id"))?;
     let action = take_string(&mut object, "action")
-        .ok_or_else(|| anyhow::anyhow!("state.intent.request requires action"))?;
+        .ok_or_else(|| anyhow::anyhow!("state.reservation.request requires action"))?;
     let path = take_string(&mut object, "path")
-        .ok_or_else(|| anyhow::anyhow!("state.intent.request requires path"))?;
+        .ok_or_else(|| anyhow::anyhow!("state.reservation.request requires path"))?;
     let purpose = take_string(&mut object, "purpose")
-        .ok_or_else(|| anyhow::anyhow!("state.intent.request requires purpose"))?;
+        .ok_or_else(|| anyhow::anyhow!("state.reservation.request requires purpose"))?;
     let session_id = take_string(&mut object, "session_id")
         .unwrap_or_else(|| format!("stateful-mcp:{}", runtime.pid));
     let workspace_id =
         take_string(&mut object, "workspace_id").unwrap_or_else(|| runtime.workspace_id.clone());
     let identity = repo_identity_from_object(&mut object);
 
-    Ok(intent_request_protocol_body(
+    Ok(reservation_request_protocol_body(
         runtime,
-        IntentRequestArgs {
+        ReservationRequestArgs {
             session_id,
             workspace_id,
             request_id,
@@ -434,33 +434,33 @@ fn intent_request_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Resu
             identity,
         },
         "mcp",
-        "state.intent.request",
+        "state.reservation.request",
     ))
 }
 
-fn intent_cancel_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
+fn reservation_cancel_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::Result<Value> {
     let Value::Object(mut object) = body else {
-        anyhow::bail!("state.intent.cancel arguments must be an object");
+        anyhow::bail!("state.reservation.cancel arguments must be an object");
     };
 
     let request_id = take_string(&mut object, "request_id")
-        .ok_or_else(|| anyhow::anyhow!("state.intent.cancel requires request_id"))?;
+        .ok_or_else(|| anyhow::anyhow!("state.reservation.cancel requires request_id"))?;
     let session_id = take_string(&mut object, "session_id")
         .unwrap_or_else(|| format!("stateful-mcp:{}", runtime.pid));
     let workspace_id =
         take_string(&mut object, "workspace_id").unwrap_or_else(|| runtime.workspace_id.clone());
     let identity = repo_identity_from_object(&mut object);
 
-    Ok(intent_cancel_protocol_body(
+    Ok(reservation_cancel_protocol_body(
         runtime,
-        IntentCancelArgs {
+        ReservationCancelArgs {
             session_id,
             workspace_id,
             request_id,
             identity,
         },
         "mcp",
-        "state.intent.cancel",
+        "state.reservation.cancel",
     ))
 }
 
@@ -506,11 +506,11 @@ fn enrich_arguments(
 
     if matches!(
         tool_name,
-        "state.intent.declare"
-            | "state.intent.request"
-            | "state.intent.claim"
-            | "state.intent.cancel"
-            | "state.lease.acquire"
+        "state.reservation.declare"
+            | "state.reservation.request"
+            | "state.reservation.claim"
+            | "state.reservation.cancel"
+            | "state.claim.acquire"
             | "state.context.render"
     ) {
         let identity = repo_identity_for_enabled_repo(paths, repo_root).ok();
@@ -774,7 +774,7 @@ mod tests {
         let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret-token", "shared", 42);
 
         let enriched = enrich_arguments(
-            "state.intent.declare",
+            "state.reservation.declare",
             serde_json::json!({
                 "session_id": "s1",
                 "purpose": "Fix auth validation behavior.",

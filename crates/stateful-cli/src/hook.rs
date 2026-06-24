@@ -455,7 +455,7 @@ fn authorize_omp_targets(
 
     let Some(runtime) = runtime else {
         let reason = format!(
-            "{} writes require a reachable stateful server, exact file intent, and a same-session file lease",
+            "{} writes require a reachable stateful server, exact file reservation, and a same-session file claim",
             input.tool_name
         );
         return Ok(OmpHookOutcome::Block { reason });
@@ -637,12 +637,12 @@ fn post_omp_post_tool_use_event(
         input,
         identity,
     )?;
-    refresh_omp_post_tool_lease_observations(input, runtime, repo_root, identity);
-    release_omp_post_tool_leases(input, runtime, repo_root, identity);
+    refresh_omp_post_tool_claim_observations(input, runtime, repo_root, identity);
+    release_omp_post_tool_claims(input, runtime, repo_root, identity);
     Ok(())
 }
 
-fn refresh_omp_post_tool_lease_observations(
+fn refresh_omp_post_tool_claim_observations(
     input: &OmpSessionEventInput,
     runtime: &ServerRuntime,
     repo_root: Option<&Path>,
@@ -676,7 +676,7 @@ fn refresh_omp_post_tool_lease_observations(
             "path": path,
             "root": identity.root,
         });
-        let Ok(response) = post_json(runtime, "/v1/lease/refresh-observation", &body) else {
+        let Ok(response) = post_json(runtime, "/v1/claim/refresh-observation", &body) else {
             continue;
         };
         if !(200..300).contains(&response.status_code) {
@@ -685,7 +685,7 @@ fn refresh_omp_post_tool_lease_observations(
     }
 }
 
-fn release_omp_post_tool_leases(
+fn release_omp_post_tool_claims(
     input: &OmpSessionEventInput,
     runtime: &ServerRuntime,
     repo_root: Option<&Path>,
@@ -718,7 +718,7 @@ fn release_omp_post_tool_leases(
             "workspace_id": workspace_id,
             "path": path,
         });
-        let Ok(response) = post_json(runtime, "/v1/lease/release", &body) else {
+        let Ok(response) = post_json(runtime, "/v1/claim/release", &body) else {
             continue;
         };
         if !(200..300).contains(&response.status_code) {
@@ -960,8 +960,8 @@ fn handle_post_tool_use_with_runtime(
         input.stateful_session_id(),
         identity,
     )?;
-    refresh_post_tool_lease_observations(&input, runtime, repo_root, identity);
-    release_post_tool_leases(&input, runtime, repo_root, identity);
+    refresh_post_tool_claim_observations(&input, runtime, repo_root, identity);
+    release_post_tool_claims(&input, runtime, repo_root, identity);
     Ok(())
 }
 
@@ -1047,7 +1047,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 fn stateful_command_policy_reminder() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- First inspect current state with canonical Stateful MCP tool names such as `state_current_read` or `state_context_render` so you know who is active, what you already hold, and what may conflict.\n- Before using Bash or eval tools, use the `stateful-command-policy` skill.\n- Use canonical Stateful MCP tool names (`state_intent_declare`, `state_lease_acquire`) for coordination. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use `sandbox_bash` for stateful sandbox run profiles except `--fs external`, `ext_ro_bash` for read-only external operations, and `ext_rw_bash` for external writes.\n- Use `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as the read-only shell fallback when native tools are unavailable or insufficient.\n- Use `{binary} sandbox process find <selector>` for structured process lookup instead of raw `ps` or `pgrep`.\n- Use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>` only after declaring exact intent and acquiring the same-session file lease.\n- Use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` for builds/tests with disposable artifacts.\n- Use `{binary} sandbox run --fs git --network disabled --command 'git <args>'` for local git operations; enable network only for remote git operations.\n- Use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` for GitHub PR inspection or creation.",
+        "Stateful command policy reminder:\n- First inspect current state with canonical Stateful MCP tool names such as `state_current_read` or `state_context_render` so you know who is active, what you already hold, and what may conflict.\n- Before using Bash or eval tools, use the `stateful-command-policy` skill.\n- Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use `sandbox_bash` for stateful sandbox run profiles except `--fs external`, `ext_ro_bash` for read-only external operations, and `ext_rw_bash` for external writes.\n- Use `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as the read-only shell fallback when native tools are unavailable or insufficient.\n- Use `{binary} sandbox process find <selector>` for structured process lookup instead of raw `ps` or `pgrep`.\n- Use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>` only after declaring exact reservation and acquiring the same-session file claim.\n- Use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` for builds/tests with disposable artifacts.\n- Use `{binary} sandbox run --fs git --network disabled --command 'git <args>'` for local git operations; enable network only for remote git operations.\n- Use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` for GitHub PR inspection or creation.",
     )
 }
 
@@ -1096,7 +1096,7 @@ fn post_session_event(
     Ok(())
 }
 
-fn refresh_post_tool_lease_observations(
+fn refresh_post_tool_claim_observations(
     input: &SessionEventInput,
     runtime: &ServerRuntime,
     repo_root: Option<&Path>,
@@ -1127,7 +1127,7 @@ fn refresh_post_tool_lease_observations(
             "path": path,
             "root": identity.root,
         });
-        let Ok(response) = post_json(runtime, "/v1/lease/refresh-observation", &body) else {
+        let Ok(response) = post_json(runtime, "/v1/claim/refresh-observation", &body) else {
             continue;
         };
         if !(200..300).contains(&response.status_code) {
@@ -1136,7 +1136,7 @@ fn refresh_post_tool_lease_observations(
     }
 }
 
-fn release_post_tool_leases(
+fn release_post_tool_claims(
     input: &SessionEventInput,
     runtime: &ServerRuntime,
     repo_root: Option<&Path>,
@@ -1166,7 +1166,7 @@ fn release_post_tool_leases(
             "workspace_id": workspace_id,
             "path": path,
         });
-        let Ok(response) = post_json(runtime, "/v1/lease/release", &body) else {
+        let Ok(response) = post_json(runtime, "/v1/claim/release", &body) else {
             continue;
         };
         if !(200..300).contains(&response.status_code) {
@@ -1354,18 +1354,18 @@ fn is_canonical_stateful_mcp_tool(tool_name: &str) -> bool {
             | "state.session.register"
             | "state_session_heartbeat"
             | "state.session.heartbeat"
-            | "state_intent_declare"
-            | "state.intent.declare"
-            | "state_intent_request"
-            | "state.intent.request"
-            | "state_intent_claim"
-            | "state.intent.claim"
-            | "state_intent_cancel"
-            | "state.intent.cancel"
-            | "state_lease_acquire"
-            | "state.lease.acquire"
-            | "state_lease_release"
-            | "state.lease.release"
+            | "state_reservation_declare"
+            | "state.reservation.declare"
+            | "state_reservation_request"
+            | "state.reservation.request"
+            | "state_reservation_claim"
+            | "state.reservation.claim"
+            | "state_reservation_cancel"
+            | "state.reservation.cancel"
+            | "state_claim_acquire"
+            | "state.claim.acquire"
+            | "state_claim_release"
+            | "state.claim.release"
             | "state_activity_observe"
             | "state.activity.observe"
             | "state_activity_finalize"
@@ -1463,7 +1463,7 @@ fn command_mentions_stateful_coordination(command: &str) -> bool {
         return false;
     };
     match words.get(1).map(String::as_str) {
-        Some("intent") => true,
+        Some("reservation") => true,
         Some("mcp")
             if words.get(2).is_some_and(|word| word == "call")
                 && words
@@ -1482,18 +1482,18 @@ fn is_stateful_coordination_mcp_tool(tool_name: &str) -> bool {
     }
     matches!(
         tool_name,
-        "state_intent_declare"
-            | "state.intent.declare"
-            | "state_intent_request"
-            | "state.intent.request"
-            | "state_intent_claim"
-            | "state.intent.claim"
-            | "state_intent_cancel"
-            | "state.intent.cancel"
-            | "state_lease_acquire"
-            | "state.lease.acquire"
-            | "state_lease_release"
-            | "state.lease.release"
+        "state_reservation_declare"
+            | "state.reservation.declare"
+            | "state_reservation_request"
+            | "state.reservation.request"
+            | "state_reservation_claim"
+            | "state.reservation.claim"
+            | "state_reservation_cancel"
+            | "state.reservation.cancel"
+            | "state_claim_acquire"
+            | "state.claim.acquire"
+            | "state_claim_release"
+            | "state.claim.release"
             | "state_notifications_poll"
             | "state.notifications.poll"
             | "state_resume_next"
@@ -1502,7 +1502,7 @@ fn is_stateful_coordination_mcp_tool(tool_name: &str) -> bool {
 }
 
 fn stateful_coordination_mcp_guidance() -> &'static str {
-    "Use canonical Stateful MCP tool names such as `state_intent_declare` and `state_lease_acquire`. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash."
+    "Use canonical Stateful MCP tool names such as `state_reservation_declare` and `state_claim_acquire`. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash."
 }
 
 fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
@@ -1664,7 +1664,7 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 fn bash_policy_guidance() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Inspect current state first with `state_current_read` or `state_context_render`, then use the `stateful-command-policy` skill before Bash or eval tools. Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use `sandbox_bash` for stateful sandbox run profiles except `--fs external`, `ext_ro_bash` for read-only external operations, and `ext_rw_bash` for external writes. Use canonical Stateful MCP tool names (`state_intent_declare`, `state_lease_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_intent_declare` or OMP `mcp__stateful_state_intent_declare`. Do not run `stateful intent declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first and `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as fallback. For structured process lookup, use `{binary} sandbox process find <selector>` instead of raw `ps` or `pgrep`. For command-shaped writes, declare exact intent, acquire the same-session lease, then use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>`. For builds/tests, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`. For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; enable network only for remote git operations. For GitHub PRs, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`.",
+        "Inspect current state first with `state_current_read` or `state_context_render`, then use the `stateful-command-policy` skill before Bash or eval tools. Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use `sandbox_bash` for stateful sandbox run profiles except `--fs external`, `ext_ro_bash` for read-only external operations, and `ext_rw_bash` for external writes. Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first and `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as fallback. For structured process lookup, use `{binary} sandbox process find <selector>` instead of raw `ps` or `pgrep`. For command-shaped writes, declare exact reservation, acquire the same-session claim, then use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>`. For builds/tests, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`. For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; enable network only for remote git operations. For GitHub PRs, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`.",
     )
 }
 
@@ -2151,7 +2151,8 @@ fn hook_authorize_purpose(
     let items = body.get("items")?.as_array()?;
     let mut fallback = None;
     for item in items {
-        let matches_intent = item.get("kind").and_then(serde_json::Value::as_str) == Some("intent")
+        let matches_intent = item.get("kind").and_then(serde_json::Value::as_str)
+            == Some("reservation")
             && item.get("freshness").and_then(serde_json::Value::as_str) == Some("live")
             && item.get("session_id").and_then(serde_json::Value::as_str)
                 == Some(input.stateful_session_id())
@@ -2200,7 +2201,7 @@ fn authorize_targets(
     let Some(runtime) = runtime else {
         return Ok(HookOutcome::Deny {
             reason: format!(
-                "{} writes require a reachable stateful server, exact file intent, and a same-session file lease",
+                "{} writes require a reachable stateful server, exact file reservation, and a same-session file claim",
                 input.tool_name
             ),
         });
@@ -2245,7 +2246,7 @@ fn authorize_targets(
         let response = match post_json(runtime, "/v1/authorize", &body) {
             Ok(response) => response,
             Err(error) => {
-                release_pre_tool_authorized_leases(
+                release_pre_tool_authorized_claims(
                     runtime,
                     &session_id,
                     &workspace_id,
@@ -2258,7 +2259,7 @@ fn authorize_targets(
         };
 
         if !(200..300).contains(&response.status_code) {
-            release_pre_tool_authorized_leases(runtime, &session_id, &workspace_id, &allowed_paths);
+            release_pre_tool_authorized_claims(runtime, &session_id, &workspace_id, &allowed_paths);
             return Ok(HookOutcome::Deny {
                 reason: format!(
                     "stateful authorization failed with HTTP {}: {}",
@@ -2270,7 +2271,7 @@ fn authorize_targets(
         let decision: AuthorizeDecision = match serde_json::from_str(&response.body) {
             Ok(decision) => decision,
             Err(error) => {
-                release_pre_tool_authorized_leases(
+                release_pre_tool_authorized_claims(
                     runtime,
                     &session_id,
                     &workspace_id,
@@ -2282,7 +2283,7 @@ fn authorize_targets(
             }
         };
         if decision.decision != "allow" {
-            release_pre_tool_authorized_leases(runtime, &session_id, &workspace_id, &allowed_paths);
+            release_pre_tool_authorized_claims(runtime, &session_id, &workspace_id, &allowed_paths);
             return Ok(HookOutcome::Deny {
                 reason: authorization_denial_reason(decision),
             });
@@ -2296,7 +2297,7 @@ fn authorize_targets(
     Ok(HookOutcome::Allow)
 }
 
-fn release_pre_tool_authorized_leases(
+fn release_pre_tool_authorized_claims(
     runtime: &ServerRuntime,
     session_id: &str,
     workspace_id: &str,
@@ -2308,7 +2309,7 @@ fn release_pre_tool_authorized_leases(
             "workspace_id": workspace_id,
             "path": path,
         });
-        let Ok(response) = post_json(runtime, "/v1/lease/release", &body) else {
+        let Ok(response) = post_json(runtime, "/v1/claim/release", &body) else {
             continue;
         };
         if !(200..300).contains(&response.status_code) {
@@ -2327,7 +2328,7 @@ fn shadow_write_paths(targets: &[PatchTarget]) -> impl Iterator<Item = &str> {
 
 fn authorization_unavailable_reason(error: &dyn std::fmt::Display) -> String {
     format!(
-        "server_unavailable: stateful authorization is unavailable while contacting /v1/authorize: {error}. Writes fail closed. Run `stateful server status`, restart or rejoin the stateful server, then retry after declaring exact intent and acquiring a same-session file lease."
+        "server_unavailable: stateful authorization is unavailable while contacting /v1/authorize: {error}. Writes fail closed. Run `stateful server status`, restart or rejoin the stateful server, then retry after declaring exact reservation and acquiring a same-session file claim."
     )
 }
 
@@ -2351,14 +2352,14 @@ fn authorization_denial_reason(decision: AuthorizeDecision) -> String {
         "state_notifications_poll",
         "state_resume_next",
         "reread",
-        "state_intent_claim",
+        "state_reservation_claim",
     ]
     .iter()
     .all(|term| reason.contains(term));
     if !has_resume_guidance {
         let target = wait.path.as_deref().unwrap_or("the target");
         reason.push_str(&format!(
-            " Resume by polling state_notifications_poll or state_resume_next for wait_id {}; when reserved, reread {}, then call state_intent_claim with wait_id {} before retrying the write.",
+            " Resume by polling state_notifications_poll or state_resume_next for wait_id {}; when reserved, reread {}, then call state_reservation_claim with wait_id {} before retrying the write.",
             wait.wait_id, target, wait.wait_id
         ));
     }

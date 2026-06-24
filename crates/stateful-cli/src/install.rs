@@ -1034,7 +1034,7 @@ statusMessage = "Loading stateful current state"
 [[hooks.UserPromptSubmit.hooks]]
 type = "command"
 command = {}
-statusMessage = "Checking stateful intent context"
+statusMessage = "Checking stateful reservation context"
 
 [[hooks.PreToolUse]]
 matcher = ".*"
@@ -1435,7 +1435,7 @@ function reservationMessage(notification) {{
   if (typeof purpose === "string" && purpose.trim().length > 0) {{
     lines.push("purpose: " + purpose.trim());
   }}
-  lines.push("Next: reread the target, then call state_intent_claim with this wait_id before retrying the write.");
+  lines.push("Next: reread the target, then call state_reservation_claim with this wait_id before retrying the write.");
   return lines.join("\n");
 }}
 

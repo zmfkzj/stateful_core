@@ -1,12 +1,12 @@
-# Intent-Scoped Concurrency Control
+# Reservation-Scoped Concurrency Control
 
 This document defines the coordination model behind `stateful_core`.
 
 The short version:
 
 ```text
-intent graph
-+ scoped lease
+reservation graph
++ scoped claim
 + OCC-style revision/hash check
 + effect log
 + validation hooks
@@ -60,7 +60,7 @@ The system also does not replace:
 The product boundary is narrower: prevent or surface risky current-state
 collisions before supported actions mutate the workspace. Prefer the
 alternatives above when actors can work independently and reconcile later.
-Use intent-scoped concurrency control when the actors must share one live
+Use reservation-scoped concurrency control when the actors must share one live
 checkout because the environment is too expensive to duplicate, tasks need each
 other's uncommitted edits immediately, or a human is editing in the canonical
 workspace alongside agents.
@@ -70,51 +70,51 @@ workspace alongside agents.
 The preferred name is:
 
 ```text
-intent-scoped concurrency control
+reservation-scoped concurrency control
 ```
 
 It can also be described as:
 
 ```text
-lease-backed optimistic coordination
+claim-backed optimistic coordination
 ```
 
 The model combines pessimistic coordination at the narrow write boundary with
 optimistic work outside that boundary. Actors can read, inspect, plan, and work
-on unrelated files concurrently. Writes require active intent, matching scope,
-and a fresh lease or explicit policy path.
+on unrelated files concurrently. Writes require active reservation, matching scope,
+and a fresh claim or explicit policy path.
 
 ## Core Flow
 
 The normal lifecycle is:
 
 ```text
-Intent Declaration
--> Lease Acquisition
+Reservation Declaration
+-> Claim Acquisition
 -> Conflict Detection
 -> Write Authorization
 -> Effect Recording
 -> Validation
--> Lease Release / Expiration
+-> Claim Release / Expiration
 ```
 
-Intent is the authorization scope. Lease is the live claim. The effect log is
+Reservation is the authorization scope. Claim is the live claim. The effect log is
 the audit trail and target replay source; shipped v1 materializes selected
-session and intent events and appends audit events for lifecycle mutations.
+session and reservation events and appends audit events for lifecycle mutations.
 Validation is post-effect evidence, not a substitute for authorization.
 
 ## Implementation Status
 
-Existing v1 docs and code already cover the core intent, lease, event log,
+Existing v1 docs and code already cover the core reservation, claim, event log,
 current-state view, wait queue, sandboxed write boundary, and audited policy
 decision shape.
 
 This spec also names target hardening work that can be added incrementally:
 
 - base revision or hash observations for OCC-style freshness checks
-- explicit lease fencing semantics where the active `lease_id` is treated as the
+- explicit claim fencing semantics where the active `claim_id` is treated as the
   current write token
-- first-class validation records tied to intents and resources
+- first-class validation records tied to reservations and resources
 - explicit override records when the server exposes an override authorization
   path
 
@@ -122,9 +122,9 @@ Those target pieces should preserve the same model boundary: they strengthen
 pre-write coordination, but they do not turn source files into CRDT or OT
 documents.
 
-## Intent Graph
+## Reservation Graph
 
-An intent declares what a session plans to do before it performs important
+A reservation declares what a session plans to do before it performs important
 actions. The graph connects user goals, sessions, turns, actors, and resources:
 
 ```text
@@ -132,11 +132,11 @@ goal
   session
     turn
       actor
-        intent
+        reservation
           resource scopes
 ```
 
-Intent answers:
+Reservation answers:
 
 ```text
 What may this session work on?
@@ -144,9 +144,9 @@ What may this session work on?
 
 The graph matters because a single user goal can span multiple turns and a
 session can spawn subagents. Subagents may contribute work, but they should not
-gain broader write authority than the parent session's active intent scope.
+gain broader write authority than the parent session's active reservation scope.
 
-Intent must be:
+Reservation must be:
 
 - explicit
 - scoped to files or directories for write authorization
@@ -154,27 +154,27 @@ Intent must be:
 - time-bound
 - extensible when the active target set grows
 
-Intent declarations add to the active file scope for the session in the
+Reservation declarations add to the active file scope for the session in the
 workspace. If a session expands from `src/auth.ts` to `src/auth.ts` plus
 `src/session.ts`, it may declare the new target without invalidating the
 existing one. If the same path is declared again, the latest matching active
-declaration supplies the purpose used for future lease acquisition.
+declaration supplies the purpose used for future claim acquisition.
 
-## Scoped Lease
+## Scoped Claim
 
-A lease declares that an actor currently holds a live claim on a resource.
+A claim declares that an actor currently holds a live claim on a resource.
 
-Lease answers:
+Claim answers:
 
 ```text
 Who is actively holding this now?
 ```
 
-For v1, only file and directory leases authorize supported filesystem writes.
+For v1, only file and directory claims authorize supported filesystem writes.
 Other resources, such as tasks, tests, ports, and migrations, can provide
 coordination context but do not authorize source-tree mutation by themselves.
 
-Leases are advisory as product semantics, but checked where the runtime has a
+Claims are advisory as product semantics, but checked where the runtime has a
 reliable hook or sandbox boundary. This split is intentional:
 
 ```text
@@ -182,31 +182,31 @@ planning and context: advisory
 write boundary: pre-tool authorization with observation checks
 ```
 
-A write authorization validates the current same-session lease and rejects stale
-lease or base-file observations when the hook can supply them. This catches the
-common lost-update case where the file changed between lease acquisition,
+A write authorization validates the current same-session claim and rejects stale
+claim or base-file observations when the hook can supply them. This catches the
+common lost-update case where the file changed between claim acquisition,
 reread, and write authorization.
 
 Continuous post-authorization fencing is target behavior. The shipped v1 hook
-does not yet pass a lease id through the native write and confirm after
-`PostToolUse` that the same lease was continuously held until the write
+does not yet pass a claim id through the native write and confirm after
+`PostToolUse` that the same claim was continuously held until the write
 completed. Long sandboxed commands are authorized before execution and are not
-currently bounded by remaining lease TTL.
+currently bounded by remaining claim TTL.
 
 At authorization time, the policy engine checks:
 
-- the target has active matching intent
-- the lease is active and unexpired
-- the lease belongs to the current session or authorized actor path
+- the target has active matching reservation
+- the claim is active and unexpired
+- the claim belongs to the current session or authorized actor path
 - the target is inside the declared file or directory scope
-- no stronger conflict has appeared since the lease was acquired
+- no stronger conflict has appeared since the claim was acquired
 
 ## OCC-Style Revision and Hash Check
 
 Optimistic concurrency control belongs at the workspace boundary, not inside a
 collaborative text data structure.
 
-When a session reads, declares intent, acquires a lease, or attempts a write, the
+When a session reads, declares reservation, acquires a claim, or attempts a write, the
 system can record a compact base observation for the target:
 
 ```text
@@ -222,13 +222,13 @@ Before a write, the policy engine compares the current observation with the
 actor's base observation and the effect log.
 
 Expected same-session effects are allowed when they are recorded under the
-active intent and current lease. Unexpected effects produce a warning or denial:
+active reservation and current claim. Unexpected effects produce a warning or denial:
 
 - another actor wrote the target
 - a human write was observed and not reconciled
 - the file hash changed since the actor last read it
-- the lease generation changed
-- the session's intent expired or was superseded
+- the claim generation changed
+- the session's reservation expired or was superseded
 
 This is OCC-style because actors can work optimistically while reading,
 planning, and editing in memory, but must prove that the target is still the
@@ -240,8 +240,8 @@ The append-only effect log is the canonical evidence stream for coordination.
 It records facts such as:
 
 - session registered
-- intent declared
-- lease acquired or released
+- reservation declared
+- claim acquired or released
 - conflict checked
 - write attempted
 - tool effect observed
@@ -256,14 +256,14 @@ checks should read the materialized view for speed, but audit, replay,
 debugging, and recovery depend on the event log.
 
 Effects are evidence, not authority. A previous successful write does not allow a
-future write unless the session still has active intent, matching scope, and a
-fresh lease.
+future write unless the session still has active reservation, matching scope, and a
+fresh claim.
 
 ## Validation Hooks
 
 Validation hooks run after effects or before high-risk lifecycle transitions.
 They provide confidence that a change is acceptable, but they do not bypass
-intent or lease requirements.
+reservation or claim requirements.
 
 Examples:
 
@@ -278,7 +278,7 @@ Validation records should include:
 ```text
 validation_id
 session_id
-intent_id
+reservation_id
 resources_checked
 command_or_tool
 started_at
@@ -299,10 +299,10 @@ They are not inferred from ownership, confidence, urgency, or same-user
 sessions.
 
 An override can apply only to the conflict class it names. In v1, that means an
-active lease conflict on a specific file or directory. It cannot bypass:
+active claim conflict on a specific file or directory. It cannot bypass:
 
-- missing intent
-- expired intent
+- missing reservation
+- expired reservation
 - finalized or blocked session state
 - file or directory scope mismatch
 - exact-scope requirements for delete, rename, or move
@@ -337,9 +337,9 @@ The decision order is:
 ```text
 1. Validate protocol and identity.
 2. Classify action and write targets.
-3. Require active, unexpired intent for supported writes.
+3. Require active, unexpired reservation for supported writes.
 4. Match targets against file or directory scope.
-5. Require active same-session lease for write-authorizing resources.
+5. Require active same-session claim for write-authorizing resources.
 6. Check hard workspace conflicts.
 7. Check OCC-style target freshness.
 8. Check human-write reconciliation state.
@@ -347,7 +347,7 @@ The decision order is:
 10. Record the conflict check and return the decision.
 ```
 
-Reads, searches, and diffs can proceed without write intent. Command-shaped
+Reads, searches, and diffs can proceed without write reservation. Command-shaped
 writes, test artifacts, delete, rename, move, commit, and push paths must use
 the appropriate controlled action surface.
 
@@ -371,18 +371,19 @@ writes.
 
 ## Wait Queue and Reservation
 
-When a write conflicts with an active lease, the actor can request the resource
+When a write conflicts with an active claim, the actor can request the resource
 instead of spinning or overriding.
 
 The scheduling flow is:
 
 ```text
-blocked -> queued -> reserved -> claimed -> active
+blocked -> queued -> claimable_reservation -> claimed -> active
 ```
 
-Queued requests are FIFO per resource. A reservation is not write authority. The
-reserved session must reread the target, claim the reservation, and then retry
-the write. The claim creates a fresh intent and lease for the reserved resource.
+Queued requests are FIFO per resource. A claimable reservation (the current API
+state is `reserved`) is not write authority. The owning session must reread the
+target, claim the reservation, and then retry the write. The claim creates a
+fresh write-authorizing reservation and claim for that resource.
 
 This preserves ordering without letting a sleeping or stale session mutate the
 workspace later on old state.
@@ -401,20 +402,20 @@ Detailed implementation rules live in the existing docs:
   CLI, storage, and test expectations.
 
 When this document and a lower-level implementation document differ, treat this
-document as the model intent and the implementation contract as the current
+document as the model reservation and the implementation contract as the current
 shipping behavior. Changes that alter the model should update both layers.
 
 ## Invariants
 
-- Intent authorizes scope; lease represents active possession.
-- A lease without matching intent does not authorize a write.
-- Intent without a current lease does not authorize a write to a leased
-  write-authorizing resource.
+- Reservation authorizes scope; claim represents active possession.
+- A claim without matching reservation does not authorize a write.
+- Reservation without a current claim does not authorize a write to a
+  claim-required write-authorizing resource.
 - Expired state is historical evidence, not live blocking authority.
 - Same physical workspace path is the hard conflict domain.
 - Same repo-relative path across worktrees or branches is warning context unless
   policy explicitly promotes it.
-- Subagents inherit only the parent session's active valid intent scope.
+- Subagents inherit only the parent session's active valid reservation scope.
 - Human writes are never discarded or blocked silently.
 - Overrides are specific, temporary, audited, and user-owned.
 - Validation evidence improves confidence but never replaces authorization.
