@@ -236,6 +236,15 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
     assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
+    assert!(extension.contains("import { existsSync } from \"node:fs\""));
+    assert!(extension.contains("import { fileURLToPath } from \"node:url\""));
+    assert!(extension.contains("function resolveSkillInternalUrl(rawUrl)"));
+    assert!(extension.contains("function expandSkillInternalUrlsInCommand(command)"));
+    assert!(
+        extension.contains(
+            "args.push(\"--command\", expandSkillInternalUrlsInCommand(params.command));"
+        )
+    );
     assert!(
         extension
             .contains("function runSandboxToolProcess(params, args, ctx, label, signal, onStdout)")
@@ -338,8 +347,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     let dispatching_skill =
         fs::read_to_string(&omp_dispatching_skill).expect("omp dispatching skill should read");
     let source_dispatching_skill = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/dispatching-parallel-agents/SKILL.md"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/dispatching-parallel-agents/SKILL.md"),
     )
     .expect("source dispatching skill should exist");
     assert_eq!(dispatching_skill, source_dispatching_skill);
@@ -609,15 +617,12 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     let dispatching_skill =
         fs::read_to_string(&dispatching_skill_path).expect("global dispatching skill should exist");
     let source_dispatching_skill = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/dispatching-parallel-agents/SKILL.md"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/dispatching-parallel-agents/SKILL.md"),
     )
     .expect("source dispatching skill should exist");
     assert_eq!(dispatching_skill, source_dispatching_skill);
     assert!(dispatching_skill.contains("name: dispatching-parallel-agents"));
-    assert!(dispatching_skill.contains(
-        "Dispatch one agent per independent problem domain"
-    ));
+    assert!(dispatching_skill.contains("Dispatch one agent per independent problem domain"));
 
     let plan =
         apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");

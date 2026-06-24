@@ -1397,6 +1397,8 @@ fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Resu
     let binary_json = serde_json::to_string(binary_path)?;
     let contents = format!(
         r#"import {{ spawn, spawnSync }} from "node:child_process";
+import {{ existsSync }} from "node:fs";
+import {{ fileURLToPath }} from "node:url";
 
 const STATEFUL = {binary_json};
 
@@ -1643,6 +1645,76 @@ function truncateSandboxToolText(value, label) {{
     .toString("utf8") + "\n\n[" + label + " output truncated to 51200 bytes]";
 }}
 
+function shellQuote(value) {{
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}}
+
+function doubleQuoteEscape(value) {{
+  return value.replace(/["\\$`]/g, "\\$&");
+}}
+
+function skillUrlTokenEnd(command, start, quote) {{
+  let index = start;
+  while (index < command.length) {{
+    const ch = command[index];
+    if (quote) {{
+      if (ch === quote) break;
+    }} else if (/\s/.test(ch) || "'\"`|&;<>".includes(ch)) {{
+      break;
+    }}
+    index += 1;
+  }}
+  return index;
+}}
+
+function resolveSkillInternalUrl(rawUrl) {{
+  let parsed;
+  try {{
+    parsed = new URL(rawUrl);
+  }} catch (_) {{
+    throw new Error("invalid skill:// URL: " + rawUrl);
+  }}
+  if (parsed.protocol !== "skill:" || !parsed.hostname || parsed.search || parsed.hash) {{
+    throw new Error("unsupported internal URL in stateful sandbox command: " + rawUrl);
+  }}
+  const relative = parsed.pathname && parsed.pathname !== "/"
+    ? decodeURIComponent(parsed.pathname.replace(/^\/+/, ""))
+    : "SKILL.md";
+  const parts = relative.split("/");
+  if (parts.some((part) => part.length === 0 || part === "." || part === ".." || part.includes("\\"))) {{
+    throw new Error("invalid skill:// path: " + rawUrl);
+  }}
+  const skillRootUrl = new URL("../skills/" + encodeURIComponent(parsed.hostname) + "/", import.meta.url);
+  const skillRoot = fileURLToPath(skillRootUrl);
+  const resolvedPath = fileURLToPath(new URL(parts.map(encodeURIComponent).join("/"), skillRootUrl));
+  if (!resolvedPath.startsWith(skillRoot) || !existsSync(resolvedPath)) {{
+    throw new Error("unknown skill:// path: " + rawUrl);
+  }}
+  return resolvedPath;
+}}
+
+function expandSkillInternalUrlsInCommand(command) {{
+  let result = "";
+  let cursor = 0;
+  let quote = null;
+  for (let index = 0; index < command.length; index += 1) {{
+    const ch = command[index];
+    if (quote) {{
+      if (ch === quote) quote = null;
+    }} else if (ch === "'" || ch === "\"") {{
+      quote = ch;
+    }}
+    if (!command.startsWith("skill://", index)) continue;
+    const end = skillUrlTokenEnd(command, index, quote);
+    const resolved = resolveSkillInternalUrl(command.slice(index, end));
+    result += command.slice(cursor, index);
+    result += quote === "'" ? resolved : quote === "\"" ? doubleQuoteEscape(resolved) : shellQuote(resolved);
+    cursor = end;
+    index = end - 1;
+  }}
+  return cursor === 0 ? command : result + command.slice(cursor);
+}}
+
 function addCommonSandboxArgs(args, params, toolName) {{
   for (const target of stringList(params.write_targets)) args.push("--write-target", target);
   for (const target of stringList(params.create_targets)) args.push("--create-target", target);
@@ -1681,7 +1753,7 @@ function sandboxBashArgs(params) {{
   const args = ["sandbox", "run", "--fs", fs];
   args.push("--stream-events");
   addCommonSandboxArgs(args, params, "sandbox_bash");
-  args.push("--command", params.command);
+  args.push("--command", expandSkillInternalUrlsInCommand(params.command));
   return args;
 }}
 
@@ -1708,7 +1780,7 @@ function externalReadOnlyBashArgs(params) {{
   const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
   args.push("--stream-events");
   addCommonSandboxArgs(args, params, "ext_ro_bash");
-  args.push("--command", params.command);
+  args.push("--command", expandSkillInternalUrlsInCommand(params.command));
   return args;
 }}
 
@@ -1720,7 +1792,7 @@ function externalReadWriteBashArgs(params) {{
   const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
   args.push("--stream-events");
   addCommonSandboxArgs(args, params, "ext_rw_bash");
-  args.push("--command", params.command);
+  args.push("--command", expandSkillInternalUrlsInCommand(params.command));
   return args;
 }}
 
