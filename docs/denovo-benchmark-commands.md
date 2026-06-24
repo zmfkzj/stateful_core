@@ -327,6 +327,11 @@ Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
   the process owner and run the same direct `stateful-bench denovo run` command
   inside it, passing `STATEFUL_*`, `DOCKER_HOST`, and provider key variables
   with `tmux new-session -e`.
+- When launching from a sandboxed or external-command harness, include the tmux
+  server socket path in the approved external socket scope before starting a
+  detached run. Use a short, existing-parent socket path because long paths can
+  exceed tmux's socket length limit; create the session with that socket and
+  keep benchmark stdout/stderr in a launch log under the run output directory.
 - If OMP exits in about one second with empty `patch.diff`, zero subagent
   spawns, and `omp exited 1`, first check provider auth propagation. In Docker
   OMP mode the isolated home does not inherit host OMP login state, and the
