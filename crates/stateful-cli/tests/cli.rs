@@ -732,6 +732,7 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
             "multi_agent_v1send_input",
             "task",
             "yield",
+            "lsp",
             "KnownTool"
         ])
     );
