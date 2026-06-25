@@ -349,8 +349,9 @@ Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
   present before `stateful-bench` starts.
 - Treat `finish_reason: "benchmark-contamination"` as an invalid rollout, not a
   scored model failure. It means the adapter found an `upstream` checkout in the
-  harvested workspace or an OMP/Codex transcript reference to the upstream
-  repository, PR, issue, patch, or raw source for that instance.
+  harvested workspace or explicit upstream access in session artifacts: `.read.log`
+  URL headers, `read`/`browser` URL or path tool-call arguments, or shell command
+  tool-call arguments containing forbidden upstream commands.
 - A `stateful:on` Docker run that emits `SessionRegistered` but no nested
   `SessionHeartbeat` or `ActivityFinalized` is not lifecycle-valid. Report it as
   a runtime/lifecycle failure, not as a model-quality score.
@@ -444,8 +445,9 @@ misleading until the run has settled.
 If `results.jsonl` shows `finish_reason: "benchmark-contamination"`, inspect
 `codex-command.json.benchmark_contamination`; `kind: "upstream-worktree"` means
 an `upstream/` checkout remained in the final workspace, and
-`kind: "upstream-source-access"` means session artifacts referenced forbidden
-upstream source-control commands or URLs.
+`kind: "upstream-source-access"` means session artifacts showed explicit
+upstream access through `.read.log` URL headers, `read`/`browser` URL or path
+tool-call arguments, or forbidden upstream commands in shell command tool calls.
 
 After all three trials complete, collect each trial separately and report the
 mean:

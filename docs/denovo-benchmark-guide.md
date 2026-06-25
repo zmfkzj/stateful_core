@@ -23,9 +23,11 @@ starts with the original source present, but the runtime runs `clean.sh` before
 the agent can inspect it. The agent receives the package specification through
 `README.md` and must rebuild the package implementation from that spec.
 The agent must not inspect the upstream repository, pull request, issue, patch,
-commit, or raw source while solving the instance. The adapter prompt now states
-this benchmark isolation rule explicitly, and harvested workspaces/transcripts
-that show upstream source access are invalidated as benchmark contamination.
+commit, or raw source while solving the instance. The adapter prompt states this
+benchmark isolation rule explicitly. The adapter invalidates runs when the final
+workspace contains `upstream/` or session artifacts show explicit upstream access:
+`.read.log` URL headers, `read`/`browser` URL or path tool-call arguments, or
+shell command tool-call arguments containing forbidden upstream commands.
 
 Evaluation runs in a fresh container session:
 

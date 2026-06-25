@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -1483,22 +1484,118 @@ def instance_owner_repo(instance_id: str) -> tuple[str, str] | None:
     return owner, repo
 
 
-def benchmark_source_leak_patterns(instance_id: str) -> tuple[str, ...]:
-    patterns = list(BENCHMARK_SOURCE_LEAK_COMMAND_PATTERNS)
+def benchmark_source_leak_url_patterns(instance_id: str) -> tuple[str, ...]:
     owner_repo = instance_owner_repo(instance_id)
-    if owner_repo is not None:
-        owner, repo = owner_repo
-        repo_path = f"{owner}/{repo}".lower()
-        patterns.extend(f"{host}/{repo_path}" for host in BENCHMARK_SOURCE_LEAK_HOST_PATTERNS)
-        patterns.extend(
-            [
-                f"patch-diff.githubusercontent.com/raw/{repo_path}",
-                f"git@github.com:{repo_path}",
-                f"pr://{repo_path}",
-                f"issue://{repo_path}",
-            ]
-        )
-    return tuple(patterns)
+    if owner_repo is None:
+        return ()
+    owner, repo = owner_repo
+    repo_path = f"{owner}/{repo}".lower()
+    return (
+        *(f"{host}/{repo_path}" for host in BENCHMARK_SOURCE_LEAK_HOST_PATTERNS),
+        f"patch-diff.githubusercontent.com/raw/{repo_path}",
+        f"git@github.com:{repo_path}",
+        f"pr://{repo_path}",
+        f"issue://{repo_path}",
+    )
+
+
+def benchmark_source_leak_command_pattern(text: str) -> str | None:
+    lower_text = text.lower()
+    for pattern in BENCHMARK_SOURCE_LEAK_COMMAND_PATTERNS:
+        words = r"\s+".join(re.escape(part) for part in pattern.split())
+        if re.search(rf"(?<![a-z0-9_-]){words}(?![a-z0-9_-])", lower_text):
+            return pattern
+    return None
+
+
+def benchmark_source_leak_url_pattern(text: str, patterns: tuple[str, ...]) -> str | None:
+    candidate = text.strip()
+    if candidate.lower().startswith("url:"):
+        candidate = candidate[4:].strip()
+    lower_candidate = candidate.lower()
+    if "://" not in lower_candidate and not lower_candidate.startswith("git@github.com:"):
+        return None
+    for pattern in patterns:
+        if pattern in lower_candidate:
+            return pattern
+    return None
+
+
+def parse_tool_arguments(arguments: Any) -> Any:
+    if not isinstance(arguments, str):
+        return arguments
+    try:
+        return json.loads(arguments)
+    except json.JSONDecodeError:
+        return arguments
+
+
+def benchmark_json_tool_calls(event: dict[str, Any]) -> list[tuple[str, Any]]:
+    calls = list(omp_session_tool_calls(event))
+    candidates = [event, event.get("payload"), event.get("item")]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        call_type = candidate.get("type")
+        if call_type in {"function_call", "custom_tool_call"}:
+            name = candidate.get("name")
+            if isinstance(name, str):
+                calls.append((name, candidate.get("arguments")))
+        function_call = candidate.get("function_call")
+        if isinstance(function_call, dict):
+            name = function_call.get("name")
+            if isinstance(name, str):
+                calls.append((name, function_call.get("arguments")))
+    return calls
+
+
+def benchmark_tool_call_source_leak_pattern(
+    name: str,
+    arguments: Any,
+    url_patterns: tuple[str, ...],
+) -> str | None:
+    parsed_arguments = parse_tool_arguments(arguments)
+    if isinstance(parsed_arguments, dict):
+        for key in ("path", "url"):
+            value = parsed_arguments.get(key)
+            if isinstance(value, str) and name in {"read", "browser"}:
+                pattern = benchmark_source_leak_url_pattern(value, url_patterns)
+                if pattern is not None:
+                    return pattern
+        command = parsed_arguments.get("command")
+        if isinstance(command, str):
+            return benchmark_source_leak_command_pattern(command)
+    elif isinstance(parsed_arguments, str):
+        if name in {"read", "browser"}:
+            pattern = benchmark_source_leak_url_pattern(parsed_arguments, url_patterns)
+            if pattern is not None:
+                return pattern
+        return benchmark_source_leak_command_pattern(parsed_arguments)
+    return None
+
+
+def benchmark_artifact_source_leak_pattern(
+    artifact_path: Path,
+    line: str,
+    url_patterns: tuple[str, ...],
+) -> str | None:
+    if artifact_path.name.endswith(".read.log"):
+        if line.lstrip().lower().startswith("url:"):
+            return benchmark_source_leak_url_pattern(line, url_patterns)
+        return None
+    if artifact_path.suffix != ".jsonl":
+        return None
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(event, dict):
+        return None
+    for name, arguments in benchmark_json_tool_calls(event):
+        pattern = benchmark_tool_call_source_leak_pattern(name, arguments, url_patterns)
+        if pattern is not None:
+            return pattern
+    return None
 
 
 def benchmark_session_artifact_paths(codex_home: Path) -> list[Path]:
@@ -1523,21 +1620,24 @@ def benchmark_contamination_record(
             "reason": "`upstream` directory exists in final workspace",
         }
 
-    patterns = benchmark_source_leak_patterns(instance_id)
+    url_patterns = benchmark_source_leak_url_patterns(instance_id)
     for artifact_path in benchmark_session_artifact_paths(codex_home):
         try:
             with artifact_path.open("r", encoding="utf-8", errors="replace") as handle:
                 for line_number, line in enumerate(handle, start=1):
-                    lower_line = line.lower()
-                    for pattern in patterns:
-                        if pattern in lower_line:
-                            return {
-                                "kind": "upstream-source-access",
-                                "path": str(artifact_path),
-                                "line": str(line_number),
-                                "pattern": pattern,
-                                "reason": "session transcript referenced upstream source control",
-                            }
+                    pattern = benchmark_artifact_source_leak_pattern(
+                        artifact_path,
+                        line,
+                        url_patterns,
+                    )
+                    if pattern is not None:
+                        return {
+                            "kind": "upstream-source-access",
+                            "path": str(artifact_path),
+                            "line": str(line_number),
+                            "pattern": pattern,
+                            "reason": "session transcript referenced upstream source control",
+                        }
         except OSError:
             continue
     return None

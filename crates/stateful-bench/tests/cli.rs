@@ -3758,7 +3758,7 @@ print(json.dumps({{"off": off, "on": on}}, sort_keys=True))
 }
 
 #[test]
-fn denovo_codex_agent_detects_upstream_source_access_in_session_artifacts() {
+fn denovo_codex_agent_detects_only_direct_upstream_access_in_session_artifacts() {
     let dir = target_temp_dir("denovo-codex-detects-source-leak");
     let script = format!(
         r#"
@@ -3775,21 +3775,48 @@ spec.loader.exec_module(module)
 root = Path({root})
 workspace = root / "workspace"
 workspace.mkdir(parents=True)
-codex_home = root / "home" / ".omp" / "profiles" / "stateful" / "agent"
-session_dir = codex_home / "sessions" / "--workspace--"
-session_dir.mkdir(parents=True)
-(session_dir / "rollout.jsonl").write_text(
-    json.dumps({{"type": "message", "text": "read https://github.com/thebjorn/pydeps/pull/233/files"}}) + "\n",
+
+def session_dir(home_name):
+    session = root / home_name / ".omp" / "profiles" / "stateful" / "agent" / "sessions" / "--workspace--"
+    session.mkdir(parents=True)
+    return session
+
+false_positive_session = session_dir("false-positive-home")
+(false_positive_session / "rollout.jsonl").write_text(
+    "\n".join([
+        json.dumps({{"type": "message", "message": {{"role": "toolResult", "content": [{{"type": "text", "text": "[setup.py#ABCD]\\n1:url='https://github.com/thebjorn/pydeps'\\n"}}]}}}}),
+        json.dumps({{"type": "message", "message": {{"role": "toolResult", "content": [{{"type": "text", "text": "Example: stateful sandbox run --fs git --command 'git fetch --all'"}}]}}}}),
+        json.dumps({{"type": "message", "message": {{"role": "assistant", "content": [{{"type": "thinking", "thinking": "import_hook calls through properly"}}]}}}}),
+    ]) + "\n",
     encoding="utf-8",
 )
+(false_positive_session / "0.read.log").write_text(
+    "URL: https://pypi.org/pypi/pydeps/json\nContent-Type: application/json\n\nhttps://github.com/thebjorn/pydeps/actions/workflows/ci.yml\n",
+    encoding="utf-8",
+)
+
+raw_read_session = session_dir("raw-read-home")
+(raw_read_session / "0.read.log").write_text(
+    "URL: https://raw.githubusercontent.com/thebjorn/pydeps/master/pydeps.py\nContent-Type: text/plain\n",
+    encoding="utf-8",
+)
+
+command_session = session_dir("command-home")
+(command_session / "rollout.jsonl").write_text(
+    json.dumps({{"type": "message", "message": {{"role": "assistant", "content": [{{"type": "toolCall", "name": "sandbox_bash", "arguments": {{"command": "git fetch upstream main"}}}}]}}}}) + "\n",
+    encoding="utf-8",
+)
+
 clean_home = root / "clean-home"
 clean_home.mkdir(parents=True)
 (workspace / "upstream").mkdir()
 upstream = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, clean_home)
 (workspace / "upstream").rmdir()
-source = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, codex_home)
+false_positive = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, root / "false-positive-home" / ".omp" / "profiles" / "stateful" / "agent")
+raw_read = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, root / "raw-read-home" / ".omp" / "profiles" / "stateful" / "agent")
+command = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, root / "command-home" / ".omp" / "profiles" / "stateful" / "agent")
 clean = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, clean_home)
-print(json.dumps({{"upstream": upstream, "source": source, "clean": clean}}, sort_keys=True))
+print(json.dumps({{"upstream": upstream, "false_positive": false_positive, "raw_read": raw_read, "command": command, "clean": clean}}, sort_keys=True))
 "#,
         agent_path = denovo_codex_agent_path_json(),
         root = serde_json::to_string(&dir).expect("root should serialize"),
@@ -3797,8 +3824,14 @@ print(json.dumps({{"upstream": upstream, "source": source, "clean": clean}}, sor
     let output = run_python_json(&script);
 
     assert_eq!(output["upstream"]["kind"], "upstream-worktree");
-    assert_eq!(output["source"]["kind"], "upstream-source-access");
-    assert_eq!(output["source"]["pattern"], "github.com/thebjorn/pydeps");
+    assert_eq!(output["false_positive"], serde_json::Value::Null);
+    assert_eq!(output["raw_read"]["kind"], "upstream-source-access");
+    assert_eq!(
+        output["raw_read"]["pattern"],
+        "raw.githubusercontent.com/thebjorn/pydeps"
+    );
+    assert_eq!(output["command"]["kind"], "upstream-source-access");
+    assert_eq!(output["command"]["pattern"], "git fetch");
     assert_eq!(output["clean"], serde_json::Value::Null);
 
     fs::remove_dir_all(dir).expect("temp dir should clean up");
