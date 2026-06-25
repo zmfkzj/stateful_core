@@ -348,3 +348,4 @@ ignored by default.
 Why AGPL? `stateful_core` is intended to remain open even when it is used behind
 local or network services. The license is part of keeping improvements to the
 coordination layer available to the people who depend on it.
+
