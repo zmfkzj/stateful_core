@@ -282,6 +282,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("emitOutputChunk(event.chunk)"));
     assert!(extension.contains("stdout += line + \"\\n\";"));
     assert!(extension.contains("if (commandStdout && !streamedOutput)"));
+    assert!(extension.contains("return stdout || \"exit_code: \" + exitCode;"));
     assert!(extension.contains("result.details.sandboxRunOutput = sandboxRunOutput"));
     assert!(extension.contains("stderr = truncateSandboxToolText(stderr + chunk, label)"));
     assert!(

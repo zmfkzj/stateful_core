@@ -2115,7 +2115,7 @@ async function ensureExternalBashGrant(ctx, params, signal) {{
 
 function sandboxToolResultText(exitCode, stdout, stderr, error) {{
   if (!stderr && !error) {{
-    return stdout || "";
+    return stdout || "exit_code: " + exitCode;
   }}
   const sections = [];
   if (stdout) sections.push(stdout);
