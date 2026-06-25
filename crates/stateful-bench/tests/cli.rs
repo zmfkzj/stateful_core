@@ -3723,6 +3723,7 @@ print(json.dumps({{"off": off, "on": on}}, sort_keys=True))
     assert!(on.contains("MUST use native subagents"));
     assert!(on.contains("Before implementation or broad repository exploration"));
     assert!(on.contains("after any narrow setup needed"));
+    assert!(on.contains("dispatching-parallel-agents"));
     assert!(!on.contains("FIRST ACTION"));
     assert!(on.contains("the current native subagent tool is `task`"));
     assert!(on.contains("tasks` array containing at least 3 implementation subagents"));
@@ -4083,6 +4084,7 @@ print(json.dumps({{
     assert!(on.contains("Native Codex subagent requirements"));
     assert!(on.contains("MUST use native Codex subagents"));
     assert!(on.contains("Spawn at least 3 native subagents"));
+    assert!(on.contains("dispatching-parallel-agents"));
     assert!(on.contains("Use all 3 native subagents for repository editing"));
     assert!(on.contains("Do not leave any native subagent as analysis-only"));
     assert!(on.contains("Wait for each spawned subagent"));

@@ -149,8 +149,10 @@ separately from full four-axis or official-style stateful/no-state comparisons.
 For `subagent:on`, the generated DeNovo prompt explicitly requires native
 Codex/OMP subagents before implementation or broad repository exploration,
 while allowing narrow preflight to read the prompt, inspect tool availability,
-or initialize stateful coordination. It tells OMP to use the current `task` tool
-or older multi-agent tools such as `multi_agent_v1spawn_agent`, requires every
+or initialize stateful coordination. It also requires reading and using the
+installed `dispatching-parallel-agents` skill before spawning native subagents
+when that skill is available. It tells OMP to use the current `task` tool or
+older multi-agent tools such as `multi_agent_v1spawn_agent`, requires every
 counted subagent to inspect, edit, and verify a distinct implementation slice,
 and requires explicit blocker reporting if the runtime does not expose subagent
 tools. OMP runs also unpack bundled task agents into the isolated runtime home,
