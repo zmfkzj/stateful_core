@@ -26,8 +26,8 @@ The prototype supports user-level installation with repo allowlist gating.
 --agent omp --yes` configures the isolated OMP `stateful` profile with stateful
 hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `ext_ro_bash`
 for read-only `--fs external`, `ext_rw_bash` for scoped-grant external writes,
-and approval entries that deny raw Bash while setting
-Python/JavaScript/JS/Ruby/Julia eval tools to false. The OMP installer also
+`lazy_edit_resume` for strict replay of queued line-based OMP edits, and approval
+entries that deny raw Bash while setting Python/JavaScript/JS/Ruby/Julia eval tools to false. The OMP installer also
 writes `rules/stateful-required.md`,
 `skills/stateful-command-policy/SKILL.md`, and
 `skills/dispatching-parallel-agents/SKILL.md` under that isolated agent
@@ -229,6 +229,11 @@ workspace file state. PostToolUse observes completed native edits and sandbox
 claims that authorized the completed write boundary. Released claims leave the
 live context render and do not authorize a later write; the session must reread
 and reacquire a claim, or lazy-claim a claimable reservation, before retrying.
+OMP `edit` denials that include a wait id are captured by the generated extension
+as live-session lazy edit operations. `lazy_edit_resume` re-authorizes the
+original edit when the reservation is claimable, verifies the file content still
+matches the queued base text, and applies only line-based edit patch operations;
+block operations or changed files require regenerating the patch.
 For Bash, command text alone never authorizes tool use.
 `/v1/authorize` accepts optional `base_observations` for OCC-style freshness
 checks. When supplied, each observation is compared against the current

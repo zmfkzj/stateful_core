@@ -143,7 +143,7 @@ stateful codex
 ### OMP
 
 Install OMP integration when you want the isolated OMP `stateful` profile,
-stateful hooks, MCP, generated sandbox command tools, and the installed
+stateful hooks, MCP, generated sandbox command tools, lazy edit resume, and the installed
 `skills/stateful-command-policy/SKILL.md` and
 `skills/dispatching-parallel-agents/SKILL.md` skills:
 
@@ -215,7 +215,8 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 
 In OMP, use the generated tools instead of raw Bash: `sandbox_bash` for
 non-external sandbox profiles, `ext_ro_bash` for read-only external shell work,
-and `ext_rw_bash` for external writes with a scoped purpose grant and declared scope.
+`ext_rw_bash` for external writes with a scoped purpose grant and declared scope,
+and `lazy_edit_resume` for strict replay of queued line-based OMP `edit` patches.
 
 See [Usage reference](docs/usage-reference.md) for detailed CLI, hook, sandbox,
 LAN sharing, generated-file, and release notes.

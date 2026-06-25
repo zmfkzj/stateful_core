@@ -388,6 +388,7 @@ fn is_omp_safe_without_repo_write_authorization(tool_name: &str) -> bool {
         "generate_image",
         "grep",
         "irc",
+        "lazy_edit_resume",
         "job",
         "read",
         "report_tool_issue",
@@ -440,6 +441,49 @@ fn omp_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {
     Some(OmpPreToolAction::Allow)
 }
 
+fn omp_hook_authorize_purpose(
+    input: &OmpPreToolUseInput,
+    runtime: &ServerRuntime,
+    target: &PatchTarget,
+    workspace_id: &str,
+) -> Option<String> {
+    let response = get_json(runtime, "/v1/current").ok()?;
+    if !(200..300).contains(&response.status_code) {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_str(&response.body).ok()?;
+    let items = body.get("items")?.as_array()?;
+    let mut fallback = None;
+    for item in items {
+        let matches_intent = item.get("kind").and_then(serde_json::Value::as_str)
+            == Some("reservation")
+            && item.get("freshness").and_then(serde_json::Value::as_str) == Some("live")
+            && item.get("session_id").and_then(serde_json::Value::as_str)
+                == Some(input.session_id.as_str())
+            && item.get("workspace_id").and_then(serde_json::Value::as_str) == Some(workspace_id);
+        if !matches_intent {
+            continue;
+        }
+        let Some(purpose) = item
+            .get("purpose")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|purpose| !purpose.is_empty())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if item.get("resource").and_then(serde_json::Value::as_str) == Some(target.path.as_str()) {
+            return Some(purpose);
+        }
+        if fallback.is_none() {
+            fallback = Some(purpose);
+        }
+    }
+
+    fallback
+}
+
 fn authorize_omp_targets(
     input: &OmpPreToolUseInput,
     runtime: Option<&ServerRuntime>,
@@ -467,10 +511,17 @@ fn authorize_omp_targets(
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, identity));
     for target in targets {
+        let purpose = omp_hook_authorize_purpose(input, runtime, &target, &workspace_id)
+            .unwrap_or_else(|| format!("Queue OMP {} for {}.", input.tool_name, target.path));
         let mut payload = json!({
             "action": target.action,
             "path": target.path,
         });
+        if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
+            payload["base_observations"] = json!([observation]);
+        }
+        payload["queue_on_conflict"] = json!(true);
+        payload["purpose"] = json!(purpose);
         if let Some(new_path) = &target.new_path {
             payload["old_path"] = json!(target.path);
             payload["new_path"] = json!(new_path);

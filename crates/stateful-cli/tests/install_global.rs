@@ -233,10 +233,16 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("name: \"ext_rw_bash\""));
     assert!(!extension.contains("name: \"external_bash\""));
     assert!(extension.contains("name: \"sandbox_bash\""));
+    assert!(extension.contains("name: \"lazy_edit_resume\""));
+    assert!(extension.contains("applyOmpLinePatch"));
+    assert!(extension.contains("lazyEditOperations"));
+    assert!(extension.contains("line === \"*** Begin Patch\""));
     assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
     assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
-    assert!(extension.contains("import { existsSync } from \"node:fs\""));
+    assert!(
+        extension.contains("import { existsSync, readFileSync, writeFileSync } from \"node:fs\"")
+    );
     assert!(extension.contains("import { fileURLToPath } from \"node:url\""));
     assert!(extension.contains("function resolveSkillInternalUrl(rawUrl)"));
     assert!(extension.contains("function expandSkillInternalUrlsInCommand(command)"));
