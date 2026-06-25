@@ -243,7 +243,7 @@ fn read_stateful_resource(repo_root: &Path, uri: &str) -> anyhow::Result<Result<
     let (tool_name, arguments, mime_type) = match uri {
         "stateful/current" => ("state_current_read", serde_json::json!({}), "application/json"),
         "stateful/events" => ("state_events_read", serde_json::json!({}), "application/json"),
-        "stateful/context" => ("state_context_render", serde_json::json!({ "mode": "brief" }), "text/plain"),
+        "stateful/context" => ("state_context_render", serde_json::json!({ "mode": "brief", "resource": "" }), "text/plain"),
         unknown => return Ok(Err(format!("unknown Stateful MCP resource URI: {unknown}"))),
     };
     let response = call_mcp_tool_in_repo(repo_root, tool_name, arguments)?;

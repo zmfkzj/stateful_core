@@ -576,7 +576,7 @@ fn stateful_resource_tool(uri: &str) -> Option<(&'static str, Value, &'static st
         "stateful/events" => Some(("state_events_read", serde_json::json!({}), "application/json")),
         "stateful/context" => Some((
             "state_context_render",
-            serde_json::json!({ "mode": "brief" }),
+            serde_json::json!({ "mode": "brief", "resource": "" }),
             "text/plain",
         )),
         _ => None,

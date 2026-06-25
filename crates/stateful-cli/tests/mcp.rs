@@ -1529,7 +1529,7 @@ fn mcp_resources_read_current_forwards_to_current_endpoint() {
 }
 
 #[test]
-fn mcp_resources_read_context_forwards_brief_context_without_resource_filter() {
+fn mcp_resources_read_context_forwards_brief_context_with_empty_resource_filter() {
     let temp_root = temp_root("stateful-mcp-resources-read-context");
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
@@ -1573,12 +1573,7 @@ fn mcp_resources_read_context_forwards_brief_context_without_resource_filter() {
     assert!(request.contains("Authorization: Bearer secret-token"));
     let body = request_json_body(&request);
     assert_eq!(body["mode"], "brief");
-    assert!(
-        !body
-            .as_object()
-            .expect("request body should be an object")
-            .contains_key("resource")
-    );
+    assert_eq!(body["resource"], "");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

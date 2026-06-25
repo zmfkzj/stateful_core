@@ -53,7 +53,7 @@ Existing custom allowlists are preserved by the current merge path.
 
 - `stateful/current` returns the same JSON body as `state_current_read`.
 - `stateful/events` returns the same JSON body as `state_events_read`.
-- `stateful/context` calls `state.context.render` with `{ "mode": "brief" }` and returns the server text/body; omitting `resource` avoids filtering context to an empty path.
+- `stateful/context` calls `state.context.render` with `{ "mode": "brief", "resource": "" }` and returns the server text/body; the server treats an empty resource filter as unfiltered context.
 - Unknown URIs return JSON-RPC `-32602`.
 
 Errors from the backing HTTP call are returned as MCP resource content only when the HTTP request succeeds at transport level; JSON-RPC infrastructure errors still return JSON-RPC errors.
