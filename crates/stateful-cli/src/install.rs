@@ -1121,7 +1121,7 @@ fn sandbox_external_prompt_rules(binary_path: &str) -> anyhow::Result<String> {
     validate_no_control_chars(binary_path)?;
     let binary = toml_string(binary_path);
     let request_match = toml_string(&format!(
-        "{binary_path} sandbox run --fs external --purpose 'install rebuilt binaries' --write-dir /Users/me/.cargo/bin --command 'install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful'"
+        "{binary_path} sandbox run --fs external --purpose 'install rebuilt binaries' --write-dir /opt/stateful/bin --command 'install -m 755 target/release/stateful /opt/stateful/bin/stateful'"
     ));
     Ok(format!(
         r#"{GLOBAL_CODEX_BLOCK_START}
@@ -2429,16 +2429,16 @@ mod tests {
     #[test]
     fn default_omp_agent_dir_uses_user_omp_profile() {
         assert_eq!(
-            default_omp_agent_dir_from_home("/tmp/home"),
-            PathBuf::from("/tmp/home/.omp/profiles/stateful/agent")
+            default_omp_agent_dir_from_home("home"),
+            PathBuf::from("home/.omp/profiles/stateful/agent")
         );
     }
 
     #[test]
     fn omp_install_places_stateful_rule_in_agent_rules_dir() {
         assert_eq!(
-            omp_required_rule_path(Path::new("/tmp/home/.omp/profiles/stateful/agent")),
-            PathBuf::from("/tmp/home/.omp/profiles/stateful/agent/rules/stateful-required.md")
+            omp_required_rule_path(Path::new("home/.omp/profiles/stateful/agent")),
+            PathBuf::from("home/.omp/profiles/stateful/agent/rules/stateful-required.md")
         );
     }
 

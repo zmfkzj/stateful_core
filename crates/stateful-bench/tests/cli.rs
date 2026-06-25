@@ -210,7 +210,7 @@ fn denovo_run_command_parses_codex_cli_agent_options() {
         "--codex-bin",
         "/opt/homebrew/bin/codex",
         "--stateful-binary",
-        "/Users/arthur/.cargo/bin/stateful",
+        "/opt/stateful/bin/stateful",
         "--benchmark-model",
         "gpt-5.4-mini",
         "--benchmark-reasoning-effort",
@@ -256,7 +256,7 @@ fn denovo_run_command_parses_codex_cli_agent_options() {
                 "stateful:on,subagent:on".to_string(),
             ]
             && codex_bin == "/opt/homebrew/bin/codex"
-            && stateful_binary == "/Users/arthur/.cargo/bin/stateful"
+            && stateful_binary == "/opt/stateful/bin/stateful"
             && benchmark_model.as_deref() == Some("gpt-5.4-mini")
             && benchmark_reasoning_effort == "low"
             && benchmark_temperature == "1"
@@ -288,7 +288,7 @@ fn denovo_run_command_parses_omp_cli_agent_options() {
         "--omp-bin",
         "/opt/homebrew/bin/omp",
         "--stateful-binary",
-        "/Users/arthur/.cargo/bin/stateful",
+        "/opt/stateful/bin/stateful",
         "--agent-docker-image",
         "ghcr.io/stateful/omp-agent:latest",
         "--agent-docker-stateful-binary",
@@ -1096,7 +1096,7 @@ prompt = mod.build_codex_prompt(
     benchmark_max_turns=500,
     max_steps=500,
     prompt_version="v1",
-    stateful_binary="/Users/arthur/.cargo/bin/stateful",
+    stateful_binary="/opt/stateful/bin/stateful",
 )
 assert "Build a parser package." in prompt
 assert "Benchmark max turns: 500" in prompt
@@ -1105,7 +1105,7 @@ assert "Do not edit benchmark artifacts" in prompt
 assert "Stateful command policy" not in prompt
 assert "state_current_read" not in prompt
 assert "search_tool_bm25" not in prompt
-assert "/Users/arthur/.cargo/bin/stateful" not in prompt
+assert "/opt/stateful/bin/stateful" not in prompt
 print(json.dumps({{"prompt": prompt}}))
 "#,
         agent_path = denovo_codex_agent_path_json(),
@@ -1374,8 +1374,8 @@ def runner(command, cwd, text, check, env, stdin, stdout, stderr, timeout):
 
 summary = module.run_omp_with_timeout(
     ["omp", "-p", "@/tmp/prompt.txt"],
-    Path("/tmp/workspace"),
-    {{"HOME": "/tmp/home"}},
+    Path("target/workspace"),
+    {{"HOME": "target/home"}},
     timeout_seconds=5,
     runner=runner,
 )
@@ -1387,7 +1387,7 @@ print(json.dumps({{"returncode": summary.returncode, "token_usage": summary.toke
     assert_eq!(output["returncode"], 0);
     assert_eq!(output["token_usage"]["turns"], 0);
     assert_eq!(output["calls"][0]["command"][0], "omp");
-    assert_eq!(output["calls"][0]["cwd"], "/tmp/workspace");
+    assert_eq!(output["calls"][0]["cwd"], "target/workspace");
     assert_eq!(output["calls"][0]["stdin_is_devnull"], true);
 }
 
@@ -1586,7 +1586,7 @@ kwargs = {{
     "workspace": Path("/tmp/workspace"),
     "subagent": "on",
     "codex_bin": "/opt/homebrew/bin/codex",
-    "stateful_binary": "/Users/arthur/.cargo/bin/stateful",
+    "stateful_binary": "/opt/stateful/bin/stateful",
     "benchmark_model": "gpt-5.4-mini",
     "benchmark_reasoning_effort": "low",
     "benchmark_model_context_window": 256000,
@@ -1775,7 +1775,7 @@ command = module.docker_omp_command_for_profile(
     benchmark_model="deepseek-v4-flash",
     docker_image="ghcr.io/stateful/omp-agent:latest",
     base_env={{
-        "HOME": "/host/home",
+        "HOME": "host-home",
         "OPENAI_API_KEY": "sk-test",
         "STATEFUL_SERVER_TOKEN": "token-123",
         "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
@@ -1855,7 +1855,7 @@ print(json.dumps({{
     assert!(!command_text.contains("token-123"));
     assert!(
         !env.iter()
-            .any(|value| value.as_str() == Some("HOME=/host/home"))
+            .any(|value| value.as_str() == Some("HOME=host-home"))
     );
     assert!(mounts.iter().any(|value| {
         value

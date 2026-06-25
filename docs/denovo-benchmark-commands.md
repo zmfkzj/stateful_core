@@ -119,22 +119,23 @@ a normal scored comparison.
 Set these values before reusing the commands:
 
 ```bash
-REPO_ROOT=/absolute/path/to/stateful_core
-AWEAGENT_ROOT=/absolute/path/to/AweAgent
-PYTHON=/absolute/path/to/python3
-STATEFUL_BENCH_BIN=/absolute/path/to/stateful-bench
-STATEFUL_BIN=/absolute/path/to/stateful
-OMP_BIN=/absolute/path/to/omp
-TMUX=/absolute/path/to/tmux
-TMUX_SOCKET=/absolute/path/to/tmux/socket
+REPO_ROOT=${REPO_ROOT:-$(pwd)}
+STATEFUL_BENCH_RUNS=${STATEFUL_BENCH_RUNS:-$REPO_ROOT/target/stateful_bench_runs}
+AWEAGENT_ROOT=${AWEAGENT_ROOT:-$REPO_ROOT/tmp/AweAgent}
+PYTHON=${PYTHON:-$REPO_ROOT/tmp/aweagent-venv/bin/python}
+STATEFUL_BENCH_BIN=${STATEFUL_BENCH_BIN:-$STATEFUL_BENCH_RUNS/cargo-target/debug/stateful-bench}
+STATEFUL_BIN=${STATEFUL_BIN:-$STATEFUL_BENCH_RUNS/cargo-target/debug/stateful}
+OMP_BIN=${OMP_BIN:-omp}
+TMUX=${TMUX:-tmux}
+TMUX_SOCKET=${TMUX_SOCKET:?set TMUX_SOCKET to the tmux server socket path}
 STATEFUL_HOME=${STATEFUL_HOME:-$HOME/.stateful_core}
 STATEFUL_SERVER_URL=$(python3 -c 'import json, os, pathlib; print(json.load(open(pathlib.Path(os.environ["STATEFUL_HOME"]) / "runtime/server.json"))["base_url"])')
 STATEFUL_SERVER_TOKEN=$(python3 -c 'import json, os, pathlib; print(json.load(open(pathlib.Path(os.environ["STATEFUL_HOME"]) / "runtime/server.json"))["token"])')
 DENOVO_OMP_AGENT_IMAGE=stateful-denovo-omp-agent:local
 DOCKER_OMP_BIN=omp
 DOCKER_STATEFUL_BIN=/usr/local/bin/stateful
-DOCKER_HOST=unix:///absolute/path/to/docker.sock
-DENOVO_OUTPUT_ROOT=/absolute/path/to/stateful_bench_runs/denovo/runs
+DOCKER_HOST=${DOCKER_HOST:?set DOCKER_HOST to unix://<docker-socket>}
+DENOVO_OUTPUT_ROOT=${DENOVO_OUTPUT_ROOT:-$STATEFUL_BENCH_RUNS/denovo/runs}
 RUN_SERIES=rNN-denovo
 TRIAL=1
 RUN_ID=$RUN_SERIES-t$TRIAL
@@ -304,14 +305,16 @@ done
 
 The corresponding authenticated run used:
 
-```text
+```bash
+REPO_ROOT=${REPO_ROOT:-$(pwd)}
+STATEFUL_BENCH_RUNS=${STATEFUL_BENCH_RUNS:-$REPO_ROOT/target/stateful_bench_runs}
 RUN_SERIES=r20260624-denovo-12-omp-docker-subagent-on-auth
-STATEFUL_BENCH_BIN=/Users/arthur/Downloads/stateful_bench_runs/cargo-target/debug/stateful-bench
-STATEFUL_BIN=/Users/arthur/Downloads/stateful_bench_runs/cargo-target/debug/stateful
-PYTHON=/Users/arthur/Code/stateful_core/tmp/aweagent-venv/bin/python
-AWEAGENT_ROOT=/Users/arthur/Code/stateful_core/tmp/AweAgent
-DENOVO_OUTPUT_ROOT=/Users/arthur/Downloads/stateful_bench_runs/denovo/runs
-DOCKER_HOST=unix:///Users/arthur/.colima/default/docker.sock
+STATEFUL_BENCH_BIN=${STATEFUL_BENCH_BIN:-$STATEFUL_BENCH_RUNS/cargo-target/debug/stateful-bench}
+STATEFUL_BIN=${STATEFUL_BIN:-$STATEFUL_BENCH_RUNS/cargo-target/debug/stateful}
+PYTHON=${PYTHON:-$REPO_ROOT/tmp/aweagent-venv/bin/python}
+AWEAGENT_ROOT=${AWEAGENT_ROOT:-$REPO_ROOT/tmp/AweAgent}
+DENOVO_OUTPUT_ROOT=${DENOVO_OUTPUT_ROOT:-$STATEFUL_BENCH_RUNS/denovo/runs}
+DOCKER_HOST=${DOCKER_HOST:-unix://$HOME/.colima/default/docker.sock}
 ```
 
 Relaunch pitfalls observed while debugging single-instance Docker OMP runs:

@@ -497,7 +497,7 @@ mod tests {
             &mut command,
             Path::new("/repo/target/.stateful-tmp"),
             Path::new("/repo/target/nested-codex-homes/run-1"),
-            Some(Path::new("/Users/arthur/.colima/default/docker.sock")),
+            Some(Path::new("/tmp/colima/default/docker.sock")),
             &runtime,
         );
 
@@ -516,7 +516,7 @@ mod tests {
                 .find(|(key, _)| key == "DOCKER_HOST")
                 .map(|(_, value)| value),
             Some(&Some(
-                "unix:///Users/arthur/.colima/default/docker.sock".to_string()
+                "unix:///tmp/colima/default/docker.sock".to_string()
             ))
         );
     }
@@ -559,7 +559,7 @@ mod tests {
             &[SandboxWritablePath::directory(PathBuf::from(
                 "/repo/target",
             ))],
-            Some(Path::new("/Users/arthur/.colima/default/docker.sock")),
+            Some(Path::new("/tmp/colima/default/docker.sock")),
         );
 
         let write_rules = profile
@@ -568,7 +568,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             write_rules.iter().any(
-                |line| line.contains("(literal \"/Users/arthur/.colima/default/docker.sock\")")
+                |line| line.contains("(literal \"/tmp/colima/default/docker.sock\")")
             )
         );
     }

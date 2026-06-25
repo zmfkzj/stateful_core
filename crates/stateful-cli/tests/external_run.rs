@@ -10,7 +10,7 @@ fn external_run_subcommand_is_removed() {
         "--purpose",
         "install rebuilt binaries",
         "--write-dir",
-        "/Users/me/.cargo/bin",
+        "/opt/stateful/bin",
         "--command",
         "true",
     ])
@@ -33,16 +33,16 @@ fn sandbox_external_profile_parses_external_scopes() {
         "--purpose",
         "install rebuilt binaries",
         "--create-target",
-        "/Users/me/.cargo/bin/stateful",
+        "/opt/stateful/bin/stateful",
         "--write-dir",
-        "/Users/me/.cargo/bin",
+        "/opt/stateful/bin",
         "--connect-socket",
         "/private/tmp/tmux-501/default",
         "--allow-signal",
         "--network",
         "enabled",
         "--command",
-        "install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful",
+        "install -m 755 target/release/stateful /opt/stateful/bin/stateful",
     ])
     .expect("sandbox external profile should parse");
 
@@ -60,8 +60,8 @@ fn sandbox_external_profile_parses_external_scopes() {
             assert_eq!(fs, SandboxFsProfile::External);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(purpose, Some("install rebuilt binaries".to_string()));
-            assert_eq!(create_targets, vec!["/Users/me/.cargo/bin/stateful"]);
-            assert_eq!(write_dirs, vec!["/Users/me/.cargo/bin"]);
+            assert_eq!(create_targets, vec!["/opt/stateful/bin/stateful"]);
+            assert_eq!(write_dirs, vec!["/opt/stateful/bin"]);
             assert_eq!(connect_sockets, vec!["/private/tmp/tmux-501/default"]);
             assert!(allow_signal);
         }

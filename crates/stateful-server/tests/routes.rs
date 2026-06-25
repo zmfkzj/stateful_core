@@ -6372,7 +6372,7 @@ async fn context_render_filters_items_to_requested_repo_identity() {
             "files_planned": ["record/hw/vision_module.py"]
         }),
     );
-    repo_2_body["workspace"]["root"] = serde_json::json!("/Users/arthur/Code/edge/core");
+    repo_2_body["workspace"]["root"] = serde_json::json!("/workspace/edge/core");
     repo_2_body["workspace"]["repo_id"] = serde_json::json!("repo-2");
     repo_2_body["workspace"]["worktree_id"] = serde_json::json!("worktree-2");
     repo_2_body["workspace"]["branch"] = serde_json::json!("frame-drops");

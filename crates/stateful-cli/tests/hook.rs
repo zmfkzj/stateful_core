@@ -1078,7 +1078,7 @@ fn pre_tool_use_denies_external_run_request() {
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
         "tool_input": {
-            "command": format!("{stateful} external-run request --purpose 'install rebuilt binaries' --write-dir /Users/me/.cargo/bin --command 'install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful'")
+            "command": format!("{stateful} external-run request --purpose 'install rebuilt binaries' --write-dir /opt/stateful/bin --command 'install -m 755 target/release/stateful /opt/stateful/bin/stateful'")
         }
     })
     .to_string();
@@ -1268,7 +1268,7 @@ fn pre_tool_use_denies_invalid_nested_codex_benchmark_sandbox_wrappers() {
         (
             "home outside target",
             format!(
-                "{stateful} sandbox run-nested-codex-benchmark --purpose 'run nested Codex chaos benchmark' --write-dir target --codex-home-root /Users/me/.codex --command 'cargo test'"
+                "{stateful} sandbox run-nested-codex-benchmark --purpose 'run nested Codex chaos benchmark' --write-dir target --codex-home-root /opt/codex-home --command 'cargo test'"
             ),
             "requires --codex-home-root under target",
         ),

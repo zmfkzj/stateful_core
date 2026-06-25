@@ -13,7 +13,7 @@ use stateful_bench::{
 #[test]
 fn denovo_condition_parser_accepts_axes_config_and_env() {
     let condition = parse_denovo_condition(
-        "stateful:on,subagent:off,config:configs/tasks/denovoswe-stateful.yaml,env:STATEFUL_HOME=/tmp/stateful,env:MODE=stateful",
+        "stateful:on,subagent:off,config:configs/tasks/denovoswe-stateful.yaml,env:STATEFUL_HOME=target/stateful-home,env:MODE=stateful",
     )
     .expect("condition should parse");
 
@@ -27,7 +27,7 @@ fn denovo_condition_parser_accepts_axes_config_and_env() {
     );
     assert_eq!(
         condition.env.get("STATEFUL_HOME").map(String::as_str),
-        Some("/tmp/stateful")
+        Some("target/stateful-home")
     );
     assert_eq!(
         condition.env.get("MODE").map(String::as_str),
@@ -326,7 +326,7 @@ fn denovo_run_command_uses_official_run_recipe_and_condition_config() {
     condition.config_path = Some("configs/tasks/denovoswe-stateful.yaml".into());
     condition
         .env
-        .insert("STATEFUL_HOME".to_string(), "/tmp/stateful".to_string());
+        .insert("STATEFUL_HOME".to_string(), "target/stateful-home".to_string());
 
     let command = build_denovo_run_recipe_command(DeNovoRunRecipeOptions {
         aweagent_root: "../AweAgent".into(),
@@ -383,7 +383,7 @@ fn denovo_run_command_uses_official_run_recipe_and_condition_config() {
     assert!(command.args.contains(&"--validate-run".to_string()));
     assert_eq!(
         command.env.get("STATEFUL_HOME").map(String::as_str),
-        Some("/tmp/stateful")
+        Some("target/stateful-home")
     );
 }
 
@@ -409,7 +409,7 @@ fn denovo_codex_adapter_command_uses_stateful_adapter_and_condition_axes() {
         verbose: true,
         codex_bin: "/opt/homebrew/bin/codex".to_string(),
         omp_bin: "omp".to_string(),
-        stateful_binary: "/Users/arthur/.cargo/bin/stateful".to_string(),
+        stateful_binary: "/opt/stateful/bin/stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "gpt-5.4-mini".to_string(),
@@ -499,7 +499,7 @@ fn denovo_omp_adapter_command_uses_existing_adapter_with_omp_runtime() {
         verbose: true,
         codex_bin: "/opt/homebrew/bin/codex".to_string(),
         omp_bin: "/opt/homebrew/bin/omp".to_string(),
-        stateful_binary: "/Users/arthur/.cargo/bin/stateful".to_string(),
+        stateful_binary: "/opt/stateful/bin/stateful".to_string(),
         agent_docker_image: Some("ghcr.io/stateful/omp-agent:latest".to_string()),
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
         benchmark_model: "deepseek-v4-flash".to_string(),
