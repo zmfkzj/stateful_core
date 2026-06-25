@@ -68,9 +68,9 @@ file, not the public full JSONL. The aborted r36 attempt duplicated the full
   `unix://$HOME/.colima/default/docker.sock`; `/var/run/docker.sock` may be a
   dangling Docker Desktop compatibility symlink.
 - The DeNovo CLI patch harvester excludes Codex/stateful runtime dirs,
-  `.stateful-tmp/**`, common Python cache/coverage dirs, `target/**`, and root
-  `clean.sh`. Repo `tmp/**` changes are harvested like other source-tree
-  changes.
+  `.stateful-tmp/**`, common Python cache/coverage dirs, `target/**`, root
+  `clean.sh`, and `upstream/**`. Repo `tmp/**` changes are harvested like other
+  source-tree changes.
 - For host-side inputs and tools, use absolute paths for `STATEFUL_BENCH_BIN`,
   `--aweagent-root`, `--python`, `--data-file`, `--config`, `STATEFUL_BIN`,
   `OMP_BIN`, `TMUX`, and `TMUX_SOCKET`.
@@ -79,7 +79,8 @@ file, not the public full JSONL. The aborted r36 attempt duplicated the full
 - Change run IDs and isolated OMP home directories before reusing commands.
 - For Docker-isolated OMP runs, build or tag the agent image from
   `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. The image includes
-  Bun-installed `omp` plus the Linux `stateful` binary.
+  Bun-installed `omp`, the Linux `stateful` binary, and `bubblewrap` for
+  stateful sandbox tool execution inside the agent container.
 - Use `--prompt-version v2` for new official-style runs. Keep
   `--prompt-version v1` only when continuing or comparing against historical
   v1 runs.
@@ -238,8 +239,9 @@ and three independent trials. It is a declared subagent/concurrency behavior
 test, not the official-style `--max-concurrent 1` default from
 `docs/denovo-benchmark-guide.md`.
 
-Rebuild the Docker agent image before relaunching after local `stateful` or OMP
-integration changes:
+Rebuild the Docker agent image before relaunching after local `stateful`, OMP
+integration, or sandbox-tooling changes; the image must contain `bwrap` for
+stateful-on OMP sandbox tools:
 
 ```bash
 DOCKER_HOST="$DOCKER_HOST" docker build --pull --no-cache \
@@ -335,11 +337,20 @@ Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
   detached run. Use a short, existing-parent socket path because long paths can
   exceed tmux's socket length limit; create the session with that socket and
   keep benchmark stdout/stderr in a launch log under the run output directory.
+- Rebuild or retag the Docker OMP agent image after changing the Dockerfile. A
+  `stateful:on` Docker OMP run whose nested `sandbox_bash`/`ext_ro_bash` calls
+  fail with `No such file or directory (os error 2)` is usually using an older
+  image without `bubblewrap`; rebuild `stateful-denovo-omp-agent:local` before
+  interpreting the run as model behavior.
 - If OMP exits in about one second with empty `patch.diff`, zero subagent
   spawns, and `omp exited 1`, first check provider auth propagation. In Docker
   OMP mode the isolated home does not inherit host OMP login state, and the
   adapter only forwards allowlisted provider key environment variables that are
   present before `stateful-bench` starts.
+- Treat `finish_reason: "benchmark-contamination"` as an invalid rollout, not a
+  scored model failure. It means the adapter found an `upstream` checkout in the
+  harvested workspace or an OMP/Codex transcript reference to the upstream
+  repository, PR, issue, patch, or raw source for that instance.
 - A `stateful:on` Docker run that emits `SessionRegistered` but no nested
   `SessionHeartbeat` or `ActivityFinalized` is not lifecycle-valid. Report it as
   a runtime/lifecycle failure, not as a model-quality score.
@@ -429,6 +440,12 @@ During live runs, prefer cumulative `denovo-report.json` values over raw
 adapter `results.jsonl` files. Matrix runs may rewrite or reset raw
 `results.jsonl` files while conditions advance, so raw row counts can be
 misleading until the run has settled.
+
+If `results.jsonl` shows `finish_reason: "benchmark-contamination"`, inspect
+`codex-command.json.benchmark_contamination`; `kind: "upstream-worktree"` means
+an `upstream/` checkout remained in the final workspace, and
+`kind: "upstream-source-access"` means session artifacts referenced forbidden
+upstream source-control commands or URLs.
 
 After all three trials complete, collect each trial separately and report the
 mean:

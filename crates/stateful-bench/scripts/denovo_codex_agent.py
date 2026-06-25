@@ -106,6 +106,27 @@ DIFF_EXCLUDED_PATHS = (
     "clean.sh",
 )
 
+WORKSPACE_COPY_IGNORE_PATTERNS = (
+    ".codex",
+    ".stateful",
+    ".stateful_bench",
+    ".stateful_core",
+    "upstream",
+)
+BENCHMARK_SOURCE_LEAK_COMMAND_PATTERNS = (
+    "git clone",
+    "git fetch",
+    "git pull",
+    "gh pr",
+    "gh issue",
+)
+BENCHMARK_SOURCE_LEAK_HOST_PATTERNS = (
+    "github.com",
+    "raw.githubusercontent.com",
+    "patch-diff.githubusercontent.com",
+    "api.github.com/repos",
+)
+
 
 @dataclass
 class InstanceResult:
@@ -165,6 +186,17 @@ Native Codex/OMP subagent requirements:
 """.rstrip()
 
 
+def benchmark_isolation_prompt_instruction() -> str:
+    return """
+
+Benchmark isolation requirements:
+- Reconstruct the package from the provided workspace and repository specification only.
+- Do not fetch, clone, open, or inspect the upstream repository, pull request, issue, patch, commit, or raw source for this instance.
+- Do not use GitHub, PR, issue, patch-diff, or raw-source URLs as implementation evidence.
+- Do not create or use an `upstream` checkout, mirror, or source-copy directory.
+""".rstrip()
+
+
 
 
 def build_codex_prompt(
@@ -179,11 +211,13 @@ def build_codex_prompt(
 ) -> str:
     step_line = f"- Maximum task steps: {max_steps}.\n" if max_steps is not None else ""
     subagent_instruction = native_subagent_prompt_instruction(subagent, subagent_min_count)
+    isolation_instruction = benchmark_isolation_prompt_instruction()
     return f"""
 You are solving one DeNovoSWE benchmark instance.
 
 Instance id:
 {instance_id}
+{isolation_instruction}
 {subagent_instruction}
 
 
@@ -435,7 +469,7 @@ def copy_exported_workspace(source: Path, workspace: Path) -> None:
         source,
         workspace,
         symlinks=True,
-        ignore=shutil.ignore_patterns(".codex", ".stateful", ".stateful_bench", ".stateful_core"),
+        ignore=shutil.ignore_patterns(*WORKSPACE_COPY_IGNORE_PATTERNS),
     )
 
 
@@ -1439,6 +1473,76 @@ def subagent_usage_metadata(
         "subagent_requirement_met_any": requirement_met_count > 0,
     }
 
+def instance_owner_repo(instance_id: str) -> tuple[str, str] | None:
+    prefix, separator, _ = instance_id.rpartition("_pr")
+    if not separator or "_" not in prefix:
+        return None
+    owner, repo = prefix.split("_", 1)
+    if not owner or not repo:
+        return None
+    return owner, repo
+
+
+def benchmark_source_leak_patterns(instance_id: str) -> tuple[str, ...]:
+    patterns = list(BENCHMARK_SOURCE_LEAK_COMMAND_PATTERNS)
+    owner_repo = instance_owner_repo(instance_id)
+    if owner_repo is not None:
+        owner, repo = owner_repo
+        repo_path = f"{owner}/{repo}".lower()
+        patterns.extend(f"{host}/{repo_path}" for host in BENCHMARK_SOURCE_LEAK_HOST_PATTERNS)
+        patterns.extend(
+            [
+                f"patch-diff.githubusercontent.com/raw/{repo_path}",
+                f"git@github.com:{repo_path}",
+                f"pr://{repo_path}",
+                f"issue://{repo_path}",
+            ]
+        )
+    return tuple(patterns)
+
+
+def benchmark_session_artifact_paths(codex_home: Path) -> list[Path]:
+    if not codex_home.exists():
+        return []
+    candidates: list[Path] = []
+    for pattern in ("**/*.jsonl", "**/*.log"):
+        candidates.extend(path for path in codex_home.rglob(pattern) if path.is_file())
+    return sorted(set(candidates))
+
+
+def benchmark_contamination_record(
+    instance_id: str,
+    workspace: Path,
+    codex_home: Path,
+) -> dict[str, str] | None:
+    upstream_dir = workspace / "upstream"
+    if upstream_dir.exists():
+        return {
+            "kind": "upstream-worktree",
+            "path": str(upstream_dir),
+            "reason": "`upstream` directory exists in final workspace",
+        }
+
+    patterns = benchmark_source_leak_patterns(instance_id)
+    for artifact_path in benchmark_session_artifact_paths(codex_home):
+        try:
+            with artifact_path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    lower_line = line.lower()
+                    for pattern in patterns:
+                        if pattern in lower_line:
+                            return {
+                                "kind": "upstream-source-access",
+                                "path": str(artifact_path),
+                                "line": str(line_number),
+                                "pattern": pattern,
+                                "reason": "session transcript referenced upstream source control",
+                            }
+        except OSError:
+            continue
+    return None
+
+
 
 def instance_result_row(result: InstanceResult) -> dict[str, Any]:
     row = {
@@ -1954,6 +2058,28 @@ async def run_one_instance_async(
                 command_record["orchestration_trace"] = orchestration_trace
             write_json(instance_dir / "codex-command.json", command_record)
 
+        benchmark_contamination = benchmark_contamination_record(inst.id, workspace, codex_home)
+        if benchmark_contamination is not None:
+            patch = git_diff(workspace) if returncode == 0 else ""
+            patch_path.write_text(patch, encoding="utf-8")
+            command_record["benchmark_contamination"] = benchmark_contamination
+            orchestration_trace = capture_trace()
+            finish_command_record(orchestration_trace)
+            cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
+            stateful_repo_cleanup = None
+            return InstanceResult(
+                inst.id,
+                False,
+                None,
+                "benchmark-contamination",
+                benchmark_contamination["reason"],
+                None,
+                subagent_used=subagent_usage["subagent_used"],
+                subagent_usage=subagent_usage,
+                token_usage=token_usage,
+                orchestration_trace=orchestration_trace,
+            )
+
         if returncode != 0:
             patch_path.write_text("", encoding="utf-8")
             orchestration_trace = capture_trace()
@@ -1972,6 +2098,7 @@ async def run_one_instance_async(
                 token_usage=token_usage,
                 orchestration_trace=orchestration_trace,
             )
+
 
         if args.subagent == "on" and not subagent_usage["subagent_requirement_met"]:
             patch_path.write_text("", encoding="utf-8")
