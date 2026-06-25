@@ -236,6 +236,11 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("name: \"lazy_edit_resume\""));
     assert!(extension.contains("applyOmpLinePatch"));
     assert!(extension.contains("lazyEditOperations"));
+    assert!(extension.contains("let lazyEditOperationCounter = 0"));
+    assert!(extension.contains("nextLazyEditOperationId()"));
+    assert!(extension.contains("reservation or claim is ready"));
+    assert!(extension.contains("structuredLazyEditOperationId(decision)"));
+    assert!(extension.contains("validateOmpLinePatchBases"));
     assert!(extension.contains("line === \"*** Begin Patch\""));
     assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
     assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));

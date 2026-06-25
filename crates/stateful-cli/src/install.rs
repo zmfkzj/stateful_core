@@ -1636,10 +1636,24 @@ function stringList(value) {{
 }}
 
 const lazyEditOperations = new Map();
+let lazyEditOperationCounter = 0;
 
 function extractWaitId(reason) {{
   const match = String(reason || "").match(/wait_id ([A-Za-z0-9_-]+)/);
   return match ? match[1] : "";
+}}
+
+function structuredLazyEditOperationId(decision) {{
+  return decision?.wait?.wait_id
+    || decision?.reservation?.wait_id
+    || decision?.reservation?.id
+    || extractWaitId(decision?.reason)
+    || extractWaitId(decision?.message);
+}}
+
+function nextLazyEditOperationId() {{
+  lazyEditOperationCounter += 1;
+  return "lazy-edit-" + Date.now().toString(36) + "-" + lazyEditOperationCounter.toString(36);
 }}
 
 function editPatchTargets(input) {{
@@ -1650,6 +1664,14 @@ function editPatchTargets(input) {{
     if (match) targets.push(match[1]);
   }}
   return [...new Set(targets)];
+}}
+
+function safeLazyEditTarget(target) {{
+  return typeof target === "string"
+    && target.length > 0
+    && !target.startsWith("/")
+    && !target.includes("\\")
+    && !target.split("/").some((part) => part === "" || part === "." || part === "..");
 }}
 
 function readOperationBases(cwd, targets) {{
@@ -1663,9 +1685,9 @@ function readOperationBases(cwd, targets) {{
 
 function rememberLazyEditOperation(event, ctx, decision) {{
   if (event?.toolName !== "edit") return "";
-  const operationId = extractWaitId(decision?.reason);
-  if (!operationId) return "";
   const targets = editPatchTargets(event.input || {{}});
+  if (targets.length === 0 || !targets.every(safeLazyEditTarget)) return "";
+  const operationId = structuredLazyEditOperationId(decision) || nextLazyEditOperationId();
   lazyEditOperations.set(operationId, {{
     operation_id: operationId,
     session_id: sessionId(event, ctx),
@@ -1674,6 +1696,7 @@ function rememberLazyEditOperation(event, ctx, decision) {{
     tool_input: event.input || {{}},
     targets,
     bases: readOperationBases(ctx.cwd, targets),
+    blocked_reason: decision?.reason || "",
   }});
   return operationId;
 }}
@@ -1749,14 +1772,24 @@ function parseOmpLinePatch(patch) {{
   return files;
 }}
 
-function applyOmpLinePatch(cwd, patch, bases) {{
-  const editsByFile = parseOmpLinePatch(patch);
-  for (const [target, edits] of editsByFile.entries()) {{
+function validateOmpLinePatchBases(cwd, editsByFile, bases) {{
+  for (const target of editsByFile.keys()) {{
     const filePath = resolve(cwd, target);
     const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : null;
     if (current !== (bases.get(target) ?? null)) {{
       return {{ status: "stale", message: target + " changed since operation was queued" }};
     }}
+  }}
+  return null;
+}}
+
+function applyOmpLinePatch(cwd, patch, bases) {{
+  const editsByFile = parseOmpLinePatch(patch);
+  const stale = validateOmpLinePatchBases(cwd, editsByFile, bases);
+  if (stale) return stale;
+  for (const [target, edits] of editsByFile.entries()) {{
+    const filePath = resolve(cwd, target);
+    const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : null;
     const text = current || "";
     const split = textToLines(text);
     const applied = split.lines.slice();
@@ -2346,11 +2379,11 @@ export default function statefulOmpExtension(pi) {{
   pi.registerTool({{
     name: "lazy_edit_resume",
     label: "Lazy Edit Resume",
-    description: "Resume a queued OMP edit operation after Stateful reports its reservation is claimable. Applies only strict line-based OMP edit patches captured in this live extension session.",
+    description: "Resume a blocked OMP edit operation after the needed reservation or claim is ready. Applies only strict line-based OMP edit patches captured in this live extension session.",
     parameters: {{
       type: "object",
       properties: {{
-        operation_id: {{ type: "string", description: "Queued lazy edit operation id; currently the Stateful wait_id printed in the conflict message." }},
+        operation_id: {{ type: "string", description: "Queued lazy edit operation id; either a Stateful wait_id or a generated live-session id printed in the block message." }},
       }},
       required: ["operation_id"],
     }},
@@ -2532,7 +2565,7 @@ export default function statefulOmpExtension(pi) {{
     if (decision.decision === "block") {{
       const operationId = rememberLazyEditOperation(event, ctx, decision);
       const suffix = operationId
-        ? "\n\nQueued lazy edit operation_id: " + operationId + "\nNext: when reservation is ready, call lazy_edit_resume with this operation_id."
+        ? "\n\nQueued lazy edit operation_id: " + operationId + "\nNext: when reservation or claim is ready, call lazy_edit_resume with this operation_id."
         : "";
       return {{ block: true, reason: decision.reason + suffix }};
     }}

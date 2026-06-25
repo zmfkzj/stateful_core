@@ -92,10 +92,11 @@ Generated OMP tools:
   grants matching calls keyed by purpose plus write/create/write-dir/socket/
   signal/network scope until expiry or max uses; defaults are 5 uses and 600
   seconds.
-- `lazy_edit_resume` for strict replay of queued, line-based OMP `edit` patches
-  after Stateful reports the reservation is claimable. It re-authorizes the
-  original edit, checks the file has not changed since queue time, then applies
-  the stored patch from the live extension session.
+- `lazy_edit_resume` for strict replay of blocked, line-based OMP `edit` patches.
+  The live extension stores the original patch after `missing_reservation`,
+  `missing_claim`, or claim-conflict denials; after the agent fixes the missing
+  scope or receives a claimable reservation, it re-authorizes the original edit,
+  checks the file has not changed since queue time, then applies the stored patch.
 
 Generated OMP bash tools wait for sandbox commands to finish before returning,
 emit stdout through inline OMP tool updates, include final stdout/stderr/status

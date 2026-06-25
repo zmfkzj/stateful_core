@@ -190,8 +190,10 @@ session stops being fresh.
 
 When another active claim blocks a write, the writer can queue for that resource.
 When the resource is released or expires, the server reserves it for the next
-eligible waiter and sends a resume notification. The reserved session rereads the
-target, claims or lazy-claims the reservation, then retries the write.
+eligible waiter and sends a resume notification. In OMP, blocked line-based
+`edit` patches are kept as live-session lazy edit operations, so an agent can
+acquire the missing reservation or claim and call `lazy_edit_resume` instead of
+regenerating the patch.
 
 Detailed queue states, claim expiry behavior, and promotion rules are documented
 in [State model](docs/state-model.md),
@@ -216,7 +218,7 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 In OMP, use the generated tools instead of raw Bash: `sandbox_bash` for
 non-external sandbox profiles, `ext_ro_bash` for read-only external shell work,
 `ext_rw_bash` for external writes with a scoped purpose grant and declared scope,
-and `lazy_edit_resume` for strict replay of queued line-based OMP `edit` patches.
+and `lazy_edit_resume` for strict replay of blocked line-based OMP `edit` patches.
 
 See [Usage reference](docs/usage-reference.md) for detailed CLI, hook, sandbox,
 LAN sharing, generated-file, and release notes.

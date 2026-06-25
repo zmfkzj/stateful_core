@@ -229,11 +229,14 @@ workspace file state. PostToolUse observes completed native edits and sandbox
 claims that authorized the completed write boundary. Released claims leave the
 live context render and do not authorize a later write; the session must reread
 and reacquire a claim, or lazy-claim a claimable reservation, before retrying.
-OMP `edit` denials that include a wait id are captured by the generated extension
-as live-session lazy edit operations. `lazy_edit_resume` re-authorizes the
-original edit when the reservation is claimable, verifies the file content still
-matches the queued base text, and applies only line-based edit patch operations;
-block operations or changed files require regenerating the patch.
+OMP `edit` denials are captured by the generated extension as live-session lazy
+edit operations when the patch has safe repo-relative line targets. Denials with
+a wait id reuse that id; missing reservation or missing claim denials receive a
+generated live-session operation id. `lazy_edit_resume` re-authorizes the original
+edit after the agent fixes the missing scope or receives a claimable reservation,
+verifies the file content still matches the queued base text, and applies only
+line-based edit patch operations; block operations or changed files require
+regenerating the patch.
 For Bash, command text alone never authorizes tool use.
 `/v1/authorize` accepts optional `base_observations` for OCC-style freshness
 checks. When supplied, each observation is compared against the current
