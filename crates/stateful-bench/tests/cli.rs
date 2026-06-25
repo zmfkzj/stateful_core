@@ -3746,6 +3746,18 @@ print(json.dumps({{"off": off, "on": on}}, sort_keys=True))
     assert!(off.contains("Benchmark isolation requirements"));
     assert!(on.contains("Benchmark isolation requirements"));
     assert!(on.contains("Do not fetch, clone, open, or inspect the upstream repository"));
+    assert!(on.contains(
+        "ABSOLUTE RULE: DO NOT DOWNLOAD THE TARGET PACKAGE'S SOURCE CODE FROM THE INTERNET"
+    ));
+    assert!(on.contains("The following are ALLOWED:"));
+    assert!(on.contains("Installing *third-party* dependencies your own implementation needs"));
+    assert!(on.contains(
+        "Running `pip install -e .` on the code you yourself wrote inside the workspace"
+    ));
+    assert!(!on.contains(
+        "Do not use GitHub, PR, issue, patch-diff, or raw-source URLs as implementation evidence."
+    ));
+    assert!(on.contains("This does not prohibit non-target third-party dependency research."));
     assert!(on.contains("Do not create or use an `upstream` checkout"));
     assert!(
         on.find("Native Codex/OMP subagent requirements").unwrap()
@@ -3807,6 +3819,18 @@ command_session = session_dir("command-home")
     encoding="utf-8",
 )
 
+local_upstream_read_session = session_dir("local-upstream-read-home")
+(local_upstream_read_session / "rollout.jsonl").write_text(
+    json.dumps({{"type": "message", "message": {{"role": "assistant", "content": [{{"type": "toolCall", "name": "read", "arguments": {{"path": "upstream/pydeps.py"}}}}]}}}}) + "\n",
+    encoding="utf-8",
+)
+
+other_repo_command_session = session_dir("other-repo-command-home")
+(other_repo_command_session / "rollout.jsonl").write_text(
+    json.dumps({{"type": "message", "message": {{"role": "assistant", "content": [{{"type": "toolCall", "name": "sandbox_bash", "arguments": {{"command": "git clone https://github.com/other/project"}}}}]}}}}) + "\n",
+    encoding="utf-8",
+)
+
 clean_home = root / "clean-home"
 clean_home.mkdir(parents=True)
 (workspace / "upstream").mkdir()
@@ -3815,8 +3839,10 @@ upstream = module.benchmark_contamination_record("thebjorn_pydeps_pr233", worksp
 false_positive = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, root / "false-positive-home" / ".omp" / "profiles" / "stateful" / "agent")
 raw_read = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, root / "raw-read-home" / ".omp" / "profiles" / "stateful" / "agent")
 command = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, root / "command-home" / ".omp" / "profiles" / "stateful" / "agent")
+local_upstream_read = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, root / "local-upstream-read-home" / ".omp" / "profiles" / "stateful" / "agent")
+other_repo_command = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, root / "other-repo-command-home" / ".omp" / "profiles" / "stateful" / "agent")
 clean = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, clean_home)
-print(json.dumps({{"upstream": upstream, "false_positive": false_positive, "raw_read": raw_read, "command": command, "clean": clean}}, sort_keys=True))
+print(json.dumps({{"upstream": upstream, "false_positive": false_positive, "raw_read": raw_read, "command": command, "local_upstream_read": local_upstream_read, "other_repo_command": other_repo_command, "clean": clean}}, sort_keys=True))
 "#,
         agent_path = denovo_codex_agent_path_json(),
         root = serde_json::to_string(&dir).expect("root should serialize"),
@@ -3832,6 +3858,12 @@ print(json.dumps({{"upstream": upstream, "false_positive": false_positive, "raw_
     );
     assert_eq!(output["command"]["kind"], "upstream-source-access");
     assert_eq!(output["command"]["pattern"], "git fetch");
+    assert_eq!(
+        output["local_upstream_read"]["kind"],
+        "upstream-source-access"
+    );
+    assert_eq!(output["local_upstream_read"]["pattern"], "upstream/");
+    assert_eq!(output["other_repo_command"], serde_json::Value::Null);
     assert_eq!(output["clean"], serde_json::Value::Null);
 
     fs::remove_dir_all(dir).expect("temp dir should clean up");
@@ -4313,6 +4345,8 @@ print(json.dumps({{
     assert!(skill.contains("state_reservation_declare"));
     assert!(skill.contains("state_claim_acquire"));
     assert!(skill.contains("runtime-specific tool names"));
+    assert!(!skill.contains("benchmark-contamination"));
+    assert!(!skill.contains("model-quality failure"));
     assert_eq!(output["auth_exists"], false);
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");

@@ -193,8 +193,25 @@ def benchmark_isolation_prompt_instruction() -> str:
 Benchmark isolation requirements:
 - Reconstruct the package from the provided workspace and repository specification only.
 - Do not fetch, clone, open, or inspect the upstream repository, pull request, issue, patch, commit, or raw source for this instance.
-- Do not use GitHub, PR, issue, patch-diff, or raw-source URLs as implementation evidence.
 - Do not create or use an `upstream` checkout, mirror, or source-copy directory.
+
+<ANTI_CHEAT_CONSTRAINT>
+ABSOLUTE RULE: DO NOT DOWNLOAD THE TARGET PACKAGE'S SOURCE CODE FROM THE INTERNET.
+You MUST implement the target project from scratch based solely on the repository specification above.
+This does not prohibit non-target third-party dependency research.
+It is a hard violation to look up, download, install, clone, or copy the target package's source code from any external source, including PyPI, GitHub, GitLab, Bitbucket, Codeberg, conda-forge, mirrors, caches, wheels, sdists, patch files, issues, pull requests, commits, or raw-source URLs.
+
+Specifically forbidden for the target package:
+- Package-manager source recovery such as `pip install <target>`, `pip download <target>`, `pip show <target>`, `python -m pip install <target>`, `uv add <target>`, `poetry add <target>`, `conda install <target>`, or equivalent commands.
+- VCS or source-control access such as `git clone`, `git fetch`, `git pull`, `git submodule add`, `gh pr`, or `gh issue` for the target repository, pull request, issue, patch, commit, or raw source.
+- Direct downloads from PyPI-family hosts, repository hosts, patch-diff hosts, or URLs containing the target package or upstream repository name.
+- Python introspection or on-disk artifact extraction that dumps the installed upstream source.
+
+The following are ALLOWED:
+- Installing *third-party* dependencies your own implementation needs.
+- Running `pip install -e .` on the code you yourself wrote inside the workspace.
+- Reading files already present in the workspace at the start of the session, except benchmark artifacts and generated metadata.
+</ANTI_CHEAT_CONSTRAINT>
 """.rstrip()
 
 
@@ -1499,12 +1516,29 @@ def benchmark_source_leak_url_patterns(instance_id: str) -> tuple[str, ...]:
     )
 
 
-def benchmark_source_leak_command_pattern(text: str) -> str | None:
+def benchmark_source_leak_local_path_pattern(text: str) -> str | None:
+    if re.search(r"(?<![a-z0-9_-])upstream(?![a-z0-9_-])", text.lower()):
+        return "upstream/"
+    return None
+
+
+def benchmark_source_leak_command_pattern(
+    text: str,
+    url_patterns: tuple[str, ...],
+) -> str | None:
     lower_text = text.lower()
+    command_pattern = None
     for pattern in BENCHMARK_SOURCE_LEAK_COMMAND_PATTERNS:
         words = r"\s+".join(re.escape(part) for part in pattern.split())
         if re.search(rf"(?<![a-z0-9_-]){words}(?![a-z0-9_-])", lower_text):
-            return pattern
+            command_pattern = pattern
+            break
+    if command_pattern is None:
+        return None
+    if benchmark_source_leak_local_path_pattern(text) is not None:
+        return command_pattern
+    if benchmark_source_leak_url_pattern(text, url_patterns) is not None:
+        return command_pattern
     return None
 
 
@@ -1559,18 +1593,24 @@ def benchmark_tool_call_source_leak_pattern(
         for key in ("path", "url"):
             value = parsed_arguments.get(key)
             if isinstance(value, str) and name in {"read", "browser"}:
+                pattern = benchmark_source_leak_local_path_pattern(value)
+                if pattern is not None:
+                    return pattern
                 pattern = benchmark_source_leak_url_pattern(value, url_patterns)
                 if pattern is not None:
                     return pattern
         command = parsed_arguments.get("command")
         if isinstance(command, str):
-            return benchmark_source_leak_command_pattern(command)
+            return benchmark_source_leak_command_pattern(command, url_patterns)
     elif isinstance(parsed_arguments, str):
         if name in {"read", "browser"}:
+            pattern = benchmark_source_leak_local_path_pattern(parsed_arguments)
+            if pattern is not None:
+                return pattern
             pattern = benchmark_source_leak_url_pattern(parsed_arguments, url_patterns)
             if pattern is not None:
                 return pattern
-        return benchmark_source_leak_command_pattern(parsed_arguments)
+        return benchmark_source_leak_command_pattern(parsed_arguments, url_patterns)
     return None
 
 

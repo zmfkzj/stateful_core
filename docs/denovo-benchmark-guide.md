@@ -22,12 +22,14 @@ DeNovoSWE is a from-scratch repository construction benchmark. The Docker image
 starts with the original source present, but the runtime runs `clean.sh` before
 the agent can inspect it. The agent receives the package specification through
 `README.md` and must rebuild the package implementation from that spec.
-The agent must not inspect the upstream repository, pull request, issue, patch,
-commit, or raw source while solving the instance. The adapter prompt states this
-benchmark isolation rule explicitly. The adapter invalidates runs when the final
-workspace contains `upstream/` or session artifacts show explicit upstream access:
+The agent may use ordinary internet access for non-target third-party dependency
+research when the configured scaffold exposes search, but must not inspect or
+recover the target package's upstream repository, pull request, issue, patch,
+commit, raw source, package-manager artifact, wheel, sdist, or source cache while
+solving the instance. The adapter invalidates runs when the final workspace
+contains `upstream/` or session artifacts show explicit target upstream access:
 `.read.log` URL headers, `read`/`browser` URL or path tool-call arguments, or
-shell command tool-call arguments containing forbidden upstream commands.
+shell command tool-call arguments containing forbidden target-upstream commands.
 
 Evaluation runs in a fresh container session:
 
