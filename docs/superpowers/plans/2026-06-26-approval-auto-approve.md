@@ -34,15 +34,17 @@
 
 ---
 
-### Task 1: Generated extension test
+### Task 1: Generated extension auto-approval
 
 **Files:**
 - Modify: `crates/stateful-cli/tests/install_global.rs:318-342`
+- Modify: `crates/stateful-cli/src/install.rs:2046-2118`
+- Modify: `crates/stateful-cli/src/install.rs:2683-2737`
 - Test: `crates/stateful-cli/tests/install_global.rs`
 
 **Interfaces:**
 - Consumes: generated extension text loaded into `extension` in `install_omp_yes_writes_config_mcp_extension_skills_and_custom_tools`.
-- Produces: failing assertions requiring `auto_approve`, `stateful.autoApprove`, `shouldAutoApproveStatefulPrompt`, `recordExternalBashGrant`, and auto-approval prompt skip behavior.
+- Produces: generated extension support for `stateful.autoApprove` and `auto_approve` without changing sandbox args.
 
 - [ ] **Step 1: Write the failing assertions**
 
@@ -71,24 +73,7 @@ async: false
 
 Expected: FAIL in `install_omp_yes_writes_config_mcp_extension_skills_and_custom_tools` because the generated extension lacks the new strings.
 
-- [ ] **Step 3: Commit is not allowed yet**
-
-Do not commit red-only tests. Continue to Task 2 in the same working tree.
-
----
-
-### Task 2: Generated extension implementation
-
-**Files:**
-- Modify: `crates/stateful-cli/src/install.rs:2046-2118`
-- Modify: `crates/stateful-cli/src/install.rs:2683-2737`
-- Test: `crates/stateful-cli/tests/install_global.rs`
-
-**Interfaces:**
-- Consumes: test assertions from Task 1.
-- Produces: generated extension support for `stateful.autoApprove` and `auto_approve` without changing sandbox args.
-
-- [ ] **Step 1: Add prompt auto-approval helpers**
+- [ ] **Step 3: Add prompt auto-approval helpers**
 
 In the generated JavaScript section, add these helpers before `externalBashApprovalMessage(params)`:
 
@@ -113,7 +98,7 @@ function recordExternalBashGrant(params, now) {
 }
 ```
 
-- [ ] **Step 2: Reuse the helper in `ensureExternalBashGrant`**
+- [ ] **Step 4: Reuse the helper in `ensureExternalBashGrant`**
 
 Replace the manual grant-recording block in `ensureExternalBashGrant` with:
 
@@ -122,9 +107,9 @@ Replace the manual grant-recording block in `ensureExternalBashGrant` with:
   return true;
 ```
 
-The function should still prune grants, reuse existing grants, call `confirmExternalBashGrant`, and return false when not approved.
+The function must still prune grants, reuse existing grants, call `confirmExternalBashGrant`, and return false when not approved.
 
-- [ ] **Step 3: Add the tool schema flag**
+- [ ] **Step 5: Add the tool schema flag**
 
 In the `ext_rw_bash` properties block, add:
 
@@ -132,7 +117,7 @@ In the `ext_rw_bash` properties block, add:
         auto_approve: { type: "boolean", description: "Skip the OMP UI approval prompt for this Stateful-owned external write grant. Sandbox scope validation and Stateful hook authorization still apply." },
 ```
 
-- [ ] **Step 4: Skip `ctx.ui.confirm` only when auto-approved**
+- [ ] **Step 6: Skip `ctx.ui.confirm` only when auto-approved**
 
 Replace the current unconditional `ctx.ui.confirm` availability check with this branch:
 
@@ -158,7 +143,7 @@ Then replace the grant call with:
         }
 ```
 
-- [ ] **Step 5: Run the targeted test to verify GREEN**
+- [ ] **Step 7: Run the targeted test to verify GREEN**
 
 Run with OMP `sandbox_bash`:
 
@@ -172,7 +157,7 @@ async: false
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit code and test together**
+- [ ] **Step 8: Commit code and test together**
 
 Run with OMP `sandbox_bash`:
 
@@ -194,7 +179,7 @@ async: false
 
 ---
 
-### Task 3: Documentation update
+### Task 2: Documentation update
 
 **Files:**
 - Modify: `README.md`
@@ -207,7 +192,7 @@ async: false
 - Test: `crates/stateful-cli/tests/install_global.rs`
 
 **Interfaces:**
-- Consumes: option names from Task 2: `stateful.autoApprove` and `auto_approve`.
+- Consumes: option names from Task 1: `stateful.autoApprove` and `auto_approve`.
 - Produces: docs that state auto-approval skips only Stateful-owned OMP UI prompts and leaves authorization intact.
 
 - [ ] **Step 1: Update each `ext_rw_bash` approval sentence**
@@ -268,13 +253,13 @@ async: false
 
 ---
 
-### Task 4: Final targeted verification
+### Task 3: Final targeted verification
 
 **Files:**
 - Test: `crates/stateful-cli/tests/install_global.rs`
 
 **Interfaces:**
-- Consumes: implementation and docs from Tasks 1-3.
+- Consumes: implementation and docs from Tasks 1-2.
 - Produces: final evidence that generated install output includes the option and asset comparisons still pass.
 
 - [ ] **Step 1: Run the full install-global test file**
