@@ -2043,6 +2043,25 @@ function pruneExternalBashGrants(now) {{
   }}
 }}
 
+function statefulPromptAutoApproveConfig(ctx) {{
+  return ctx?.config?.stateful?.autoApprove === true;
+}}
+
+function shouldAutoApproveStatefulPrompt(ctx, params) {{
+  return statefulPromptAutoApproveConfig(ctx) || params?.auto_approve === true;
+}}
+
+function recordExternalBashGrant(params, now) {{
+  const key = externalGrantKey(params);
+  const settings = externalGrantSettings(params);
+  const approvedAt = now ?? Date.now();
+  externalBashGrants.set(key, {{
+    expiresAt: approvedAt + settings.ttlMs,
+    maxUses: settings.maxUses,
+    uses: 1,
+  }});
+}}
+
 function externalBashApprovalMessage(params) {{
   const descriptor = externalGrantDescriptor(params);
   const settings = externalGrantSettings(params);
@@ -2106,15 +2125,9 @@ async function ensureExternalBashGrant(ctx, params, signal) {{
     existing.uses += 1;
     return true;
   }}
-  const settings = externalGrantSettings(params);
   const approved = await confirmExternalBashGrant(ctx, params, signal);
   if (!approved) return false;
-  const approvedAt = Date.now();
-  externalBashGrants.set(key, {{
-    expiresAt: approvedAt + settings.ttlMs,
-    maxUses: settings.maxUses,
-    uses: 1,
-  }});
+  recordExternalBashGrant(params, Date.now());
   return true;
 }}
 
@@ -2697,6 +2710,7 @@ export default function statefulOmpExtension(pi) {{
         approval_examples: {{ type: "array", items: {{ type: "string" }}, description: "Optional example command classes to show in the approval prompt; raw command text is not shown." }},
         grant_max_uses: {{ type: "number", description: "Maximum executions covered by the approved purpose/scope grant, from 1 to 20. Defaults to 5." }},
         grant_expires_seconds: {{ type: "number", description: "Grant lifetime in seconds, from 1 to 3600. Defaults to 600." }},
+        auto_approve: {{ type: "boolean", description: "Skip the OMP UI approval prompt for this Stateful-owned external write grant. Sandbox scope validation and Stateful hook authorization still apply." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
         async: {{ type: "boolean", description: "Run in the background when true or omitted; set false to wait for completion." }},
@@ -2710,7 +2724,7 @@ export default function statefulOmpExtension(pi) {{
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      if (typeof ctx?.ui?.confirm !== "function") {{
+      if (!shouldAutoApproveStatefulPrompt(ctx, params) && typeof ctx?.ui?.confirm !== "function") {{
         return {{
           isError: true,
           content: [{{ type: "text", text: "ext_rw_bash requires OMP UI confirmation, but ctx.ui.confirm is unavailable." }}],
@@ -2719,7 +2733,14 @@ export default function statefulOmpExtension(pi) {{
       }}
       let approved;
       try {{
-        approved = await ensureExternalBashGrant(ctx, params, signal);
+        if (shouldAutoApproveStatefulPrompt(ctx, params)) {{
+          const now = Date.now();
+          pruneExternalBashGrants(now);
+          recordExternalBashGrant(params, now);
+          approved = true;
+        }} else {{
+          approved = await ensureExternalBashGrant(ctx, params, signal);
+        }}
       }} catch (error) {{
         return sandboxToolError(error);
       }}

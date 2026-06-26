@@ -339,6 +339,12 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("decision: \"block\""));
     assert!(extension.contains("decision.decision === \"prompt\""));
     assert!(extension.contains("ctx?.ui?.confirm"));
+    assert!(extension.contains("auto_approve: { type: \"boolean\""));
+    assert!(extension.contains("function shouldAutoApproveStatefulPrompt(ctx, params)"));
+    assert!(extension.contains("ctx?.config?.stateful?.autoApprove"));
+    assert!(extension.contains("params?.auto_approve === true"));
+    assert!(extension.contains("function recordExternalBashGrant(params, now)"));
+    assert!(extension.contains("if (!shouldAutoApproveStatefulPrompt(ctx, params) && typeof ctx?.ui?.confirm !== \"function\")"));
     let command_policy_skill = fs::read_to_string(&omp_skill).expect("omp skill should read");
     let source_command_policy_skill = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/stateful-command-policy/SKILL.md"),
