@@ -1032,7 +1032,10 @@ fn flush_denovo_matrix_checkpoint(
     write_condition_metadata: bool,
 ) -> Result<Vec<DeNovoConditionReport>> {
     let mut reports = Vec::new();
-    for aggregate in aggregates {
+    for aggregate in aggregates
+        .iter()
+        .filter(|aggregate| aggregate.command.is_some())
+    {
         let report = flush_denovo_condition_aggregate(
             options,
             aggregate,
