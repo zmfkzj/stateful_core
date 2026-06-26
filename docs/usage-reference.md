@@ -87,11 +87,11 @@ Generated OMP tools:
   `write-targets`, `build`, `git`, and `github-pr`
 - `ext_ro_bash` for read-only `--fs external` purpose-and-command operations
   without OMP UI confirmation
-- `ext_rw_bash` for external writes that declare write/create/dir scope and ask
-  for a scoped purpose grant. The approval prompt omits raw command text and
-  grants matching calls keyed by purpose plus write/create/write-dir/socket/
-  signal/network scope until expiry or max uses; defaults are 5 uses and 600
-  seconds.
+- `ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
+  The approval prompt omits raw command text and grants matching calls keyed by
+  purpose plus write/create/write-dir/socket/signal/network scope until expiry
+  or max uses; defaults are 5 uses and 600 seconds. When auto-approval is
+  enabled, no prompt is shown.
 - `lazy_edit_resume` for strict replay of blocked, line-based OMP `edit` patches.
   The live extension stores the original patch after `missing_reservation`,
   `missing_claim`, or claim-conflict denials; after the agent fixes the missing

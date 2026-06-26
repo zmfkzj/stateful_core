@@ -133,12 +133,12 @@ the `stateful-command-policy` manual keeps the detailed procedure, and hooks
 remain the
 enforcement boundary. The
 generated extension registers `sandbox_bash` for read-only, write-targets,
-build, git, and github-pr sandbox runs, including common sandbox flags,
-registers `ext_ro_bash` for read-only `--fs external` commands, and registers
-`ext_rw_bash` for external writes that require write/create/dir scope plus a
-scoped OMP UI approval grant. That grant shows purpose, declared
-write/socket/signal scope, network mode, examples, max uses, and expiry instead
-of raw command text, and matching calls can reuse it until the limit is reached.
+build, git, and github-pr sandbox runs, including common sandbox flags, and
+registers `ext_ro_bash` for read-only `--fs external` commands. `ext_rw_bash`
+asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
+The grant prompt shows purpose, declared write/socket/signal scope, network
+mode, examples, max uses, and expiry instead of raw command text, and matching
+calls can reuse it until the limit is reached. When auto-approval is enabled, no prompt is shown.
 All three generated `*_bash` tools run sandbox commands in the background by
 default. With `async` omitted or `true`, they return a job id immediately,
 stream stdout/output via OMP messages using `pi.sendMessage`, and send final
@@ -196,9 +196,9 @@ reconciliation fail closed; read/search/diff remains allowed.
 
 For OMP, the generated `sandbox_bash` tool owns non-external sandbox command
 execution for read-only, write-targets, build, git, and github-pr profiles;
-`ext_ro_bash` owns read-only external commands without OMP UI confirmation; and
-`ext_rw_bash` owns external writes through reusable scoped purpose grants. Each
-generated tool runs in the background by default: when `async` is omitted or
+`ext_ro_bash` owns read-only external commands without OMP UI confirmation.
+`ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
+Each generated tool runs in the background by default: when `async` is omitted or
 `true`, it returns a job id immediately, streams stdout/output via
 `pi.sendMessage`, and sends final stdout/stderr/exit status as a follow-up
 message. `async: false` keeps the old awaited foreground behavior with final
@@ -266,8 +266,8 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   Python/JavaScript/JS/Ruby/Julia eval tools are denied at host approval and hook
   levels, even when the raw command invokes `stateful sandbox run`; non-external
   sandbox command work must use `sandbox_bash`, read-only repo-external shell
-  work must use `ext_ro_bash` without OMP UI confirmation, and external writes
-  must use `ext_rw_bash` with write/create/dir scope plus a scoped purpose grant.
+  work must use `ext_ro_bash` without OMP UI confirmation. `ext_rw_bash` asks
+  for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
   Hook-mediated command execution outside OMP custom tools must be a single
   strict invocation of the trusted absolute `stateful` binary running
   `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
@@ -364,10 +364,9 @@ classification, so `functions.bash` is Bash,
   approval and hook levels, even when the raw command itself invokes
   `stateful sandbox run`. OMP command-shaped sandbox work uses generated tools:
   `sandbox_bash` for read-only, write-targets, build, git, and github-pr
-  profiles, `ext_ro_bash` for read-only `--fs external` commands without OMP UI
-  confirmation, and `ext_rw_bash` for external writes with a scoped purpose
-  grant. These tools run sandbox commands in the background by default, return
-  a job id immediately when `async` is omitted or `true`, stream stdout/output
+  profiles and `ext_ro_bash` for read-only `--fs external` commands without OMP
+  UI confirmation. `ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
+  These tools run sandbox commands in the background by default, return a job id immediately when `async` is omitted or `true`, stream stdout/output
   via OMP messages using `pi.sendMessage`, and send final stdout/stderr/exit
   status as a follow-up message. `async: false` keeps the old awaited
   foreground behavior and returns final stdout/stderr/exit status in tool
@@ -379,9 +378,9 @@ classification, so `functions.bash` is Bash,
   repo writes use `--fs write-targets` with explicit `--write-target <file>` /
   `--create-target <file>` values and target authorization. External operations
   use `--fs external` with no repo reservation or claim, and Codex approval or OMP
-  `ext_ro_bash` for read-only/no-write-scope commands; OMP external writes use
-  `ext_rw_bash` with at least one write target, create target, or write dir and a
-  scoped purpose grant. On
+  `ext_ro_bash` for read-only/no-write-scope commands. `ext_rw_bash` asks for a
+  scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
+  On
   macOS, the external profile permits `trustd` and DirectoryService Mach lookups
   so Go TLS clients such as `gh` can verify certificates.
 - Test execution: run only through sandboxed test actions such as
