@@ -1,7 +1,7 @@
 use clap::Parser;
 use stateful_bench::{
-    parse_denovo_condition, run_denovo_matrix, Cli, Command, DeNovoAgentKind, DeNovoCommand,
-    DeNovoMatrixRunOptions, DeNovoRunMode, ReportFormat, RunMode,
+    Cli, Command, DeNovoAgentDockerSandbox, DeNovoAgentKind, DeNovoCommand, DeNovoMatrixRunOptions,
+    DeNovoRunMode, ReportFormat, RunMode, parse_denovo_condition, run_denovo_matrix,
 };
 use std::{fs, path::PathBuf, process::Command as ProcessCommand, time::Duration};
 
@@ -293,6 +293,8 @@ fn denovo_run_command_parses_omp_cli_agent_options() {
         "ghcr.io/stateful/omp-agent:latest",
         "--agent-docker-stateful-binary",
         "/usr/local/bin/stateful",
+        "--agent-docker-sandbox",
+        "off",
         "--benchmark-model",
         "deepseek-v4-flash",
     ])
@@ -308,6 +310,7 @@ fn denovo_run_command_parses_omp_cli_agent_options() {
                 ref omp_bin,
                 ref agent_docker_image,
                 ref agent_docker_stateful_binary,
+                agent_docker_sandbox,
                 ref benchmark_model,
                 ..
             }
@@ -319,6 +322,7 @@ fn denovo_run_command_parses_omp_cli_agent_options() {
             && omp_bin == "/opt/homebrew/bin/omp"
             && agent_docker_image.as_deref() == Some("ghcr.io/stateful/omp-agent:latest")
             && agent_docker_stateful_binary == "/usr/local/bin/stateful"
+            && agent_docker_sandbox == DeNovoAgentDockerSandbox::Off
             && benchmark_model.as_deref() == Some("deepseek-v4-flash")
     ));
 }
@@ -423,6 +427,7 @@ with results.open("w", encoding="utf-8") as handle:
         stateful_binary: "stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -546,6 +551,7 @@ with results.open("w", encoding="utf-8") as handle:
         stateful_binary: "stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -655,6 +661,7 @@ with results.open("w", encoding="utf-8") as handle:
         stateful_binary: "stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -745,7 +752,7 @@ with results.open("w", encoding="utf-8") as handle:
         run_dir: temp_dir.join("runs"),
         base_config: PathBuf::from("configs/tasks/denovoswe.yaml"),
         conditions: vec![
-            parse_denovo_condition("stateful:off,subagent:on").expect("condition should parse")
+            parse_denovo_condition("stateful:off,subagent:on").expect("condition should parse"),
         ],
         agent: DeNovoAgentKind::CodexCli,
         codex_bin: "codex".to_string(),
@@ -753,6 +760,7 @@ with results.open("w", encoding="utf-8") as handle:
         stateful_binary: "stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -1214,10 +1222,12 @@ print(json.dumps({{"prompt": prompt}}))
         agent_path = denovo_codex_agent_path_json(),
     );
     let output = run_python_json(&script);
-    assert!(output["prompt"]
-        .as_str()
-        .expect("prompt should be a string")
-        .contains("fake-a"));
+    assert!(
+        output["prompt"]
+            .as_str()
+            .expect("prompt should be a string")
+            .contains("fake-a")
+    );
 }
 
 #[test]
@@ -1261,10 +1271,12 @@ print(json.dumps({{"patch": patch}}))
         workspace = serde_json::to_string(&workspace).expect("workspace path should serialize"),
     );
     let output = run_python_json(&script);
-    assert!(output["patch"]
-        .as_str()
-        .expect("patch should be a string")
-        .contains("new_file.txt"));
+    assert!(
+        output["patch"]
+            .as_str()
+            .expect("patch should be a string")
+            .contains("new_file.txt")
+    );
     fs::remove_dir_all(&dir).expect("temp git diff workspace should clean up");
 }
 
@@ -1440,10 +1452,12 @@ print(json.dumps({{"fast": fast.returncode, "token_usage": fast.token_usage, "em
         output["token_usage"]["uncached_input_plus_output_tokens"],
         81
     );
-    assert!(output["timeout"]
-        .as_str()
-        .expect("timeout should be a string")
-        .contains("0.25s"));
+    assert!(
+        output["timeout"]
+            .as_str()
+            .expect("timeout should be a string")
+            .contains("0.25s")
+    );
 }
 
 #[test]
@@ -1486,6 +1500,48 @@ print(json.dumps({{"returncode": summary.returncode, "token_usage": summary.toke
     assert_eq!(output["calls"][0]["command"][0], "omp");
     assert_eq!(output["calls"][0]["cwd"], "target/workspace");
     assert_eq!(output["calls"][0]["stdin_is_devnull"], true);
+}
+
+#[test]
+fn denovo_codex_agent_docker_omp_command_disables_inner_sandbox_when_requested() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_docker_omp_sandbox_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+command = module.docker_omp_command_for_profile(
+    workspace=Path("/tmp/workspace"),
+    prompt_path=Path("/tmp/prompt.txt"),
+    home=Path("/tmp/home"),
+    omp_bin="omp",
+    benchmark_model="deepseek-v4-flash",
+    docker_image="stateful-denovo-omp-agent:local",
+    base_env={{"STATEFUL_SERVER_URL": "http://127.0.0.1:1234", "DEEPSEEK_API_KEY": "secret"}},
+    sandbox="off",
+)
+print(json.dumps({{"command": command}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+    let command = output["command"]
+        .as_array()
+        .expect("command should be an array");
+    let args = command
+        .iter()
+        .map(|value| value.as_str().expect("command arg should be a string"))
+        .collect::<Vec<_>>();
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--env", "STATEFUL_OMP_SANDBOX=off"])
+    );
 }
 
 #[test]
@@ -1582,10 +1638,12 @@ print(json.dumps({{"message": message}}))
         destination = serde_json::to_string(&dir).expect("destination should serialize"),
     );
     let output = run_python_json(&script);
-    assert!(output["message"]
-        .as_str()
-        .expect("message should be a string")
-        .contains("link-out"));
+    assert!(
+        output["message"]
+            .as_str()
+            .expect("message should be a string")
+            .contains("link-out")
+    );
     fs::remove_dir_all(&dir).expect("temp tar workspace should clean up");
 }
 
@@ -1863,9 +1921,11 @@ print(json.dumps({{"command": command, "native_command": native_command, "comman
         native_command,
         "features.multi_agent=true"
     ));
-    assert!(command_arg_after(native_command, "--append-system-prompt")
-        .expect("native system prompt should exist")
-        .contains("Before implementation or broad repository exploration"));
+    assert!(
+        command_arg_after(native_command, "--append-system-prompt")
+            .expect("native system prompt should exist")
+            .contains("Before implementation or broad repository exploration")
+    );
     assert!(
         command_contains(native_command, "@/tmp/instance/prompt.txt")
             || command_contains(native_command, "@/private/tmp/instance/prompt.txt")
@@ -1960,34 +2020,42 @@ print(json.dumps({{
     assert!(command_contains(command, "--approval-mode"));
     assert!(command_contains(command, "yolo"));
     assert!(!command_contains(command, "features.multi_agent=true"));
-    assert!(command_arg_after(command, "--append-system-prompt")
-        .expect("docker system prompt should exist")
-        .contains("Before implementation or broad repository exploration"));
+    assert!(
+        command_arg_after(command, "--append-system-prompt")
+            .expect("docker system prompt should exist")
+            .contains("Before implementation or broad repository exploration")
+    );
 
-    assert!(env
-        .iter()
-        .any(|value| value.as_str() == Some("HOME=/home/stateful")));
-    assert!(env
-        .iter()
-        .any(|value| value.as_str() == Some("OPENAI_API_KEY")));
+    assert!(
+        env.iter()
+            .any(|value| value.as_str() == Some("HOME=/home/stateful"))
+    );
+    assert!(
+        env.iter()
+            .any(|value| value.as_str() == Some("OPENAI_API_KEY"))
+    );
     assert!(env.iter().any(|value| {
         value.as_str() == Some("STATEFUL_SERVER_URL=http://host.docker.internal:43873")
     }));
-    assert!(env
-        .iter()
-        .any(|value| value.as_str() == Some("STATEFUL_SERVER_TOKEN")));
-    assert!(!env
-        .iter()
-        .any(|value| value.as_str() == Some("OPENAI_API_KEY=sk-test")));
-    assert!(!env
-        .iter()
-        .any(|value| value.as_str() == Some("STATEFUL_SERVER_TOKEN=token-123")));
+    assert!(
+        env.iter()
+            .any(|value| value.as_str() == Some("STATEFUL_SERVER_TOKEN"))
+    );
+    assert!(
+        !env.iter()
+            .any(|value| value.as_str() == Some("OPENAI_API_KEY=sk-test"))
+    );
+    assert!(
+        !env.iter()
+            .any(|value| value.as_str() == Some("STATEFUL_SERVER_TOKEN=token-123"))
+    );
     let command_text = serde_json::to_string(command).expect("command should encode");
     assert!(!command_text.contains("sk-test"));
     assert!(!command_text.contains("token-123"));
-    assert!(!env
-        .iter()
-        .any(|value| value.as_str() == Some("HOME=host-home")));
+    assert!(
+        !env.iter()
+            .any(|value| value.as_str() == Some("HOME=host-home"))
+    );
     assert!(mounts.iter().any(|value| {
         value
             .as_str()
@@ -2104,10 +2172,12 @@ print(json.dumps({{
     );
     let output = run_python_json(&script);
 
-    assert!(output["no_state_home"]
-        .as_str()
-        .expect("no-state home should be text")
-        .ends_with("adapter-output/codex-homes/issue-no-state/home"));
+    assert!(
+        output["no_state_home"]
+            .as_str()
+            .expect("no-state home should be text")
+            .ends_with("adapter-output/codex-homes/issue-no-state/home")
+    );
     assert_eq!(output["no_state_has_session"], false);
     assert_eq!(output["no_state_has_thread"], false);
     assert_eq!(output["no_state_has_codex_run"], false);
@@ -2115,10 +2185,12 @@ print(json.dumps({{
     assert_eq!(output["no_state_skill_exists"], false);
     assert_eq!(output["no_state_auth_exists"], true);
 
-    assert!(output["stateful_home"]
-        .as_str()
-        .expect("stateful home should be text")
-        .ends_with("adapter-output/codex-homes/issue-stateful/home"));
+    assert!(
+        output["stateful_home"]
+            .as_str()
+            .expect("stateful home should be text")
+            .ends_with("adapter-output/codex-homes/issue-stateful/home")
+    );
     let config = output["stateful_config"]
         .as_str()
         .expect("stateful config should be text");
@@ -2144,9 +2216,11 @@ print(json.dumps({{
         .as_str()
         .expect("generated session id should be text");
     assert!(generated_session_id.starts_with("denovo-owner-repo-1-"));
-    assert!(generated_session_id
-        .bytes()
-        .all(|byte| { byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' }));
+    assert!(
+        generated_session_id
+            .bytes()
+            .all(|byte| { byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' })
+    );
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }
@@ -3312,15 +3386,19 @@ print(json.dumps({{
     let output = run_python_json(&script);
 
     assert_eq!(output["local"]["finish_reason"], "missing-runtime-image");
-    assert!(output["local"]["error"]
-        .as_str()
-        .expect("local error should be text")
-        .contains("aweaiteam/denovoswe:case-a"));
+    assert!(
+        output["local"]["error"]
+            .as_str()
+            .expect("local error should be text")
+            .contains("aweaiteam/denovoswe:case-a")
+    );
     assert_eq!(output["remote"]["finish_reason"], "missing-runtime-image");
-    assert!(output["remote"]["error"]
-        .as_str()
-        .expect("remote error should be text")
-        .contains("aweaiteam/denovoswe:case-b"));
+    assert!(
+        output["remote"]["error"]
+            .as_str()
+            .expect("remote error should be text")
+            .contains("aweaiteam/denovoswe:case-b")
+    );
     assert_eq!(output["other"]["finish_reason"], "adapter-error");
 }
 
@@ -3513,10 +3591,12 @@ asyncio.run(main())
 
     assert_eq!(output["raised"], true);
     assert_eq!(output["row"]["finish_reason"], "missing-runtime-image");
-    assert!(output["row"]["error"]
-        .as_str()
-        .expect("error should be text")
-        .contains("aweaiteam/denovoswe:case-missing"));
+    assert!(
+        output["row"]["error"]
+            .as_str()
+            .expect("error should be text")
+            .contains("aweaiteam/denovoswe:case-missing")
+    );
     assert_eq!(
         output["calls"],
         serde_json::json!([
@@ -3664,10 +3744,12 @@ print(json.dumps(module.instance_result_row(result), sort_keys=True))
     assert_eq!(output["instance_id"], "case-a");
     assert_eq!(output["success"], false);
     assert_eq!(output["finish_reason"], "disk-space-low");
-    assert!(output["error"]
-        .as_str()
-        .expect("error should be text")
-        .contains("free disk space 40 bytes is below required 100 bytes"));
+    assert!(
+        output["error"]
+            .as_str()
+            .expect("error should be text")
+            .contains("free disk space 40 bytes is below required 100 bytes")
+    );
 }
 
 #[test]
@@ -4712,10 +4794,12 @@ print(json.dumps({{
     assert_eq!(observed[0]["resumeable_token_failure"], true);
     assert_eq!(observed[1]["returncode"], 0);
     assert_eq!(calls[0]["input"], "initial prompt");
-    assert!(calls[1]["input"]
-        .as_str()
-        .expect("resume prompt should be text")
-        .contains("Continue the same benchmark task"));
+    assert!(
+        calls[1]["input"]
+            .as_str()
+            .expect("resume prompt should be text")
+            .contains("Continue the same benchmark task")
+    );
     let resume_command = calls[1]["command"]
         .as_array()
         .expect("resume command should be an array");
@@ -4723,18 +4807,24 @@ print(json.dumps({{
     assert!(command_contains(resume_command, "session-123"));
     assert!(!command_contains(resume_command, "--cd"));
     assert!(!command_contains(resume_command, "--sandbox"));
-    assert!(!output["stdout"]
-        .as_str()
-        .expect("stdout should be text")
-        .contains("turn.failed"));
-    assert!(output["stdout"]
-        .as_str()
-        .expect("stdout should be text")
-        .contains("stateful_bench.resume"));
-    assert!(output["stdout"]
-        .as_str()
-        .expect("stdout should be text")
-        .contains("token_count"));
+    assert!(
+        !output["stdout"]
+            .as_str()
+            .expect("stdout should be text")
+            .contains("turn.failed")
+    );
+    assert!(
+        output["stdout"]
+            .as_str()
+            .expect("stdout should be text")
+            .contains("stateful_bench.resume")
+    );
+    assert!(
+        output["stdout"]
+            .as_str()
+            .expect("stdout should be text")
+            .contains("token_count")
+    );
 }
 
 #[test]

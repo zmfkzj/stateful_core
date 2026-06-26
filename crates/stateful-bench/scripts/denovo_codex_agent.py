@@ -70,6 +70,7 @@ OMP_AGENT_DOCKER_ARG_VALUE_ENV = {
     "PI_CODING_AGENT_DIR",
     "STATEFUL_HOME",
     "STATEFUL_SERVER_URL",
+    "STATEFUL_OMP_SANDBOX",
     "XDG_CACHE_HOME",
     "XDG_CONFIG_HOME",
 }
@@ -825,8 +826,11 @@ def docker_omp_command_for_profile(
     docker_bin: str = "docker",
     enable_native_subagent: bool = False,
     subagent_min_count: int = DEFAULT_SUBAGENT_MIN_COUNT,
+    sandbox: str = "on",
 ) -> list[str]:
     docker_env = omp_agent_docker_env(base_env)
+    if sandbox == "off":
+        docker_env["STATEFUL_OMP_SANDBOX"] = "off"
     command = [
         docker_bin,
         "run",
@@ -1225,6 +1229,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--agent-docker-stateful-binary",
         default=DEFAULT_OMP_AGENT_DOCKER_STATEFUL_BINARY,
     )
+    parser.add_argument("--agent-docker-sandbox", choices=["on", "off"], default="on")
     parser.add_argument("--benchmark-model", required=True)
     parser.add_argument("--benchmark-reasoning-effort", required=True)
     parser.add_argument("--benchmark-model-context-window", type=int, required=True)
@@ -2097,6 +2102,7 @@ async def run_one_instance_async(
                     base_env=env,
                     enable_native_subagent=args.subagent == "on",
                     subagent_min_count=args.subagent_min_count,
+                    sandbox=args.agent_docker_sandbox,
                 )
             else:
                 command = omp_command_for_profile(
@@ -2409,6 +2415,7 @@ async def run_real_instances_async(args: argparse.Namespace) -> int:
             "agent_docker_stateful_binary": (
                 args.agent_docker_stateful_binary if args.agent_docker_image else None
             ),
+            "agent_docker_sandbox": args.agent_docker_sandbox if args.agent_docker_image else None,
         },
     )
     return adapter_exit_code_after_results(results)

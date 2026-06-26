@@ -262,6 +262,12 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
         extension
             .contains("function runSandboxToolProcess(params, args, ctx, label, signal, onStdout)")
     );
+    assert!(extension.contains("process.env.STATEFUL_OMP_SANDBOX === \"off\""));
+    assert!(
+        extension.contains(
+            "function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout)"
+        )
+    );
     assert!(!extension.contains("function runSandboxTool(params"));
     assert!(extension.contains("spawn(STATEFUL, args"));
     assert!(extension.contains(
@@ -301,7 +307,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains(
         "async function runSandboxAwaitedTool(params, args, ctx, label, signal, onUpdate)"
     ));
-    assert!(extension.contains("await runSandboxToolProcess(params, args, ctx, label, signal"));
+    assert!(extension.contains("runSandboxToolProcess(params, args, ctx, label, signal"));
     assert!(extension.contains("await stdoutStreamer.drain();"));
     assert!(extension.contains("await Promise.allSettled(deliveries);"));
     assert!(!extension.contains("function startSandboxBackgroundTool"));

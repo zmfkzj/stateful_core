@@ -200,8 +200,10 @@ matrix:
 
 For the same one-instance smoke shape with OMP running inside the benchmark
 Docker agent image, use an image built from
-`crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. The sample passes
-the default in-image `stateful` path explicitly; omit
+`crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. Docker already
+isolates the agent workspace, so the sample disables the nested OMP sandbox to
+avoid bubblewrap namespace failures inside the container. It also passes the
+default in-image `stateful` path explicitly; omit
 `--agent-docker-stateful-binary` when the image uses the default:
 
 ```bash
@@ -222,6 +224,7 @@ the default in-image `stateful` path explicitly; omit
   --stateful-binary "$STATEFUL_BIN" \
   --agent-docker-image "$DENOVO_OMP_AGENT_IMAGE" \
   --agent-docker-stateful-binary "$DOCKER_STATEFUL_BIN" \
+  --agent-docker-sandbox off \
   --benchmark-model deepseek-v4-flash \
   --benchmark-reasoning-effort low \
   --benchmark-model-context-window 256000 \
@@ -239,9 +242,9 @@ and three independent trials. It is a declared subagent/concurrency behavior
 test, not the official-style `--max-concurrent 1` default from
 `docs/denovo-benchmark-guide.md`.
 
-Rebuild the Docker agent image before relaunching after local `stateful`, OMP
-integration, or sandbox-tooling changes; the image must contain `bwrap` for
-stateful-on OMP sandbox tools:
+Rebuild the Docker agent image before relaunching after local `stateful` or OMP
+integration changes. The examples below pass `--agent-docker-sandbox off`
+because Docker isolation is the sandbox boundary for the benchmark agent:
 
 ```bash
 DOCKER_HOST="$DOCKER_HOST" docker build --pull --no-cache \
@@ -291,6 +294,7 @@ for trial in 1 2 3; do
     --stateful-binary "$STATEFUL_BIN" \
     --agent-docker-image "$DENOVO_OMP_AGENT_IMAGE" \
     --agent-docker-stateful-binary "$DOCKER_STATEFUL_BIN" \
+    --agent-docker-sandbox off \
     --benchmark-model deepseek-v4-flash \
     --benchmark-reasoning-effort low \
     --benchmark-model-context-window 256000 \
@@ -337,11 +341,10 @@ Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
   detached run. Use a short, existing-parent socket path because long paths can
   exceed tmux's socket length limit; create the session with that socket and
   keep benchmark stdout/stderr in a launch log under the run output directory.
-- Rebuild or retag the Docker OMP agent image after changing the Dockerfile. A
-  `stateful:on` Docker OMP run whose nested `sandbox_bash`/`ext_ro_bash` calls
-  fail with `No such file or directory (os error 2)` is usually using an older
-  image without `bubblewrap`; rebuild `stateful-denovo-omp-agent:local` before
-  interpreting the run as model behavior.
+- Rebuild or retag the Docker OMP agent image after changing the Dockerfile. If
+  a Docker OMP run still shows `bubblewrap` namespace failures, confirm the
+  command includes `--agent-docker-sandbox off`; otherwise nested OMP sandboxing
+  is still enabled inside the already-isolated container.
 - If OMP exits in about one second with empty `patch.diff`, zero subagent
   spawns, and `omp exited 1`, first check provider auth propagation. In Docker
   OMP mode the isolated home does not inherit host OMP login state, and the

@@ -1951,6 +1951,10 @@ function sandboxBashArgs(params) {{
   return args;
 }}
 
+function ompSandboxDisabled() {{
+  return process.env.STATEFUL_OMP_SANDBOX === "off";
+}}
+
 function validateExternalPurposeAndCommand(params, toolName) {{
   if (typeof params?.purpose !== "string" || params.purpose.trim().length === 0) {{
     throw new Error(toolName + " requires a non-empty purpose");
@@ -2363,13 +2367,99 @@ function runSandboxToolProcess(params, args, ctx, label, signal, onStdout) {{
   }});
 }}
 
+function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout) {{
+  return new Promise((resolve) => {{
+    let stdout = "";
+    let stderr = "";
+    let processError = "";
+    let settled = false;
+    let cancelled = false;
+    let child;
+    let abortHandler;
+    let killTimer;
+    let timeoutTimer;
+    const finish = (exitCode, error) => {{
+      if (settled) return;
+      settled = true;
+      if (killTimer) clearTimeout(killTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (signal && abortHandler) {{
+        signal.removeEventListener("abort", abortHandler);
+      }}
+      if (stdout) onStdout(stdout);
+      const result = buildSandboxToolResult(params, ["sandbox-disabled"], exitCode, stdout, stderr, error);
+      result.details.sandboxDisabled = true;
+      if (cancelled) {{
+        result.details.cancelled = true;
+      }}
+      resolve(result);
+    }};
+    abortHandler = () => {{
+      if (settled || cancelled) return;
+      cancelled = true;
+      processError = "cancelled by user";
+      killSandboxChild(child, "SIGTERM");
+      killTimer = setTimeout(() => killSandboxChild(child, "SIGKILL"), 1000);
+      setTimeout(() => finish(1, processError), 3000);
+    }};
+    if (signal?.aborted) {{
+      cancelled = true;
+      finish(1, "cancelled by user");
+      return;
+    }}
+    try {{
+      child = spawn(expandSkillInternalUrlsInCommand(params.command), {{
+        cwd: ctx.cwd,
+        shell: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+      }});
+    }} catch (error) {{
+      finish(1, error instanceof Error ? error.message : String(error));
+      return;
+    }}
+    if (signal) {{
+      signal.addEventListener("abort", abortHandler, {{ once: true }});
+    }}
+    const timeoutSeconds = params.timeout_seconds ?? params.timeoutSeconds;
+    if (Number.isInteger(timeoutSeconds) && timeoutSeconds > 0) {{
+      timeoutTimer = setTimeout(() => {{
+        processError = "timed out after " + timeoutSeconds + "s";
+        killSandboxChild(child, "SIGTERM");
+        killTimer = setTimeout(() => killSandboxChild(child, "SIGKILL"), 1000);
+      }}, timeoutSeconds * 1000);
+    }}
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => {{
+      stdout = truncateSandboxToolText(stdout + chunk, label);
+    }});
+    child.stderr?.on("data", (chunk) => {{
+      stderr = truncateSandboxToolText(stderr + chunk, label);
+    }});
+    child.on("error", (error) => {{
+      processError = error instanceof Error ? error.message : String(error);
+    }});
+    child.on("close", (code, signalName) => {{
+      const exitCode = typeof code === "number" ? code : 1;
+      const signalError = signalName ? "terminated by signal " + signalName : "";
+      finish(exitCode, processError || signalError);
+    }});
+  }});
+}}
+
 async function runSandboxAwaitedTool(params, args, ctx, label, signal, onUpdate) {{
   const runId = nextSandboxJobId(label);
   const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
   const stdoutStreamer = createSandboxStdoutStreamer(onUpdate, runId, commandLabel);
-  const result = await runSandboxToolProcess(params, args, ctx, label, signal, (chunk) => {{
-    stdoutStreamer.push(chunk);
-  }});
+  const runner = label === "sandbox_bash" && ompSandboxDisabled()
+    ? runSandboxDisabledToolProcess(params, ctx, label, signal, (chunk) => {{
+        stdoutStreamer.push(chunk);
+      }})
+    : runSandboxToolProcess(params, args, ctx, label, signal, (chunk) => {{
+        stdoutStreamer.push(chunk);
+      }});
+  const result = await runner;
   await stdoutStreamer.drain();
   return result;
 }}

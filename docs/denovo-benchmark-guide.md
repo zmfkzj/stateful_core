@@ -95,9 +95,11 @@ debug run:
 - For Docker-isolated OMP agent runs, build or tag the image from
   `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`; it includes
   Bun-installed `omp`, the Linux `stateful` binary, and `bubblewrap`/`bwrap` for
-  stateful sandbox tools. Add `--agent-docker-image <image>`.
-  `--agent-docker-stateful-binary <path>` only needs to be set when the image's
-  `stateful` binary is not at `/usr/local/bin/stateful`.
+  the default `--agent-docker-sandbox on` path. Add `--agent-docker-image
+  <image>`. Pass `--agent-docker-sandbox off` when the Docker container itself
+  should be the sandbox boundary; `--agent-docker-stateful-binary <path>` only
+  needs to be set when the image's `stateful` binary is not at
+  `/usr/local/bin/stateful`.
 - A reduced `stateful:off/on,subagent:on` matrix with `--max-concurrent 6` is a
   subagent/concurrency behavior test. Keep the same 12-instance list, shard,
   model, prompt version, temperature, context window, max turns, evaluator

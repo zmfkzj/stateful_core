@@ -1,10 +1,10 @@
 use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
 use stateful_bench::{
-    DeNovoAgentKind, DeNovoCliRuntime, DeNovoCodexRunOptions, DeNovoComparisonReport,
-    DeNovoCondition, DeNovoConditionRunOptions, DeNovoExtractOptions, DeNovoExtractRecipeOptions,
-    DeNovoMatrixRunOptions, DeNovoOfficialResult, DeNovoRunMode, DeNovoRunRecipeOptions,
-    build_denovo_codex_adapter_command, build_denovo_condition_report,
+    DeNovoAgentDockerSandbox, DeNovoAgentKind, DeNovoCliRuntime, DeNovoCodexRunOptions,
+    DeNovoComparisonReport, DeNovoCondition, DeNovoConditionRunOptions, DeNovoExtractOptions,
+    DeNovoExtractRecipeOptions, DeNovoMatrixRunOptions, DeNovoOfficialResult, DeNovoRunMode,
+    DeNovoRunRecipeOptions, build_denovo_codex_adapter_command, build_denovo_condition_report,
     build_denovo_extract_recipe_command, build_denovo_run_recipe_command, compare_denovo_reports,
     default_denovo_conditions, parse_denovo_condition, run_denovo_condition, run_denovo_extract,
     run_denovo_matrix,
@@ -324,9 +324,10 @@ fn denovo_extract_command_uses_official_extract_patch_recipe() {
 fn denovo_run_command_uses_official_run_recipe_and_condition_config() {
     let mut condition = DeNovoCondition::new(true, false);
     condition.config_path = Some("configs/tasks/denovoswe-stateful.yaml".into());
-    condition
-        .env
-        .insert("STATEFUL_HOME".to_string(), "target/stateful-home".to_string());
+    condition.env.insert(
+        "STATEFUL_HOME".to_string(),
+        "target/stateful-home".to_string(),
+    );
 
     let command = build_denovo_run_recipe_command(DeNovoRunRecipeOptions {
         aweagent_root: "../AweAgent".into(),
@@ -412,6 +413,7 @@ fn denovo_codex_adapter_command_uses_stateful_adapter_and_condition_axes() {
         stateful_binary: "/opt/stateful/bin/stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -502,6 +504,7 @@ fn denovo_omp_adapter_command_uses_existing_adapter_with_omp_runtime() {
         stateful_binary: "/opt/stateful/bin/stateful".to_string(),
         agent_docker_image: Some("ghcr.io/stateful/omp-agent:latest".to_string()),
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::Off,
         benchmark_model: "deepseek-v4-flash".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -558,6 +561,12 @@ fn denovo_omp_adapter_command_uses_existing_adapter_with_omp_runtime() {
             .windows(2)
             .any(|pair| pair == ["--agent-docker-stateful-binary", "/usr/local/bin/stateful"])
     );
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--agent-docker-sandbox", "off"])
+    );
 }
 
 #[test]
@@ -606,6 +615,7 @@ out.mkdir(parents=True, exist_ok=True)
         stateful_binary: "stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -755,6 +765,7 @@ out.mkdir(parents=True, exist_ok=True)
         stateful_binary: "stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -874,6 +885,7 @@ out.mkdir(parents=True, exist_ok=True)
         stateful_binary: "stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -946,6 +958,7 @@ sys.exit(2)
         stateful_binary: "stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -1063,6 +1076,7 @@ score = 1.0 if "stateful" in args.config else 0.5
         stateful_binary: "stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
