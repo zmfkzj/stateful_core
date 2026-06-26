@@ -2062,6 +2062,19 @@ function recordExternalBashGrant(params, now) {{
   }});
 }}
 
+function approveExternalBashGrantWithoutPrompt(params) {{
+  const now = Date.now();
+  pruneExternalBashGrants(now);
+  const key = externalGrantKey(params);
+  const existing = externalBashGrants.get(key);
+  if (existing && existing.expiresAt > now && existing.uses < existing.maxUses) {{
+    existing.uses += 1;
+    return true;
+  }}
+  recordExternalBashGrant(params, now);
+  return true;
+}}
+
 function externalBashApprovalMessage(params) {{
   const descriptor = externalGrantDescriptor(params);
   const settings = externalGrantSettings(params);
@@ -2734,10 +2747,7 @@ export default function statefulOmpExtension(pi) {{
       let approved;
       try {{
         if (shouldAutoApproveStatefulPrompt(ctx, params)) {{
-          const now = Date.now();
-          pruneExternalBashGrants(now);
-          recordExternalBashGrant(params, now);
-          approved = true;
+          approved = approveExternalBashGrantWithoutPrompt(params);
         }} else {{
           approved = await ensureExternalBashGrant(ctx, params, signal);
         }}
