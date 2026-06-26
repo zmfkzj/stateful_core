@@ -722,8 +722,9 @@ always-apply `rules/stateful-required.md` rule,
 `skills/stateful-command-policy/SKILL.md` manual,
 `skills/dispatching-parallel-agents/SKILL.md` skill, and OMP config under the
 `stateful` profile agent directory (`~/.omp/profiles/stateful/agent`) with
-`tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
-`eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
+`tools.approvalMode: yolo`, `stateful.autoApprove: false`,
+`bash.enabled: false`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
+and `eval.jl: false`; it removes
 `tools.approval` from the stateful profile because yolo mode delegates safety to
 Stateful hooks. Raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution
 is still denied at host approval and hook levels, sandbox runs still go through

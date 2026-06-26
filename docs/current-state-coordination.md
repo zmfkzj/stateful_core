@@ -257,8 +257,9 @@ and writes `skills/stateful-command-policy/SKILL.md` and
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) and ensures the target keys
-`tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
-`eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
+`tools.approvalMode: yolo`, `stateful.autoApprove: false`,
+`bash.enabled: false`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
+and `eval.jl: false`; it removes
 `tools.approval` from the stateful profile because yolo mode delegates safety to
 Stateful hooks. Without `--update`, existing scalar values are preserved and
 only missing keys are inserted; with `--update`, existing target scalar values

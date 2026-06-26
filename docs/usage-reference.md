@@ -63,6 +63,7 @@ The target OMP profile keys are:
 
 ```yaml
 tools.approvalMode: yolo
+stateful.autoApprove: false
 bash.enabled: false
 eval.py: false
 eval.js: false

@@ -214,7 +214,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("stateful-omp-extension.js"));
     assert!(config.contains(
-        "tools:\n  approvalMode: yolo\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: false\n",
+        "tools:\n  approvalMode: yolo\nstateful:\n  autoApprove: false\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: false\n",
     ));
     assert!(!config.contains("approval:"));
     assert!(
@@ -424,6 +424,7 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert_eq!(count(&config, "stateful-omp-extension.js"), 1);
     assert_eq!(count(&config, "approvalMode: yolo"), 1);
+    assert_eq!(count(&config, "autoApprove: false"), 1);
     assert_eq!(count(&config, "approval:"), 0);
     assert_eq!(count(&config, "external_bash:"), 0);
     assert_eq!(count(&config, "\n  py: false"), 1);
@@ -462,6 +463,7 @@ fn install_omp_yes_preserves_existing_config_and_uses_yolo_approval() {
     assert!(config.contains("existing-extension.js"));
     assert!(config.contains("stateful-omp-extension.js"));
     assert!(config.contains("tools:\n  approvalMode: yolo\n"));
+    assert!(config.contains("stateful:\n  autoApprove: false\n"));
     assert!(!config.contains("approval:"));
     assert!(!config.contains("task: allow"));
     assert!(!config.contains("sandbox_bash: allow"));
@@ -488,7 +490,7 @@ fn install_omp_yes_removes_existing_tool_approval_without_update() {
     let omp_config = omp_agent_dir.join("config.yml");
     fs::write(
         &omp_config,
-        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    bash: prompt\n    edit: prompt\n",
+        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    bash: prompt\n    edit: prompt\nstateful:\n  autoApprove: true\n",
     )
     .expect("existing config should write");
 
@@ -496,6 +498,7 @@ fn install_omp_yes_removes_existing_tool_approval_without_update() {
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("tools:\n  approvalMode: yolo\n"));
+    assert!(config.contains("stateful:\n  autoApprove: true\n"));
     assert!(!config.contains("approval:"));
     assert!(!config.contains("task: prompt"));
     assert!(!config.contains("bash: prompt"));
@@ -519,7 +522,7 @@ fn install_omp_update_removes_existing_tool_approval() {
     let omp_config = omp_agent_dir.join("config.yml");
     fs::write(
         &omp_config,
-        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    sandbox_bash: prompt\n    external_bash: prompt\n    ext_ro_bash: prompt\n    ext_rw_bash: prompt\n    edit: prompt\neval:\n  py: true\n  js: true\n  rb: true\n  jl: true\nbash:\n  enabled: true\n",
+        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    sandbox_bash: prompt\n    external_bash: prompt\n    ext_ro_bash: prompt\n    ext_rw_bash: prompt\n    edit: prompt\neval:\n  py: true\n  js: true\n  rb: true\n  jl: true\nbash:\n  enabled: true\nstateful:\n  autoApprove: true\n",
     )
     .expect("existing config should write");
 
@@ -529,6 +532,7 @@ fn install_omp_update_removes_existing_tool_approval() {
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("tools:\n  approvalMode: yolo\n"));
+    assert!(config.contains("stateful:\n  autoApprove: false\n"));
     assert!(!config.contains("approval:"));
     assert!(!config.contains("task: allow"));
     assert!(!config.contains("sandbox_bash: allow"));
