@@ -2709,7 +2709,7 @@ export default function statefulOmpExtension(pi) {{
   pi.registerTool({{
     name: "ext_rw_bash",
     label: "External Read/write Bash",
-    description: "Run a command through stateful sandbox run --fs external after explicit OMP UI approval of a scoped purpose grant. At least one write_targets, create_targets, or write_dirs entry is required.",
+    description: "Run a command through stateful sandbox run --fs external; prompts by default for a scoped OMP UI grant unless stateful.autoApprove: true or per-call auto_approve: true is enabled. Auto-approval skips only the Stateful-owned UI prompt; sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. At least one write_targets, create_targets, or write_dirs entry is required.",
     parameters: {{
       type: "object",
       properties: {{
@@ -2723,7 +2723,7 @@ export default function statefulOmpExtension(pi) {{
         approval_examples: {{ type: "array", items: {{ type: "string" }}, description: "Optional example command classes to show in the approval prompt; raw command text is not shown." }},
         grant_max_uses: {{ type: "number", description: "Maximum executions covered by the approved purpose/scope grant, from 1 to 20. Defaults to 5." }},
         grant_expires_seconds: {{ type: "number", description: "Grant lifetime in seconds, from 1 to 3600. Defaults to 600." }},
-        auto_approve: {{ type: "boolean", description: "Skip the OMP UI approval prompt for this Stateful-owned external write grant. Sandbox scope validation and Stateful hook authorization still apply." }},
+        auto_approve: {{ type: "boolean", description: "Skip the OMP UI approval prompt for this Stateful-owned external write grant on this call. Sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
         async: {{ type: "boolean", description: "Run in the background when true or omitted; set false to wait for completion." }},
@@ -2740,7 +2740,7 @@ export default function statefulOmpExtension(pi) {{
       if (!shouldAutoApproveStatefulPrompt(ctx, params) && typeof ctx?.ui?.confirm !== "function") {{
         return {{
           isError: true,
-          content: [{{ type: "text", text: "ext_rw_bash requires OMP UI confirmation, but ctx.ui.confirm is unavailable." }}],
+          content: [{{ type: "text", text: "ext_rw_bash needs OMP UI confirmation for this non-auto-approved call, but ctx.ui.confirm is unavailable." }}],
           details: {{ error: "confirmation_unavailable" }},
         }};
       }}
