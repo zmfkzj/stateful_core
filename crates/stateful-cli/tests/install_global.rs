@@ -271,52 +271,37 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(!extension.contains("function runSandboxTool(params"));
     assert!(extension.contains("spawn(STATEFUL, args"));
     assert!(extension.contains(
-        "Deprecated compatibility field; commands now wait for completion before returning."
+        "async: { type: \"boolean\", description: \"Run in the background when true or omitted; set false to wait for completion.\" }"
     ));
-    assert!(
-        extension.contains("function deliverSandboxStdoutChunk(onUpdate, jobId, label, chunk)")
-    );
-    assert!(extension.contains("content: [{ type: \"text\", text: chunk }]"));
-    assert!(extension.contains("return Promise.resolve(onUpdate(update)).catch(() => {});"));
-    assert!(extension.contains("stream: \"stdout\""));
-    assert!(extension.contains("collapsible: true"));
-    assert!(extension.contains("collapseShortcut: \"Ctrl+O\""));
-    assert!(extension.contains("function parseSandboxRunOutput(rawStdout)"));
-    assert!(extension.contains("const parsed = JSON.parse(text)"));
-    assert!(extension.contains("const event = JSON.parse(line)"));
-    assert!(extension.contains("event?.event === \"sandbox_output\""));
-    assert!(extension.contains("emitOutputChunk(event.chunk)"));
-    assert!(extension.contains("stdout += line + \"\\n\";"));
-    assert!(extension.contains("if (commandStdout && !streamedOutput)"));
-    assert!(extension.contains("return stdout || \"exit_code: \" + exitCode;"));
-    assert!(extension.contains("result.details.sandboxRunOutput = sandboxRunOutput"));
-    assert!(extension.contains("stderr = truncateSandboxToolText(stderr + chunk, label)"));
-    assert!(
-        extension
-            .contains("streamedStdout = truncateSandboxToolText(streamedStdout + chunk, label)")
-    );
-    assert!(extension.contains("const fallbackStdout = streamedOutput ? streamedStdout : stdout"));
-    assert!(extension.contains("function killSandboxChild(child, signalName)"));
-    assert!(extension.contains("process.kill(-child.pid, signalName)"));
-    assert!(extension.contains("signal.addEventListener(\"abort\", abortHandler, { once: true })"));
-    assert!(extension.contains("killSandboxChild(child, \"SIGTERM\")"));
-    assert!(extension.contains("killSandboxChild(child, \"SIGKILL\")"));
-    assert!(extension.contains("result.details.cancelled = true"));
-    assert!(extension.contains("async function confirmExternalBashGrant(ctx, params, signal)"));
-    assert!(extension.contains("await Promise.race([confirmPromise, abortPromise])"));
+    assert!(extension
+        .contains("function deliverSandboxBackgroundMessage(pi, jobId, label, text, details)"));
+    assert!(extension.contains("stateful_sandbox_bash_output"));
+    assert!(extension.contains("stateful_sandbox_bash_result"));
     assert!(extension.contains(
-        "async function runSandboxAwaitedTool(params, args, ctx, label, signal, onUpdate)"
+        "function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, signal, onUpdate)"
     ));
-    assert!(extension.contains("runSandboxToolProcess(params, args, ctx, label, signal"));
-    assert!(extension.contains("await stdoutStreamer.drain();"));
-    assert!(extension.contains("await Promise.allSettled(deliveries);"));
-    assert!(!extension.contains("function startSandboxBackgroundTool"));
-    assert!(!extension.contains("Background job "));
-    assert!(!extension.contains("stateful_sandbox_bash_result"));
-    assert!(!extension.contains("params.async === true"));
+    assert!(extension.contains("Background job "));
+    assert!(extension.contains("params.async === false"));
+    assert!(
+        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, \"sandbox_bash\", signal, onUpdate)")
+    );
+    assert!(
+        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, \"ext_ro_bash\", signal, onUpdate)")
+    );
+    assert!(
+        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, \"ext_rw_bash\", signal, onUpdate)")
+    );
     assert!(extension.contains(
         "return await runSandboxAwaitedTool(params, args, ctx, \"sandbox_bash\", signal, onUpdate)"
     ));
+    assert!(extension.contains("const backgroundSandboxToolCallIds = new Set();"));
+    assert!(
+        extension.contains("function isBackgroundSandboxToolResult(event)")
+    );
+    assert!(extension.contains("if (isBackgroundSandboxToolResult(event)) return;"));
+    assert!(
+        extension.contains("postBackgroundSandboxToolUse(ctx, label, params)")
+    );
     assert!(extension.contains("async execute(_toolCallId, params, signal, onUpdate, ctx)"));
     assert!(extension.contains("args.push(\"--stream-events\");"));
     assert!(extension.contains("pi.sendMessage"));
