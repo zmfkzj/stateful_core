@@ -515,9 +515,7 @@ mod tests {
             env.iter()
                 .find(|(key, _)| key == "DOCKER_HOST")
                 .map(|(_, value)| value),
-            Some(&Some(
-                "unix:///tmp/colima/default/docker.sock".to_string()
-            ))
+            Some(&Some("unix:///tmp/colima/default/docker.sock".to_string()))
         );
     }
 
@@ -567,9 +565,9 @@ mod tests {
             .filter(|line| line.starts_with("(allow file-write*"))
             .collect::<Vec<_>>();
         assert!(
-            write_rules.iter().any(
-                |line| line.contains("(literal \"/tmp/colima/default/docker.sock\")")
-            )
+            write_rules
+                .iter()
+                .any(|line| line.contains("(literal \"/tmp/colima/default/docker.sock\")"))
         );
     }
 }

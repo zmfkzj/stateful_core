@@ -573,7 +573,11 @@ fn stateful_resource_tool(uri: &str) -> Option<(&'static str, Value, &'static st
             serde_json::json!({}),
             "application/json",
         )),
-        "stateful/events" => Some(("state_events_read", serde_json::json!({}), "application/json")),
+        "stateful/events" => Some((
+            "state_events_read",
+            serde_json::json!({}),
+            "application/json",
+        )),
         "stateful/context" => Some((
             "state_context_render",
             serde_json::json!({ "mode": "brief", "resource": "" }),
@@ -635,7 +639,10 @@ pub fn handle_mcp_jsonrpc_in_repo(
                 .get("params")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-            let uri = params.get("uri").and_then(Value::as_str).unwrap_or_default();
+            let uri = params
+                .get("uri")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let Some((tool_name, arguments, mime_type)) = stateful_resource_tool(uri) else {
                 return Ok(Some(serde_json::to_string(&jsonrpc_error(
                     id,
@@ -654,7 +661,7 @@ pub fn handle_mcp_jsonrpc_in_repo(
                     }]
                 }),
             )
-        },
+        }
         "tools/call" => {
             let params = request
                 .get("params")

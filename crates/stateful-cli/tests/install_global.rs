@@ -273,8 +273,10 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains(
         "async: { type: \"boolean\", description: \"Run in the background when true or omitted; set false to wait for completion.\" }"
     ));
-    assert!(extension
-        .contains("function deliverSandboxBackgroundMessage(pi, jobId, label, text, details)"));
+    assert!(
+        extension
+            .contains("function deliverSandboxBackgroundMessage(pi, jobId, label, text, details)")
+    );
     assert!(extension.contains("stateful_sandbox_bash_output"));
     assert!(extension.contains("stateful_sandbox_bash_result"));
     assert!(extension.contains(
@@ -295,13 +297,9 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
         "return await runSandboxAwaitedTool(params, args, ctx, \"sandbox_bash\", signal, onUpdate)"
     ));
     assert!(extension.contains("const backgroundSandboxToolCallIds = new Set();"));
-    assert!(
-        extension.contains("function isBackgroundSandboxToolResult(event)")
-    );
+    assert!(extension.contains("function isBackgroundSandboxToolResult(event)"));
     assert!(extension.contains("if (isBackgroundSandboxToolResult(event)) return;"));
-    assert!(
-        extension.contains("postBackgroundSandboxToolUse(ctx, label, params)")
-    );
+    assert!(extension.contains("postBackgroundSandboxToolUse(ctx, label, params)"));
     assert!(extension.contains("async execute(_toolCallId, params, signal, onUpdate, ctx)"));
     assert!(extension.contains("args.push(\"--stream-events\");"));
     assert!(extension.contains("pi.sendMessage"));

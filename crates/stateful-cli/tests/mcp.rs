@@ -1440,7 +1440,10 @@ fn mcp_initialize_advertises_resources_capability() {
 
     assert_eq!(json["jsonrpc"], "2.0");
     assert_eq!(json["id"], 1);
-    assert_eq!(json["result"]["capabilities"]["resources"], serde_json::json!({}));
+    assert_eq!(
+        json["result"]["capabilities"]["resources"],
+        serde_json::json!({})
+    );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
