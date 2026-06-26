@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -69,6 +70,7 @@ OMP_AGENT_DOCKER_ARG_VALUE_ENV = {
     "PI_CODING_AGENT_DIR",
     "STATEFUL_HOME",
     "STATEFUL_SERVER_URL",
+    "STATEFUL_OMP_SANDBOX",
     "XDG_CACHE_HOME",
     "XDG_CONFIG_HOME",
 }
@@ -104,6 +106,27 @@ DIFF_EXCLUDED_PATHS = (
     "target",
     "target/**",
     "clean.sh",
+)
+
+WORKSPACE_COPY_IGNORE_PATTERNS = (
+    ".codex",
+    ".stateful",
+    ".stateful_bench",
+    ".stateful_core",
+    "upstream",
+)
+BENCHMARK_SOURCE_LEAK_COMMAND_PATTERNS = (
+    "git clone",
+    "git fetch",
+    "git pull",
+    "gh pr",
+    "gh issue",
+)
+BENCHMARK_SOURCE_LEAK_HOST_PATTERNS = (
+    "github.com",
+    "raw.githubusercontent.com",
+    "patch-diff.githubusercontent.com",
+    "api.github.com/repos",
 )
 
 
@@ -156,11 +179,40 @@ def native_subagent_prompt_instruction(subagent: str, subagent_min_count: int) -
 Native Codex/OMP subagent requirements:
 - MUST use native subagents for this benchmark condition before making the final answer.
 - Before implementation or broad repository exploration, and after any narrow setup needed to read this prompt, inspect tool availability, or initialize stateful coordination, spawn at least {subagent_min_count} native subagents unless the runtime does not expose any native subagent tool.
+- MUST read and use the `dispatching-parallel-agents` skill before spawning native subagents when that skill is available.
 - In OMP, the current native subagent tool is `task`: call it with a `tasks` array containing at least {subagent_min_count} implementation subagents. Older OMP multi-agent builds may expose `multi_agent_v1spawn_agent` instead.
 - Use all {subagent_min_count} native subagents for repository editing; each subagent must inspect, edit, and verify a distinct implementation slice.
 - Do not leave any native subagent as analysis-only, documentation-only, or idle.
 - Wait for each spawned subagent and incorporate its work or findings into the final workspace.
 - If the runtime does not expose subagent tools, explicitly report that blocker instead of silently completing as if subagents were used.
+""".rstrip()
+
+
+def benchmark_isolation_prompt_instruction() -> str:
+    return """
+
+Benchmark isolation requirements:
+- Reconstruct the package from the provided workspace and repository specification only.
+- Do not fetch, clone, open, or inspect the upstream repository, pull request, issue, patch, commit, or raw source for this instance.
+- Do not create or use an `upstream` checkout, mirror, or source-copy directory.
+
+<ANTI_CHEAT_CONSTRAINT>
+ABSOLUTE RULE: DO NOT DOWNLOAD THE TARGET PACKAGE'S SOURCE CODE FROM THE INTERNET.
+You MUST implement the target project from scratch based solely on the repository specification above.
+This does not prohibit non-target third-party dependency research.
+It is a hard violation to look up, download, install, clone, or copy the target package's source code from any external source, including PyPI, GitHub, GitLab, Bitbucket, Codeberg, conda-forge, mirrors, caches, wheels, sdists, patch files, issues, pull requests, commits, or raw-source URLs.
+
+Specifically forbidden for the target package:
+- Package-manager source recovery such as `pip install <target>`, `pip download <target>`, `pip show <target>`, `python -m pip install <target>`, `uv add <target>`, `poetry add <target>`, `conda install <target>`, or equivalent commands.
+- VCS or source-control access such as `git clone`, `git fetch`, `git pull`, `git submodule add`, `gh pr`, or `gh issue` for the target repository, pull request, issue, patch, commit, or raw source.
+- Direct downloads from PyPI-family hosts, repository hosts, patch-diff hosts, or URLs containing the target package or upstream repository name.
+- Python introspection or on-disk artifact extraction that dumps the installed upstream source.
+
+The following are ALLOWED:
+- Installing *third-party* dependencies your own implementation needs.
+- Running `pip install -e .` on the code you yourself wrote inside the workspace.
+- Reading files already present in the workspace at the start of the session, except benchmark artifacts and generated metadata.
+</ANTI_CHEAT_CONSTRAINT>
 """.rstrip()
 
 
@@ -178,11 +230,13 @@ def build_codex_prompt(
 ) -> str:
     step_line = f"- Maximum task steps: {max_steps}.\n" if max_steps is not None else ""
     subagent_instruction = native_subagent_prompt_instruction(subagent, subagent_min_count)
+    isolation_instruction = benchmark_isolation_prompt_instruction()
     return f"""
 You are solving one DeNovoSWE benchmark instance.
 
 Instance id:
 {instance_id}
+{isolation_instruction}
 {subagent_instruction}
 
 
@@ -434,7 +488,7 @@ def copy_exported_workspace(source: Path, workspace: Path) -> None:
         source,
         workspace,
         symlinks=True,
-        ignore=shutil.ignore_patterns(".codex", ".stateful", ".stateful_bench", ".stateful_core"),
+        ignore=shutil.ignore_patterns(*WORKSPACE_COPY_IGNORE_PATTERNS),
     )
 
 
@@ -772,8 +826,11 @@ def docker_omp_command_for_profile(
     docker_bin: str = "docker",
     enable_native_subagent: bool = False,
     subagent_min_count: int = DEFAULT_SUBAGENT_MIN_COUNT,
+    sandbox: str = "on",
 ) -> list[str]:
     docker_env = omp_agent_docker_env(base_env)
+    if sandbox == "off":
+        docker_env["STATEFUL_OMP_SANDBOX"] = "off"
     command = [
         docker_bin,
         "run",
@@ -1172,6 +1229,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--agent-docker-stateful-binary",
         default=DEFAULT_OMP_AGENT_DOCKER_STATEFUL_BINARY,
     )
+    parser.add_argument("--agent-docker-sandbox", choices=["on", "off"], default="on")
     parser.add_argument("--benchmark-model", required=True)
     parser.add_argument("--benchmark-reasoning-effort", required=True)
     parser.add_argument("--benchmark-model-context-window", type=int, required=True)
@@ -1437,6 +1495,198 @@ def subagent_usage_metadata(
         "subagent_requirement_met_count": requirement_met_count,
         "subagent_requirement_met_any": requirement_met_count > 0,
     }
+
+def instance_owner_repo(instance_id: str) -> tuple[str, str] | None:
+    prefix, separator, _ = instance_id.rpartition("_pr")
+    if not separator or "_" not in prefix:
+        return None
+    owner, repo = prefix.split("_", 1)
+    if not owner or not repo:
+        return None
+    return owner, repo
+
+
+def benchmark_source_leak_url_patterns(instance_id: str) -> tuple[str, ...]:
+    owner_repo = instance_owner_repo(instance_id)
+    if owner_repo is None:
+        return ()
+    owner, repo = owner_repo
+    repo_path = f"{owner}/{repo}".lower()
+    return (
+        *(f"{host}/{repo_path}" for host in BENCHMARK_SOURCE_LEAK_HOST_PATTERNS),
+        f"patch-diff.githubusercontent.com/raw/{repo_path}",
+        f"git@github.com:{repo_path}",
+        f"pr://{repo_path}",
+        f"issue://{repo_path}",
+    )
+
+
+def benchmark_source_leak_local_path_pattern(text: str) -> str | None:
+    if re.search(r"(?<![a-z0-9_-])upstream(?![a-z0-9_-])", text.lower()):
+        return "upstream/"
+    return None
+
+
+def benchmark_source_leak_command_pattern(
+    text: str,
+    url_patterns: tuple[str, ...],
+) -> str | None:
+    lower_text = text.lower()
+    command_pattern = None
+    for pattern in BENCHMARK_SOURCE_LEAK_COMMAND_PATTERNS:
+        words = r"\s+".join(re.escape(part) for part in pattern.split())
+        if re.search(rf"(?<![a-z0-9_-]){words}(?![a-z0-9_-])", lower_text):
+            command_pattern = pattern
+            break
+    if command_pattern is None:
+        return None
+    if benchmark_source_leak_local_path_pattern(text) is not None:
+        return command_pattern
+    if benchmark_source_leak_url_pattern(text, url_patterns) is not None:
+        return command_pattern
+    return None
+
+
+def benchmark_source_leak_url_pattern(text: str, patterns: tuple[str, ...]) -> str | None:
+    candidate = text.strip()
+    if candidate.lower().startswith("url:"):
+        candidate = candidate[4:].strip()
+    lower_candidate = candidate.lower()
+    if "://" not in lower_candidate and not lower_candidate.startswith("git@github.com:"):
+        return None
+    for pattern in patterns:
+        if pattern in lower_candidate:
+            return pattern
+    return None
+
+
+def parse_tool_arguments(arguments: Any) -> Any:
+    if not isinstance(arguments, str):
+        return arguments
+    try:
+        return json.loads(arguments)
+    except json.JSONDecodeError:
+        return arguments
+
+
+def benchmark_json_tool_calls(event: dict[str, Any]) -> list[tuple[str, Any]]:
+    calls = list(omp_session_tool_calls(event))
+    candidates = [event, event.get("payload"), event.get("item")]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        call_type = candidate.get("type")
+        if call_type in {"function_call", "custom_tool_call"}:
+            name = candidate.get("name")
+            if isinstance(name, str):
+                calls.append((name, candidate.get("arguments")))
+        function_call = candidate.get("function_call")
+        if isinstance(function_call, dict):
+            name = function_call.get("name")
+            if isinstance(name, str):
+                calls.append((name, function_call.get("arguments")))
+    return calls
+
+
+def benchmark_tool_call_source_leak_pattern(
+    name: str,
+    arguments: Any,
+    url_patterns: tuple[str, ...],
+) -> str | None:
+    parsed_arguments = parse_tool_arguments(arguments)
+    if isinstance(parsed_arguments, dict):
+        for key in ("path", "url"):
+            value = parsed_arguments.get(key)
+            if isinstance(value, str) and name in {"read", "browser"}:
+                pattern = benchmark_source_leak_local_path_pattern(value)
+                if pattern is not None:
+                    return pattern
+                pattern = benchmark_source_leak_url_pattern(value, url_patterns)
+                if pattern is not None:
+                    return pattern
+        command = parsed_arguments.get("command")
+        if isinstance(command, str):
+            return benchmark_source_leak_command_pattern(command, url_patterns)
+    elif isinstance(parsed_arguments, str):
+        if name in {"read", "browser"}:
+            pattern = benchmark_source_leak_local_path_pattern(parsed_arguments)
+            if pattern is not None:
+                return pattern
+            pattern = benchmark_source_leak_url_pattern(parsed_arguments, url_patterns)
+            if pattern is not None:
+                return pattern
+        return benchmark_source_leak_command_pattern(parsed_arguments, url_patterns)
+    return None
+
+
+def benchmark_artifact_source_leak_pattern(
+    artifact_path: Path,
+    line: str,
+    url_patterns: tuple[str, ...],
+) -> str | None:
+    if artifact_path.name.endswith(".read.log"):
+        if line.lstrip().lower().startswith("url:"):
+            return benchmark_source_leak_url_pattern(line, url_patterns)
+        return None
+    if artifact_path.suffix != ".jsonl":
+        return None
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(event, dict):
+        return None
+    for name, arguments in benchmark_json_tool_calls(event):
+        pattern = benchmark_tool_call_source_leak_pattern(name, arguments, url_patterns)
+        if pattern is not None:
+            return pattern
+    return None
+
+
+def benchmark_session_artifact_paths(codex_home: Path) -> list[Path]:
+    if not codex_home.exists():
+        return []
+    candidates: list[Path] = []
+    for pattern in ("**/*.jsonl", "**/*.log"):
+        candidates.extend(path for path in codex_home.rglob(pattern) if path.is_file())
+    return sorted(set(candidates))
+
+
+def benchmark_contamination_record(
+    instance_id: str,
+    workspace: Path,
+    codex_home: Path,
+) -> dict[str, str] | None:
+    upstream_dir = workspace / "upstream"
+    if upstream_dir.exists():
+        return {
+            "kind": "upstream-worktree",
+            "path": str(upstream_dir),
+            "reason": "`upstream` directory exists in final workspace",
+        }
+
+    url_patterns = benchmark_source_leak_url_patterns(instance_id)
+    for artifact_path in benchmark_session_artifact_paths(codex_home):
+        try:
+            with artifact_path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    pattern = benchmark_artifact_source_leak_pattern(
+                        artifact_path,
+                        line,
+                        url_patterns,
+                    )
+                    if pattern is not None:
+                        return {
+                            "kind": "upstream-source-access",
+                            "path": str(artifact_path),
+                            "line": str(line_number),
+                            "pattern": pattern,
+                            "reason": "session transcript referenced upstream source control",
+                        }
+        except OSError:
+            continue
+    return None
+
 
 
 def instance_result_row(result: InstanceResult) -> dict[str, Any]:
@@ -1852,6 +2102,7 @@ async def run_one_instance_async(
                     base_env=env,
                     enable_native_subagent=args.subagent == "on",
                     subagent_min_count=args.subagent_min_count,
+                    sandbox=args.agent_docker_sandbox,
                 )
             else:
                 command = omp_command_for_profile(
@@ -1953,6 +2204,28 @@ async def run_one_instance_async(
                 command_record["orchestration_trace"] = orchestration_trace
             write_json(instance_dir / "codex-command.json", command_record)
 
+        benchmark_contamination = benchmark_contamination_record(inst.id, workspace, codex_home)
+        if benchmark_contamination is not None:
+            patch = git_diff(workspace) if returncode == 0 else ""
+            patch_path.write_text(patch, encoding="utf-8")
+            command_record["benchmark_contamination"] = benchmark_contamination
+            orchestration_trace = capture_trace()
+            finish_command_record(orchestration_trace)
+            cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
+            stateful_repo_cleanup = None
+            return InstanceResult(
+                inst.id,
+                False,
+                None,
+                "benchmark-contamination",
+                benchmark_contamination["reason"],
+                None,
+                subagent_used=subagent_usage["subagent_used"],
+                subagent_usage=subagent_usage,
+                token_usage=token_usage,
+                orchestration_trace=orchestration_trace,
+            )
+
         if returncode != 0:
             patch_path.write_text("", encoding="utf-8")
             orchestration_trace = capture_trace()
@@ -1971,6 +2244,7 @@ async def run_one_instance_async(
                 token_usage=token_usage,
                 orchestration_trace=orchestration_trace,
             )
+
 
         if args.subagent == "on" and not subagent_usage["subagent_requirement_met"]:
             patch_path.write_text("", encoding="utf-8")
@@ -2141,6 +2415,7 @@ async def run_real_instances_async(args: argparse.Namespace) -> int:
             "agent_docker_stateful_binary": (
                 args.agent_docker_stateful_binary if args.agent_docker_image else None
             ),
+            "agent_docker_sandbox": args.agent_docker_sandbox if args.agent_docker_image else None,
         },
     )
     return adapter_exit_code_after_results(results)

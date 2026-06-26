@@ -9,6 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
+        bubblewrap \
         ca-certificates \
         curl \
         git \
@@ -26,5 +27,6 @@ RUN bun install -g @oh-my-pi/pi-coding-agent@16.1.14 \
 
 COPY --from=builder /src/target/release/stateful /usr/local/bin/stateful
 RUN stateful --help >/dev/null \
+    && command -v bwrap \
     && command -v omp \
     && command -v stateful

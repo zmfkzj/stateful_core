@@ -138,6 +138,10 @@ pub fn plan_codex_install(options: &CodexInstallOptions) -> anyhow::Result<Insta
     plan.files.push(options.codex_config_path.clone());
     plan.files
         .push(global_command_policy_skill_path(&options.codex_config_path));
+    plan.files
+        .push(global_dispatching_parallel_agents_skill_path(
+            &options.codex_config_path,
+        ));
     plan.files.push(global_external_sandbox_rules_path(
         &options.codex_config_path,
     ));
@@ -157,6 +161,7 @@ pub fn apply_codex_install(options: CodexInstallOptions) -> anyhow::Result<Insta
     })?;
     write_codex_config_update(&options.codex_config_path, codex_update)?;
     write_global_command_policy_skill(&options.codex_config_path)?;
+    write_global_dispatching_parallel_agents_skill(&options.codex_config_path)?;
     write_global_external_sandbox_rules(&options.codex_config_path, &options.binary_path)?;
     plan.summary = format!(
         "apply: installed stateful global files under {} and merged Codex config {}",
@@ -182,7 +187,8 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
         .join("extensions")
         .join("stateful-omp-extension.js");
     let mcp_path = agent_dir.join("mcp.json");
-    let skill_path = omp_command_policy_skill_path(&agent_dir);
+    let command_policy_skill_path = omp_command_policy_skill_path(&agent_dir);
+    let dispatching_skill_path = omp_dispatching_parallel_agents_skill_path(&agent_dir);
     let rule_path = omp_required_rule_path(&agent_dir);
     plan.summary = format!(
         "{mode}: install stateful files under {} and configure the OMP stateful profile under {}",
@@ -192,7 +198,8 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
     plan.files.push(config_path);
     plan.files.push(extension_path);
     plan.files.push(mcp_path);
-    plan.files.push(skill_path);
+    plan.files.push(command_policy_skill_path);
+    plan.files.push(dispatching_skill_path);
     plan.files.push(rule_path);
     Ok(plan)
 }
@@ -232,6 +239,7 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
     write_omp_extension(&extension_path, &options.binary_path)?;
     write_omp_mcp_config(&mcp_path, &options.binary_path)?;
     write_omp_command_policy_skill(&agent_dir)?;
+    write_omp_dispatching_parallel_agents_skill(&agent_dir)?;
     write_omp_required_rule(&agent_dir)?;
     plan.summary = format!(
         "apply: installed stateful files under {} and configured the OMP stateful profile under {}",
@@ -369,6 +377,46 @@ fn omp_command_policy_skill_path(agent_dir: &Path) -> PathBuf {
     agent_dir
         .join("skills")
         .join("stateful-command-policy")
+        .join("SKILL.md")
+}
+
+fn write_global_dispatching_parallel_agents_skill(codex_config_path: &Path) -> anyhow::Result<()> {
+    let path = global_dispatching_parallel_agents_skill_path(codex_config_path);
+    let parent = containing_dir(&path);
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create Codex dispatching skill directory {}",
+            parent.display()
+        )
+    })?;
+    fs::write(&path, dispatching_parallel_agents_skill())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn global_dispatching_parallel_agents_skill_path(codex_config_path: &Path) -> PathBuf {
+    containing_dir(codex_config_path)
+        .join("skills")
+        .join("dispatching-parallel-agents")
+        .join("SKILL.md")
+}
+
+fn write_omp_dispatching_parallel_agents_skill(agent_dir: &Path) -> anyhow::Result<()> {
+    let path = omp_dispatching_parallel_agents_skill_path(agent_dir);
+    let parent = containing_dir(&path);
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create OMP dispatching skill directory {}",
+            parent.display()
+        )
+    })?;
+    fs::write(&path, dispatching_parallel_agents_skill())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn omp_dispatching_parallel_agents_skill_path(agent_dir: &Path) -> PathBuf {
+    agent_dir
+        .join("skills")
+        .join("dispatching-parallel-agents")
         .join("SKILL.md")
 }
 
@@ -1073,7 +1121,7 @@ fn sandbox_external_prompt_rules(binary_path: &str) -> anyhow::Result<String> {
     validate_no_control_chars(binary_path)?;
     let binary = toml_string(binary_path);
     let request_match = toml_string(&format!(
-        "{binary_path} sandbox run --fs external --purpose 'install rebuilt binaries' --write-dir /Users/me/.cargo/bin --command 'install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful'"
+        "{binary_path} sandbox run --fs external --purpose 'install rebuilt binaries' --write-dir /opt/stateful/bin --command 'install -m 755 target/release/stateful /opt/stateful/bin/stateful'"
     ));
     Ok(format!(
         r#"{GLOBAL_CODEX_BLOCK_START}
@@ -1349,6 +1397,9 @@ fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Resu
     let binary_json = serde_json::to_string(binary_path)?;
     let contents = format!(
         r#"import {{ spawn, spawnSync }} from "node:child_process";
+import {{ existsSync, readFileSync, writeFileSync }} from "node:fs";
+import {{ resolve }} from "node:path";
+import {{ fileURLToPath }} from "node:url";
 
 const STATEFUL = {binary_json};
 
@@ -1562,6 +1613,7 @@ const MAX_SANDBOX_TOOL_OUTPUT_BYTES = 50 * 1024;
 const SANDBOX_BASH_FS_PROFILES = new Set(["read-only", "write-targets", "build", "git", "github-pr"]);
 
 let sandboxJobCounter = 0;
+const backgroundSandboxToolCallIds = new Set();
 
 const EXTERNAL_GRANT_DEFAULT_MAX_USES = 5;
 const EXTERNAL_GRANT_MAX_USES_LIMIT = 20;
@@ -1584,6 +1636,195 @@ function stringList(value) {{
   return [];
 }}
 
+const lazyEditOperations = new Map();
+let lazyEditOperationCounter = 0;
+
+function extractWaitId(reason) {{
+  const match = String(reason || "").match(/wait_id ([A-Za-z0-9_-]+)/);
+  return match ? match[1] : "";
+}}
+
+function structuredLazyEditOperationId(decision) {{
+  return decision?.wait?.wait_id
+    || decision?.reservation?.wait_id
+    || decision?.reservation?.id
+    || extractWaitId(decision?.reason)
+    || extractWaitId(decision?.message);
+}}
+
+function nextLazyEditOperationId() {{
+  lazyEditOperationCounter += 1;
+  return "lazy-edit-" + Date.now().toString(36) + "-" + lazyEditOperationCounter.toString(36);
+}}
+
+function editPatchTargets(input) {{
+  const patch = String(input?.input || "");
+  const targets = [];
+  for (const line of patch.split(/\r?\n/)) {{
+    const match = line.match(/^\[([^#\]\r\n]+)#[0-9A-Fa-f]{{4}}\]$/);
+    if (match) targets.push(match[1]);
+  }}
+  return [...new Set(targets)];
+}}
+
+function safeLazyEditTarget(target) {{
+  return typeof target === "string"
+    && target.length > 0
+    && !target.startsWith("/")
+    && !target.includes("\\")
+    && !target.split("/").some((part) => part === "" || part === "." || part === "..");
+}}
+
+function readOperationBases(cwd, targets) {{
+  const bases = new Map();
+  for (const target of targets) {{
+    const path = resolve(cwd, target);
+    bases.set(target, existsSync(path) ? readFileSync(path, "utf8") : null);
+  }}
+  return bases;
+}}
+
+function rememberLazyEditOperation(event, ctx, decision) {{
+  if (event?.toolName !== "edit") return "";
+  const targets = editPatchTargets(event.input || {{}});
+  if (targets.length === 0 || !targets.every(safeLazyEditTarget)) return "";
+  const operationId = structuredLazyEditOperationId(decision) || nextLazyEditOperationId();
+  lazyEditOperations.set(operationId, {{
+    operation_id: operationId,
+    session_id: sessionId(event, ctx),
+    cwd: ctx.cwd,
+    tool_name: event.toolName,
+    tool_input: event.input || {{}},
+    targets,
+    bases: readOperationBases(ctx.cwd, targets),
+    blocked_reason: decision?.reason || "",
+  }});
+  return operationId;
+}}
+
+function textToLines(text) {{
+  if (text === "") return {{ lines: [], trailing: false }};
+  const trailing = text.endsWith("\n");
+  const body = trailing ? text.slice(0, -1) : text;
+  return {{ lines: body.length ? body.split("\n") : [], trailing }};
+}}
+
+function linesToText(lines, trailing) {{
+  return lines.join("\n") + (trailing && lines.length ? "\n" : "");
+}}
+
+function readPatchBody(lines, cursor) {{
+  const body = [];
+  while (cursor < lines.length && lines[cursor].startsWith("+")) {{
+    body.push(lines[cursor].slice(1));
+    cursor += 1;
+  }}
+  return {{ body, cursor }};
+}}
+
+function parseOmpLinePatch(patch) {{
+  const lines = String(patch || "").replace(/\r\n/g, "\n").split("\n");
+  const files = new Map();
+  let current = null;
+  for (let i = 0; i < lines.length;) {{
+    const line = lines[i];
+    if (line === "*** Begin Patch" || line === "*** End Patch") {{ i += 1; continue; }}
+    if (!line) {{ i += 1; continue; }}
+    const header = line.match(/^\[([^#\]\r\n]+)#[0-9A-Fa-f]{{4}}\]$/);
+    if (header) {{
+      current = header[1];
+      if (!files.has(current)) files.set(current, []);
+      i += 1;
+      continue;
+    }}
+    if (!current) throw new Error("lazy_edit_resume patch missing file header");
+    if (/^(SWAP|DEL)\.BLK |^INS\.BLK\.POST /.test(line)) {{
+      throw new Error("lazy_edit_resume supports line edits only; regenerate patch for block operations");
+    }}
+    let match = line.match(/^SWAP ([1-9]\d*)\.=([1-9]\d*):$/);
+    if (match) {{
+      const read = readPatchBody(lines, i + 1);
+      files.get(current).push({{ kind: "swap", start: Number(match[1]), end: Number(match[2]), body: read.body }});
+      i = read.cursor;
+      continue;
+    }}
+    match = line.match(/^DEL ([1-9]\d*)(?:\.=([1-9]\d*))?$/);
+    if (match) {{
+      files.get(current).push({{ kind: "del", start: Number(match[1]), end: Number(match[2] || match[1]), body: [] }});
+      i += 1;
+      continue;
+    }}
+    match = line.match(/^INS\.(HEAD|TAIL):$/);
+    if (match) {{
+      const read = readPatchBody(lines, i + 1);
+      files.get(current).push({{ kind: "ins", pos: match[1].toLowerCase(), line: 0, body: read.body }});
+      i = read.cursor;
+      continue;
+    }}
+    match = line.match(/^INS\.(PRE|POST) ([1-9]\d*):$/);
+    if (match) {{
+      const read = readPatchBody(lines, i + 1);
+      files.get(current).push({{ kind: "ins", pos: match[1].toLowerCase(), line: Number(match[2]), body: read.body }});
+      i = read.cursor;
+      continue;
+    }}
+    throw new Error("unsupported lazy_edit_resume patch line: " + line);
+  }}
+  return files;
+}}
+
+function validateOmpLinePatchBases(cwd, editsByFile, bases) {{
+  for (const target of editsByFile.keys()) {{
+    const filePath = resolve(cwd, target);
+    const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : null;
+    if (current !== (bases.get(target) ?? null)) {{
+      return {{ status: "stale", message: target + " changed since operation was queued" }};
+    }}
+  }}
+  return null;
+}}
+
+function applyOmpLinePatch(cwd, patch, bases) {{
+  const editsByFile = parseOmpLinePatch(patch);
+  const stale = validateOmpLinePatchBases(cwd, editsByFile, bases);
+  if (stale) return stale;
+  for (const [target, edits] of editsByFile.entries()) {{
+    const filePath = resolve(cwd, target);
+    const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : null;
+    const text = current || "";
+    const split = textToLines(text);
+    const applied = split.lines.slice();
+    const ordered = edits.slice().sort((a, b) => {{
+      const aLine = a.kind === "ins" ? (a.pos === "tail" ? Number.MAX_SAFE_INTEGER : a.line) : a.start;
+      const bLine = b.kind === "ins" ? (b.pos === "tail" ? Number.MAX_SAFE_INTEGER : b.line) : b.start;
+      return bLine - aLine;
+    }});
+    for (const edit of ordered) {{
+      if (edit.kind === "swap") {{
+        if (edit.start < 1 || edit.end < edit.start || edit.end > applied.length) throw new Error("invalid SWAP range for " + target);
+        applied.splice(edit.start - 1, edit.end - edit.start + 1, ...edit.body);
+      }} else if (edit.kind === "del") {{
+        if (edit.start < 1 || edit.end < edit.start || edit.end > applied.length) throw new Error("invalid DEL range for " + target);
+        applied.splice(edit.start - 1, edit.end - edit.start + 1);
+      }} else if (edit.kind === "ins") {{
+        const index = edit.pos === "head" ? 0 : edit.pos === "tail" ? applied.length : edit.pos === "pre" ? edit.line - 1 : edit.line;
+        if (index < 0 || index > applied.length) throw new Error("invalid INS anchor for " + target);
+        applied.splice(index, 0, ...edit.body);
+      }}
+    }}
+    writeFileSync(filePath, linesToText(applied, split.trailing || text === ""), "utf8");
+  }}
+  return {{ status: "applied", message: "lazy edit applied" }};
+}}
+
+function lazyEditToolResult(status, text, details) {{
+  return {{
+    isError: status !== "applied",
+    content: [{{ type: "text", text }}],
+    details,
+  }};
+}}
+
 function truncateSandboxToolText(value, label) {{
   const text = value || "";
   if (Buffer.byteLength(text, "utf8") <= MAX_SANDBOX_TOOL_OUTPUT_BYTES) {{
@@ -1593,6 +1834,80 @@ function truncateSandboxToolText(value, label) {{
     .from(text, "utf8")
     .subarray(0, MAX_SANDBOX_TOOL_OUTPUT_BYTES)
     .toString("utf8") + "\n\n[" + label + " output truncated to 51200 bytes]";
+}}
+
+function shellQuote(value) {{
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}}
+
+function singleQuoteEscape(value) {{
+  return value.replace(/'/g, "'\\''");
+}}
+
+function doubleQuoteEscape(value) {{
+  return value.replace(/["\\$`]/g, "\\$&");
+}}
+
+function skillUrlTokenEnd(command, start, quote) {{
+  let index = start;
+  while (index < command.length) {{
+    const ch = command[index];
+    if (quote) {{
+      if (ch === quote) break;
+    }} else if (/\s/.test(ch) || "'\"`|&;<>".includes(ch)) {{
+      break;
+    }}
+    index += 1;
+  }}
+  return index;
+}}
+
+function resolveSkillInternalUrl(rawUrl) {{
+  let parsed;
+  try {{
+    parsed = new URL(rawUrl);
+  }} catch (_) {{
+    throw new Error("invalid skill:// URL: " + rawUrl);
+  }}
+  if (parsed.protocol !== "skill:" || !parsed.hostname || parsed.search || parsed.hash) {{
+    throw new Error("unsupported internal URL in stateful sandbox command: " + rawUrl);
+  }}
+  const relative = parsed.pathname && parsed.pathname !== "/"
+    ? decodeURIComponent(parsed.pathname.replace(/^\/+/, ""))
+    : "SKILL.md";
+  const parts = relative.split("/");
+  if (parts.some((part) => part.length === 0 || part === "." || part === ".." || part.includes("\\"))) {{
+    throw new Error("invalid skill:// path: " + rawUrl);
+  }}
+  const skillRootUrl = new URL("../skills/" + encodeURIComponent(parsed.hostname) + "/", import.meta.url);
+  const skillRoot = fileURLToPath(skillRootUrl);
+  const resolvedPath = fileURLToPath(new URL(parts.map(encodeURIComponent).join("/"), skillRootUrl));
+  if (!resolvedPath.startsWith(skillRoot) || !existsSync(resolvedPath)) {{
+    throw new Error("unknown skill:// path: " + rawUrl);
+  }}
+  return resolvedPath;
+}}
+
+function expandSkillInternalUrlsInCommand(command) {{
+  let result = "";
+  let cursor = 0;
+  let quote = null;
+  for (let index = 0; index < command.length; index += 1) {{
+    const ch = command[index];
+    if (quote) {{
+      if (ch === quote) quote = null;
+    }} else if (ch === "'" || ch === "\"") {{
+      quote = ch;
+    }}
+    if (!command.startsWith("skill://", index)) continue;
+    const end = skillUrlTokenEnd(command, index, quote);
+    const resolved = resolveSkillInternalUrl(command.slice(index, end));
+    result += command.slice(cursor, index);
+    result += quote === "'" ? singleQuoteEscape(resolved) : quote === "\"" ? doubleQuoteEscape(resolved) : shellQuote(resolved);
+    cursor = end;
+    index = end - 1;
+  }}
+  return cursor === 0 ? command : result + command.slice(cursor);
 }}
 
 function addCommonSandboxArgs(args, params, toolName) {{
@@ -1633,8 +1948,12 @@ function sandboxBashArgs(params) {{
   const args = ["sandbox", "run", "--fs", fs];
   args.push("--stream-events");
   addCommonSandboxArgs(args, params, "sandbox_bash");
-  args.push("--command", params.command);
+  args.push("--command", expandSkillInternalUrlsInCommand(params.command));
   return args;
+}}
+
+function ompSandboxDisabled() {{
+  return process.env.STATEFUL_OMP_SANDBOX === "off";
 }}
 
 function validateExternalPurposeAndCommand(params, toolName) {{
@@ -1660,7 +1979,7 @@ function externalReadOnlyBashArgs(params) {{
   const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
   args.push("--stream-events");
   addCommonSandboxArgs(args, params, "ext_ro_bash");
-  args.push("--command", params.command);
+  args.push("--command", expandSkillInternalUrlsInCommand(params.command));
   return args;
 }}
 
@@ -1672,7 +1991,7 @@ function externalReadWriteBashArgs(params) {{
   const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
   args.push("--stream-events");
   addCommonSandboxArgs(args, params, "ext_rw_bash");
-  args.push("--command", params.command);
+  args.push("--command", expandSkillInternalUrlsInCommand(params.command));
   return args;
 }}
 
@@ -1801,7 +2120,7 @@ async function ensureExternalBashGrant(ctx, params, signal) {{
 
 function sandboxToolResultText(exitCode, stdout, stderr, error) {{
   if (!stderr && !error) {{
-    return stdout || "";
+    return stdout || "exit_code: " + exitCode;
   }}
   const sections = [];
   if (stdout) sections.push(stdout);
@@ -1909,6 +2228,28 @@ function createSandboxStdoutStreamer(onUpdate, jobId, label) {{
       await Promise.allSettled(deliveries);
     }},
   }};
+}}
+
+function deliverSandboxBackgroundMessage(pi, jobId, label, text, details) {{
+  if (typeof pi?.sendMessage !== "function") {{
+    return;
+  }}
+  const final = details?.final === true;
+  try {{
+    pi.sendMessage(
+      {{
+        customType: final ? "stateful_sandbox_bash_result" : "stateful_sandbox_bash_output",
+        content: text,
+        display: true,
+        details: {{
+          runId: jobId,
+          label,
+          ...(details || {{}}),
+        }},
+      }},
+      {{ triggerTurn: true, deliverAs: "nextTurn" }}
+    );
+  }} catch (_) {{}}
 }}
 
 function killSandboxChild(child, signalName) {{
@@ -2049,19 +2390,239 @@ function runSandboxToolProcess(params, args, ctx, label, signal, onStdout) {{
   }});
 }}
 
+function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout) {{
+  return new Promise((resolve) => {{
+    let stdout = "";
+    let stderr = "";
+    let processError = "";
+    let settled = false;
+    let cancelled = false;
+    let child;
+    let abortHandler;
+    let killTimer;
+    let timeoutTimer;
+    const finish = (exitCode, error) => {{
+      if (settled) return;
+      settled = true;
+      if (killTimer) clearTimeout(killTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (signal && abortHandler) {{
+        signal.removeEventListener("abort", abortHandler);
+      }}
+      if (stdout) onStdout(stdout);
+      const result = buildSandboxToolResult(params, ["sandbox-disabled"], exitCode, stdout, stderr, error);
+      result.details.sandboxDisabled = true;
+      if (cancelled) {{
+        result.details.cancelled = true;
+      }}
+      resolve(result);
+    }};
+    abortHandler = () => {{
+      if (settled || cancelled) return;
+      cancelled = true;
+      processError = "cancelled by user";
+      killSandboxChild(child, "SIGTERM");
+      killTimer = setTimeout(() => killSandboxChild(child, "SIGKILL"), 1000);
+      setTimeout(() => finish(1, processError), 3000);
+    }};
+    if (signal?.aborted) {{
+      cancelled = true;
+      finish(1, "cancelled by user");
+      return;
+    }}
+    try {{
+      child = spawn(expandSkillInternalUrlsInCommand(params.command), {{
+        cwd: ctx.cwd,
+        shell: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+      }});
+    }} catch (error) {{
+      finish(1, error instanceof Error ? error.message : String(error));
+      return;
+    }}
+    if (signal) {{
+      signal.addEventListener("abort", abortHandler, {{ once: true }});
+    }}
+    const timeoutSeconds = params.timeout_seconds ?? params.timeoutSeconds;
+    if (Number.isInteger(timeoutSeconds) && timeoutSeconds > 0) {{
+      timeoutTimer = setTimeout(() => {{
+        processError = "timed out after " + timeoutSeconds + "s";
+        killSandboxChild(child, "SIGTERM");
+        killTimer = setTimeout(() => killSandboxChild(child, "SIGKILL"), 1000);
+      }}, timeoutSeconds * 1000);
+    }}
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => {{
+      stdout = truncateSandboxToolText(stdout + chunk, label);
+    }});
+    child.stderr?.on("data", (chunk) => {{
+      stderr = truncateSandboxToolText(stderr + chunk, label);
+    }});
+    child.on("error", (error) => {{
+      processError = error instanceof Error ? error.message : String(error);
+    }});
+    child.on("close", (code, signalName) => {{
+      const exitCode = typeof code === "number" ? code : 1;
+      const signalError = signalName ? "terminated by signal " + signalName : "";
+      finish(exitCode, processError || signalError);
+    }});
+  }});
+}}
+
 async function runSandboxAwaitedTool(params, args, ctx, label, signal, onUpdate) {{
   const runId = nextSandboxJobId(label);
   const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
   const stdoutStreamer = createSandboxStdoutStreamer(onUpdate, runId, commandLabel);
-  const result = await runSandboxToolProcess(params, args, ctx, label, signal, (chunk) => {{
-    stdoutStreamer.push(chunk);
-  }});
+  const runner = label === "sandbox_bash" && ompSandboxDisabled()
+    ? runSandboxDisabledToolProcess(params, ctx, label, signal, (chunk) => {{
+        stdoutStreamer.push(chunk);
+      }})
+    : runSandboxToolProcess(params, args, ctx, label, signal, (chunk) => {{
+        stdoutStreamer.push(chunk);
+      }});
+  const result = await runner;
   await stdoutStreamer.drain();
   return result;
 }}
 
+function backgroundToolCallIdFromEvent(event) {{
+  const id = event?.toolCallId || event?.tool_call_id || event?.id;
+  return typeof id === "string" && id.length > 0 ? id : "";
+}}
+
+function rememberBackgroundSandboxToolCall(toolCallId) {{
+  if (typeof toolCallId === "string" && toolCallId.length > 0) {{
+    backgroundSandboxToolCallIds.add(toolCallId);
+  }}
+}}
+
+function isBackgroundSandboxToolResult(event) {{
+  const toolCallId = backgroundToolCallIdFromEvent(event);
+  if (toolCallId && backgroundSandboxToolCallIds.delete(toolCallId)) {{
+    return true;
+  }}
+  return event?.result?.details?.background === true || event?.details?.background === true;
+}}
+
+function postBackgroundSandboxToolUse(ctx, label, params) {{
+  runStatefulHook("post-tool-use", {{
+    session_id: sessionId({{}}, ctx),
+    cwd: ctx.cwd,
+    tool_name: label,
+    tool_input: params || {{}},
+  }});
+}}
+
+function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, signal, onUpdate) {{
+  if (signal?.aborted) {{
+    return sandboxToolError("cancelled by user");
+  }}
+  rememberBackgroundSandboxToolCall(toolCallId);
+  const runId = nextSandboxJobId(label);
+  const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
+  const stdoutStreamer = createSandboxStdoutStreamer((update) => {{
+    const chunk = update?.content?.[0]?.text || "";
+    deliverSandboxBackgroundMessage(pi, runId, label, chunk, {{
+      command: params.command,
+      stream: "stdout",
+    }});
+  }}, runId, commandLabel);
+  const runner = label === "sandbox_bash" && ompSandboxDisabled()
+    ? runSandboxDisabledToolProcess(params, ctx, label, undefined, (chunk) => {{
+        stdoutStreamer.push(chunk);
+      }})
+    : runSandboxToolProcess(params, args, ctx, label, undefined, (chunk) => {{
+        stdoutStreamer.push(chunk);
+      }});
+  runner.then(async (result) => {{
+    await stdoutStreamer.drain();
+    const details = result?.details || {{}};
+    postBackgroundSandboxToolUse(ctx, label, params);
+    deliverSandboxBackgroundMessage(
+      pi,
+      runId,
+      label,
+      sandboxToolResultText(details.exitCode ?? 1, details.stdout || "", details.stderr || "", details.error || ""),
+      {{
+        command: params.command,
+        final: true,
+        result,
+      }}
+    );
+  }}).catch((error) => {{
+    deliverSandboxBackgroundMessage(
+      pi,
+      runId,
+      label,
+      error instanceof Error ? error.message : String(error),
+      {{
+        command: params.command,
+        error: error instanceof Error ? error.message : String(error),
+        final: true,
+      }}
+    );
+  }});
+  return {{
+    isError: false,
+    content: [{{ type: "text", text: "Background job " + runId + " started." }}],
+    details: {{
+      runId,
+      background: true,
+      command: params.command,
+      sandboxArgs: args,
+    }},
+  }};
+}}
+
 export default function statefulOmpExtension(pi) {{
   pi.setLabel("Stateful");
+  pi.registerTool({{
+    name: "lazy_edit_resume",
+    label: "Lazy Edit Resume",
+    description: "Resume a blocked OMP edit operation after the needed reservation or claim is ready. Applies only strict line-based OMP edit patches captured in this live extension session.",
+    parameters: {{
+      type: "object",
+      properties: {{
+        operation_id: {{ type: "string", description: "Queued lazy edit operation id; either a Stateful wait_id or a generated live-session id printed in the block message." }},
+      }},
+      required: ["operation_id"],
+    }},
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {{
+      const operationId = String(params?.operation_id || "").trim();
+      const operation = lazyEditOperations.get(operationId);
+      if (!operation) {{
+        return lazyEditToolResult("failed", "lazy edit operation not found in this live OMP extension session", {{ operation_id: operationId }});
+      }}
+      const authorization = runStatefulHook("pre-tool-use", {{
+        session_id: operation.session_id,
+        cwd: operation.cwd || ctx.cwd,
+        yolo: true,
+        tool_name: operation.tool_name,
+        tool_input: operation.tool_input,
+      }});
+      if (authorization.decision !== "allow") {{
+        return lazyEditToolResult("failed", authorization.reason || "stateful authorization denied lazy edit resume", {{ operation_id: operationId, authorization }});
+      }}
+      let result;
+      try {{
+        result = applyOmpLinePatch(operation.cwd || ctx.cwd, operation.tool_input?.input || "", operation.bases);
+      }} catch (error) {{
+        result = {{ status: "failed", message: error instanceof Error ? error.message : String(error) }};
+      }}
+      if (result.status === "applied") {{
+        lazyEditOperations.delete(operationId);
+        runStatefulHook("post-tool-use", {{
+          session_id: operation.session_id,
+          cwd: operation.cwd || ctx.cwd,
+          tool_name: operation.tool_name,
+          tool_input: operation.tool_input,
+        }});
+      }}
+      return lazyEditToolResult(result.status, result.message, {{ operation_id: operationId, targets: operation.targets }});
+    }},
+  }});
   pi.registerTool({{
     name: "sandbox_bash",
     label: "Sandbox Bash",
@@ -2078,7 +2639,7 @@ export default function statefulOmpExtension(pi) {{
         allow_signal: {{ type: "boolean", description: "Allow the sandboxed command to signal approved processes when the selected profile supports signaling." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Deprecated compatibility field; commands now wait for completion before returning." }},
+        async: {{ type: "boolean", description: "Run in the background when true or omitted; set false to wait for completion." }},
       }},
       required: ["fs", "command"],
     }},
@@ -2089,7 +2650,8 @@ export default function statefulOmpExtension(pi) {{
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      return await runSandboxAwaitedTool(params, args, ctx, "sandbox_bash", signal, onUpdate);
+      if (params.async === false) return await runSandboxAwaitedTool(params, args, ctx, "sandbox_bash", signal, onUpdate);
+      return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, "sandbox_bash", signal, onUpdate);
     }},
   }});
   pi.registerTool({{
@@ -2103,7 +2665,7 @@ export default function statefulOmpExtension(pi) {{
         command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Deprecated compatibility field; commands now wait for completion before returning." }},
+        async: {{ type: "boolean", description: "Run in the background when true or omitted; set false to wait for completion." }},
       }},
       required: ["purpose", "command"],
     }},
@@ -2114,7 +2676,8 @@ export default function statefulOmpExtension(pi) {{
       }} catch (error) {{
         return sandboxToolError(error);
       }}
-      return await runSandboxAwaitedTool(params, args, ctx, "ext_ro_bash", signal, onUpdate);
+      if (params.async === false) return await runSandboxAwaitedTool(params, args, ctx, "ext_ro_bash", signal, onUpdate);
+      return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, "ext_ro_bash", signal, onUpdate);
     }},
   }});
   pi.registerTool({{
@@ -2136,7 +2699,7 @@ export default function statefulOmpExtension(pi) {{
         grant_expires_seconds: {{ type: "number", description: "Grant lifetime in seconds, from 1 to 3600. Defaults to 600." }},
         network: {{ type: "string", description: "Network mode: enabled or disabled." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Deprecated compatibility field; commands now wait for completion before returning." }},
+        async: {{ type: "boolean", description: "Run in the background when true or omitted; set false to wait for completion." }},
       }},
       required: ["purpose", "command"],
     }},
@@ -2170,7 +2733,8 @@ export default function statefulOmpExtension(pi) {{
       if (signal?.aborted) {{
         return sandboxToolError("cancelled by user");
       }}
-      return await runSandboxAwaitedTool(params, args, ctx, "ext_rw_bash", signal, onUpdate);
+      if (params.async === false) return await runSandboxAwaitedTool(params, args, ctx, "ext_rw_bash", signal, onUpdate);
+      return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, "ext_rw_bash", signal, onUpdate);
     }},
   }});
   pi.on("session_start", async (event, ctx) => {{
@@ -2204,10 +2768,15 @@ export default function statefulOmpExtension(pi) {{
       }}
     }}
     if (decision.decision === "block") {{
-      return {{ block: true, reason: decision.reason }};
+      const operationId = rememberLazyEditOperation(event, ctx, decision);
+      const suffix = operationId
+        ? "\n\nQueued lazy edit operation_id: " + operationId + "\nNext: when reservation or claim is ready, call lazy_edit_resume with this operation_id."
+        : "";
+      return {{ block: true, reason: decision.reason + suffix }};
     }}
   }});
   pi.on("tool_result", async (event, ctx) => {{
+    if (isBackgroundSandboxToolResult(event)) return;
     runStatefulHook("post-tool-use", {{
       session_id: sessionId(event, ctx),
       cwd: ctx.cwd,
@@ -2269,6 +2838,10 @@ fn stateful_command_policy_skill() -> &'static str {
     include_str!("../assets/stateful-command-policy/SKILL.md")
 }
 
+fn dispatching_parallel_agents_skill() -> &'static str {
+    include_str!("../assets/dispatching-parallel-agents/SKILL.md")
+}
+
 fn omp_stateful_required_rule() -> &'static str {
     include_str!("../assets/omp-stateful-required-rule.md")
 }
@@ -2301,16 +2874,16 @@ mod tests {
     #[test]
     fn default_omp_agent_dir_uses_user_omp_profile() {
         assert_eq!(
-            default_omp_agent_dir_from_home("/tmp/home"),
-            PathBuf::from("/tmp/home/.omp/profiles/stateful/agent")
+            default_omp_agent_dir_from_home("home"),
+            PathBuf::from("home/.omp/profiles/stateful/agent")
         );
     }
 
     #[test]
     fn omp_install_places_stateful_rule_in_agent_rules_dir() {
         assert_eq!(
-            omp_required_rule_path(Path::new("/tmp/home/.omp/profiles/stateful/agent")),
-            PathBuf::from("/tmp/home/.omp/profiles/stateful/agent/rules/stateful-required.md")
+            omp_required_rule_path(Path::new("home/.omp/profiles/stateful/agent")),
+            PathBuf::from("home/.omp/profiles/stateful/agent/rules/stateful-required.md")
         );
     }
 

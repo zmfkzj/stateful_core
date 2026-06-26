@@ -131,7 +131,8 @@ stateful install --yes
 ### Codex
 
 Install Codex integration when you want global Codex hooks, MCP, and the
-stateful command-policy skill:
+installed `skills/stateful-command-policy/SKILL.md` and
+`skills/dispatching-parallel-agents/SKILL.md` skills:
 
 ```bash
 stateful install --agent codex --yes
@@ -142,7 +143,9 @@ stateful codex
 ### OMP
 
 Install OMP integration when you want the isolated OMP `stateful` profile,
-stateful hooks, MCP, and generated sandbox command tools:
+stateful hooks, MCP, generated sandbox command tools, lazy edit resume, and the installed
+`skills/stateful-command-policy/SKILL.md` and
+`skills/dispatching-parallel-agents/SKILL.md` skills:
 
 ```bash
 stateful install --agent omp --yes
@@ -187,8 +190,10 @@ session stops being fresh.
 
 When another active claim blocks a write, the writer can queue for that resource.
 When the resource is released or expires, the server reserves it for the next
-eligible waiter and sends a resume notification. The reserved session rereads the
-target, claims or lazy-claims the reservation, then retries the write.
+eligible waiter and sends a resume notification. In OMP, blocked line-based
+`edit` patches are kept as live-session lazy edit operations, so an agent can
+acquire the missing reservation or claim and call `lazy_edit_resume` instead of
+regenerating the patch.
 
 Detailed queue states, claim expiry behavior, and promotion rules are documented
 in [State model](docs/state-model.md),
@@ -212,7 +217,8 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 
 In OMP, use the generated tools instead of raw Bash: `sandbox_bash` for
 non-external sandbox profiles, `ext_ro_bash` for read-only external shell work,
-and `ext_rw_bash` for external writes with a scoped purpose grant and declared scope.
+`ext_rw_bash` for external writes with a scoped purpose grant and declared scope,
+and `lazy_edit_resume` for strict replay of blocked line-based OMP `edit` patches.
 
 See [Usage reference](docs/usage-reference.md) for detailed CLI, hook, sandbox,
 LAN sharing, generated-file, and release notes.
@@ -344,3 +350,4 @@ ignored by default.
 Why AGPL? `stateful_core` is intended to remain open even when it is used behind
 local or network services. The license is part of keeping improvements to the
 coordination layer available to the people who depend on it.
+

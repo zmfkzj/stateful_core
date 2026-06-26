@@ -65,6 +65,7 @@ def native_subagent_prompt_instruction(
 Native Codex subagent requirements:
 - MUST use native Codex subagents for this task.
 - Spawn at least {subagent_min_count} native subagents before finishing.
+- MUST read and use the `dispatching-parallel-agents` skill before spawning native subagents when that skill is available.
 - Use all {subagent_min_count} native subagents for repository editing.
 - Do not leave any native subagent as analysis-only; each one must inspect, edit, and verify the workspace.
 - Wait for each spawned subagent and incorporate its work or findings into the final workspace.

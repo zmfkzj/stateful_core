@@ -543,6 +543,50 @@ fn add_repo_identity(object: &mut serde_json::Map<String, Value>, identity: Repo
         .or_insert_with(|| Value::String(identity.branch));
 }
 
+fn stateful_resource_descriptors() -> Vec<Value> {
+    vec![
+        serde_json::json!({
+            "uri": "stateful/current",
+            "name": "current",
+            "description": "Materialized Stateful current-state summary.",
+            "mimeType": "application/json"
+        }),
+        serde_json::json!({
+            "uri": "stateful/events",
+            "name": "events",
+            "description": "Recent Stateful audit events.",
+            "mimeType": "application/json"
+        }),
+        serde_json::json!({
+            "uri": "stateful/context",
+            "name": "context",
+            "description": "Brief Stateful current-state context for an agent prompt.",
+            "mimeType": "text/plain"
+        }),
+    ]
+}
+
+fn stateful_resource_tool(uri: &str) -> Option<(&'static str, Value, &'static str)> {
+    match uri {
+        "stateful/current" => Some((
+            "state_current_read",
+            serde_json::json!({}),
+            "application/json",
+        )),
+        "stateful/events" => Some((
+            "state_events_read",
+            serde_json::json!({}),
+            "application/json",
+        )),
+        "stateful/context" => Some((
+            "state_context_render",
+            serde_json::json!({ "mode": "brief", "resource": "" }),
+            "text/plain",
+        )),
+        _ => None,
+    }
+}
+
 pub fn handle_mcp_jsonrpc_in_repo(
     repo_root: impl AsRef<Path>,
     message: &str,
@@ -561,7 +605,8 @@ pub fn handle_mcp_jsonrpc_in_repo(
             serde_json::json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
-                    "tools": {}
+                    "tools": {},
+                    "resources": {}
                 },
                 "serverInfo": {
                     "name": "stateful",
@@ -583,6 +628,40 @@ pub fn handle_mcp_jsonrpc_in_repo(
                     .collect::<Vec<_>>()
             }),
         ),
+        "resources/list" => jsonrpc_result(
+            id,
+            serde_json::json!({
+                "resources": stateful_resource_descriptors()
+            }),
+        ),
+        "resources/read" => {
+            let params = request
+                .get("params")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let uri = params
+                .get("uri")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let Some((tool_name, arguments, mime_type)) = stateful_resource_tool(uri) else {
+                return Ok(Some(serde_json::to_string(&jsonrpc_error(
+                    id,
+                    -32602,
+                    format!("unknown Stateful MCP resource URI: {uri}"),
+                ))?));
+            };
+            let response = call_mcp_tool_in_repo(repo_root, tool_name, arguments)?;
+            jsonrpc_result(
+                id,
+                serde_json::json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": mime_type,
+                        "text": response.body
+                    }]
+                }),
+            )
+        }
         "tools/call" => {
             let params = request
                 .get("params")

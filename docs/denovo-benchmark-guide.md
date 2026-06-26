@@ -22,6 +22,14 @@ DeNovoSWE is a from-scratch repository construction benchmark. The Docker image
 starts with the original source present, but the runtime runs `clean.sh` before
 the agent can inspect it. The agent receives the package specification through
 `README.md` and must rebuild the package implementation from that spec.
+The agent may use ordinary internet access for non-target third-party dependency
+research when the configured scaffold exposes search, but must not inspect or
+recover the target package's upstream repository, pull request, issue, patch,
+commit, raw source, package-manager artifact, wheel, sdist, or source cache while
+solving the instance. The adapter invalidates runs when the final workspace
+contains `upstream/` or session artifacts show explicit target upstream access:
+`.read.log` URL headers, `read`/`browser` URL or path tool-call arguments, or
+shell command tool-call arguments containing forbidden target-upstream commands.
 
 Evaluation runs in a fresh container session:
 
@@ -86,8 +94,10 @@ debug run:
   appears as an immediate `omp exited 1`, empty patch, and zero subagent spawns.
 - For Docker-isolated OMP agent runs, build or tag the image from
   `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`; it includes
-  Bun-installed `omp` plus the Linux `stateful` binary. Add
-  `--agent-docker-image <image>`. `--agent-docker-stateful-binary <path>` only
+  Bun-installed `omp`, the Linux `stateful` binary, and `bubblewrap`/`bwrap` for
+  the default `--agent-docker-sandbox on` path. Add `--agent-docker-image
+  <image>`. Pass `--agent-docker-sandbox off` when the Docker container itself
+  should be the sandbox boundary; `--agent-docker-stateful-binary <path>` only
   needs to be set when the image's `stateful` binary is not at
   `/usr/local/bin/stateful`.
 - A reduced `stateful:off/on,subagent:on` matrix with `--max-concurrent 6` is a
@@ -103,10 +113,15 @@ the same comparison table.
 
 Do not add ad hoc prompt instructions for normal scored, patch-quality, or
 stateful/no-state comparison runs. Keep the agent prompt limited to the
-benchmark task, official prompt version behavior, and declared condition axes.
+benchmark task, benchmark isolation/source-control restrictions, official prompt
+version behavior, and declared condition axes.
 Extra strategy hints, orchestration instructions, lifecycle reminders, role
 assignments, or implementation guidance can bias the rollout and make the result
 non-comparable.
+
+The adapter's built-in benchmark isolation prompt is an integrity guardrail, not
+a strategy hint. Keep it enabled for normal scored runs so agents are evaluated
+only on the provided workspace and package specification.
 
 Stateful lifecycle enforcement belongs in hooks, extensions, MCP/tool policy,
 installed skills, and runtime configuration rather than in benchmark task
@@ -149,8 +164,10 @@ separately from full four-axis or official-style stateful/no-state comparisons.
 For `subagent:on`, the generated DeNovo prompt explicitly requires native
 Codex/OMP subagents before implementation or broad repository exploration,
 while allowing narrow preflight to read the prompt, inspect tool availability,
-or initialize stateful coordination. It tells OMP to use the current `task` tool
-or older multi-agent tools such as `multi_agent_v1spawn_agent`, requires every
+or initialize stateful coordination. It also requires reading and using the
+installed `dispatching-parallel-agents` skill before spawning native subagents
+when that skill is available. It tells OMP to use the current `task` tool or
+older multi-agent tools such as `multi_agent_v1spawn_agent`, requires every
 counted subagent to inspect, edit, and verify a distinct implementation slice,
 and requires explicit blocker reporting if the runtime does not expose subagent
 tools. OMP runs also unpack bundled task agents into the isolated runtime home,
@@ -208,6 +225,8 @@ Recommended reporting order:
 2. `comparison.json` for completed matrix comparisons.
 3. Per-instance `eval-result.json` files for failure analysis.
 4. `results.jsonl` only as a fallback or for raw row inspection.
+5. For contaminated instances, inspect
+   `codex-command.json.benchmark_contamination`.
 
 Every report should state:
 
@@ -220,6 +239,10 @@ Every report should state:
 - whether the run completed or was interrupted
 - whether reported numbers come from `denovo-report.json`,
   `comparison.json`, or raw `results.jsonl`
+- whether any rows have `finish_reason: "benchmark-contamination"`; these rows
+  are invalid/non-scored rollouts, not model-quality failures. Record the
+  contamination `kind` (`upstream-worktree` or `upstream-source-access`) and the
+  recorded `path`, `line`, or `pattern` when present.
 
 ## Failure Analysis
 

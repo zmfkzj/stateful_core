@@ -36,18 +36,23 @@ fn install_codex_dry_run_plans_codex_config_without_writing() {
 
     let plan = plan_codex_install(&options).expect("codex install should plan");
     let applied = apply_codex_install(options).expect("dry-run codex install should succeed");
-    let skill_path = fixture
+    let command_policy_skill_path = fixture
         .codex_config_parent()
         .join("skills/stateful-command-policy/SKILL.md");
+    let dispatching_skill_path = fixture
+        .codex_config_parent()
+        .join("skills/dispatching-parallel-agents/SKILL.md");
 
     assert!(plan.summary.contains("dry-run"));
     assert!(applied.summary.contains("dry-run"));
     assert!(plan.files.contains(&fixture.paths.home));
     assert!(plan.files.contains(&fixture.paths.state_db));
     assert!(plan.files.contains(&fixture.codex_config));
-    assert!(plan.files.contains(&skill_path));
+    assert!(plan.files.contains(&command_policy_skill_path));
+    assert!(plan.files.contains(&dispatching_skill_path));
     assert!(!fixture.paths.home.exists());
     assert!(!fixture.codex_config.exists());
+    assert!(!dispatching_skill_path.exists());
 }
 
 #[test]
@@ -57,17 +62,24 @@ fn install_omp_dry_run_plans_command_policy_skill_without_writing() {
 
     let plan = plan_omp_install(&options).expect("omp install should plan");
     let applied = apply_omp_install(options).expect("dry-run omp install should succeed");
-    let skill_path = fixture
+    let command_policy_skill_path = fixture
         .omp_agent_dir()
         .join("skills")
         .join("stateful-command-policy")
         .join("SKILL.md");
+    let dispatching_skill_path = fixture
+        .omp_agent_dir()
+        .join("skills")
+        .join("dispatching-parallel-agents")
+        .join("SKILL.md");
 
     assert!(plan.summary.contains("dry-run"));
     assert!(applied.summary.contains("dry-run"));
-    assert!(plan.files.contains(&skill_path));
+    assert!(plan.files.contains(&command_policy_skill_path));
+    assert!(plan.files.contains(&dispatching_skill_path));
     assert!(!fixture.paths.home.exists());
-    assert!(!skill_path.exists());
+    assert!(!command_policy_skill_path.exists());
+    assert!(!dispatching_skill_path.exists());
 }
 
 #[test]
@@ -184,11 +196,16 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
         .join("skills")
         .join("stateful-command-policy")
         .join("SKILL.md");
+    let omp_dispatching_skill = omp_agent_dir
+        .join("skills")
+        .join("dispatching-parallel-agents")
+        .join("SKILL.md");
 
     assert!(omp_config.is_file());
     assert!(omp_mcp.is_file());
     assert!(omp_extension.is_file());
     assert!(omp_skill.is_file());
+    assert!(omp_dispatching_skill.is_file());
     assert!(
         fs::read_to_string(&omp_config)
             .expect("omp config should read")
@@ -216,61 +233,73 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("name: \"ext_rw_bash\""));
     assert!(!extension.contains("name: \"external_bash\""));
     assert!(extension.contains("name: \"sandbox_bash\""));
+    assert!(extension.contains("name: \"lazy_edit_resume\""));
+    assert!(extension.contains("applyOmpLinePatch"));
+    assert!(extension.contains("lazyEditOperations"));
+    assert!(extension.contains("let lazyEditOperationCounter = 0"));
+    assert!(extension.contains("nextLazyEditOperationId()"));
+    assert!(extension.contains("reservation or claim is ready"));
+    assert!(extension.contains("structuredLazyEditOperationId(decision)"));
+    assert!(extension.contains("validateOmpLinePatchBases"));
+    assert!(extension.contains("line === \"*** Begin Patch\""));
     assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
     assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
     assert!(
+        extension.contains("import { existsSync, readFileSync, writeFileSync } from \"node:fs\"")
+    );
+    assert!(extension.contains("import { fileURLToPath } from \"node:url\""));
+    assert!(extension.contains("function resolveSkillInternalUrl(rawUrl)"));
+    assert!(extension.contains("function expandSkillInternalUrlsInCommand(command)"));
+    assert!(extension.contains("function singleQuoteEscape(value)"));
+    assert!(extension.contains("quote === \"'\" ? singleQuoteEscape(resolved)"));
+    assert!(
+        extension.contains(
+            "args.push(\"--command\", expandSkillInternalUrlsInCommand(params.command));"
+        )
+    );
+    assert!(
         extension
             .contains("function runSandboxToolProcess(params, args, ctx, label, signal, onStdout)")
+    );
+    assert!(extension.contains("process.env.STATEFUL_OMP_SANDBOX === \"off\""));
+    assert!(
+        extension.contains(
+            "function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout)"
+        )
     );
     assert!(!extension.contains("function runSandboxTool(params"));
     assert!(extension.contains("spawn(STATEFUL, args"));
     assert!(extension.contains(
-        "Deprecated compatibility field; commands now wait for completion before returning."
+        "async: { type: \"boolean\", description: \"Run in the background when true or omitted; set false to wait for completion.\" }"
     ));
-    assert!(
-        extension.contains("function deliverSandboxStdoutChunk(onUpdate, jobId, label, chunk)")
-    );
-    assert!(extension.contains("content: [{ type: \"text\", text: chunk }]"));
-    assert!(extension.contains("return Promise.resolve(onUpdate(update)).catch(() => {});"));
-    assert!(extension.contains("stream: \"stdout\""));
-    assert!(extension.contains("collapsible: true"));
-    assert!(extension.contains("collapseShortcut: \"Ctrl+O\""));
-    assert!(extension.contains("function parseSandboxRunOutput(rawStdout)"));
-    assert!(extension.contains("const parsed = JSON.parse(text)"));
-    assert!(extension.contains("const event = JSON.parse(line)"));
-    assert!(extension.contains("event?.event === \"sandbox_output\""));
-    assert!(extension.contains("emitOutputChunk(event.chunk)"));
-    assert!(extension.contains("stdout += line + \"\\n\";"));
-    assert!(extension.contains("if (commandStdout && !streamedOutput)"));
-    assert!(extension.contains("result.details.sandboxRunOutput = sandboxRunOutput"));
-    assert!(extension.contains("stderr = truncateSandboxToolText(stderr + chunk, label)"));
     assert!(
         extension
-            .contains("streamedStdout = truncateSandboxToolText(streamedStdout + chunk, label)")
+            .contains("function deliverSandboxBackgroundMessage(pi, jobId, label, text, details)")
     );
-    assert!(extension.contains("const fallbackStdout = streamedOutput ? streamedStdout : stdout"));
-    assert!(extension.contains("function killSandboxChild(child, signalName)"));
-    assert!(extension.contains("process.kill(-child.pid, signalName)"));
-    assert!(extension.contains("signal.addEventListener(\"abort\", abortHandler, { once: true })"));
-    assert!(extension.contains("killSandboxChild(child, \"SIGTERM\")"));
-    assert!(extension.contains("killSandboxChild(child, \"SIGKILL\")"));
-    assert!(extension.contains("result.details.cancelled = true"));
-    assert!(extension.contains("async function confirmExternalBashGrant(ctx, params, signal)"));
-    assert!(extension.contains("await Promise.race([confirmPromise, abortPromise])"));
+    assert!(extension.contains("stateful_sandbox_bash_output"));
+    assert!(extension.contains("stateful_sandbox_bash_result"));
     assert!(extension.contains(
-        "async function runSandboxAwaitedTool(params, args, ctx, label, signal, onUpdate)"
+        "function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, signal, onUpdate)"
     ));
-    assert!(extension.contains("await runSandboxToolProcess(params, args, ctx, label, signal"));
-    assert!(extension.contains("await stdoutStreamer.drain();"));
-    assert!(extension.contains("await Promise.allSettled(deliveries);"));
-    assert!(!extension.contains("function startSandboxBackgroundTool"));
-    assert!(!extension.contains("Background job "));
-    assert!(!extension.contains("stateful_sandbox_bash_result"));
-    assert!(!extension.contains("params.async === true"));
+    assert!(extension.contains("Background job "));
+    assert!(extension.contains("params.async === false"));
+    assert!(
+        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, \"sandbox_bash\", signal, onUpdate)")
+    );
+    assert!(
+        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, \"ext_ro_bash\", signal, onUpdate)")
+    );
+    assert!(
+        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, \"ext_rw_bash\", signal, onUpdate)")
+    );
     assert!(extension.contains(
         "return await runSandboxAwaitedTool(params, args, ctx, \"sandbox_bash\", signal, onUpdate)"
     ));
+    assert!(extension.contains("const backgroundSandboxToolCallIds = new Set();"));
+    assert!(extension.contains("function isBackgroundSandboxToolResult(event)"));
+    assert!(extension.contains("if (isBackgroundSandboxToolResult(event)) return;"));
+    assert!(extension.contains("postBackgroundSandboxToolUse(ctx, label, params)"));
     assert!(extension.contains("async execute(_toolCallId, params, signal, onUpdate, ctx)"));
     assert!(extension.contains("args.push(\"--stream-events\");"));
     assert!(extension.contains("pi.sendMessage"));
@@ -318,6 +347,15 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert_eq!(command_policy_skill, source_command_policy_skill);
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
     assert!(plan.files.contains(&omp_skill));
+    let dispatching_skill =
+        fs::read_to_string(&omp_dispatching_skill).expect("omp dispatching skill should read");
+    let source_dispatching_skill = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/dispatching-parallel-agents/SKILL.md"),
+    )
+    .expect("source dispatching skill should exist");
+    assert_eq!(dispatching_skill, source_dispatching_skill);
+    assert!(dispatching_skill.contains("name: dispatching-parallel-agents"));
+    assert!(plan.files.contains(&omp_dispatching_skill));
     assert!(plan.files.iter().any(|path| path.ends_with("mcp.json")));
 }
 
@@ -548,6 +586,9 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     let skill_path = fixture
         .codex_config_parent()
         .join("skills/stateful-command-policy/SKILL.md");
+    let dispatching_skill_path = fixture
+        .codex_config_parent()
+        .join("skills/dispatching-parallel-agents/SKILL.md");
     let command_policy_skill =
         fs::read_to_string(&skill_path).expect("global command policy skill should exist");
     let source_command_policy_skill = fs::read_to_string(
@@ -576,10 +617,20 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     assert!(
         !command_policy_skill.contains("--fs write-targets --network enabled --write-dir target")
     );
+    let dispatching_skill =
+        fs::read_to_string(&dispatching_skill_path).expect("global dispatching skill should exist");
+    let source_dispatching_skill = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/dispatching-parallel-agents/SKILL.md"),
+    )
+    .expect("source dispatching skill should exist");
+    assert_eq!(dispatching_skill, source_dispatching_skill);
+    assert!(dispatching_skill.contains("name: dispatching-parallel-agents"));
+    assert!(dispatching_skill.contains("Dispatch one agent per independent problem domain"));
 
     let plan =
         apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");
     assert!(plan.files.contains(&skill_path));
+    assert!(plan.files.contains(&dispatching_skill_path));
     assert_eq!(
         fs::read_to_string(&skill_path).expect("global command policy skill should reread"),
         command_policy_skill

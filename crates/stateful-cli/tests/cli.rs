@@ -330,7 +330,7 @@ fn parses_nested_codex_benchmark_sandbox_command_with_docker_socket() {
         "--codex-home-root",
         "target/nested-codex-homes/run-1",
         "--docker-socket",
-        "/Users/arthur/.colima/default/docker.sock",
+        "/tmp/colima/default/docker.sock",
         "--command",
         "cargo run -p stateful-bench -- run",
     ]);
@@ -399,11 +399,11 @@ fn parses_sandbox_run_external_profile() {
         "--purpose",
         "install rebuilt binaries",
         "--write-target",
-        "/Users/me/.cargo/bin/stateful",
+        "/opt/stateful/bin/stateful",
         "--create-target",
-        "/Users/me/.cargo/bin/stateful-bench",
+        "/opt/stateful/bin/stateful-bench",
         "--write-dir",
-        "/Users/me/.cargo/bin",
+        "/opt/stateful/bin",
         "--connect-socket",
         "/private/tmp/tmux-501/default",
         "--allow-signal",
@@ -412,7 +412,7 @@ fn parses_sandbox_run_external_profile() {
         "--timeout-seconds",
         "10",
         "--command",
-        "install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful",
+        "install -m 755 target/release/stateful /opt/stateful/bin/stateful",
     ])
     .expect("sandbox external run should parse");
 
@@ -432,9 +432,9 @@ fn parses_sandbox_run_external_profile() {
         }) => {
             assert_eq!(fs, SandboxFsProfile::External);
             assert_eq!(purpose, Some("install rebuilt binaries".to_string()));
-            assert_eq!(write_targets, vec!["/Users/me/.cargo/bin/stateful"]);
-            assert_eq!(create_targets, vec!["/Users/me/.cargo/bin/stateful-bench"]);
-            assert_eq!(write_dirs, vec!["/Users/me/.cargo/bin"]);
+            assert_eq!(write_targets, vec!["/opt/stateful/bin/stateful"]);
+            assert_eq!(create_targets, vec!["/opt/stateful/bin/stateful-bench"]);
+            assert_eq!(write_dirs, vec!["/opt/stateful/bin"]);
             assert_eq!(connect_sockets, vec!["/private/tmp/tmux-501/default"]);
             assert!(allow_signal);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
@@ -442,7 +442,7 @@ fn parses_sandbox_run_external_profile() {
             assert!(!stream_events);
             assert_eq!(
                 command,
-                "install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful"
+                "install -m 755 target/release/stateful /opt/stateful/bin/stateful"
             );
         }
         other => panic!("expected sandbox external run command, got {other:?}"),
@@ -459,7 +459,7 @@ fn rejects_external_run_command() {
             "--purpose",
             "install rebuilt binaries",
             "--write-dir",
-            "/Users/me/.cargo/bin",
+            "/opt/stateful/bin",
             "--command",
             "true",
         ],
@@ -604,7 +604,7 @@ fn parses_install_agent_codex_command() {
         "codex",
         "--yes",
         "--codex-config",
-        "/home/me/.codex/config.toml",
+        "codex-home/.codex/config.toml",
         "--binary",
         "/opt/stateful/bin/stateful",
     ])
@@ -618,7 +618,7 @@ fn parses_install_agent_codex_command() {
             ref codex_config,
             ref binary,
             update: false,
-        } if codex_config == &Some(PathBuf::from("/home/me/.codex/config.toml"))
+        } if codex_config == &Some(PathBuf::from("codex-home/.codex/config.toml"))
             && binary.as_deref() == Some("/opt/stateful/bin/stateful")
             && agents == &vec![InstallAgent::Codex]
     ));
@@ -732,6 +732,7 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
             "multi_agent_v1send_input",
             "task",
             "yield",
+            "lsp",
             "KnownTool"
         ])
     );
@@ -1172,7 +1173,7 @@ fn parses_server_join_with_repo_enablement_and_install_overrides() {
         "--binary",
         "/opt/stateful/bin/stateful",
         "--codex-config",
-        "/Users/me/.codex/config.toml",
+        "codex-home/.codex/config.toml",
     ])
     .expect("server join should parse");
 
@@ -1198,7 +1199,7 @@ fn parses_server_join_with_repo_enablement_and_install_overrides() {
             assert_eq!(binary.as_deref(), Some("/opt/stateful/bin/stateful"));
             assert_eq!(
                 codex_config,
-                Some(std::path::PathBuf::from("/Users/me/.codex/config.toml"))
+                Some(std::path::PathBuf::from("codex-home/.codex/config.toml"))
             );
         }
         other => panic!("expected server join command, got {other:?}"),

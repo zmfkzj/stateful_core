@@ -1426,6 +1426,195 @@ fn sandbox_run_external_profile_rejects_repo_internal_targets() {
 }
 
 #[test]
+fn mcp_initialize_advertises_resources_capability() {
+    let temp_root = temp_root("stateful-mcp-initialize-resources");
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    let response = handle_mcp_jsonrpc_in_repo(
+        &temp_root,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+    )
+    .expect("initialize should handle")
+    .expect("initialize should produce response");
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 1);
+    assert_eq!(
+        json["result"]["capabilities"]["resources"],
+        serde_json::json!({})
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_resources_list_returns_stateful_read_resources() {
+    let temp_root = temp_root("stateful-mcp-resources-list");
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    let response = handle_mcp_jsonrpc_in_repo(
+        &temp_root,
+        r#"{"jsonrpc":"2.0","id":1,"method":"resources/list","params":{}}"#,
+    )
+    .expect("resources/list should handle")
+    .expect("resources/list should produce response");
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 1);
+    let resources = json["result"]["resources"]
+        .as_array()
+        .expect("resources should be array");
+    let current = resources
+        .iter()
+        .find(|resource| resource["uri"] == "stateful/current")
+        .expect("current resource should be listed");
+    assert_eq!(current["mimeType"], "application/json");
+    let events = resources
+        .iter()
+        .find(|resource| resource["uri"] == "stateful/events")
+        .expect("events resource should be listed");
+    assert_eq!(events["mimeType"], "application/json");
+    let context = resources
+        .iter()
+        .find(|resource| resource["uri"] == "stateful/context")
+        .expect("context resource should be listed");
+    assert_eq!(context["mimeType"], "text/plain");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_resources_read_current_forwards_to_current_endpoint() {
+    let temp_root = temp_root("stateful-mcp-resources-read-current");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let current_body = r#"{"status":"ok","current":{"source":"resource"}}"#;
+    let (runtime, rx) = spawn_fake_stateful_server(current_body);
+
+    let response = run_mcp_jsonrpc_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[
+            ("STATEFUL_SERVER_URL", runtime.base_url.as_str()),
+            ("STATEFUL_SERVER_TOKEN", runtime.token.as_str()),
+        ],
+        r#"{
+          "jsonrpc":"2.0",
+          "id":2,
+          "method":"resources/read",
+          "params":{
+            "uri":"stateful/current"
+          }
+        }"#,
+    );
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 2);
+    let contents = json["result"]["contents"]
+        .as_array()
+        .expect("contents should be array");
+    assert_eq!(contents.len(), 1);
+    assert_eq!(contents[0]["uri"], "stateful/current");
+    assert_eq!(contents[0]["mimeType"], "application/json");
+    assert_eq!(contents[0]["text"], current_body);
+    let request = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("captured request should arrive");
+    assert!(request.contains("GET /v1/current HTTP/1.1"));
+    assert!(request.contains("Authorization: Bearer secret-token"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_resources_read_context_forwards_brief_context_with_empty_resource_filter() {
+    let temp_root = temp_root("stateful-mcp-resources-read-context");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let context_body = r#"{"status":"ok","prompt_text":"brief context"}"#;
+    let (runtime, rx) = spawn_fake_stateful_server(context_body);
+
+    let response = run_mcp_jsonrpc_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[
+            ("STATEFUL_SERVER_URL", runtime.base_url.as_str()),
+            ("STATEFUL_SERVER_TOKEN", runtime.token.as_str()),
+            ("STATEFUL_SESSION_ID", "s-context"),
+        ],
+        r#"{
+          "jsonrpc":"2.0",
+          "id":3,
+          "method":"resources/read",
+          "params":{
+            "uri":"stateful/context"
+          }
+        }"#,
+    );
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 3);
+    let contents = json["result"]["contents"]
+        .as_array()
+        .expect("contents should be array");
+    assert_eq!(contents.len(), 1);
+    assert_eq!(contents[0]["uri"], "stateful/context");
+    assert_eq!(contents[0]["mimeType"], "text/plain");
+    assert_eq!(contents[0]["text"], context_body);
+    let request = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("captured request should arrive");
+    assert!(request.contains("POST /v1/context/render HTTP/1.1"));
+    assert!(request.contains("Authorization: Bearer secret-token"));
+    let body = request_json_body(&request);
+    assert_eq!(body["mode"], "brief");
+    assert_eq!(body["resource"], "");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_resources_read_rejects_unknown_resource_uri() {
+    let temp_root = temp_root("stateful-mcp-resources-read-unknown");
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+
+    let response = handle_mcp_jsonrpc_in_repo(
+        &temp_root,
+        r#"{
+          "jsonrpc":"2.0",
+          "id":3,
+          "method":"resources/read",
+          "params":{
+            "uri":"stateful/missing"
+          }
+        }"#,
+    )
+    .expect("resources/read should handle")
+    .expect("resources/read should produce response");
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 3);
+    assert_eq!(json["error"]["code"], -32602);
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unknown Stateful MCP resource URI")
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn mcp_tools_list_returns_stateful_tool_descriptors() {
     let temp_root = temp_root("stateful-mcp-tools-list");
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");

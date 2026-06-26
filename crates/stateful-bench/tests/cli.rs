@@ -1,7 +1,7 @@
 use clap::Parser;
 use stateful_bench::{
-    Cli, Command, DeNovoAgentKind, DeNovoCommand, DeNovoMatrixRunOptions, DeNovoRunMode,
-    ReportFormat, RunMode, parse_denovo_condition, run_denovo_matrix,
+    Cli, Command, DeNovoAgentDockerSandbox, DeNovoAgentKind, DeNovoCommand, DeNovoMatrixRunOptions,
+    DeNovoRunMode, ReportFormat, RunMode, parse_denovo_condition, run_denovo_matrix,
 };
 use std::{fs, path::PathBuf, process::Command as ProcessCommand, time::Duration};
 
@@ -210,7 +210,7 @@ fn denovo_run_command_parses_codex_cli_agent_options() {
         "--codex-bin",
         "/opt/homebrew/bin/codex",
         "--stateful-binary",
-        "/Users/arthur/.cargo/bin/stateful",
+        "/opt/stateful/bin/stateful",
         "--benchmark-model",
         "gpt-5.4-mini",
         "--benchmark-reasoning-effort",
@@ -256,7 +256,7 @@ fn denovo_run_command_parses_codex_cli_agent_options() {
                 "stateful:on,subagent:on".to_string(),
             ]
             && codex_bin == "/opt/homebrew/bin/codex"
-            && stateful_binary == "/Users/arthur/.cargo/bin/stateful"
+            && stateful_binary == "/opt/stateful/bin/stateful"
             && benchmark_model.as_deref() == Some("gpt-5.4-mini")
             && benchmark_reasoning_effort == "low"
             && benchmark_temperature == "1"
@@ -288,11 +288,13 @@ fn denovo_run_command_parses_omp_cli_agent_options() {
         "--omp-bin",
         "/opt/homebrew/bin/omp",
         "--stateful-binary",
-        "/Users/arthur/.cargo/bin/stateful",
+        "/opt/stateful/bin/stateful",
         "--agent-docker-image",
         "ghcr.io/stateful/omp-agent:latest",
         "--agent-docker-stateful-binary",
         "/usr/local/bin/stateful",
+        "--agent-docker-sandbox",
+        "off",
         "--benchmark-model",
         "deepseek-v4-flash",
     ])
@@ -308,6 +310,7 @@ fn denovo_run_command_parses_omp_cli_agent_options() {
                 ref omp_bin,
                 ref agent_docker_image,
                 ref agent_docker_stateful_binary,
+                agent_docker_sandbox,
                 ref benchmark_model,
                 ..
             }
@@ -319,6 +322,7 @@ fn denovo_run_command_parses_omp_cli_agent_options() {
             && omp_bin == "/opt/homebrew/bin/omp"
             && agent_docker_image.as_deref() == Some("ghcr.io/stateful/omp-agent:latest")
             && agent_docker_stateful_binary == "/usr/local/bin/stateful"
+            && agent_docker_sandbox == DeNovoAgentDockerSandbox::Off
             && benchmark_model.as_deref() == Some("deepseek-v4-flash")
     ));
 }
@@ -423,6 +427,7 @@ with results.open("w", encoding="utf-8") as handle:
         stateful_binary: "stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -546,6 +551,7 @@ with results.open("w", encoding="utf-8") as handle:
         stateful_binary: "stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -582,6 +588,110 @@ with results.open("w", encoding="utf-8") as handle:
     );
     assert_eq!(reports.len(), 2);
     assert!(reports.iter().all(|report| report.total_instances == 2));
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
+fn denovo_matrix_checkpoint_skips_conditions_not_started_yet() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-matrix-skip-pending");
+    let aweagent_root = temp_dir.join("AweAgent");
+    fs::create_dir_all(&aweagent_root).expect("fake AweAgent root should be created");
+    let data_file = temp_dir.join("denovo.jsonl");
+    fs::write(&data_file, r#"{"instance_id":"case-a"}"#).expect("data file should be written");
+    let probe_path = temp_dir.join("pending-report-probe.txt");
+    let adapter_script = temp_dir.join("fake_denovo_adapter.py");
+    fs::write(
+        &adapter_script,
+        format!(
+            r#"
+import argparse
+import json
+import os
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--output", required=True)
+parser.add_argument("--agent-mode", required=True)
+parser.add_argument("--instance-id", action="append", default=[])
+args, _ = parser.parse_known_args()
+
+output = Path(args.output)
+run_dir = output.parents[2]
+if args.agent_mode == "stateful":
+    pending_report = run_dir / "conditions" / "stateful-on_subagent-on" / "denovo-report.json"
+    Path(os.environ["DENOVO_PENDING_PROBE"]).write_text(str(pending_report.exists()), encoding="utf-8")
+
+results = output / "_" / "results.jsonl"
+results.parent.mkdir(parents=True, exist_ok=True)
+with results.open("w", encoding="utf-8") as handle:
+    for instance_id in args.instance_id:
+        handle.write(json.dumps({{
+            "instance_id": instance_id,
+            "success": True,
+            "score": 1.0,
+            "eval_result": {{"details": {{"pass_rate": 1.0}}}},
+        }}) + "\n")
+"#
+        ),
+    )
+    .expect("fake adapter should be written");
+
+    let probe_env = probe_path.to_string_lossy();
+    run_denovo_matrix(DeNovoMatrixRunOptions {
+        run_id: "dev-denovo-skip-pending".to_string(),
+        aweagent_root,
+        python: "python3".to_string(),
+        data_file,
+        run_dir: temp_dir.join("runs"),
+        base_config: PathBuf::from("configs/tasks/denovoswe.yaml"),
+        conditions: vec![
+            parse_denovo_condition(&format!(
+                "stateful:off,subagent:on,env:DENOVO_PENDING_PROBE={probe_env}"
+            ))
+            .expect("off condition should parse"),
+            parse_denovo_condition(&format!(
+                "stateful:on,subagent:on,env:DENOVO_PENDING_PROBE={probe_env}"
+            ))
+            .expect("on condition should parse"),
+        ],
+        agent: DeNovoAgentKind::CodexCli,
+        codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
+        stateful_binary: "stateful".to_string(),
+        agent_docker_image: None,
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
+        benchmark_model: "gpt-5.4-mini".to_string(),
+        benchmark_reasoning_effort: "low".to_string(),
+        benchmark_model_context_window: 256000,
+        benchmark_temperature: "1".to_string(),
+        benchmark_max_turns: 500,
+        subagent_min_count: 3,
+        max_resumes: 1,
+        codex_timeout_seconds: 7200,
+        codex_adapter_script: Some(adapter_script),
+        mode: DeNovoRunMode::Batch,
+        instance_ids: vec!["case-a".to_string()],
+        llm_config: None,
+        model: None,
+        max_steps: None,
+        max_concurrent: Some(2),
+        search_override: None,
+        skip_eval: false,
+        validate_run: false,
+        eval_iters: 1,
+        del_done_images: true,
+        dump_clean_snapshot: None,
+        prompt_version: "v1".to_string(),
+        verbose: false,
+    })
+    .expect("matrix run should complete");
+
+    assert_eq!(
+        fs::read_to_string(&probe_path).expect("probe should be written"),
+        "False"
+    );
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }
@@ -650,6 +760,7 @@ with results.open("w", encoding="utf-8") as handle:
         stateful_binary: "stateful".to_string(),
         agent_docker_image: None,
         agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_sandbox: DeNovoAgentDockerSandbox::On,
         benchmark_model: "gpt-5.4-mini".to_string(),
         benchmark_reasoning_effort: "low".to_string(),
         benchmark_model_context_window: 256000,
@@ -1096,7 +1207,7 @@ prompt = mod.build_codex_prompt(
     benchmark_max_turns=500,
     max_steps=500,
     prompt_version="v1",
-    stateful_binary="/Users/arthur/.cargo/bin/stateful",
+    stateful_binary="/opt/stateful/bin/stateful",
 )
 assert "Build a parser package." in prompt
 assert "Benchmark max turns: 500" in prompt
@@ -1105,7 +1216,7 @@ assert "Do not edit benchmark artifacts" in prompt
 assert "Stateful command policy" not in prompt
 assert "state_current_read" not in prompt
 assert "search_tool_bm25" not in prompt
-assert "/Users/arthur/.cargo/bin/stateful" not in prompt
+assert "/opt/stateful/bin/stateful" not in prompt
 print(json.dumps({{"prompt": prompt}}))
 "#,
         agent_path = denovo_codex_agent_path_json(),
@@ -1374,8 +1485,8 @@ def runner(command, cwd, text, check, env, stdin, stdout, stderr, timeout):
 
 summary = module.run_omp_with_timeout(
     ["omp", "-p", "@/tmp/prompt.txt"],
-    Path("/tmp/workspace"),
-    {{"HOME": "/tmp/home"}},
+    Path("target/workspace"),
+    {{"HOME": "target/home"}},
     timeout_seconds=5,
     runner=runner,
 )
@@ -1387,8 +1498,50 @@ print(json.dumps({{"returncode": summary.returncode, "token_usage": summary.toke
     assert_eq!(output["returncode"], 0);
     assert_eq!(output["token_usage"]["turns"], 0);
     assert_eq!(output["calls"][0]["command"][0], "omp");
-    assert_eq!(output["calls"][0]["cwd"], "/tmp/workspace");
+    assert_eq!(output["calls"][0]["cwd"], "target/workspace");
     assert_eq!(output["calls"][0]["stdin_is_devnull"], true);
+}
+
+#[test]
+fn denovo_codex_agent_docker_omp_command_disables_inner_sandbox_when_requested() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_docker_omp_sandbox_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+command = module.docker_omp_command_for_profile(
+    workspace=Path("/tmp/workspace"),
+    prompt_path=Path("/tmp/prompt.txt"),
+    home=Path("/tmp/home"),
+    omp_bin="omp",
+    benchmark_model="deepseek-v4-flash",
+    docker_image="stateful-denovo-omp-agent:local",
+    base_env={{"STATEFUL_SERVER_URL": "http://127.0.0.1:1234", "DEEPSEEK_API_KEY": "secret"}},
+    sandbox="off",
+)
+print(json.dumps({{"command": command}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+    let command = output["command"]
+        .as_array()
+        .expect("command should be an array");
+    let args = command
+        .iter()
+        .map(|value| value.as_str().expect("command arg should be a string"))
+        .collect::<Vec<_>>();
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--env", "STATEFUL_OMP_SANDBOX=off"])
+    );
 }
 
 #[test]
@@ -1569,6 +1722,42 @@ print(json.dumps({{
 }
 
 #[test]
+fn denovo_codex_agent_copy_exported_workspace_skips_upstream_checkout() {
+    let dir = target_temp_dir("denovo-codex-copy-export-skips-upstream");
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_copy_upstream_test", {agent_path})
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+root = Path({root})
+source = root / "source"
+workspace = root / "workspace"
+(source / "upstream" / "package").mkdir(parents=True)
+(source / "upstream" / "package" / "answer.py").write_text("leaked")
+(source / "README.md").write_text("kept")
+mod.copy_exported_workspace(source, workspace)
+print(json.dumps({{
+    "readme": (workspace / "README.md").read_text(),
+    "upstream_exists": (workspace / "upstream").exists(),
+}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        root = serde_json::to_string(&dir).expect("root should serialize"),
+    );
+    let output = run_python_json(&script);
+    assert_eq!(output["readme"], "kept");
+    assert_eq!(output["upstream_exists"], false);
+    fs::remove_dir_all(&dir).expect("temp copy workspace should clean up");
+}
+
+#[test]
 fn denovo_codex_agent_builds_no_state_and_stateful_commands() {
     let script = format!(
         r#"
@@ -1586,7 +1775,7 @@ kwargs = {{
     "workspace": Path("/tmp/workspace"),
     "subagent": "on",
     "codex_bin": "/opt/homebrew/bin/codex",
-    "stateful_binary": "/Users/arthur/.cargo/bin/stateful",
+    "stateful_binary": "/opt/stateful/bin/stateful",
     "benchmark_model": "gpt-5.4-mini",
     "benchmark_reasoning_effort": "low",
     "benchmark_model_context_window": 256000,
@@ -1744,6 +1933,16 @@ print(json.dumps({{"command": command, "native_command": native_command, "comman
 }
 
 #[test]
+fn denovo_omp_agent_dockerfile_installs_bubblewrap_for_sandbox_tools() {
+    let dockerfile = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker/denovo-omp-agent.Dockerfile"),
+    )
+    .expect("Dockerfile should read");
+
+    assert!(dockerfile.contains("bubblewrap"));
+    assert!(dockerfile.contains("command -v bwrap"));
+}
+#[test]
 fn denovo_codex_agent_builds_dockerized_omp_command_with_minimal_mounts() {
     let temp_dir = target_temp_dir("stateful-bench-denovo-omp-docker-command");
     let script = format!(
@@ -1775,7 +1974,7 @@ command = module.docker_omp_command_for_profile(
     benchmark_model="deepseek-v4-flash",
     docker_image="ghcr.io/stateful/omp-agent:latest",
     base_env={{
-        "HOME": "/host/home",
+        "HOME": "host-home",
         "OPENAI_API_KEY": "sk-test",
         "STATEFUL_SERVER_TOKEN": "token-123",
         "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
@@ -1855,7 +2054,7 @@ print(json.dumps({{
     assert!(!command_text.contains("token-123"));
     assert!(
         !env.iter()
-            .any(|value| value.as_str() == Some("HOME=/host/home"))
+            .any(|value| value.as_str() == Some("HOME=host-home"))
     );
     assert!(mounts.iter().any(|value| {
         value
@@ -3723,11 +3922,28 @@ print(json.dumps({{"off": off, "on": on}}, sort_keys=True))
     assert!(on.contains("MUST use native subagents"));
     assert!(on.contains("Before implementation or broad repository exploration"));
     assert!(on.contains("after any narrow setup needed"));
+    assert!(on.contains("dispatching-parallel-agents"));
     assert!(!on.contains("FIRST ACTION"));
     assert!(on.contains("the current native subagent tool is `task`"));
     assert!(on.contains("tasks` array containing at least 3 implementation subagents"));
     assert!(on.contains("multi_agent_v1spawn_agent"));
     assert!(on.contains("Use all 3 native subagents for repository editing"));
+    assert!(off.contains("Benchmark isolation requirements"));
+    assert!(on.contains("Benchmark isolation requirements"));
+    assert!(on.contains("Do not fetch, clone, open, or inspect the upstream repository"));
+    assert!(on.contains(
+        "ABSOLUTE RULE: DO NOT DOWNLOAD THE TARGET PACKAGE'S SOURCE CODE FROM THE INTERNET"
+    ));
+    assert!(on.contains("The following are ALLOWED:"));
+    assert!(on.contains("Installing *third-party* dependencies your own implementation needs"));
+    assert!(on.contains(
+        "Running `pip install -e .` on the code you yourself wrote inside the workspace"
+    ));
+    assert!(!on.contains(
+        "Do not use GitHub, PR, issue, patch-diff, or raw-source URLs as implementation evidence."
+    ));
+    assert!(on.contains("This does not prohibit non-target third-party dependency research."));
+    assert!(on.contains("Do not create or use an `upstream` checkout"));
     assert!(
         on.find("Native Codex/OMP subagent requirements").unwrap()
             < on.find("Repository specification:").unwrap()
@@ -3736,6 +3952,106 @@ print(json.dumps({{"off": off, "on": on}}, sort_keys=True))
     assert!(on.contains("Wait for each spawned subagent"));
     assert!(on.contains("explicitly report that blocker"));
     assert_ne!(off, on);
+}
+
+#[test]
+fn denovo_codex_agent_detects_only_direct_upstream_access_in_session_artifacts() {
+    let dir = target_temp_dir("denovo-codex-detects-source-leak");
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_contamination_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+root = Path({root})
+workspace = root / "workspace"
+workspace.mkdir(parents=True)
+
+def session_dir(home_name):
+    session = root / home_name / ".omp" / "profiles" / "stateful" / "agent" / "sessions" / "--workspace--"
+    session.mkdir(parents=True)
+    return session
+
+false_positive_session = session_dir("false-positive-home")
+(false_positive_session / "rollout.jsonl").write_text(
+    "\n".join([
+        json.dumps({{"type": "message", "message": {{"role": "toolResult", "content": [{{"type": "text", "text": "[setup.py#ABCD]\\n1:url='https://github.com/thebjorn/pydeps'\\n"}}]}}}}),
+        json.dumps({{"type": "message", "message": {{"role": "toolResult", "content": [{{"type": "text", "text": "Example: stateful sandbox run --fs git --command 'git fetch --all'"}}]}}}}),
+        json.dumps({{"type": "message", "message": {{"role": "assistant", "content": [{{"type": "thinking", "thinking": "import_hook calls through properly"}}]}}}}),
+    ]) + "\n",
+    encoding="utf-8",
+)
+(false_positive_session / "0.read.log").write_text(
+    "URL: https://pypi.org/pypi/pydeps/json\nContent-Type: application/json\n\nhttps://github.com/thebjorn/pydeps/actions/workflows/ci.yml\n",
+    encoding="utf-8",
+)
+
+raw_read_session = session_dir("raw-read-home")
+(raw_read_session / "0.read.log").write_text(
+    "URL: https://raw.githubusercontent.com/thebjorn/pydeps/master/pydeps.py\nContent-Type: text/plain\n",
+    encoding="utf-8",
+)
+
+command_session = session_dir("command-home")
+(command_session / "rollout.jsonl").write_text(
+    json.dumps({{"type": "message", "message": {{"role": "assistant", "content": [{{"type": "toolCall", "name": "sandbox_bash", "arguments": {{"command": "git fetch upstream main"}}}}]}}}}) + "\n",
+    encoding="utf-8",
+)
+
+local_upstream_read_session = session_dir("local-upstream-read-home")
+(local_upstream_read_session / "rollout.jsonl").write_text(
+    json.dumps({{"type": "message", "message": {{"role": "assistant", "content": [{{"type": "toolCall", "name": "read", "arguments": {{"path": "upstream/pydeps.py"}}}}]}}}}) + "\n",
+    encoding="utf-8",
+)
+
+other_repo_command_session = session_dir("other-repo-command-home")
+(other_repo_command_session / "rollout.jsonl").write_text(
+    json.dumps({{"type": "message", "message": {{"role": "assistant", "content": [{{"type": "toolCall", "name": "sandbox_bash", "arguments": {{"command": "git clone https://github.com/other/project"}}}}]}}}}) + "\n",
+    encoding="utf-8",
+)
+
+clean_home = root / "clean-home"
+clean_home.mkdir(parents=True)
+(workspace / "upstream").mkdir()
+upstream = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, clean_home)
+(workspace / "upstream").rmdir()
+false_positive = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, root / "false-positive-home" / ".omp" / "profiles" / "stateful" / "agent")
+raw_read = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, root / "raw-read-home" / ".omp" / "profiles" / "stateful" / "agent")
+command = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, root / "command-home" / ".omp" / "profiles" / "stateful" / "agent")
+local_upstream_read = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, root / "local-upstream-read-home" / ".omp" / "profiles" / "stateful" / "agent")
+other_repo_command = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, root / "other-repo-command-home" / ".omp" / "profiles" / "stateful" / "agent")
+clean = module.benchmark_contamination_record("thebjorn_pydeps_pr233", workspace, clean_home)
+print(json.dumps({{"upstream": upstream, "false_positive": false_positive, "raw_read": raw_read, "command": command, "local_upstream_read": local_upstream_read, "other_repo_command": other_repo_command, "clean": clean}}, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        root = serde_json::to_string(&dir).expect("root should serialize"),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["upstream"]["kind"], "upstream-worktree");
+    assert_eq!(output["false_positive"], serde_json::Value::Null);
+    assert_eq!(output["raw_read"]["kind"], "upstream-source-access");
+    assert_eq!(
+        output["raw_read"]["pattern"],
+        "raw.githubusercontent.com/thebjorn/pydeps"
+    );
+    assert_eq!(output["command"]["kind"], "upstream-source-access");
+    assert_eq!(output["command"]["pattern"], "git fetch");
+    assert_eq!(
+        output["local_upstream_read"]["kind"],
+        "upstream-source-access"
+    );
+    assert_eq!(output["local_upstream_read"]["pattern"], "upstream/");
+    assert_eq!(output["other_repo_command"], serde_json::Value::Null);
+    assert_eq!(output["clean"], serde_json::Value::Null);
+
+    fs::remove_dir_all(dir).expect("temp dir should clean up");
 }
 
 #[test]
@@ -4083,6 +4399,7 @@ print(json.dumps({{
     assert!(on.contains("Native Codex subagent requirements"));
     assert!(on.contains("MUST use native Codex subagents"));
     assert!(on.contains("Spawn at least 3 native subagents"));
+    assert!(on.contains("dispatching-parallel-agents"));
     assert!(on.contains("Use all 3 native subagents for repository editing"));
     assert!(on.contains("Do not leave any native subagent as analysis-only"));
     assert!(on.contains("Wait for each spawned subagent"));
@@ -4213,6 +4530,8 @@ print(json.dumps({{
     assert!(skill.contains("state_reservation_declare"));
     assert!(skill.contains("state_claim_acquire"));
     assert!(skill.contains("runtime-specific tool names"));
+    assert!(!skill.contains("benchmark-contamination"));
+    assert!(!skill.contains("model-quality failure"));
     assert_eq!(output["auth_exists"], false);
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");

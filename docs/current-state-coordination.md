@@ -251,7 +251,9 @@ This gives useful control without forking Codex or changing the default OMP
 profile.
 
 The prototype supports user-level installation with repo allowlist gating.
-`stateful install --agent codex --yes` configures global Codex hooks and MCP.
+`stateful install --agent codex --yes` configures global Codex hooks and MCP,
+and writes `skills/stateful-command-policy/SKILL.md` and
+`skills/dispatching-parallel-agents/SKILL.md`.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) and ensures the target keys
@@ -262,22 +264,24 @@ Stateful hooks. Without `--update`, existing scalar values are preserved and
 only missing keys are inserted; with `--update`, existing target scalar values
 are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
 tools are denied at the host approval and hook levels. The installer also writes
-`rules/stateful-required.md` and `skills/stateful-command-policy/SKILL.md` under
-that isolated agent directory:
-the always-apply rule tells the model when Stateful policy applies, the skill
-keeps the detailed procedure, and hooks remain the enforcement boundary. The
+`rules/stateful-required.md`, `skills/stateful-command-policy/SKILL.md`, and
+`skills/dispatching-parallel-agents/SKILL.md` under that isolated agent
+directory: the always-apply rule tells the model when Stateful policy applies,
+the `stateful-command-policy` manual keeps the detailed procedure, and hooks
+remain the
+enforcement boundary. The
 generated extension registers `sandbox_bash` for read-only, write-targets,
 build, git, and github-pr sandbox runs, including common sandbox flags,
 registers `ext_ro_bash` for read-only `--fs external` commands, and registers
 `ext_rw_bash` for external writes that require write/create/dir scope plus a
 scoped OMP UI grant. That grant omits raw command text, shows purpose and
-declared scope, and can cover matching calls until expiry or max uses. All three generated `*_bash` tools wait for the sandbox command
-to finish before returning the tool result, so final stdout/stderr/status are
-available before the agent can end the turn. They emit stdout through inline OMP
-tool updates so it renders in the tool output panel, and OMP abort/ESC cancels
-the foreground tool while the sandbox runner cleans up its child process group.
-Their `async` input is a deprecated compatibility no-op that does not select
-background execution. `sandbox_bash` rejects
+declared scope, and can cover matching calls until expiry or max uses. All three
+generated `*_bash` tools run sandbox commands in the background by default.
+With `async` omitted or `true`, they return a job id immediately, stream
+stdout/output via OMP messages using `pi.sendMessage`, and send final stdout,
+stderr, and exit status as a follow-up message. Set `async: false` to keep the
+old awaited foreground behavior that returns final stdout/stderr/status in tool
+details. `sandbox_bash` rejects
 `--fs external` with guidance to use `ext_ro_bash` or `ext_rw_bash`. Raw Bash and
 Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
@@ -328,9 +332,11 @@ OMP adapters preserve stateful hard blocks: `sandbox_bash` owns non-external
 sandbox command execution for read-only, write-targets, build, git, and
 github-pr profiles; `ext_ro_bash` owns read-only external commands without OMP
 UI confirmation; `ext_rw_bash` owns external writes through reusable scoped
-purpose grants; all generated `*_bash` tools wait for the sandbox command to finish before
-returning, emit stdout through inline OMP tool updates, and return final
-stdout/stderr/exit status in tool details;
+purpose grants; all generated `*_bash` tools run sandbox commands in the
+background by default, return a job id immediately when `async` is omitted or
+`true`, stream stdout/output via OMP messages using `pi.sendMessage`, and send
+final stdout/stderr/exit status as a follow-up message; `async: false` waits for
+completion and returns final stdout/stderr/exit status in tool details;
 stateful allow maps to allow; and stateful denial or unavailable state maps to
 block even when OMP yolo metadata is present.
 

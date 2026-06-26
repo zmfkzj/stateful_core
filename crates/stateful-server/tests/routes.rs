@@ -6161,6 +6161,48 @@ async fn context_render_includes_live_current_state_purpose() {
 }
 
 #[tokio::test]
+async fn context_render_treats_empty_resource_as_unfiltered() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/reservation/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "Fix auth validation behavior.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("reservation declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "resource": "",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 4096).await;
+    assert_eq!(json["items"][0]["resource"], "src/auth.ts");
+    assert!(
+        json["prompt_text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("purpose: Fix auth validation behavior")
+    );
+}
+
+#[tokio::test]
 async fn context_render_lists_current_session_lease_as_active_scope() {
     let store = Store::open_in_memory().expect("store should open");
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
@@ -6372,7 +6414,7 @@ async fn context_render_filters_items_to_requested_repo_identity() {
             "files_planned": ["record/hw/vision_module.py"]
         }),
     );
-    repo_2_body["workspace"]["root"] = serde_json::json!("/Users/arthur/Code/edge/core");
+    repo_2_body["workspace"]["root"] = serde_json::json!("/workspace/edge/core");
     repo_2_body["workspace"]["repo_id"] = serde_json::json!("repo-2");
     repo_2_body["workspace"]["worktree_id"] = serde_json::json!("worktree-2");
     repo_2_body["workspace"]["branch"] = serde_json::json!("frame-drops");

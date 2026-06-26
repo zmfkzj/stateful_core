@@ -1078,7 +1078,7 @@ fn pre_tool_use_denies_external_run_request() {
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
         "tool_input": {
-            "command": format!("{stateful} external-run request --purpose 'install rebuilt binaries' --write-dir /Users/me/.cargo/bin --command 'install -m 755 target/release/stateful /Users/me/.cargo/bin/stateful'")
+            "command": format!("{stateful} external-run request --purpose 'install rebuilt binaries' --write-dir /opt/stateful/bin --command 'install -m 755 target/release/stateful /opt/stateful/bin/stateful'")
         }
     })
     .to_string();
@@ -1268,7 +1268,7 @@ fn pre_tool_use_denies_invalid_nested_codex_benchmark_sandbox_wrappers() {
         (
             "home outside target",
             format!(
-                "{stateful} sandbox run-nested-codex-benchmark --purpose 'run nested Codex chaos benchmark' --write-dir target --codex-home-root /Users/me/.codex --command 'cargo test'"
+                "{stateful} sandbox run-nested-codex-benchmark --purpose 'run nested Codex chaos benchmark' --write-dir target --codex-home-root /opt/codex-home --command 'cargo test'"
             ),
             "requires --codex-home-root under target",
         ),
@@ -2829,6 +2829,70 @@ fn omp_edit_extracts_hashline_file_targets() {
     let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
     assert_eq!(body["payload"]["action"], "write_file");
     assert_eq!(body["payload"]["path"], "docs/a.md");
+}
+
+#[test]
+fn omp_edit_authorize_includes_lazy_queue_metadata_when_scope_exists() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-omp-lazy-edit-metadata-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
+    fs::write(repo_root.join("docs/a.md"), "old\n").expect("target file should write");
+
+    let (runtime, rx) = spawn_fake_stateful_server_sequence_with_current(
+        vec![r#"{"decision":"allow","message":"ok"}"#],
+        Some(
+            r#"{
+                "status": "ok",
+                "items": [{
+                    "kind": "reservation",
+                    "freshness": "live",
+                    "session_id": "omp-parent",
+                    "workspace_id": "w1",
+                    "resource": "docs/a.md",
+                    "purpose": "Replay queued edit."
+                }]
+            }"#,
+        ),
+    );
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": "w1",
+        "cwd": repo_root,
+        "yolo": false,
+        "tool_name": "edit",
+        "tool_input": { "input": "[docs/a.md#ABCD]\nSWAP 1.=1:\n+new\n" }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        Some(&runtime),
+        Some(&repo_root),
+        Some(&repo_root),
+    )
+    .expect("omp edit should authorize");
+
+    assert_eq!(outcome, OmpHookOutcome::Allow);
+    let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
+    assert_eq!(body["payload"]["action"], "write_file");
+    assert_eq!(body["payload"]["path"], "docs/a.md");
+    assert_eq!(body["payload"]["queue_on_conflict"], true);
+    assert_eq!(body["payload"]["purpose"], "Replay queued edit.");
+    assert_eq!(body["payload"]["base_observations"][0]["path"], "docs/a.md");
+    assert_eq!(body["payload"]["base_observations"][0]["exists"], true);
+    assert!(
+        body["payload"]["base_observations"][0]["content_hash"]
+            .as_str()
+            .is_some_and(|hash| !hash.is_empty())
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]

@@ -20,16 +20,20 @@ design targets unless a section below says they are implemented.
 
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --yes` installs stateful global files only. `stateful install
---agent codex --yes` configures global Codex hooks and MCP. `stateful install
+--agent codex --yes` configures global Codex hooks and MCP, and writes
+`skills/stateful-command-policy/SKILL.md` and
+`skills/dispatching-parallel-agents/SKILL.md`. `stateful install
 --agent omp --yes` configures the isolated OMP `stateful` profile with stateful
 hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `ext_ro_bash`
 for read-only `--fs external`, `ext_rw_bash` for scoped-grant external writes,
-and approval entries that deny raw Bash while setting
-Python/JavaScript/JS/Ruby/Julia eval tools to false. The OMP installer also
-writes `rules/stateful-required.md` and
-`skills/stateful-command-policy/SKILL.md` under that isolated agent directory:
-the always-apply rule owns model-facing activation, the skill owns detailed
-procedure, and hooks remain the enforcement boundary. `stateful enable` opts the
+`lazy_edit_resume` for strict replay of queued line-based OMP edits, and approval
+entries that deny raw Bash while setting Python/JavaScript/JS/Ruby/Julia eval tools to false. The OMP installer also
+writes `rules/stateful-required.md`,
+`skills/stateful-command-policy/SKILL.md`, and
+`skills/dispatching-parallel-agents/SKILL.md` under that isolated agent
+directory: the always-apply rule owns model-facing activation, the
+`stateful-command-policy` manual owns detailed procedure, and hooks remain the
+boundary. `stateful enable` opts the
 current repo into enforcement.
 For OMP, the extension prefers the actual OMP runtime session id from
 `event.sessionId` or `ctx.sessionManager.session.id`, stores it in
@@ -225,6 +229,14 @@ workspace file state. PostToolUse observes completed native edits and sandbox
 claims that authorized the completed write boundary. Released claims leave the
 live context render and do not authorize a later write; the session must reread
 and reacquire a claim, or lazy-claim a claimable reservation, before retrying.
+OMP `edit` denials are captured by the generated extension as live-session lazy
+edit operations when the patch has safe repo-relative line targets. Denials with
+a wait id reuse that id; missing reservation or missing claim denials receive a
+generated live-session operation id. `lazy_edit_resume` re-authorizes the original
+edit after the agent fixes the missing scope or receives a claimable reservation,
+verifies the file content still matches the queued base text, and applies only
+line-based edit patch operations; block operations or changed files require
+regenerating the patch.
 For Bash, command text alone never authorizes tool use.
 `/v1/authorize` accepts optional `base_observations` for OCC-style freshness
 checks. When supplied, each observation is compared against the current
@@ -258,11 +270,12 @@ stateful binary with `sandbox run --fs external --purpose ...` for external
 writes that declare at least one write target, create target, or write dir. The
 grant prompt shows purpose, declared scope, examples, max uses, and expiry rather
 than raw command text, and matching calls reuse the grant until it expires or
-reaches its use limit. All generated `*_bash` tools
-wait for sandbox commands to finish before returning the tool result, so final
-stdout/stderr/status are available before the agent can end the turn. They emit
-stdout through inline OMP tool updates and cancel on OMP abort/ESC; their
-`async` input is a deprecated compatibility no-op that does not select background execution.
+reaches its use limit. All generated `*_bash` tools run
+sandbox commands in the background by default. With `async` omitted or `true`,
+they return a job id immediately, stream stdout/output via OMP messages using
+`pi.sendMessage`, and send final stdout/stderr/exit status as a follow-up
+message. Set `async: false` to keep the old awaited foreground behavior with
+final stdout/stderr/status in returned tool details.
 The external sandbox profile requires
 purpose and command; read-only/no-declared-scope operations may
 omit targets, while supplied external write scopes are validated as absolute
@@ -594,10 +607,12 @@ verification.
 install --agent omp --yes` registers `sandbox_bash` for read-only,
 write-targets, build, git, and github-pr sandbox profiles, `ext_ro_bash` for
 read-only external commands, and `ext_rw_bash` for external writes with scoped
-purpose grants. All three generated `*_bash` tools wait for sandbox commands to
-finish before returning, emit stdout through inline OMP tool updates, cancel on
-OMP abort, and return final stdout/stderr/exit status in tool details; the
-compatibility `async` input is a no-op.
+purpose grants. All three generated `*_bash` tools run sandbox commands in the
+background by default: when `async` is omitted or `true`, the call returns a job
+id immediately, streams stdout/output via OMP messages using `pi.sendMessage`,
+and sends final stdout/stderr/exit status as a follow-up message. `async: false`
+waits for completion and returns final stdout/stderr/exit status in tool
+details.
 `ext_ro_bash` does not ask OMP UI confirmation; `ext_rw_bash` asks for the grant
 before starting the trusted stateful binary with the external profile. Raw OMP Bash and
 Python/JavaScript/JS/Ruby/Julia eval-tool sandbox invocations are denied.
@@ -701,10 +716,13 @@ pieces into `stateful-core` without duplicating product policy in adapters.
 
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --yes` installs stateful global files only. `stateful install
---agent codex --yes` configures global Codex hooks and MCP. `stateful install
+--agent codex --yes` configures global Codex hooks and MCP, and writes
+`skills/stateful-command-policy/SKILL.md` and
+`skills/dispatching-parallel-agents/SKILL.md`. `stateful install
 --agent omp --yes` installs the OMP extension entry point, MCP config,
 always-apply `rules/stateful-required.md` rule,
-`skills/stateful-command-policy/SKILL.md` manual, and OMP config under the
+`skills/stateful-command-policy/SKILL.md` manual,
+`skills/dispatching-parallel-agents/SKILL.md` skill, and OMP config under the
 `stateful` profile agent directory (`~/.omp/profiles/stateful/agent`) with
 `tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
 `eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes

@@ -68,9 +68,9 @@ file, not the public full JSONL. The aborted r36 attempt duplicated the full
   `unix://$HOME/.colima/default/docker.sock`; `/var/run/docker.sock` may be a
   dangling Docker Desktop compatibility symlink.
 - The DeNovo CLI patch harvester excludes Codex/stateful runtime dirs,
-  `.stateful-tmp/**`, common Python cache/coverage dirs, `target/**`, and root
-  `clean.sh`. Repo `tmp/**` changes are harvested like other source-tree
-  changes.
+  `.stateful-tmp/**`, common Python cache/coverage dirs, `target/**`, root
+  `clean.sh`, and `upstream/**`. Repo `tmp/**` changes are harvested like other
+  source-tree changes.
 - For host-side inputs and tools, use absolute paths for `STATEFUL_BENCH_BIN`,
   `--aweagent-root`, `--python`, `--data-file`, `--config`, `STATEFUL_BIN`,
   `OMP_BIN`, `TMUX`, and `TMUX_SOCKET`.
@@ -79,7 +79,8 @@ file, not the public full JSONL. The aborted r36 attempt duplicated the full
 - Change run IDs and isolated OMP home directories before reusing commands.
 - For Docker-isolated OMP runs, build or tag the agent image from
   `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. The image includes
-  Bun-installed `omp` plus the Linux `stateful` binary.
+  Bun-installed `omp`, the Linux `stateful` binary, and `bubblewrap` for
+  stateful sandbox tool execution inside the agent container.
 - Use `--prompt-version v2` for new official-style runs. Keep
   `--prompt-version v1` only when continuing or comparing against historical
   v1 runs.
@@ -119,22 +120,23 @@ a normal scored comparison.
 Set these values before reusing the commands:
 
 ```bash
-REPO_ROOT=/absolute/path/to/stateful_core
-AWEAGENT_ROOT=/absolute/path/to/AweAgent
-PYTHON=/absolute/path/to/python3
-STATEFUL_BENCH_BIN=/absolute/path/to/stateful-bench
-STATEFUL_BIN=/absolute/path/to/stateful
-OMP_BIN=/absolute/path/to/omp
-TMUX=/absolute/path/to/tmux
-TMUX_SOCKET=/absolute/path/to/tmux/socket
+REPO_ROOT=${REPO_ROOT:-$(pwd)}
+STATEFUL_BENCH_RUNS=${STATEFUL_BENCH_RUNS:-$REPO_ROOT/target/stateful_bench_runs}
+AWEAGENT_ROOT=${AWEAGENT_ROOT:-$REPO_ROOT/tmp/AweAgent}
+PYTHON=${PYTHON:-$REPO_ROOT/tmp/aweagent-venv/bin/python}
+STATEFUL_BENCH_BIN=${STATEFUL_BENCH_BIN:-$STATEFUL_BENCH_RUNS/cargo-target/debug/stateful-bench}
+STATEFUL_BIN=${STATEFUL_BIN:-$STATEFUL_BENCH_RUNS/cargo-target/debug/stateful}
+OMP_BIN=${OMP_BIN:-omp}
+TMUX=${TMUX:-tmux}
+TMUX_SOCKET=${TMUX_SOCKET:?set TMUX_SOCKET to the tmux server socket path}
 STATEFUL_HOME=${STATEFUL_HOME:-$HOME/.stateful_core}
 STATEFUL_SERVER_URL=$(python3 -c 'import json, os, pathlib; print(json.load(open(pathlib.Path(os.environ["STATEFUL_HOME"]) / "runtime/server.json"))["base_url"])')
 STATEFUL_SERVER_TOKEN=$(python3 -c 'import json, os, pathlib; print(json.load(open(pathlib.Path(os.environ["STATEFUL_HOME"]) / "runtime/server.json"))["token"])')
 DENOVO_OMP_AGENT_IMAGE=stateful-denovo-omp-agent:local
 DOCKER_OMP_BIN=omp
 DOCKER_STATEFUL_BIN=/usr/local/bin/stateful
-DOCKER_HOST=unix:///absolute/path/to/docker.sock
-DENOVO_OUTPUT_ROOT=/absolute/path/to/stateful_bench_runs/denovo/runs
+DOCKER_HOST=${DOCKER_HOST:?set DOCKER_HOST to unix://<docker-socket>}
+DENOVO_OUTPUT_ROOT=${DENOVO_OUTPUT_ROOT:-$STATEFUL_BENCH_RUNS/denovo/runs}
 RUN_SERIES=rNN-denovo
 TRIAL=1
 RUN_ID=$RUN_SERIES-t$TRIAL
@@ -198,8 +200,10 @@ matrix:
 
 For the same one-instance smoke shape with OMP running inside the benchmark
 Docker agent image, use an image built from
-`crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. The sample passes
-the default in-image `stateful` path explicitly; omit
+`crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. Docker already
+isolates the agent workspace, so the sample disables the nested OMP sandbox to
+avoid bubblewrap namespace failures inside the container. It also passes the
+default in-image `stateful` path explicitly; omit
 `--agent-docker-stateful-binary` when the image uses the default:
 
 ```bash
@@ -220,6 +224,7 @@ the default in-image `stateful` path explicitly; omit
   --stateful-binary "$STATEFUL_BIN" \
   --agent-docker-image "$DENOVO_OMP_AGENT_IMAGE" \
   --agent-docker-stateful-binary "$DOCKER_STATEFUL_BIN" \
+  --agent-docker-sandbox off \
   --benchmark-model deepseek-v4-flash \
   --benchmark-reasoning-effort low \
   --benchmark-model-context-window 256000 \
@@ -238,7 +243,8 @@ test, not the official-style `--max-concurrent 1` default from
 `docs/denovo-benchmark-guide.md`.
 
 Rebuild the Docker agent image before relaunching after local `stateful` or OMP
-integration changes:
+integration changes. The examples below pass `--agent-docker-sandbox off`
+because Docker isolation is the sandbox boundary for the benchmark agent:
 
 ```bash
 DOCKER_HOST="$DOCKER_HOST" docker build --pull --no-cache \
@@ -288,6 +294,7 @@ for trial in 1 2 3; do
     --stateful-binary "$STATEFUL_BIN" \
     --agent-docker-image "$DENOVO_OMP_AGENT_IMAGE" \
     --agent-docker-stateful-binary "$DOCKER_STATEFUL_BIN" \
+    --agent-docker-sandbox off \
     --benchmark-model deepseek-v4-flash \
     --benchmark-reasoning-effort low \
     --benchmark-model-context-window 256000 \
@@ -304,14 +311,16 @@ done
 
 The corresponding authenticated run used:
 
-```text
+```bash
+REPO_ROOT=${REPO_ROOT:-$(pwd)}
+STATEFUL_BENCH_RUNS=${STATEFUL_BENCH_RUNS:-$REPO_ROOT/target/stateful_bench_runs}
 RUN_SERIES=r20260624-denovo-12-omp-docker-subagent-on-auth
-STATEFUL_BENCH_BIN=/Users/arthur/Downloads/stateful_bench_runs/cargo-target/debug/stateful-bench
-STATEFUL_BIN=/Users/arthur/Downloads/stateful_bench_runs/cargo-target/debug/stateful
-PYTHON=/Users/arthur/Code/stateful_core/tmp/aweagent-venv/bin/python
-AWEAGENT_ROOT=/Users/arthur/Code/stateful_core/tmp/AweAgent
-DENOVO_OUTPUT_ROOT=/Users/arthur/Downloads/stateful_bench_runs/denovo/runs
-DOCKER_HOST=unix:///Users/arthur/.colima/default/docker.sock
+STATEFUL_BENCH_BIN=${STATEFUL_BENCH_BIN:-$STATEFUL_BENCH_RUNS/cargo-target/debug/stateful-bench}
+STATEFUL_BIN=${STATEFUL_BIN:-$STATEFUL_BENCH_RUNS/cargo-target/debug/stateful}
+PYTHON=${PYTHON:-$REPO_ROOT/tmp/aweagent-venv/bin/python}
+AWEAGENT_ROOT=${AWEAGENT_ROOT:-$REPO_ROOT/tmp/AweAgent}
+DENOVO_OUTPUT_ROOT=${DENOVO_OUTPUT_ROOT:-$STATEFUL_BENCH_RUNS/denovo/runs}
+DOCKER_HOST=${DOCKER_HOST:-unix://$HOME/.colima/default/docker.sock}
 ```
 
 Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
@@ -332,11 +341,20 @@ Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
   detached run. Use a short, existing-parent socket path because long paths can
   exceed tmux's socket length limit; create the session with that socket and
   keep benchmark stdout/stderr in a launch log under the run output directory.
+- Rebuild or retag the Docker OMP agent image after changing the Dockerfile. If
+  a Docker OMP run still shows `bubblewrap` namespace failures, confirm the
+  command includes `--agent-docker-sandbox off`; otherwise nested OMP sandboxing
+  is still enabled inside the already-isolated container.
 - If OMP exits in about one second with empty `patch.diff`, zero subagent
   spawns, and `omp exited 1`, first check provider auth propagation. In Docker
   OMP mode the isolated home does not inherit host OMP login state, and the
   adapter only forwards allowlisted provider key environment variables that are
   present before `stateful-bench` starts.
+- Treat `finish_reason: "benchmark-contamination"` as an invalid rollout, not a
+  scored model failure. It means the adapter found an `upstream` checkout in the
+  harvested workspace or explicit target upstream access in session artifacts:
+  `.read.log` URL headers, `read`/`browser` URL or path tool-call arguments, or
+  shell command tool-call arguments containing forbidden target-upstream commands.
 - A `stateful:on` Docker run that emits `SessionRegistered` but no nested
   `SessionHeartbeat` or `ActivityFinalized` is not lifecycle-valid. Report it as
   a runtime/lifecycle failure, not as a model-quality score.
@@ -375,7 +393,9 @@ failure rather than a model-quality result.
 For `subagent:on`, the generated DeNovo prompt requires native Codex/OMP
 subagents before implementation or broad repository exploration, while allowing
 narrow preflight to read the prompt, inspect tool availability, or initialize
-stateful coordination. It tells OMP to use the current `task` tool or older
+stateful coordination. It also requires reading and using the installed
+`dispatching-parallel-agents` skill before spawning native subagents when that
+skill is available. It tells OMP to use the current `task` tool or older
 multi-agent tools such as `multi_agent_v1spawn_agent`, requires every counted
 subagent to inspect, edit, and verify a distinct implementation slice, and
 requires explicit blocker reporting if the runtime does not expose subagent
@@ -424,6 +444,14 @@ During live runs, prefer cumulative `denovo-report.json` values over raw
 adapter `results.jsonl` files. Matrix runs may rewrite or reset raw
 `results.jsonl` files while conditions advance, so raw row counts can be
 misleading until the run has settled.
+
+If `results.jsonl` shows `finish_reason: "benchmark-contamination"`, inspect
+`codex-command.json.benchmark_contamination`; `kind: "upstream-worktree"` means
+an `upstream/` checkout remained in the final workspace, and
+`kind: "upstream-source-access"` means session artifacts showed explicit target
+upstream access through `.read.log` URL headers, `read`/`browser` URL or path
+tool-call arguments, or forbidden target-upstream commands in shell command tool
+calls.
 
 After all three trials complete, collect each trial separately and report the
 mean:

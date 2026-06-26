@@ -984,7 +984,7 @@ async fn context_render(
                 .live_current_state_for_workspace_identity(
                     workspace_id,
                     identity_filter,
-                    input.resource.as_deref(),
+                    input.resource.as_deref().and_then(non_empty_str),
                 )
                 .map_err(|error| error.to_string())
         });

@@ -26,9 +26,11 @@ installer prints a dry-run plan.
 stateful install --agent codex --yes
 ```
 
-Installs global stateful files, writes the global `stateful-command-policy`
-skill, writes Codex external sandbox prompt rules under the Codex config
-directory's `rules/stateful.rules`, and merges the stateful block into Codex
+Installs global stateful files, writes global
+`skills/stateful-command-policy/SKILL.md` and
+`skills/dispatching-parallel-agents/SKILL.md`, writes Codex external sandbox
+prompt rules under the Codex config directory's `rules/stateful.rules`, and
+merges the stateful block into Codex
 config. The merged config enables hooks, registers the `stateful` MCP server, and
 adds lifecycle hooks for:
 
@@ -73,10 +75,11 @@ safety to Stateful hooks. Without `--update`, existing scalar values are
 preserved and only missing keys are inserted. With `--update`, existing target
 scalar values are updated.
 
-The installer also writes `rules/stateful-required.md` and
-`skills/stateful-command-policy/SKILL.md` under that isolated agent directory.
-The always-apply rule owns activation; the skill owns the detailed Stateful
-procedure.
+The installer also writes `rules/stateful-required.md`,
+`skills/stateful-command-policy/SKILL.md`, and
+`skills/dispatching-parallel-agents/SKILL.md` under that isolated agent
+directory. The always-apply rule owns activation; the
+`stateful-command-policy` manual owns the detailed Stateful procedure.
 
 Generated OMP tools:
 
@@ -89,6 +92,11 @@ Generated OMP tools:
   grants matching calls keyed by purpose plus write/create/write-dir/socket/
   signal/network scope until expiry or max uses; defaults are 5 uses and 600
   seconds.
+- `lazy_edit_resume` for strict replay of blocked, line-based OMP `edit` patches.
+  The live extension stores the original patch after `missing_reservation`,
+  `missing_claim`, or claim-conflict denials; after the agent fixes the missing
+  scope or receives a claimable reservation, it re-authorizes the original edit,
+  checks the file has not changed since queue time, then applies the stored patch.
 
 Generated OMP bash tools wait for sandbox commands to finish before returning,
 emit stdout through inline OMP tool updates, include final stdout/stderr/status
