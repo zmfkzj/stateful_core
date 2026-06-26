@@ -2783,7 +2783,7 @@ export default function statefulOmpExtension(pi) {{
       tool_name: event.toolName,
       tool_input: event.input || {{}},
     }});
-    if (decision.decision === "prompt") {{
+    if (decision.decision === "prompt" && !shouldAutoApproveStatefulPrompt(ctx, event.input || {{}})) {{
       if (typeof ctx?.ui?.confirm !== "function") {{
         return {{
           block: true,

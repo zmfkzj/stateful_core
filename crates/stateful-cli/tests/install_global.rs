@@ -337,7 +337,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("process.env.STATEFUL_SESSION_ID = id"));
     assert!(extension.contains("pre-tool-use"));
     assert!(extension.contains("decision: \"block\""));
-    assert!(extension.contains("decision.decision === \"prompt\""));
+    assert!(extension.contains("if (decision.decision === \"prompt\" && !shouldAutoApproveStatefulPrompt(ctx, event.input || {}))"));
     assert!(extension.contains("ctx?.ui?.confirm"));
     assert!(extension.contains("auto_approve: { type: \"boolean\""));
     assert!(extension.contains("function shouldAutoApproveStatefulPrompt(ctx, params)"));
