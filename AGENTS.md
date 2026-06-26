@@ -30,4 +30,5 @@ After follow-up work is complete:
 - Re-run targeted verification for the changed behavior when the environment allows it.
 - When a turn ends with file modifications, commit the finished changes from that turn.
 - Push that commit after it is created.
+- When creating or updating a pull request, wait for GitHub checks to finish and report the final CI pass/fail state.
 - Stage only the files changed for the current turn; do not include unrelated dirty work.
