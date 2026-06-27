@@ -5382,7 +5382,6 @@ print(json.dumps({{"code": code}}))
     assert_eq!(output["code"], 403);
 }
 
-
 fn codex_pair_agent_path_json() -> String {
     serde_json::to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),

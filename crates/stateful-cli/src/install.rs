@@ -1252,7 +1252,13 @@ fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow
 
     ensure_omp_child_scalar(&mut lines, "tools", "approvalMode", "yolo", update_existing)?;
     remove_omp_child_mapping(&mut lines, "tools", "approval")?;
-    ensure_omp_child_scalar(&mut lines, "stateful", "autoApprove", "false", update_existing)?;
+    ensure_omp_child_scalar(
+        &mut lines,
+        "stateful",
+        "autoApprove",
+        "false",
+        update_existing,
+    )?;
     ensure_omp_child_scalar(&mut lines, "eval", "py", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "js", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "rb", "false", update_existing)?;
