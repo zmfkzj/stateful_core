@@ -247,6 +247,11 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));
     assert!(extension.contains("function processFindArgs(params)"));
     assert!(extension.contains("const args = [\"sandbox\", \"process\", \"find\"];"));
+    assert!(extension.contains(
+        "fields: { type: \"array\", items: { type: \"string\" }"
+    ));
+    assert!(extension.contains("for (const field of stringList(params.fields))"));
+    assert!(extension.contains("args.push(\"--field\", field)"));
     assert!(!extension.contains("process_find --fs external"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
     assert!(

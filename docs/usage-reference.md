@@ -87,7 +87,7 @@ Generated OMP tools:
 - `sandbox_bash` for non-external `stateful sandbox run` profiles: `read-only`,
   `write-targets`, `build`, `git`, and `github-pr`
 - `process_find` for process inspection; parameters are `names`, `contains`,
-  `pids`, `parent_pids`, `process_groups`, `timeout_seconds`, and `async`
+  `pids`, `parent_pids`, `process_groups`, `fields`, `timeout_seconds`, and `async`
 - `ext_ro_bash` for read-only `--fs external` purpose-and-command operations
   without OMP UI confirmation
 - `ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
@@ -336,8 +336,11 @@ stateful sandbox process find --contains denovo_codex_agent
 ```
 
 In OMP, call the generated `process_find` tool directly instead of routing
-process inspection through `sandbox_bash` or raw Bash. Process output includes
-CPU usage as `pcpu`.
+process inspection through `sandbox_bash` or raw Bash. By default, result JSON
+includes safe process metadata fields: `pid`, `ppid`, `pgid`, `user`, `uid`,
+`stat`, `start`, `etime`, `time`, `pcpu`, `pmem`, `rss`, `vsz`, `nice`, `pri`,
+`tty`, and `comm`. Command strings, argv, and environment data are never exposed
+in result JSON.
 
 ## HTTP And MCP Surface
 

@@ -1976,6 +1976,7 @@ function processFindArgs(params) {{
   for (const pid of processIdList(params.pids)) args.push("--pid", String(pid));
   for (const ppid of processIdList(params.parent_pids)) args.push("--parent-pid", String(ppid));
   for (const pgid of processIdList(params.process_groups)) args.push("--process-group", String(pgid));
+  for (const field of stringList(params.fields)) args.push("--field", field);
   if (args.length === 3) {{
     throw new Error("process_find requires at least one selector");
   }}
@@ -2668,6 +2669,7 @@ export default function statefulOmpExtension(pi) {{
         pids: {{ type: "array", items: {{ type: "number" }}, description: "Process ids to match." }},
         parent_pids: {{ type: "array", items: {{ type: "number" }}, description: "Parent process ids to match." }},
         process_groups: {{ type: "array", items: {{ type: "number" }}, description: "Process group ids to match." }},
+        fields: {{ type: "array", items: {{ type: "string" }}, description: "Safe output fields to include. Omit to include every safe process metadata field; command, argv, and env are never exposed." }},
         timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
         async: {{ type: "boolean", description: "Run in the background when true or omitted; set false to wait for completion." }},
       }},
