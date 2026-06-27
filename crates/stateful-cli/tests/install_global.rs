@@ -252,6 +252,16 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     ));
     assert!(extension.contains("for (const field of stringList(params.fields))"));
     assert!(extension.contains("args.push(\"--field\", field)"));
+    let selector_check = extension
+        .find("if (args.length === 3)")
+        .expect("process_find should require a selector");
+    let field_loop = extension
+        .find("for (const field of stringList(params.fields))")
+        .expect("process_find should forward selected output fields");
+    assert!(
+        selector_check < field_loop,
+        "fields should not count as process selectors"
+    );
     assert!(!extension.contains("process_find --fs external"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
     assert!(
