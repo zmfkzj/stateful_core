@@ -134,8 +134,9 @@ the `stateful-command-policy` manual keeps the detailed procedure, and hooks
 remain the
 enforcement boundary. The
 generated extension registers `sandbox_bash` for read-only, write-targets,
-build, git, and github-pr sandbox runs, including common sandbox flags, and
-registers `ext_ro_bash` for read-only `--fs external` commands. `ext_rw_bash`
+build, git, and github-pr sandbox runs, including common sandbox flags,
+registers `process_find` for process inspection, and registers `ext_ro_bash` for
+read-only `--fs external` commands. `ext_rw_bash`
 asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
 The grant prompt shows purpose, declared write/socket/signal scope, network
 mode, examples, max uses, and expiry instead of raw command text, and matching
@@ -197,7 +198,8 @@ reconciliation fail closed; read/search/diff remains allowed.
 
 For OMP, the generated `sandbox_bash` tool owns non-external sandbox command
 execution for read-only, write-targets, build, git, and github-pr profiles;
-`ext_ro_bash` owns read-only external commands without OMP UI confirmation.
+`process_find` owns process inspection; `ext_ro_bash` owns read-only external
+commands without OMP UI confirmation.
 `ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
 Each generated tool runs in the background by default: when `async` is omitted or
 `true`, it returns a job id immediately, streams stdout/output via
@@ -266,15 +268,17 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 - deny Codex raw Bash with sandbox guidance. For OMP, raw Bash and the
   Python/JavaScript/JS/Ruby/Julia eval tools are denied at host approval and hook
   levels, even when the raw command invokes `stateful sandbox run`; non-external
-  sandbox command work must use `sandbox_bash`, read-only repo-external shell
-  work must use `ext_ro_bash` without OMP UI confirmation. `ext_rw_bash` asks
-  for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
+  sandbox command work must use `sandbox_bash`, process inspection must use
+  `process_find`, and read-only repo-external shell work must use `ext_ro_bash`
+  without OMP UI confirmation. `ext_rw_bash` asks for a scoped OMP UI grant by
+  default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag
+  skips only that Stateful-owned prompt while sandbox scope validation, hooks,
+  reservation/claim checks, and grant limits still apply.
   Hook-mediated command execution outside OMP custom tools must be a single
-  strict invocation of the trusted absolute `stateful` binary running
-  `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
-  command-shaped inspection uses `--fs read-only --network disabled`; process
-  inspection uses `sandbox process find <selector>`. Command-shaped repo writes
-  use `--fs write-targets` with explicit `--write-target <file>` /
+  strict invocation of the trusted absolute `stateful` binary. Read-only
+  command-shaped inspection uses `--fs read-only --network disabled`; Codex
+  process inspection uses `<absolute-stateful-binary> sandbox process find <selector>`. Command-shaped repo
+  writes use `--fs write-targets` with explicit `--write-target <file>` /
   `--create-target <file>` values and repo reservation plus same-session claims. Local
   Git uses `--fs git --network disabled`, GitHub PR operations use
   `--fs github-pr --network enabled`, and external operations use `--fs external`
@@ -374,8 +378,9 @@ classification, so `functions.bash` is Bash,
   details.
   Ordinary read work should use native read/search/diff tools when available.
   Read-only command-shaped inspection that genuinely needs a shell uses
-  `--fs read-only --network disabled`; process inspection uses
-  `sandbox process find <selector>`, not raw `ps` or `pgrep`. Command-shaped
+  `--fs read-only --network disabled`; OMP process inspection uses
+  `process_find`, not `sandbox_bash`, raw `ps`, or `pgrep`. Codex process
+  inspection uses `<absolute-stateful-binary> sandbox process find <selector>`. Command-shaped
   repo writes use `--fs write-targets` with explicit `--write-target <file>` /
   `--create-target <file>` values and target authorization. External operations
   use `--fs external` with no repo reservation or claim, and Codex approval or OMP

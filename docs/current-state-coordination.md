@@ -272,8 +272,9 @@ the `stateful-command-policy` manual keeps the detailed procedure, and hooks
 remain the
 enforcement boundary. The
 generated extension registers `sandbox_bash` for read-only, write-targets,
-build, git, and github-pr sandbox runs, including common sandbox flags, and
-registers `ext_ro_bash` for read-only `--fs external` commands. `ext_rw_bash`
+build, git, and github-pr sandbox runs, including common sandbox flags,
+registers `process_find` for process inspection, and registers `ext_ro_bash` for
+read-only `--fs external` commands. `ext_rw_bash`
 asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
 That grant omits raw command text, shows purpose and declared scope, and can
 cover matching calls until expiry or max uses. When auto-approval is enabled, no prompt is shown.
@@ -331,8 +332,11 @@ authorization still uses the v1 envelope.
 
 OMP adapters preserve stateful hard blocks: `sandbox_bash` owns non-external
 sandbox command execution for read-only, write-targets, build, git, and
-github-pr profiles; `ext_ro_bash` owns read-only external commands without OMP
-UI confirmation. `ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. All
+github-pr profiles; `process_find` owns process inspection; `ext_ro_bash` owns
+read-only external commands without OMP UI confirmation. `ext_rw_bash` asks for
+a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call
+`auto_approve: true` flag skips only that Stateful-owned prompt while sandbox
+scope validation, hooks, reservation/claim checks, and grant limits still apply. All
 generated `*_bash` tools run sandbox commands in the
 background by default, return a job id immediately when `async` is omitted or
 `true`, stream stdout/output via OMP messages using `pi.sendMessage`, and send
@@ -365,9 +369,12 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 - deny Codex raw Bash with sandbox guidance. For OMP, raw Bash and the
   Python/JavaScript/JS/Ruby/Julia eval tools are denied at host approval and hook
   levels, even when the raw command itself invokes `stateful sandbox run`;
-  non-external sandbox command work must use `sandbox_bash`, read-only
-  repo-external command-shaped work must use `ext_ro_bash` without OMP UI
-  confirmation. `ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
+  non-external sandbox command work must use `sandbox_bash`, process inspection
+  must use `process_find`, and read-only repo-external command-shaped work must
+  use `ext_ro_bash` without OMP UI confirmation. `ext_rw_bash` asks for a scoped
+  OMP UI grant by default; `stateful.autoApprove: true` or the per-call
+  `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox
+  scope validation, hooks, reservation/claim checks, and grant limits still apply.
 - check whether requested files or resources conflict with active claims
 - deny, warn, or add context based on policy
 
@@ -500,7 +507,8 @@ Codex Bash read-only inspection that genuinely needs a shell -> require a strict
   --command <cmd>
 OMP read-only/write-targets/build/git/github-pr sandbox runs -> require
   `sandbox_bash`
-process inspection -> use sandbox process find <selector>, not raw ps/pgrep
+OMP process inspection -> require `process_find`, not `sandbox_bash`
+Codex process inspection -> use <absolute-stateful-binary> sandbox process find <selector>, not raw ps/pgrep
 Codex Bash command-shaped repo writes -> require the trusted wrapper with
   --fs write-targets plus explicit --write-target <file>/--create-target <file> values
 test execution -> run through sandbox run --fs build --network enabled with

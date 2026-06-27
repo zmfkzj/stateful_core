@@ -216,8 +216,13 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 | Repo-external shell operation | `stateful sandbox run --fs external --purpose <purpose> --command <cmd>` for reads; add exact `--write-target`, `--create-target`, or `--write-dir` scopes for writes |
 
 In OMP, use generated tools instead of raw Bash: `sandbox_bash` for
-non-external sandbox profiles and `ext_ro_bash` for read-only external shell work.
-`ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. When auto-approval is enabled, no prompt is shown. Use `lazy_edit_resume` for strict replay of blocked line-based OMP `edit` patches.
+non-external sandbox profiles, `process_find` for process inspection, and
+`ext_ro_bash` for read-only external shell work. `ext_rw_bash` asks for a scoped
+OMP UI grant by default; `stateful.autoApprove: true` or the per-call
+`auto_approve: true` flag skips only that Stateful-owned prompt while sandbox
+scope validation, hooks, reservation/claim checks, and grant limits still apply.
+When auto-approval is enabled, no prompt is shown. Use `lazy_edit_resume` for
+strict replay of blocked line-based OMP `edit` patches.
 
 See [Usage reference](docs/usage-reference.md) for detailed CLI, hook, sandbox,
 LAN sharing, generated-file, and release notes.

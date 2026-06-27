@@ -10,6 +10,8 @@ When a workflow, skill, or "superpower" offers choices, do not pick a default,
 recommendation, approval, or next step on the user's behalf. Ask one question at
 a time and wait for the user's explicit choice before proceeding.
 
+Assume every implementation change should be the optimal change for the maintainer workflow, not the smallest possible diff, unless the user explicitly asks for a minimal change.
+
 After completing an implementation or behavior change, maintainers should run
 follow-up checks before final handoff.
 

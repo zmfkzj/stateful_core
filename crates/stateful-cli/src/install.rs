@@ -1637,6 +1637,16 @@ function stringList(value) {{
   return [];
 }}
 
+function processIdList(value) {{
+  if (Array.isArray(value)) {{
+    return value.filter((item) => Number.isInteger(item) && item > 0);
+  }}
+  if (Number.isInteger(value) && value > 0) {{
+    return [value];
+  }}
+  return [];
+}}
+
 const lazyEditOperations = new Map();
 let lazyEditOperationCounter = 0;
 
@@ -1953,6 +1963,19 @@ function sandboxBashArgs(params) {{
   return args;
 }}
 
+function processFindArgs(params) {{
+  const args = ["sandbox", "process", "find"];
+  for (const name of stringList(params.names)) args.push("--name", name);
+  for (const contains of stringList(params.contains)) args.push("--contains", contains);
+  for (const pid of processIdList(params.pids)) args.push("--pid", String(pid));
+  for (const ppid of processIdList(params.parent_pids)) args.push("--parent-pid", String(ppid));
+  for (const pgid of processIdList(params.process_groups)) args.push("--process-group", String(pgid));
+  if (args.length === 3) {{
+    throw new Error("process_find requires at least one selector");
+  }}
+  return args;
+}}
+
 function ompSandboxDisabled() {{
   return process.env.STATEFUL_OMP_SANDBOX === "off";
 }}
@@ -2184,6 +2207,13 @@ function parseSandboxRunOutput(rawStdout) {{
   }}
 }}
 
+function toolDisplayCommand(params, args) {{
+  if (typeof params?.command === "string" && params.command.length > 0) {{
+    return params.command;
+  }}
+  return "stateful " + args.join(" ");
+}}
+
 function buildSandboxToolResult(params, args, exitCode, stdout, stderr, error) {{
   const text = sandboxToolResultText(exitCode, stdout, stderr, error);
   return {{
@@ -2194,7 +2224,7 @@ function buildSandboxToolResult(params, args, exitCode, stdout, stderr, error) {
       stdout,
       stderr,
       error,
-      command: params.command,
+      command: toolDisplayCommand(params, args),
       sandboxArgs: args,
     }},
   }};
@@ -2306,6 +2336,7 @@ function runSandboxToolProcess(params, args, ctx, label, signal, onStdout) {{
     let abortHandler;
     let killTimer;
     let resolveTimer;
+    let timeoutTimer;
     const clearCancelTimers = () => {{
       if (killTimer) {{
         clearTimeout(killTimer);
@@ -2314,6 +2345,10 @@ function runSandboxToolProcess(params, args, ctx, label, signal, onStdout) {{
       if (resolveTimer) {{
         clearTimeout(resolveTimer);
         resolveTimer = undefined;
+      }}
+      if (timeoutTimer) {{
+        clearTimeout(timeoutTimer);
+        timeoutTimer = undefined;
       }}
     }};
     const emitOutputChunk = (chunk) => {{
@@ -2399,6 +2434,14 @@ function runSandboxToolProcess(params, args, ctx, label, signal, onStdout) {{
     }}
     if (signal?.aborted) {{
       abortHandler();
+    }}
+    const timeoutSeconds = params.timeout_seconds ?? params.timeoutSeconds;
+    if (Number.isInteger(timeoutSeconds) && timeoutSeconds > 0) {{
+      timeoutTimer = setTimeout(() => {{
+        processError = "timed out after " + timeoutSeconds + "s";
+        killSandboxChild(child, "SIGTERM");
+        killTimer = setTimeout(() => killSandboxChild(child, "SIGKILL"), 1000);
+      }}, timeoutSeconds * 1000);
     }}
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
@@ -2500,7 +2543,8 @@ function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout) {{
 
 async function runSandboxAwaitedTool(params, args, ctx, label, signal, onUpdate) {{
   const runId = nextSandboxJobId(label);
-  const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
+  const commandText = toolDisplayCommand(params, args);
+  const commandLabel = commandText.length > 120 ? commandText.slice(0, 117) + "..." : commandText;
   const stdoutStreamer = createSandboxStdoutStreamer(onUpdate, runId, commandLabel);
   const runner = label === "sandbox_bash" && ompSandboxDisabled()
     ? runSandboxDisabledToolProcess(params, ctx, label, signal, (chunk) => {{
@@ -2548,11 +2592,12 @@ function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, si
   }}
   rememberBackgroundSandboxToolCall(toolCallId);
   const runId = nextSandboxJobId(label);
-  const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
+  const commandText = toolDisplayCommand(params, args);
+  const commandLabel = commandText.length > 120 ? commandText.slice(0, 117) + "..." : commandText;
   const stdoutStreamer = createSandboxStdoutStreamer((update) => {{
     const chunk = update?.content?.[0]?.text || "";
     deliverSandboxBackgroundMessage(pi, runId, label, chunk, {{
-      command: params.command,
+      command: commandText,
       stream: "stdout",
     }});
   }}, runId, commandLabel);
@@ -2605,6 +2650,33 @@ function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, si
 
 export default function statefulOmpExtension(pi) {{
   pi.setLabel("Stateful");
+  pi.registerTool({{
+    name: "process_find",
+    label: "Process Find",
+    description: "Inspect host processes through stateful sandbox process find without routing through sandbox_bash.",
+    parameters: {{
+      type: "object",
+      properties: {{
+        names: {{ type: "array", items: {{ type: "string" }}, description: "Process command names to match." }},
+        contains: {{ type: "array", items: {{ type: "string" }}, description: "Command-line substrings to match." }},
+        pids: {{ type: "array", items: {{ type: "number" }}, description: "Process ids to match." }},
+        parent_pids: {{ type: "array", items: {{ type: "number" }}, description: "Parent process ids to match." }},
+        process_groups: {{ type: "array", items: {{ type: "number" }}, description: "Process group ids to match." }},
+        timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
+        async: {{ type: "boolean", description: "Run in the background when true or omitted; set false to wait for completion." }},
+      }},
+    }},
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {{
+      let args;
+      try {{
+        args = processFindArgs(params || {{}});
+      }} catch (error) {{
+        return sandboxToolError(error);
+      }}
+      if (params?.async === false) return await runSandboxAwaitedTool(params || {{}}, args, ctx, "process_find", signal, onUpdate);
+      return startSandboxBackgroundTool(pi, _toolCallId, params || {{}}, args, ctx, "process_find", signal, onUpdate);
+    }},
+  }});
   pi.registerTool({{
     name: "lazy_edit_resume",
     label: "Lazy Edit Resume",

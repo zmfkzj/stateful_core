@@ -233,6 +233,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("name: \"ext_rw_bash\""));
     assert!(!extension.contains("name: \"external_bash\""));
     assert!(extension.contains("name: \"sandbox_bash\""));
+    assert!(extension.contains("name: \"process_find\""));
     assert!(extension.contains("name: \"lazy_edit_resume\""));
     assert!(extension.contains("applyOmpLinePatch"));
     assert!(extension.contains("lazyEditOperations"));
@@ -244,6 +245,9 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("line === \"*** Begin Patch\""));
     assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
     assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));
+    assert!(extension.contains("function processFindArgs(params)"));
+    assert!(extension.contains("const args = [\"sandbox\", \"process\", \"find\"];"));
+    assert!(!extension.contains("process_find --fs external"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
     assert!(
         extension.contains("import { existsSync, readFileSync, writeFileSync } from \"node:fs\"")
@@ -273,6 +277,8 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains(
         "async: { type: \"boolean\", description: \"Run in the background when true or omitted; set false to wait for completion.\" }"
     ));
+    assert!(extension.contains("timeoutTimer = setTimeout"));
+    assert!(extension.contains("\"timed out after \" + timeoutSeconds + \"s\""));
     assert!(
         extension
             .contains("function deliverSandboxBackgroundMessage(pi, jobId, label, text, details)")
@@ -284,6 +290,12 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     ));
     assert!(extension.contains("Background job "));
     assert!(extension.contains("params.async === false"));
+    assert!(
+        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params || {}, args, ctx, \"process_find\", signal, onUpdate)")
+    );
+    assert!(
+        extension.contains("return await runSandboxAwaitedTool(params || {}, args, ctx, \"process_find\", signal, onUpdate)")
+    );
     assert!(
         extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, \"sandbox_bash\", signal, onUpdate)")
     );

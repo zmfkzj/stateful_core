@@ -134,6 +134,7 @@ pub struct SandboxProcessInfo {
     pub pgid: u32,
     pub stat: String,
     pub etime: String,
+    pub pcpu: String,
     pub comm: String,
 }
 
@@ -2456,11 +2457,11 @@ enum ShellSegmentQuoteState {
 
 fn read_process_find_rows() -> anyhow::Result<Vec<SandboxProcessRow>> {
     let output = Command::new("/bin/ps")
-        .args(["-axo", "pid=,ppid=,pgid=,stat=,etime=,comm=,command="])
+        .args(["-axo", "pid=,ppid=,pgid=,stat=,etime=,pcpu=,comm=,command="])
         .output()
         .or_else(|_| {
             Command::new("ps")
-                .args(["-axo", "pid=,ppid=,pgid=,stat=,etime=,comm=,command="])
+                .args(["-axo", "pid=,ppid=,pgid=,stat=,etime=,pcpu=,comm=,command="])
                 .output()
         })?;
     if !output.status.success() {
@@ -2477,7 +2478,7 @@ fn parse_process_find_ps_output(output: &str) -> anyhow::Result<Vec<SandboxProce
     let mut rows = Vec::new();
     for line in output.lines() {
         let fields = line.split_whitespace().collect::<Vec<_>>();
-        if fields.len() < 6 {
+        if fields.len() < 7 {
             continue;
         }
         let pid = parse_process_find_field(fields[0], "pid")?;
@@ -2485,9 +2486,10 @@ fn parse_process_find_ps_output(output: &str) -> anyhow::Result<Vec<SandboxProce
         let pgid = parse_process_find_field(fields[2], "pgid")?;
         let stat = fields[3].to_string();
         let etime = fields[4].to_string();
-        let comm = fields[5].to_string();
-        let command = if fields.len() > 6 {
-            fields[6..].join(" ")
+        let pcpu = fields[5].to_string();
+        let comm = fields[6].to_string();
+        let command = if fields.len() > 7 {
+            fields[7..].join(" ")
         } else {
             comm.clone()
         };
@@ -2498,6 +2500,7 @@ fn parse_process_find_ps_output(output: &str) -> anyhow::Result<Vec<SandboxProce
                 pgid,
                 stat,
                 etime,
+                pcpu,
                 comm,
             },
             command,
@@ -4241,8 +4244,8 @@ mod tests {
             process_groups: Vec::new(),
         };
         let rows = parse_process_find_ps_output(
-            "101 1 101 S 00:01 codex /opt/bin/codex exec\n\
-             202 1 202 S 00:02 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
+            "101 1 101 S 00:01 0.0 codex /opt/bin/codex exec\n\
+             202 1 202 S 00:02 37.5 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
         )
         .expect("ps output should parse");
 
@@ -4251,6 +4254,7 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].pid, 202);
         assert_eq!(matches[0].comm, "python3");
+        assert_eq!(matches[0].pcpu, "37.5");
     }
 
     #[test]
@@ -4264,8 +4268,8 @@ mod tests {
         };
         let current_pid = std::process::id();
         let rows = parse_process_find_ps_output(&format!(
-            "{current_pid} 1 {current_pid} S 00:01 stateful stateful sandbox process find --contains denovo_codex_agent\n\
-             202 1 202 S 00:02 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
+            "{current_pid} 1 {current_pid} S 00:01 0.0 stateful stateful sandbox process find --contains denovo_codex_agent\n\
+             202 1 202 S 00:02 2.5 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
         ))
         .expect("ps output should parse");
 

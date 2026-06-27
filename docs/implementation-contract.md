@@ -24,9 +24,10 @@ The prototype supports user-level installation with repo allowlist gating.
 `skills/stateful-command-policy/SKILL.md` and
 `skills/dispatching-parallel-agents/SKILL.md`. `stateful install
 --agent omp --yes` configures the isolated OMP `stateful` profile with stateful
-hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `ext_ro_bash`
-for read-only `--fs external`, `ext_rw_bash`, `lazy_edit_resume` for strict
-replay of queued line-based OMP edits, and approval entries that deny raw Bash while setting Python/JavaScript/JS/Ruby/Julia eval tools to false.
+hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `process_find` for
+process inspection, `ext_ro_bash` for read-only `--fs external`, `ext_rw_bash`,
+`lazy_edit_resume` for strict replay of queued line-based OMP edits, and approval
+entries that deny raw Bash while setting Python/JavaScript/JS/Ruby/Julia eval tools to false.
 `ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. The OMP installer also
 writes `rules/stateful-required.md`,
 `skills/stateful-command-policy/SKILL.md`, and
@@ -263,7 +264,8 @@ at host approval and hook levels, even when the raw command itself invokes
 sandbox command execution uses generated custom tools: `sandbox_bash` invokes
 the trusted stateful binary for read-only, write-targets, build, git, and
 github-pr profiles, including common sandbox flags, and rejects `--fs external`
-with guidance to use `ext_ro_bash` or `ext_rw_bash`; `ext_ro_bash` starts
+with guidance to use `ext_ro_bash` or `ext_rw_bash`; `process_find` invokes
+`stateful sandbox process find` directly; `ext_ro_bash` starts
 purpose-and-command-only external reads without OMP UI confirmation. `ext_rw_bash`
 asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. It starts the trusted
 stateful binary with `sandbox run --fs external --purpose ...` for external
@@ -604,8 +606,13 @@ permits `trustd` and DirectoryService Mach lookups needed by Go TLS certificate
 verification.
 `stateful
 install --agent omp --yes` registers `sandbox_bash` for read-only,
-write-targets, build, git, and github-pr sandbox profiles and `ext_ro_bash` for
-read-only external commands. `ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
+write-targets, build, git, and github-pr sandbox profiles, `process_find` for
+process inspection, and `ext_ro_bash` for read-only external commands.
+`process_find` accepts `names`, `contains`, `pids`, `parent_pids`,
+`process_groups`, `timeout_seconds`, and `async`. `ext_rw_bash` asks for a
+scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call
+`auto_approve: true` flag skips only that Stateful-owned prompt while sandbox
+scope validation, hooks, reservation/claim checks, and grant limits still apply.
 All three generated `*_bash` tools run sandbox commands in the background by
 default: when `async` is omitted or `true`, the call returns a job id
 immediately, streams stdout/output via OMP messages using `pi.sendMessage`, and
@@ -727,8 +734,11 @@ always-apply `rules/stateful-required.md` rule,
 and `eval.jl: false`; it removes
 `tools.approval` from the stateful profile because yolo mode delegates safety to
 Stateful hooks. Raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution
-is still denied at host approval and hook levels, sandbox runs still go through
-`sandbox_bash`, `ext_ro_bash`, or `ext_rw_bash`, and `stateful.autoApprove: true` or per-call `auto_approve: true` skips only the Stateful-owned `ext_rw_bash` prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. `stateful enable`
+is still denied at host approval and hook levels, OMP process inspection uses
+`process_find`, sandbox runs still go through `sandbox_bash`, `ext_ro_bash`, or
+`ext_rw_bash`, and `stateful.autoApprove: true` or per-call `auto_approve: true`
+skips only the Stateful-owned `ext_rw_bash` prompt while sandbox scope
+validation, hooks, reservation/claim checks, and grant limits still apply. `stateful enable`
 opts the current repo into enforcement. Repo-local packaging and managed hooks
 must reuse the same hook adapter library and HTTP protocol.
 

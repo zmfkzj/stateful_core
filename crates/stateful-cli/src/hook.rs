@@ -328,19 +328,20 @@ fn omp_pre_tool_action(
         tool_name
             if tool_name.eq_ignore_ascii_case("ext_ro_bash")
                 || tool_name.eq_ignore_ascii_case("ext_rw_bash")
-                || tool_name.eq_ignore_ascii_case("sandbox_bash") =>
+                || tool_name.eq_ignore_ascii_case("sandbox_bash")
+                || tool_name.eq_ignore_ascii_case("process_find") =>
         {
             Ok(OmpPreToolAction::Allow)
         }
         tool_name if tool_name.eq_ignore_ascii_case("bash") => Ok(OmpPreToolAction::Block {
             reason: format!(
-                "OMP raw {} is denied; use sandbox_bash for stateful sandbox run profiles except --fs external, ext_ro_bash for read-only external operations, or ext_rw_bash for external writes",
+                "OMP raw {} is denied; use process_find for process inspection, sandbox_bash for stateful sandbox run profiles except --fs external, ext_ro_bash for read-only external operations, or ext_rw_bash for external writes",
                 input.tool_name
             ),
         }),
         tool_name if is_omp_eval_tool(tool_name) => Ok(OmpPreToolAction::Block {
             reason: format!(
-                "OMP eval tool {} is denied; use sandbox_bash for stateful sandbox run profiles except --fs external, ext_ro_bash for read-only external operations, or ext_rw_bash for external writes",
+                "OMP eval tool {} is denied; use process_find for process inspection, sandbox_bash for stateful sandbox run profiles except --fs external, ext_ro_bash for read-only external operations, or ext_rw_bash for external writes",
                 input.tool_name
             ),
         }),
@@ -1717,7 +1718,7 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 fn bash_policy_guidance() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Inspect current state first with `state_current_read` or `state_context_render`, then use the `stateful-command-policy` skill before Bash or eval tools. Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use `sandbox_bash` for stateful sandbox run profiles except `--fs external`, `ext_ro_bash` for read-only external operations, and `ext_rw_bash` for external writes. Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first and `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as fallback. For structured process lookup, use `{binary} sandbox process find <selector>` instead of raw `ps` or `pgrep`. For command-shaped writes, ensure task-level reservation covers the target, acquire the same-session claim, then use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>`. For builds/tests, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`. For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; enable network only for remote git operations. For GitHub PRs, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`.",
+        "Inspect current state first with `state_current_read` or `state_context_render`, then use the `stateful-command-policy` skill before Bash or eval tools. Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use `process_find` for process inspection, `sandbox_bash` for stateful sandbox run profiles except `--fs external`, `ext_ro_bash` for read-only external operations, and `ext_rw_bash` for external writes. Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first and `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as fallback. For structured process lookup, use `{binary} sandbox process find <selector>` in Codex or `process_find` in OMP instead of raw `ps` or `pgrep`. For command-shaped writes, ensure task-level reservation covers the target, acquire the same-session claim, then use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>`. For builds/tests, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`. For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; enable network only for remote git operations. For GitHub PRs, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`.",
     )
 }
 
@@ -2982,6 +2983,10 @@ mod tests {
         assert!(
             guidance.contains("network enabled"),
             "denial guidance should mention networked git exception: {guidance}"
+        );
+        assert!(
+            guidance.contains("process_find"),
+            "denial guidance should mention OMP process_find: {guidance}"
         );
         assert!(
             guidance.contains(&current_exe),
