@@ -82,6 +82,7 @@ pub struct SandboxProcessFindRequest {
     pub pids: Vec<u32>,
     pub parent_pids: Vec<u32>,
     pub process_groups: Vec<u32>,
+    pub fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +125,7 @@ pub struct SandboxRunOutput {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SandboxProcessFindOutput {
     pub status: &'static str,
-    pub processes: Vec<SandboxProcessInfo>,
+    pub processes: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -132,9 +133,19 @@ pub struct SandboxProcessInfo {
     pub pid: u32,
     pub ppid: u32,
     pub pgid: u32,
+    pub user: String,
+    pub uid: u32,
     pub stat: String,
+    pub start: String,
     pub etime: String,
+    pub time: String,
     pub pcpu: String,
+    pub pmem: String,
+    pub rss: u64,
+    pub vsz: u64,
+    pub nice: i32,
+    pub pri: i32,
+    pub tty: String,
     pub comm: String,
 }
 
@@ -143,6 +154,13 @@ struct SandboxProcessRow {
     info: SandboxProcessInfo,
     command: String,
 }
+
+const PROCESS_FIND_DEFAULT_FIELDS: &[&str] = &[
+    "pid", "ppid", "pgid", "user", "uid", "stat", "start", "etime", "time", "pcpu", "pmem",
+    "rss", "vsz", "nice", "pri", "tty", "comm",
+];
+
+const PROCESS_FIND_FORBIDDEN_FIELDS: &[&str] = &["command", "args", "argv", "env"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxAuthorizationDenied {
@@ -743,6 +761,7 @@ pub(crate) fn parse_sandbox_process_find_bash_invocation(
         pids: Vec::new(),
         parent_pids: Vec::new(),
         process_groups: Vec::new(),
+        fields: Vec::new(),
     };
     let mut index = 4;
     while index < words.len() {
@@ -780,6 +799,12 @@ pub(crate) fn parse_sandbox_process_find_bash_invocation(
                 request
                     .process_groups
                     .push(parse_process_selector_arg(&words, index, arg)?);
+            }
+            "--field" => {
+                index += 1;
+                request
+                    .fields
+                    .push(parse_sandbox_run_arg_value(&words, index, "--field")?);
             }
             _ => {
                 return Err(format!(
@@ -880,6 +905,8 @@ pub(crate) fn validate_process_find_request(
         }
     }
 
+    validate_process_find_fields(&request.fields)?;
+
     Ok(())
 }
 
@@ -888,11 +915,7 @@ pub fn run_sandbox_process_find(
 ) -> anyhow::Result<SandboxProcessFindOutput> {
     validate_process_find_request(&request)?;
     let rows = read_process_find_rows()?;
-    let processes = filter_process_find_rows(&request, rows);
-    Ok(SandboxProcessFindOutput {
-        status: "ok",
-        processes,
-    })
+    process_find_output_for_rows(&request, rows)
 }
 
 fn parse_process_selector_arg(words: &[String], index: usize, arg: &str) -> Result<u32, String> {
@@ -2457,11 +2480,11 @@ enum ShellSegmentQuoteState {
 
 fn read_process_find_rows() -> anyhow::Result<Vec<SandboxProcessRow>> {
     let output = Command::new("/bin/ps")
-        .args(["-axo", "pid=,ppid=,pgid=,stat=,etime=,pcpu=,comm=,command="])
+        .args(["-axo", "pid=,ppid=,pgid=,user=,uid=,stat=,start=,etime=,time=,pcpu=,pmem=,rss=,vsz=,nice=,pri=,tty=,comm=,command="])
         .output()
         .or_else(|_| {
             Command::new("ps")
-                .args(["-axo", "pid=,ppid=,pgid=,stat=,etime=,pcpu=,comm=,command="])
+                .args(["-axo", "pid=,ppid=,pgid=,user=,uid=,stat=,start=,etime=,time=,pcpu=,pmem=,rss=,vsz=,nice=,pri=,tty=,comm=,command="])
                 .output()
         })?;
     if !output.status.success() {
@@ -2478,18 +2501,28 @@ fn parse_process_find_ps_output(output: &str) -> anyhow::Result<Vec<SandboxProce
     let mut rows = Vec::new();
     for line in output.lines() {
         let fields = line.split_whitespace().collect::<Vec<_>>();
-        if fields.len() < 7 {
+        if fields.len() < PROCESS_FIND_DEFAULT_FIELDS.len() {
             continue;
         }
-        let pid = parse_process_find_field(fields[0], "pid")?;
-        let ppid = parse_process_find_field(fields[1], "ppid")?;
-        let pgid = parse_process_find_field(fields[2], "pgid")?;
-        let stat = fields[3].to_string();
-        let etime = fields[4].to_string();
-        let pcpu = fields[5].to_string();
-        let comm = fields[6].to_string();
-        let command = if fields.len() > 7 {
-            fields[7..].join(" ")
+        let pid = parse_process_find_u32_field(fields[0], "pid")?;
+        let ppid = parse_process_find_u32_field(fields[1], "ppid")?;
+        let pgid = parse_process_find_u32_field(fields[2], "pgid")?;
+        let user = fields[3].to_string();
+        let uid = parse_process_find_u32_field(fields[4], "uid")?;
+        let stat = fields[5].to_string();
+        let start = fields[6].to_string();
+        let etime = fields[7].to_string();
+        let time = fields[8].to_string();
+        let pcpu = fields[9].to_string();
+        let pmem = fields[10].to_string();
+        let rss = parse_process_find_u64_field(fields[11], "rss")?;
+        let vsz = parse_process_find_u64_field(fields[12], "vsz")?;
+        let nice = parse_process_find_i32_field(fields[13], "nice")?;
+        let pri = parse_process_find_i32_field(fields[14], "pri")?;
+        let tty = fields[15].to_string();
+        let comm = fields[16].to_string();
+        let command = if fields.len() > PROCESS_FIND_DEFAULT_FIELDS.len() {
+            fields[PROCESS_FIND_DEFAULT_FIELDS.len()..].join(" ")
         } else {
             comm.clone()
         };
@@ -2498,9 +2531,19 @@ fn parse_process_find_ps_output(output: &str) -> anyhow::Result<Vec<SandboxProce
                 pid,
                 ppid,
                 pgid,
+                user,
+                uid,
                 stat,
+                start,
                 etime,
+                time,
                 pcpu,
+                pmem,
+                rss,
+                vsz,
+                nice,
+                pri,
+                tty,
                 comm,
             },
             command,
@@ -2509,8 +2552,20 @@ fn parse_process_find_ps_output(output: &str) -> anyhow::Result<Vec<SandboxProce
     Ok(rows)
 }
 
-fn parse_process_find_field(value: &str, field: &str) -> anyhow::Result<u32> {
+fn parse_process_find_u32_field(value: &str, field: &str) -> anyhow::Result<u32> {
     value.parse::<u32>().map_err(|_| {
+        anyhow::anyhow!("stateful sandbox process find invalid {field} field `{value}`")
+    })
+}
+
+fn parse_process_find_u64_field(value: &str, field: &str) -> anyhow::Result<u64> {
+    value.parse::<u64>().map_err(|_| {
+        anyhow::anyhow!("stateful sandbox process find invalid {field} field `{value}`")
+    })
+}
+
+fn parse_process_find_i32_field(value: &str, field: &str) -> anyhow::Result<i32> {
+    value.parse::<i32>().map_err(|_| {
         anyhow::anyhow!("stateful sandbox process find invalid {field} field `{value}`")
     })
 }
@@ -2524,6 +2579,86 @@ fn filter_process_find_rows(
         .filter(|row| process_find_row_matches(request, row))
         .map(|row| row.info)
         .collect()
+}
+
+fn process_find_output_for_rows(
+    request: &SandboxProcessFindRequest,
+    rows: Vec<SandboxProcessRow>,
+) -> anyhow::Result<SandboxProcessFindOutput> {
+    validate_process_find_fields(&request.fields)?;
+    let processes = filter_process_find_rows(request, rows)
+        .into_iter()
+        .map(|process| process_find_info_to_json(&process, &request.fields))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(SandboxProcessFindOutput {
+        status: "ok",
+        processes,
+    })
+}
+
+fn validate_process_find_fields(fields: &[String]) -> anyhow::Result<()> {
+    for field in fields {
+        if PROCESS_FIND_FORBIDDEN_FIELDS.contains(&field.as_str()) {
+            anyhow::bail!("stateful sandbox process find cannot expose field `{field}`");
+        }
+        if !process_find_is_safe_field(field) {
+            anyhow::bail!("stateful sandbox process find unknown field `{field}`");
+        }
+    }
+    Ok(())
+}
+
+fn process_find_is_safe_field(field: &str) -> bool {
+    PROCESS_FIND_DEFAULT_FIELDS.contains(&field)
+}
+
+fn process_find_info_to_json(
+    info: &SandboxProcessInfo,
+    requested_fields: &[String],
+) -> anyhow::Result<Value> {
+    let mut process = serde_json::Map::new();
+    if requested_fields.is_empty() {
+        for field in PROCESS_FIND_DEFAULT_FIELDS {
+            process.insert(
+                (*field).to_string(),
+                process_find_info_field_value(info, field)?,
+            );
+        }
+    } else {
+        for field in requested_fields {
+            process.insert(
+                field.clone(),
+                process_find_info_field_value(info, field.as_str())?,
+            );
+        }
+    }
+    Ok(Value::Object(process))
+}
+
+fn process_find_info_field_value(info: &SandboxProcessInfo, field: &str) -> anyhow::Result<Value> {
+    match field {
+        "pid" => Ok(Value::from(info.pid)),
+        "ppid" => Ok(Value::from(info.ppid)),
+        "pgid" => Ok(Value::from(info.pgid)),
+        "user" => Ok(Value::from(info.user.clone())),
+        "uid" => Ok(Value::from(info.uid)),
+        "stat" => Ok(Value::from(info.stat.clone())),
+        "start" => Ok(Value::from(info.start.clone())),
+        "etime" => Ok(Value::from(info.etime.clone())),
+        "time" => Ok(Value::from(info.time.clone())),
+        "pcpu" => Ok(Value::from(info.pcpu.clone())),
+        "pmem" => Ok(Value::from(info.pmem.clone())),
+        "rss" => Ok(Value::from(info.rss)),
+        "vsz" => Ok(Value::from(info.vsz)),
+        "nice" => Ok(Value::from(info.nice)),
+        "pri" => Ok(Value::from(info.pri)),
+        "tty" => Ok(Value::from(info.tty.clone())),
+        "comm" => Ok(Value::from(info.comm.clone())),
+        _ if PROCESS_FIND_FORBIDDEN_FIELDS.contains(&field) => {
+            anyhow::bail!("stateful sandbox process find cannot expose field `{field}`")
+        }
+        _ => anyhow::bail!("stateful sandbox process find unknown field `{field}`"),
+    }
 }
 
 fn process_find_row_matches(request: &SandboxProcessFindRequest, row: &SandboxProcessRow) -> bool {
@@ -4221,6 +4356,7 @@ mod tests {
             pids: Vec::new(),
             parent_pids: Vec::new(),
             process_groups: Vec::new(),
+            fields: Vec::new(),
         };
 
         let error = validate_process_find_request(&request)
@@ -4242,10 +4378,11 @@ mod tests {
             pids: Vec::new(),
             parent_pids: Vec::new(),
             process_groups: Vec::new(),
+            fields: Vec::new(),
         };
         let rows = parse_process_find_ps_output(
-            "101 1 101 S 00:01 0.0 codex /opt/bin/codex exec\n\
-             202 1 202 S 00:02 37.5 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
+            "101 1 101 root 0 S 10:29 00:01 00:00:00 0.0 0.0 0 0 0 31 ?? codex /opt/bin/codex exec\n\
+             202 1 202 arthur 501 S 10:30 00:02 00:00:01 37.5 1.2 123456 789012 0 31 ttys001 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
         )
         .expect("ps output should parse");
 
@@ -4258,6 +4395,84 @@ mod tests {
     }
 
     #[test]
+    fn process_find_default_output_includes_safe_ps_metadata() {
+        let request = SandboxProcessFindRequest {
+            names: Vec::new(),
+            contains: vec!["denovo_codex_agent".to_string()],
+            pids: Vec::new(),
+            parent_pids: Vec::new(),
+            process_groups: Vec::new(),
+            fields: Vec::new(),
+        };
+        let rows = parse_process_find_ps_output(
+            "202 1 202 arthur 501 S 10:30 00:02 00:00:01 37.5 1.2 123456 789012 0 31 ttys001 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
+        )
+        .expect("ps output should parse");
+
+        let output = process_find_output_for_rows(&request, rows).expect("output should serialize");
+        let process = output.processes[0]
+            .as_object()
+            .expect("process should be an object");
+
+        assert_eq!(process.get("pid").and_then(|v| v.as_u64()), Some(202));
+        assert_eq!(process.get("user").and_then(|v| v.as_str()), Some("arthur"));
+        assert_eq!(process.get("uid").and_then(|v| v.as_u64()), Some(501));
+        assert_eq!(process.get("tty").and_then(|v| v.as_str()), Some("ttys001"));
+        assert_eq!(process.get("pmem").and_then(|v| v.as_str()), Some("1.2"));
+        assert_eq!(process.get("rss").and_then(|v| v.as_u64()), Some(123456));
+        assert!(!process.contains_key("command"));
+        assert!(!process.contains_key("argv"));
+        assert!(!process.contains_key("env"));
+    }
+
+    #[test]
+    fn process_find_selected_fields_omit_unselected_safe_fields() {
+        let request = SandboxProcessFindRequest {
+            names: Vec::new(),
+            contains: vec!["denovo_codex_agent".to_string()],
+            pids: Vec::new(),
+            parent_pids: Vec::new(),
+            process_groups: Vec::new(),
+            fields: vec!["pid".to_string(), "user".to_string()],
+        };
+        let rows = parse_process_find_ps_output(
+            "202 1 202 arthur 501 S 10:30 00:02 00:00:01 37.5 1.2 123456 789012 0 31 ttys001 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
+        )
+        .expect("ps output should parse");
+
+        let output = process_find_output_for_rows(&request, rows).expect("output should serialize");
+        let process = output.processes[0]
+            .as_object()
+            .expect("process should be an object");
+
+        assert_eq!(process.len(), 2);
+        assert_eq!(process.get("pid").and_then(|v| v.as_u64()), Some(202));
+        assert_eq!(process.get("user").and_then(|v| v.as_str()), Some("arthur"));
+    }
+
+    #[test]
+    fn process_find_rejects_forbidden_output_fields() {
+        let request = SandboxProcessFindRequest {
+            names: Vec::new(),
+            contains: vec!["denovo_codex_agent".to_string()],
+            pids: Vec::new(),
+            parent_pids: Vec::new(),
+            process_groups: Vec::new(),
+            fields: vec!["command".to_string()],
+        };
+
+        let error = validate_process_find_request(&request)
+            .expect_err("forbidden process field should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("stateful sandbox process find cannot expose field `command`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn process_find_excludes_current_finder_process() {
         let request = SandboxProcessFindRequest {
             names: Vec::new(),
@@ -4265,11 +4480,12 @@ mod tests {
             pids: Vec::new(),
             parent_pids: Vec::new(),
             process_groups: Vec::new(),
+            fields: Vec::new(),
         };
         let current_pid = std::process::id();
         let rows = parse_process_find_ps_output(&format!(
-            "{current_pid} 1 {current_pid} S 00:01 0.0 stateful stateful sandbox process find --contains denovo_codex_agent\n\
-             202 1 202 S 00:02 2.5 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
+            "{current_pid} 1 {current_pid} root 0 S 10:29 00:01 00:00:00 0.0 0.0 0 0 0 31 ?? stateful stateful sandbox process find --contains denovo_codex_agent\n\
+             202 1 202 arthur 501 S 10:30 00:02 00:00:01 2.5 1.2 123456 789012 0 31 ttys001 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
         ))
         .expect("ps output should parse");
 

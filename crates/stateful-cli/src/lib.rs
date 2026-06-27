@@ -259,6 +259,8 @@ pub enum SandboxProcessCommand {
         parent_pids: Vec<u32>,
         #[arg(long = "process-group", alias = "pgid")]
         process_groups: Vec<u32>,
+        #[arg(long = "field")]
+        fields: Vec<String>,
     },
 }
 
@@ -671,6 +673,7 @@ pub fn run() -> anyhow::Result<()> {
                     pids,
                     parent_pids,
                     process_groups,
+                    fields,
                 },
         }) => {
             let output = sandbox::run_sandbox_process_find(sandbox::SandboxProcessFindRequest {
@@ -679,6 +682,7 @@ pub fn run() -> anyhow::Result<()> {
                 pids,
                 parent_pids,
                 process_groups,
+                fields,
             })?;
             println!("{}", serde_json::to_string(&output)?);
         }
