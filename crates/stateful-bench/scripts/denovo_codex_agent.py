@@ -367,7 +367,7 @@ def run_omp_with_timeout(
         raise CodexTimeoutError(f"omp timed out after {timeout_seconds:g}s") from error
     return CodexExecutionSummary(
         returncode=completed.returncode,
-        token_usage=codex_token_usage_from_output(completed.stdout),
+        token_usage=omp_token_usage_from_output(completed.stdout),
     )
 
 
@@ -405,6 +405,41 @@ def codex_token_usage_from_output(output: str) -> dict[str, int]:
     if total["turns"] == 0 and total_event is not None:
         return total_event
     return total
+
+
+def omp_token_usage_from_output(output: str) -> dict[str, int]:
+    total = empty_codex_token_usage()
+    for event in iter_json_events(output):
+        if not isinstance(event, dict):
+            continue
+        usage = omp_usage_from_event(event)
+        if usage is not None:
+            add_codex_token_usage(total, usage)
+    return total
+
+
+def omp_usage_from_event(event: dict[str, Any]) -> dict[str, int] | None:
+    usage = first_dict(pointer(event, "message", "usage"))
+    if usage is None:
+        return None
+    uncached_input_tokens = int(usage.get("input", 0) or 0)
+    cached_input_tokens = int(usage.get("cacheRead", 0) or 0)
+    input_tokens = uncached_input_tokens + cached_input_tokens
+    output_tokens = int(usage.get("output", 0) or 0)
+    reasoning_output_tokens = int(usage.get("reasoningTokens", 0) or 0)
+    input_plus_output_tokens = (
+        int(usage.get("totalTokens", 0) or 0) or input_tokens + output_tokens
+    )
+    return {
+        "turns": 1,
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": reasoning_output_tokens,
+        "input_plus_output_tokens": input_plus_output_tokens,
+        "uncached_input_tokens": uncached_input_tokens,
+        "uncached_input_plus_output_tokens": uncached_input_tokens + output_tokens,
+    }
 
 
 def codex_usage_from_event(event: dict[str, Any]) -> dict[str, int] | None:

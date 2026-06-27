@@ -1492,6 +1492,38 @@ print(json.dumps(usage, sort_keys=True))
 }
 
 #[test]
+fn denovo_codex_agent_reads_omp_message_usage_events() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_omp_usage_test", {agent_path})
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+usage = mod.omp_token_usage_from_output(
+    '{{"type":"message","message":{{"role":"assistant","usage":{{"input":100,"output":12,"cacheRead":40,"reasoningTokens":5,"totalTokens":152}}}}}}\n'
+    '{{"type":"message","message":{{"role":"assistant","usage":{{"input":10,"output":3,"cacheRead":4,"reasoningTokens":2,"totalTokens":17}}}}}}\n'
+)
+print(json.dumps(usage, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+    assert_eq!(output["turns"], 2);
+    assert_eq!(output["input_tokens"], 154);
+    assert_eq!(output["cached_input_tokens"], 44);
+    assert_eq!(output["output_tokens"], 15);
+    assert_eq!(output["reasoning_output_tokens"], 7);
+    assert_eq!(output["input_plus_output_tokens"], 169);
+    assert_eq!(output["uncached_input_tokens"], 110);
+    assert_eq!(output["uncached_input_plus_output_tokens"], 125);
+}
+
+#[test]
 fn denovo_codex_agent_omp_timeout_wrapper_runs_command_without_stdin() {
     let script = format!(
         r#"
@@ -1510,7 +1542,7 @@ def runner(command, cwd, text, check, env, stdin, stdout, stderr, timeout):
     calls.append({{"command": command, "cwd": str(cwd), "timeout": timeout, "stdin_is_devnull": stdin == module.subprocess.DEVNULL}})
     class Result:
         returncode = 0
-        stdout = '{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":10,"cached_input_tokens":3,"output_tokens":5,"reasoning_output_tokens":2,"total_tokens":15}}}}}}\n'
+        stdout = '{{"type":"message","message":{{"role":"assistant","usage":{{"input":10,"output":5,"cacheRead":3,"reasoningTokens":2,"totalTokens":18}}}}}}\n'
         stderr = ""
     return Result()
 
@@ -1527,7 +1559,7 @@ print(json.dumps({{"returncode": summary.returncode, "token_usage": summary.toke
     );
     let output = run_python_json(&script);
     assert_eq!(output["returncode"], 0);
-    assert_eq!(output["token_usage"]["input_plus_output_tokens"], 15);
+    assert_eq!(output["token_usage"]["input_plus_output_tokens"], 18);
     assert_eq!(output["calls"][0]["command"][0], "omp");
     assert_eq!(output["calls"][0]["cwd"], "target/workspace");
     assert_eq!(output["calls"][0]["stdin_is_devnull"], true);
