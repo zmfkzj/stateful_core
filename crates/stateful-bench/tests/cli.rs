@@ -1461,6 +1461,37 @@ print(json.dumps({{"fast": fast.returncode, "token_usage": fast.token_usage, "em
 }
 
 #[test]
+fn denovo_codex_agent_reads_token_count_events() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_token_count_test", {agent_path})
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+usage = mod.codex_token_usage_from_output(
+    '{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":10,"cached_input_tokens":3,"output_tokens":5,"reasoning_output_tokens":2,"total_tokens":15}}}}}}\n'
+)
+print(json.dumps(usage, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+    assert_eq!(output["turns"], 1);
+    assert_eq!(output["input_tokens"], 10);
+    assert_eq!(output["cached_input_tokens"], 3);
+    assert_eq!(output["output_tokens"], 5);
+    assert_eq!(output["reasoning_output_tokens"], 2);
+    assert_eq!(output["input_plus_output_tokens"], 15);
+    assert_eq!(output["uncached_input_tokens"], 7);
+    assert_eq!(output["uncached_input_plus_output_tokens"], 12);
+}
+
+#[test]
 fn denovo_codex_agent_omp_timeout_wrapper_runs_command_without_stdin() {
     let script = format!(
         r#"
@@ -1479,7 +1510,7 @@ def runner(command, cwd, text, check, env, stdin, stdout, stderr, timeout):
     calls.append({{"command": command, "cwd": str(cwd), "timeout": timeout, "stdin_is_devnull": stdin == module.subprocess.DEVNULL}})
     class Result:
         returncode = 0
-        stdout = '{{"type":"done"}}\n'
+        stdout = '{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":10,"cached_input_tokens":3,"output_tokens":5,"reasoning_output_tokens":2,"total_tokens":15}}}}}}\n'
         stderr = ""
     return Result()
 
@@ -1496,7 +1527,7 @@ print(json.dumps({{"returncode": summary.returncode, "token_usage": summary.toke
     );
     let output = run_python_json(&script);
     assert_eq!(output["returncode"], 0);
-    assert_eq!(output["token_usage"]["turns"], 0);
+    assert_eq!(output["token_usage"]["input_plus_output_tokens"], 15);
     assert_eq!(output["calls"][0]["command"][0], "omp");
     assert_eq!(output["calls"][0]["cwd"], "target/workspace");
     assert_eq!(output["calls"][0]["stdin_is_devnull"], true);
@@ -1541,6 +1572,58 @@ print(json.dumps({{"command": command}}))
     assert!(
         args.windows(2)
             .any(|pair| pair == ["--env", "STATEFUL_OMP_SANDBOX=off"])
+    );
+}
+
+#[test]
+fn denovo_codex_agent_seeds_omp_codex_oauth_credentials() {
+    let dir = target_temp_dir("denovo-omp-codex-oauth-seed");
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_omp_auth_seed_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+root = Path({root})
+source_home = root / "source"
+target_home = root / "target"
+source_agent = source_home / ".omp" / "profiles" / "stateful" / "agent"
+target_agent = target_home / ".omp" / "profiles" / "stateful" / "agent"
+source_agent.mkdir(parents=True, exist_ok=True)
+target_agent.mkdir(parents=True, exist_ok=True)
+
+with sqlite3.connect(source_agent / "agent.db") as db:
+    db.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, data TEXT, disabled_cause TEXT, identity_key TEXT, created_at INTEGER, updated_at INTEGER)")
+    db.execute("INSERT INTO auth_credentials (provider, credential_type, data, identity_key, created_at, updated_at) VALUES ('openai-codex', 'oauth', '{{\"access_token\":\"token\"}}', 'email:test@example.com', 1, 2)")
+    db.execute("CREATE TABLE auth_schema_version (version INTEGER)")
+    db.execute("INSERT INTO auth_schema_version VALUES (1)")
+
+env = {{
+    "HOME": str(target_home),
+    "PI_CODING_AGENT_DIR": str(target_agent),
+    "STATEFUL_HOME": str(target_home),
+    "OMP_AUTH_SOURCE_AGENT_DIR": str(source_agent),
+}}
+module.seed_omp_auth_credentials(env)
+with sqlite3.connect(target_agent / "agent.db") as db:
+    rows = db.execute("SELECT provider, credential_type, identity_key FROM auth_credentials").fetchall()
+print(json.dumps({{"rows": rows}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        root = serde_json::to_string(&dir.display().to_string()).unwrap(),
+    );
+    let output = run_python_json(&script);
+    assert_eq!(
+        output["rows"],
+        serde_json::json!([["openai-codex", "oauth", "email:test@example.com"]])
     );
 }
 
@@ -5258,6 +5341,47 @@ print(json.dumps({{
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }
+
+#[test]
+fn denovo_codex_agent_target_upstream_proxy_blocks_raw_source_url() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+import urllib.error
+import urllib.request
+
+spec = importlib.util.spec_from_file_location("denovo_target_proxy_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+proxy = module.start_target_upstream_deny_proxy("cloudtools_troposphere_pr2343")
+try:
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({{"http": proxy.url}})
+    )
+    try:
+        opener.open(
+            "http://raw.githubusercontent.com/cloudtools/troposphere/master/troposphere/apigateway.py",
+            timeout=2,
+        )
+        code = None
+    except urllib.error.HTTPError as error:
+        code = error.code
+finally:
+    proxy.close()
+
+print(json.dumps({{"code": code}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["code"], 403);
+}
+
 
 fn codex_pair_agent_path_json() -> String {
     serde_json::to_string(concat!(

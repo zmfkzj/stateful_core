@@ -5,15 +5,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import http.server
 import json
 import os
 import re
+import select
 import shutil
 import sqlite3
+import socket
+import socketserver
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -362,7 +367,7 @@ def run_omp_with_timeout(
         raise CodexTimeoutError(f"omp timed out after {timeout_seconds:g}s") from error
     return CodexExecutionSummary(
         returncode=completed.returncode,
-        token_usage=empty_codex_token_usage(),
+        token_usage=codex_token_usage_from_output(completed.stdout),
     )
 
 
@@ -386,26 +391,71 @@ def add_codex_token_usage(total: dict[str, int], update: dict[str, int]) -> None
 
 def codex_token_usage_from_output(output: str) -> dict[str, int]:
     total = empty_codex_token_usage()
+    total_event: dict[str, int] | None = None
     for event in iter_json_events(output):
-        if not isinstance(event, dict) or event.get("type") != "turn.completed":
+        if not isinstance(event, dict):
             continue
-        usage = event.get("usage")
-        if not isinstance(usage, dict):
+        usage = codex_usage_from_event(event)
+        if usage is None:
             continue
-        input_tokens = int(usage.get("input_tokens", 0) or 0)
-        cached_input_tokens = int(usage.get("cached_input_tokens", 0) or 0)
-        output_tokens = int(usage.get("output_tokens", 0) or 0)
-        reasoning_output_tokens = int(usage.get("reasoning_output_tokens", 0) or 0)
-        uncached_input_tokens = max(0, input_tokens - cached_input_tokens)
-        total["turns"] += 1
-        total["input_tokens"] += input_tokens
-        total["cached_input_tokens"] += cached_input_tokens
-        total["output_tokens"] += output_tokens
-        total["reasoning_output_tokens"] += reasoning_output_tokens
-        total["input_plus_output_tokens"] += input_tokens + output_tokens
-        total["uncached_input_tokens"] += uncached_input_tokens
-        total["uncached_input_plus_output_tokens"] += uncached_input_tokens + output_tokens
+        if event.get("type") == "turn.completed":
+            add_codex_token_usage(total, usage)
+        else:
+            total_event = usage
+    if total["turns"] == 0 and total_event is not None:
+        return total_event
     return total
+
+
+def codex_usage_from_event(event: dict[str, Any]) -> dict[str, int] | None:
+    usage = first_dict(
+        event.get("usage"),
+        pointer(event, "info", "total_token_usage"),
+        pointer(event, "payload", "info", "total_token_usage"),
+        pointer(event, "payload", "usage"),
+        pointer(event, "response", "usage"),
+        pointer(event, "payload", "response", "usage"),
+    )
+    if usage is None:
+        return None
+    input_tokens = int(usage.get("input_tokens", 0) or 0)
+    cached_input_tokens = int(
+        usage.get("cached_input_tokens", 0)
+        or pointer(usage, "input_tokens_details", "cached_tokens")
+        or 0
+    )
+    output_tokens = int(usage.get("output_tokens", 0) or 0)
+    reasoning_output_tokens = int(
+        usage.get("reasoning_output_tokens", 0)
+        or pointer(usage, "output_tokens_details", "reasoning_tokens")
+        or 0
+    )
+    input_plus_output_tokens = (
+        int(usage.get("total_tokens", 0) or 0) or input_tokens + output_tokens
+    )
+    uncached_input_tokens = max(0, input_tokens - cached_input_tokens)
+    return {
+        "turns": 1,
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": reasoning_output_tokens,
+        "input_plus_output_tokens": input_plus_output_tokens,
+        "uncached_input_tokens": uncached_input_tokens,
+        "uncached_input_plus_output_tokens": uncached_input_tokens + output_tokens,
+    }
+
+
+def pointer(value: object, *path: str) -> object | None:
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def first_dict(*values: object) -> dict[str, Any] | None:
+    return next((value for value in values if isinstance(value, dict)), None)
 
 
 def add_aweagent_to_path(aweagent_root: Path) -> None:
@@ -923,12 +973,64 @@ def denovo_omp_environment(
     if stateful_session_id is not None:
         env["STATEFUL_SESSION_ID"] = stateful_session_id
     home = output / "omp-homes" / path_fragment(instance_id) / "home"
+    auth_source_agent = source_env.get("OMP_AUTH_SOURCE_AGENT_DIR")
+    if not auth_source_agent:
+        source_home = Path(source_env.get("HOME", "")).expanduser()
+        for candidate in (
+            source_home / ".omp" / "profiles" / "stateful" / "agent",
+            source_home / ".omp" / "agent",
+        ):
+            if (candidate / "agent.db").exists():
+                auth_source_agent = str(candidate)
+                break
+    if auth_source_agent:
+        env["OMP_AUTH_SOURCE_AGENT_DIR"] = auth_source_agent
     env["HOME"] = str(home)
     env["STATEFUL_HOME"] = str(home)
     env["PI_CODING_AGENT_DIR"] = str(home / ".omp" / "profiles" / "stateful" / "agent")
     env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["XDG_CACHE_HOME"] = str(home / ".cache")
     return env
+
+def seed_omp_auth_credentials(env: dict[str, str]) -> None:
+    source_agent = env.get("OMP_AUTH_SOURCE_AGENT_DIR")
+    if not source_agent:
+        return
+    source_db = Path(source_agent) / "agent.db"
+    target_db = Path(env["PI_CODING_AGENT_DIR"]) / "agent.db"
+    if not source_db.exists():
+        return
+    with sqlite3.connect(source_db) as source:
+        auth_schema = source.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'"
+        ).fetchone()
+        rows = source.execute(
+            """
+            SELECT provider, credential_type, data, disabled_cause, identity_key, created_at, updated_at
+            FROM auth_credentials
+            WHERE provider = 'openai-codex' AND credential_type = 'oauth'
+            """
+        ).fetchall()
+    if not rows:
+        return
+    target_db.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(target_db) as target:
+        has_auth = target.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'"
+        ).fetchone()
+        if auth_schema is not None and has_auth is None:
+            target.execute(auth_schema[0])
+        target.execute(
+            "DELETE FROM auth_credentials WHERE provider = 'openai-codex' AND credential_type = 'oauth'"
+        )
+        target.executemany(
+            """
+            INSERT INTO auth_credentials
+                (provider, credential_type, data, disabled_cause, identity_key, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
 
 
 def prepare_omp_environment(
@@ -1560,6 +1662,141 @@ def benchmark_source_leak_url_pattern(text: str, patterns: tuple[str, ...]) -> s
     return None
 
 
+@dataclass
+class TargetUpstreamDenyProxy:
+    server: socketserver.ThreadingTCPServer
+    thread: threading.Thread
+    url: str
+    container_url: str
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+
+class _TargetUpstreamProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler_class: type[http.server.BaseHTTPRequestHandler],
+        url_patterns: tuple[str, ...],
+    ) -> None:
+        super().__init__(server_address, handler_class)
+        self.url_patterns = url_patterns
+
+
+class _TargetUpstreamProxyHandler(http.server.BaseHTTPRequestHandler):
+    timeout = 60
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+    def _deny(self) -> None:
+        body = b"target upstream URL blocked by DeNovo benchmark proxy\n"
+        self.send_response(403)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_CONNECT(self) -> None:
+        host, _, raw_port = self.path.rpartition(":")
+        host = host.lower()
+        if host in {"raw.githubusercontent.com", "patch-diff.githubusercontent.com"}:
+            self._deny()
+            return
+        upstream = socket.create_connection((host, int(raw_port or "443")), timeout=self.timeout)
+        try:
+            self.send_response(200, "Connection Established")
+            self.end_headers()
+            self._relay(upstream)
+        finally:
+            upstream.close()
+
+    def do_GET(self) -> None:
+        self._handle_http_request()
+
+    def do_HEAD(self) -> None:
+        self._handle_http_request()
+
+    def _handle_http_request(self) -> None:
+        if benchmark_source_leak_url_pattern(self.path, self.server.url_patterns) is not None:
+            self._deny()
+            return
+        parsed = urllib.parse.urlparse(self.path)
+        if not parsed.scheme or not parsed.hostname:
+            self.send_error(502, "proxy requires absolute-form URL")
+            return
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if parsed.scheme == "https":
+            self.send_error(502, "https proxying requires CONNECT")
+            return
+        target = urllib.parse.urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
+        body = None
+        content_length = self.headers.get("Content-Length")
+        if content_length is not None:
+            body = self.rfile.read(int(content_length))
+        with socket.create_connection((parsed.hostname, port), timeout=self.timeout) as upstream:
+            request = f"{self.command} {target} HTTP/1.1\r\n"
+            upstream.sendall(request.encode("ascii"))
+            for key, value in self.headers.items():
+                if key.lower() in {"proxy-connection", "connection"}:
+                    continue
+                upstream.sendall(f"{key}: {value}\r\n".encode("latin-1"))
+            upstream.sendall(b"Connection: close\r\n\r\n")
+            if body is not None:
+                upstream.sendall(body)
+            while True:
+                chunk = upstream.recv(65536)
+                if not chunk:
+                    break
+                self.connection.sendall(chunk)
+
+    def _relay(self, upstream: socket.socket) -> None:
+        sockets = [self.connection, upstream]
+        while True:
+            readable, _, _ = select.select(sockets, [], [], self.timeout)
+            if not readable:
+                return
+            for source in readable:
+                data = source.recv(65536)
+                if not data:
+                    return
+                target = upstream if source is self.connection else self.connection
+                target.sendall(data)
+
+
+def start_target_upstream_deny_proxy(instance_id: str) -> TargetUpstreamDenyProxy | None:
+    url_patterns = benchmark_source_leak_url_patterns(instance_id)
+    if not url_patterns:
+        return None
+    server = _TargetUpstreamProxyServer(("0.0.0.0", 0), _TargetUpstreamProxyHandler, url_patterns)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    return TargetUpstreamDenyProxy(
+        server=server,
+        thread=thread,
+        url=f"http://127.0.0.1:{port}",
+        container_url=f"http://host.docker.internal:{port}",
+    )
+
+
+def install_target_upstream_proxy_env(env: dict[str, str], proxy: TargetUpstreamDenyProxy) -> None:
+    env["HTTP_PROXY"] = proxy.container_url
+    env["HTTPS_PROXY"] = proxy.container_url
+    no_proxy = [part for part in env.get("NO_PROXY", "").split(",") if part]
+    for host in ("127.0.0.1", "localhost", "host.docker.internal"):
+        if host not in no_proxy:
+            no_proxy.append(host)
+    env["NO_PROXY"] = ",".join(no_proxy)
+
+
 def parse_tool_arguments(arguments: Any) -> Any:
     if not isinstance(arguments, str):
         return arguments
@@ -1953,6 +2190,7 @@ async def run_one_instance_async(
     stateful_repo_cleanup = None
     codex_env = None
     image = None
+    target_upstream_proxy = None
 
     try:
         source_env = dict(os.environ)
@@ -2091,6 +2329,11 @@ async def run_one_instance_async(
                 enable_native_subagent=args.subagent == "on",
                 agent_docker_image=args.agent_docker_image,
             )
+            seed_omp_auth_credentials(env)
+            if args.agent_docker_image and args.agent_mode != "stateful":
+                target_upstream_proxy = start_target_upstream_deny_proxy(inst.id)
+                if target_upstream_proxy is not None:
+                    install_target_upstream_proxy_env(env, target_upstream_proxy)
             if args.agent_docker_image:
                 command = docker_omp_command_for_profile(
                     workspace=workspace,
@@ -2330,6 +2573,8 @@ async def run_one_instance_async(
     except Exception as error:
         return instance_setup_exception_result(inst.id, error)
     finally:
+        if target_upstream_proxy is not None:
+            target_upstream_proxy.close()
         cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
         cleanup_seeded_auth(seeded_auth)
         if codex_env is not None:
