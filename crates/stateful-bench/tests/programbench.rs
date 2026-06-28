@@ -1,7 +1,8 @@
 use clap::Parser;
 use stateful_bench::{
     Cli, Command, ProgramBenchAgentKind, ProgramBenchCommand, ProgramBenchCondition,
-    ReportFormat, default_programbench_conditions, parse_programbench_condition,
+    ProgramBenchInstanceRunOptions, ReportFormat, build_programbench_agent_command,
+    default_programbench_conditions, parse_programbench_condition,
 };
 use std::path::{Path, PathBuf};
 
@@ -181,4 +182,60 @@ fn programbench_condition_parser_rejects_unknown_keys() {
             .contains("unknown ProgramBench condition key `unknown`"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn programbench_codex_agent_command_contains_condition_and_paths() {
+    let command = build_programbench_agent_command(ProgramBenchInstanceRunOptions {
+        agent: ProgramBenchAgentKind::CodexCli,
+        condition: ProgramBenchCondition::new(true, false),
+        instance_id: "BurntSushi__ripgrep.abc123".to_string(),
+        container_id: "programbench-container".to_string(),
+        condition_dir: "runs/pb/conditions/stateful-on_subagent-off".into(),
+        docker_bin: "docker".to_string(),
+        codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
+        stateful_binary: "target/debug/stateful".to_string(),
+        model: Some("gpt-5.4-mini".to_string()),
+        benchmark_max_turns: 500,
+        timeout_seconds: 7200,
+        subagent_min_count: 3,
+    })
+    .expect("codex agent command should build");
+
+    assert!(command.program.ends_with("programbench_codex_agent.py"));
+    assert!(has_arg(&command.args, "--container-id"));
+    assert!(has_arg(&command.args, "programbench-container"));
+    assert!(has_arg(&command.args, "--condition-id"));
+    assert!(has_arg(&command.args, "stateful-on_subagent-off"));
+    assert!(has_arg(&command.args, "--stateful"));
+    assert!(!has_arg(&command.args, "--subagent"));
+}
+
+#[test]
+fn programbench_omp_agent_command_marks_subagent_condition() {
+    let command = build_programbench_agent_command(ProgramBenchInstanceRunOptions {
+        agent: ProgramBenchAgentKind::OmpCli,
+        condition: ProgramBenchCondition::new(false, true),
+        instance_id: "ajeetdsouza__zoxide.67ca1bc".to_string(),
+        container_id: "programbench-container".to_string(),
+        condition_dir: "runs/pb/conditions/stateful-off_subagent-on".into(),
+        docker_bin: "docker".to_string(),
+        codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
+        stateful_binary: "stateful".to_string(),
+        model: None,
+        benchmark_max_turns: 500,
+        timeout_seconds: 7200,
+        subagent_min_count: 3,
+    })
+    .expect("omp agent command should build");
+
+    assert!(command.program.ends_with("programbench_omp_agent.py"));
+    assert!(has_arg(&command.args, "--subagent"));
+    assert!(!has_arg(&command.args, "--stateful"));
+}
+
+fn has_arg(args: &[String], value: &str) -> bool {
+    args.iter().any(|arg| arg == value)
 }

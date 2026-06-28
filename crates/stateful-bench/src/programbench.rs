@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Result, bail};
 use clap::{Subcommand, ValueEnum};
@@ -93,6 +96,13 @@ pub enum ProgramBenchCommand {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramBenchRecipeCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+}
+
 fn default_programbench_run_id() -> String {
     format!("programbench-{}", uuid::Uuid::new_v4())
 }
@@ -115,6 +125,97 @@ impl ProgramBenchCondition {
             axis_label(self.subagent)
         )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramBenchInstanceRunOptions {
+    pub agent: ProgramBenchAgentKind,
+    pub condition: ProgramBenchCondition,
+    pub instance_id: String,
+    pub container_id: String,
+    pub condition_dir: PathBuf,
+    pub docker_bin: String,
+    pub codex_bin: String,
+    pub omp_bin: String,
+    pub stateful_binary: String,
+    pub model: Option<String>,
+    pub benchmark_max_turns: usize,
+    pub timeout_seconds: u64,
+    pub subagent_min_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramBenchRunOptions {
+    pub output_dir: PathBuf,
+    pub run_id: String,
+    pub agent: ProgramBenchAgentKind,
+    pub conditions: Vec<ProgramBenchCondition>,
+    pub model: Option<String>,
+    pub benchmark_max_turns: usize,
+    pub timeout_seconds: u64,
+    pub filter: Option<String>,
+    pub slice: Option<String>,
+    pub max_instances: Option<usize>,
+    pub programbench_bin: String,
+    pub docker_bin: String,
+    pub image_tag: String,
+    pub stateful_binary: String,
+    pub codex_bin: String,
+    pub omp_bin: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramBenchTokenUsage {
+    #[serde(default)]
+    pub turns: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub cached_input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub reasoning_output_tokens: u64,
+    #[serde(default)]
+    pub input_plus_output_tokens: u64,
+    #[serde(default)]
+    pub uncached_input_tokens: u64,
+    #[serde(default)]
+    pub uncached_input_plus_output_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramBenchInstanceMetadata {
+    pub instance_id: String,
+    pub condition_id: String,
+    pub agent: ProgramBenchAgentKind,
+    pub started_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_used: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<ProgramBenchTokenUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramBenchConditionMetadata {
+    pub run_id: String,
+    pub condition_id: String,
+    pub condition: ProgramBenchCondition,
+    pub agent: ProgramBenchAgentKind,
+    pub started_at_ms: u64,
+    pub finished_at_ms: u64,
+    pub running_time_ms: u64,
+    pub instances: Vec<ProgramBenchInstanceMetadata>,
 }
 
 pub fn default_programbench_conditions() -> Vec<ProgramBenchCondition> {
@@ -145,6 +246,60 @@ pub fn parse_programbench_condition(input: &str) -> Result<ProgramBenchCondition
     ))
 }
 
+pub fn build_programbench_agent_command(
+    options: ProgramBenchInstanceRunOptions,
+) -> Result<ProgramBenchRecipeCommand> {
+    let condition_id = options.condition.id();
+    let mut args = vec![
+        "--container-id".to_string(),
+        options.container_id,
+        "--instance-id".to_string(),
+        options.instance_id,
+        "--condition-id".to_string(),
+        condition_id,
+        "--condition-dir".to_string(),
+        path_arg(&options.condition_dir),
+        "--docker-bin".to_string(),
+        options.docker_bin,
+        "--stateful-binary".to_string(),
+        options.stateful_binary,
+        "--benchmark-max-turns".to_string(),
+        options.benchmark_max_turns.to_string(),
+        "--timeout-seconds".to_string(),
+        options.timeout_seconds.to_string(),
+        "--subagent-min-count".to_string(),
+        options.subagent_min_count.to_string(),
+    ];
+
+    match options.agent {
+        ProgramBenchAgentKind::CodexCli => {
+            args.push("--codex-bin".to_string());
+            args.push(options.codex_bin);
+        }
+        ProgramBenchAgentKind::OmpCli => {
+            args.push("--omp-bin".to_string());
+            args.push(options.omp_bin);
+        }
+    }
+
+    if options.condition.stateful {
+        args.push("--stateful".to_string());
+    }
+    if options.condition.subagent {
+        args.push("--subagent".to_string());
+    }
+    if let Some(model) = options.model {
+        args.push("--model".to_string());
+        args.push(model);
+    }
+
+    Ok(ProgramBenchRecipeCommand {
+        program: path_arg(&default_programbench_agent_script(options.agent)),
+        args,
+        env: BTreeMap::new(),
+    })
+}
+
 pub fn run_programbench_cli(_command: ProgramBenchCommand) -> Result<()> {
     bail!("ProgramBench command execution is not implemented yet")
 }
@@ -159,4 +314,18 @@ fn parse_axis(value: &str) -> Result<bool> {
 
 fn axis_label(enabled: bool) -> &'static str {
     if enabled { "on" } else { "off" }
+}
+
+fn default_programbench_agent_script(agent: ProgramBenchAgentKind) -> PathBuf {
+    let script = match agent {
+        ProgramBenchAgentKind::CodexCli => "programbench_codex_agent.py",
+        ProgramBenchAgentKind::OmpCli => "programbench_omp_agent.py",
+    };
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join(script)
+}
+
+fn path_arg(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }

@@ -15,7 +15,9 @@ pub use denovo::{
 
 pub use programbench::{
     ProgramBenchAgentKind, ProgramBenchCommand, ProgramBenchCondition,
-    default_programbench_conditions, parse_programbench_condition,
+    ProgramBenchConditionMetadata, ProgramBenchInstanceMetadata, ProgramBenchInstanceRunOptions,
+    ProgramBenchRecipeCommand, ProgramBenchRunOptions, ProgramBenchTokenUsage,
+    build_programbench_agent_command, default_programbench_conditions, parse_programbench_condition,
 };
 
 use std::{
