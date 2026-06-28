@@ -4000,8 +4000,7 @@ fn pre_tool_use_apply_patch_denial_does_not_render_live_context() {
     let reason = json["hookSpecificOutput"]["permissionDecisionReason"]
         .as_str()
         .expect("deny reason should be text");
-    assert!(reason.contains("Write target is outside active reservation scope."));
-    assert!(reason.contains("Declare matching reservation."));
+    assert_eq!(reason, "Declare matching reservation.");
     assert!(!reason.contains("Nearby Activity"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -4905,7 +4904,6 @@ fn codex_stateful_lifecycle_posts_expected_server_requests() {
         r#"{"status":"ok"}"#,
         r#"{"status":"ok","prompt_text":"Lifecycle Prompt\n- none"}"#,
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","items":[],"prompt_text":"Lifecycle Pre\n- none"}"#,
         r#"{"status":"ok"}"#,
         r#"{"status":"ok"}"#,
     ]);
@@ -4991,11 +4989,6 @@ fn codex_stateful_lifecycle_posts_expected_server_requests() {
     assert_eq!(authorize_body["session"]["session_id"], "codex-session");
     assert_eq!(authorize_body["payload"]["action"], "write_file");
     assert_eq!(authorize_body["payload"]["path"], "src/auth.ts");
-    let pre_context = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("pre-tool context render request should arrive");
-    assert!(pre_context.contains("POST /v1/context/render HTTP/1.1"));
-
     let post_tool = serde_json::json!({
         "session_id": "codex-session",
         "cwd": repo_root,
