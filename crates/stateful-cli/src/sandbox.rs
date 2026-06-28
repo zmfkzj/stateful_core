@@ -405,9 +405,11 @@ pub fn run_sandbox_in_repo(
                 });
 
                 if !denied_write_targets.is_empty() {
-                    let body =
-                        sandbox_authorization_denied_body(allowed_write_targets, denied_write_targets)
-                            .to_string();
+                    let body = sandbox_authorization_denied_body(
+                        allowed_write_targets,
+                        denied_write_targets,
+                    )
+                    .to_string();
                     if let Some(release_context) = &release_after_run {
                         release_sandbox_write_claims(runtime, release_context);
                     }
@@ -4310,7 +4312,6 @@ mod tests {
             stateful_core::normalize_relative_path("src/auth.ts")
         );
     }
-
 
     #[test]
     fn process_find_request_requires_a_selector() {
