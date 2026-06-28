@@ -76,7 +76,7 @@ fn install_omp_dry_run_plans_command_policy_skill_without_writing() {
     assert!(plan.summary.contains("dry-run"));
     assert!(applied.summary.contains("dry-run"));
     assert!(plan.files.contains(&command_policy_skill_path));
-    assert!(plan.files.contains(&dispatching_skill_path));
+    assert!(!plan.files.contains(&dispatching_skill_path));
     assert!(!fixture.paths.home.exists());
     assert!(!command_policy_skill_path.exists());
     assert!(!dispatching_skill_path.exists());
@@ -202,7 +202,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(omp_mcp.is_file());
     assert!(omp_extension.is_file());
     assert!(omp_skill.is_file());
-    assert!(omp_dispatching_skill.is_file());
+    assert!(!omp_dispatching_skill.exists());
     assert!(fs::read_to_string(&omp_config)
         .expect("omp config should read")
         .contains("stateful-omp-extension.js"));
@@ -383,15 +383,8 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
         assert!(support_file.contains(marker));
         assert!(plan.files.contains(&support_path));
     }
-    let dispatching_skill =
-        fs::read_to_string(&omp_dispatching_skill).expect("omp dispatching skill should read");
-    let source_dispatching_skill = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/dispatching-parallel-agents/SKILL.md"),
-    )
-    .expect("source dispatching skill should exist");
-    assert_eq!(dispatching_skill, source_dispatching_skill);
-    assert!(dispatching_skill.contains("name: dispatching-parallel-agents"));
-    assert!(plan.files.contains(&omp_dispatching_skill));
+    assert!(!omp_dispatching_skill.exists());
+    assert!(!plan.files.contains(&omp_dispatching_skill));
     assert!(plan.files.iter().any(|path| path.ends_with("mcp.json")));
 }
 

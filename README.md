@@ -144,10 +144,9 @@ stateful codex
 ### OMP
 
 Install OMP integration when you want the isolated OMP `stateful` profile,
-stateful hooks, MCP, generated sandbox command tools, lazy edit resume,
+stateful hooks, MCP, generated sandbox command tools, lazy edit resume, and
 `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
-`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`), and
-`skills/dispatching-parallel-agents/SKILL.md`:
+`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`):
 
 ```bash
 stateful install --agent omp --yes

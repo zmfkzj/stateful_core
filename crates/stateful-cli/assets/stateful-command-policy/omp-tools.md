@@ -17,7 +17,6 @@ OMP installs the integration into the live OMP profile agent directory, defaulti
 - the Stateful extension,
 - `rules/stateful-required.md`,
 - `skills/stateful-command-policy/SKILL.md` plus support files,
-- `skills/dispatching-parallel-agents/SKILL.md`,
 - `sandbox_bash`, `ext_ro_bash`, `ext_rw_bash`, and `process_find` tools.
 
 The installer merges an existing `config.yml` and rejects invalid YAML. Without `stateful install --agent omp --update`, existing OMP scalar config values are preserved and only missing Stateful keys are inserted. With `--update`, targeted OMP scalar values are overwritten to delegate safety to Stateful hooks while raw Bash/eval denials and sandbox confirmations remain hook-enforced.

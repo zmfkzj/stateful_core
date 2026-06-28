@@ -29,10 +29,10 @@ hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `process_find` for
 process inspection, `ext_ro_bash` for read-only `--fs external`, `ext_rw_bash`,
 `lazy_edit_resume` for strict replay of queued line-based OMP edits, and approval
 entries that deny raw Bash while setting Python/JavaScript/JS/Ruby/Julia eval tools to false.
-`ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. The OMP installer also writes `rules/stateful-required.md`, `skills/stateful-command-policy/`
+`ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. The OMP installer also writes `rules/stateful-required.md` and `skills/stateful-command-policy/`
 (`SKILL.md`, `omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
-`subagent-write-recovery.md`), and `skills/dispatching-parallel-agents/SKILL.md`
-under that isolated agent directory: the always-apply rule owns model-facing activation, the
+`subagent-write-recovery.md`) under that isolated agent directory: the
+always-apply rule owns model-facing activation, the
 `stateful-command-policy` manual owns detailed procedure, and hooks remain the
 boundary. `stateful enable` opts the
 current repo into enforcement.
@@ -728,8 +728,7 @@ The prototype supports user-level installation with repo allowlist gating.
 --agent omp --yes` installs the OMP extension entry point, MCP config,
 always-apply `rules/stateful-required.md` rule, `skills/stateful-command-policy/`
 (`SKILL.md`, `omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
-`subagent-write-recovery.md`) manual files,
-`skills/dispatching-parallel-agents/SKILL.md` skill, and OMP config under the
+`subagent-write-recovery.md`) manual files, and OMP config under the
 `stateful` profile agent directory (`~/.omp/profiles/stateful/agent`) with
 `tools.approvalMode: yolo`, `stateful.autoApprove: false`,
 `bash.enabled: false`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,

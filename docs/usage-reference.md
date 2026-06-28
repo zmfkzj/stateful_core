@@ -77,11 +77,10 @@ safety to Stateful hooks. Without `--update`, existing scalar values are
 preserved and only missing keys are inserted. With `--update`, existing target
 scalar values are updated.
 
-The installer also writes `rules/stateful-required.md`,
+The installer also writes `rules/stateful-required.md` and
 `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
-`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`), and
-`skills/dispatching-parallel-agents/SKILL.md` under that isolated agent
-directory. The always-apply rule owns activation; the
+`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`) under
+that isolated agent directory. The always-apply rule owns activation; the
 `stateful-command-policy` manual owns the detailed Stateful procedure.
 
 Generated OMP tools:

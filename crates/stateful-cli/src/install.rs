@@ -192,7 +192,6 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
         .join("stateful-omp-extension.js");
     let mcp_path = agent_dir.join("mcp.json");
     let command_policy_skill_path = omp_command_policy_skill_path(&agent_dir);
-    let dispatching_skill_path = omp_dispatching_parallel_agents_skill_path(&agent_dir);
     let rule_path = omp_required_rule_path(&agent_dir);
     plan.summary = format!(
         "{mode}: install stateful files under {} and configure the OMP stateful profile under {}",
@@ -205,7 +204,6 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
     plan.files.push(command_policy_skill_path);
     plan.files
         .extend(omp_command_policy_support_file_paths(&agent_dir));
-    plan.files.push(dispatching_skill_path);
     plan.files.push(rule_path);
     Ok(plan)
 }
@@ -246,7 +244,6 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
     write_omp_mcp_config(&mcp_path, &options.binary_path)?;
     write_omp_command_policy_skill(&agent_dir)?;
     write_omp_command_policy_support_files(&agent_dir)?;
-    write_omp_dispatching_parallel_agents_skill(&agent_dir)?;
     write_omp_required_rule(&agent_dir)?;
     plan.summary = format!(
         "apply: installed stateful files under {} and configured the OMP stateful profile under {}",
@@ -450,26 +447,6 @@ fn write_global_dispatching_parallel_agents_skill(codex_config_path: &Path) -> a
 
 fn global_dispatching_parallel_agents_skill_path(codex_config_path: &Path) -> PathBuf {
     containing_dir(codex_config_path)
-        .join("skills")
-        .join("dispatching-parallel-agents")
-        .join("SKILL.md")
-}
-
-fn write_omp_dispatching_parallel_agents_skill(agent_dir: &Path) -> anyhow::Result<()> {
-    let path = omp_dispatching_parallel_agents_skill_path(agent_dir);
-    let parent = containing_dir(&path);
-    fs::create_dir_all(parent).with_context(|| {
-        format!(
-            "failed to create OMP dispatching skill directory {}",
-            parent.display()
-        )
-    })?;
-    fs::write(&path, dispatching_parallel_agents_skill())
-        .with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn omp_dispatching_parallel_agents_skill_path(agent_dir: &Path) -> PathBuf {
-    agent_dir
         .join("skills")
         .join("dispatching-parallel-agents")
         .join("SKILL.md")

@@ -184,7 +184,6 @@ def native_subagent_prompt_instruction(subagent: str, subagent_min_count: int) -
 Native Codex/OMP subagent requirements:
 - MUST use native subagents for this benchmark condition before making the final answer.
 - Before implementation or broad repository exploration, and after any narrow setup needed to read this prompt, inspect tool availability, or initialize stateful coordination, spawn at least {subagent_min_count} native subagents unless the runtime does not expose any native subagent tool.
-- MUST read and use the `dispatching-parallel-agents` skill before spawning native subagents when that skill is available.
 - In OMP, the current native subagent tool is `task`: call it with a `tasks` array containing at least {subagent_min_count} implementation subagents. Older OMP multi-agent builds may expose `multi_agent_v1spawn_agent` instead.
 - Use all {subagent_min_count} native subagents for repository editing; each subagent must inspect, edit, and verify a distinct implementation slice.
 - Do not leave any native subagent as analysis-only, documentation-only, or idle.
