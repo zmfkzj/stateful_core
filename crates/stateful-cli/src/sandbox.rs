@@ -134,7 +134,7 @@ pub struct SandboxProcessInfo {
     pub ppid: u32,
     pub pgid: u32,
     pub user: String,
-    pub uid: u32,
+    pub uid: i32,
     pub stat: String,
     pub start: String,
     pub etime: String,
@@ -2508,7 +2508,7 @@ fn parse_process_find_ps_output(output: &str) -> anyhow::Result<Vec<SandboxProce
         let ppid = parse_process_find_u32_field(fields[1], "ppid")?;
         let pgid = parse_process_find_u32_field(fields[2], "pgid")?;
         let user = fields[3].to_string();
-        let uid = parse_process_find_u32_field(fields[4], "uid")?;
+        let uid = parse_process_find_i32_field(fields[4], "uid")?;
         let stat = fields[5].to_string();
         let start = fields[6].to_string();
         let etime = fields[7].to_string();
@@ -4483,6 +4483,29 @@ mod tests {
         assert!(!process.contains_key("command"));
         assert!(!process.contains_key("argv"));
         assert!(!process.contains_key("env"));
+    }
+
+    #[test]
+    fn process_find_parses_negative_uid() {
+        let request = SandboxProcessFindRequest {
+            names: Vec::new(),
+            contains: vec!["distnoted".to_string()],
+            pids: Vec::new(),
+            parent_pids: Vec::new(),
+            process_groups: Vec::new(),
+            fields: Vec::new(),
+        };
+        let rows = parse_process_find_ps_output(
+            "303 1 303 _distnote -2 S 10:31 00:03 00:00:02 0.0 0.1 1234 5678 0 31 ?? distnoted /usr/sbin/distnoted\n",
+        )
+        .expect("ps output with negative uid should parse");
+
+        let output = process_find_output_for_rows(&request, rows).expect("output should serialize");
+        let process = output.processes[0]
+            .as_object()
+            .expect("process should be an object");
+
+        assert_eq!(process.get("uid").and_then(|v| v.as_i64()), Some(-2));
     }
 
     #[test]
