@@ -666,6 +666,22 @@ pub fn render_programbench_comparison_markdown(report: &ProgramBenchComparisonRe
         "- Stateful input+output token delta without subagent: {}\n",
         optional_i64(report.stateful_input_plus_output_tokens_delta_without_subagent)
     ));
+    output.push_str(&format!(
+        "- Subagent score delta without stateful: {}\n",
+        optional_float(report.subagent_score_delta_without_stateful)
+    ));
+    output.push_str(&format!(
+        "- Subagent running time ms delta without stateful: {}\n",
+        optional_i64(report.subagent_running_time_ms_delta_without_stateful)
+    ));
+    output.push_str(&format!(
+        "- Subagent input+output token delta without stateful: {}\n",
+        optional_i64(report.subagent_input_plus_output_tokens_delta_without_stateful)
+    ));
+    output.push_str(&format!(
+        "- Combined interaction score delta: {}\n",
+        optional_float(report.combined_interaction_score_delta)
+    ));
     if !report.missing_axis_ids.is_empty() {
         output.push_str(&format!(
             "- Missing axes: {}\n",
@@ -1316,7 +1332,7 @@ fn start_programbench_container(
     docker_bin: &str,
     container_name: &str,
     image: &str,
-    timeout_seconds: u64,
+    _timeout_seconds: u64,
 ) -> Result<String> {
     let output = ProcessCommand::new(docker_bin)
         .args([
@@ -1331,7 +1347,7 @@ fn start_programbench_container(
             container_name,
             image,
             "sleep",
-            &format!("{timeout_seconds}s"),
+            "infinity",
         ])
         .output()
         .with_context(|| format!("failed to start ProgramBench Docker container from {image}"))?;

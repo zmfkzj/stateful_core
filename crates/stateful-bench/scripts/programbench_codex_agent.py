@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -121,12 +124,25 @@ def codex_token_usage_from_output(output: str):
     return total
 
 
-def archive_workspace(args, instance_dir: Path):
+def archive_airlock_workspace(airlock: str, instance_dir: Path) -> Path:
     submission_path = instance_dir / "submission.tar.gz"
+    subprocess.run(
+        ["tar", "-czf", str(submission_path), "-C", airlock, "."],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return submission_path
+
+
+def archive_workspace(args, instance_dir: Path):
+    submission_path = getattr(args, "submission_path", None)
+    if submission_path is not None:
+        return Path(submission_path)
     container_tar = "/tmp/programbench-submission.tar.gz"
     subprocess.run(
         [
-            args.docker_bin,
+            resolve_host_binary(args.docker_bin),
             "exec",
             args.container_id,
             "tar",
@@ -141,54 +157,149 @@ def archive_workspace(args, instance_dir: Path):
         text=True,
     )
     subprocess.run(
-        [args.docker_bin, "cp", f"{args.container_id}:{container_tar}", str(submission_path)],
+        [
+            resolve_host_binary(args.docker_bin),
+            "cp",
+            f"{args.container_id}:{container_tar}",
+            str(instance_dir / "submission.tar.gz"),
+        ],
         check=True,
         capture_output=True,
         text=True,
     )
-    return submission_path
+    return instance_dir / "submission.tar.gz"
+
+
+def copy_workspace_from_container(args, airlock: str) -> None:
+    subprocess.run(
+        [resolve_host_binary(args.docker_bin), "cp", f"{args.container_id}:/workspace/.", airlock],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=args.timeout_seconds,
+    )
 
 
 def docker_exec_command(args, *inner: str) -> list[str]:
-    return [args.docker_bin, "exec", "-w", "/workspace", args.container_id, *inner]
+    return [resolve_host_binary(args.docker_bin), "exec", "-w", "/workspace", args.container_id, *inner]
 
 
-def run_stateful_command(args, *stateful_args: str) -> None:
+def airlock_env(airlock: str) -> dict[str, str]:
+    env = os.environ.copy()
+    for key in list(env):
+        if key.startswith("STATEFUL_") or key == "CODEX_THREAD_ID":
+            env.pop(key)
+    env["HOME"] = airlock
+    env["STATEFUL_HOME"] = airlock
+    env["CODEX_HOME"] = str(Path(airlock) / ".codex")
+    return env
+
+
+def initialize_airlock_git_repo(args, airlock: str) -> None:
     subprocess.run(
-        docker_exec_command(args, args.stateful_binary, *stateful_args),
+        ["git", "init", "-q"],
         check=True,
         capture_output=True,
         text=True,
         timeout=args.timeout_seconds,
+        cwd=airlock,
+        env=airlock_env(airlock),
     )
 
 
-def install_stateful_for_agent(args, agent: str) -> None:
-    run_stateful_command(args, "install", "--agent", agent, "--yes")
+def resolve_host_binary(binary: str) -> str:
+    path = Path(binary)
+    if path.parent == Path(".") and not binary.startswith("."):
+        return binary
+    return str(path.resolve())
 
 
-def enable_stateful_repo(args) -> None:
-    run_stateful_command(args, "enable", "--repo", "/workspace")
-
-
-def install_stateful_for_codex(args) -> None:
-    install_stateful_for_agent(args, "codex")
-
-
-def run_agent(args, prompt):
-    if args.stateful:
-        install_stateful_for_codex(args)
-        enable_stateful_repo(args)
-    command = docker_exec_command(args, args.codex_bin, "exec", "--json", "--cd", "/workspace")
-    if args.model:
-        command.extend(["--model", args.model])
-    command.append(prompt)
-    return subprocess.run(
-        command,
+def run_stateful_command(args, airlock: str, *stateful_args: str) -> None:
+    stateful_binary = resolve_host_binary(args.stateful_binary)
+    subprocess.run(
+        [stateful_binary, *stateful_args],
+        check=True,
         capture_output=True,
         text=True,
         timeout=args.timeout_seconds,
+        cwd=airlock,
+        env=airlock_env(airlock),
     )
+
+
+def install_stateful_for_agent(args, airlock: str, agent: str) -> None:
+    run_stateful_command(args, airlock, "install", "--agent", agent, "--yes")
+
+def stop_stateful_server(args, airlock: str) -> None:
+    subprocess.run(
+        [resolve_host_binary(args.stateful_binary), "server", "stop"],
+        capture_output=True,
+        text=True,
+        timeout=args.timeout_seconds,
+        cwd=airlock,
+        env=airlock_env(airlock),
+    )
+
+
+def enable_stateful_repo(args, airlock: str) -> None:
+    initialize_airlock_git_repo(args, airlock)
+    run_stateful_command(args, airlock, "enable", "--repo", airlock)
+
+
+def install_stateful_for_codex(args, airlock: str) -> None:
+    install_stateful_for_agent(args, airlock, "codex")
+
+
+def run_agent(args, prompt):
+    with tempfile.TemporaryDirectory(prefix="programbench-airlock-") as airlock:
+        env = airlock_env(airlock)
+        copy_workspace_from_container(args, airlock)
+        try:
+            if args.stateful:
+                install_stateful_for_codex(args, airlock)
+                enable_stateful_repo(args, airlock)
+
+            command = [
+                resolve_host_binary(args.codex_bin),
+                "-c",
+                "sandbox_workspace_write.network_access=false",
+            ]
+            if args.subagent:
+                command.extend(["-c", "features.multi_agent=true"])
+            command.extend(
+                [
+                    "exec",
+                    "--json",
+                    *([] if args.stateful else ["--ignore-user-config"]),
+                    "--ignore-rules",
+                    "--skip-git-repo-check",
+                    "--ephemeral",
+                    "--cd",
+                    airlock,
+                    "--sandbox",
+                    "workspace-write",
+                ]
+            )
+            if args.model:
+                command.extend(["--model", args.model])
+            command.append(prompt)
+            try:
+                return subprocess.run(
+                    command,
+                    cwd=airlock,
+                    capture_output=True,
+                    text=True,
+                    timeout=args.timeout_seconds,
+                    env=env,
+                )
+            finally:
+                if hasattr(args, "condition_dir"):
+                    args.submission_path = str(
+                        archive_airlock_workspace(airlock, Path(args.condition_dir) / args.instance_id)
+                    )
+        finally:
+            if args.stateful:
+                stop_stateful_server(args, airlock)
 
 
 def build_base_parser() -> argparse.ArgumentParser:
@@ -222,6 +333,12 @@ def output_text(value: Any) -> str:
 
 def prompt_for_args(args) -> str:
     prompt = PROGRAMBENCH_SYSTEM_PROMPT
+    prompt += (
+        "\n\nTarget workspace:\n"
+        "- The current directory is the ProgramBench workspace and is the submitted source tree.\n"
+        "- Run `./executable` normally and read bundled documentation.\n"
+        "- Do not run internet, package-manager, source-control, or host filesystem commands."
+    )
     max_turns = getattr(args, "benchmark_max_turns", None)
     if max_turns is not None:
         prompt += f"\n\nBenchmark max turns: {max_turns}."
@@ -238,6 +355,28 @@ def observed_subagent_used(stdout: str, stderr: str) -> bool | None:
         usage = event.get("subagent_usage")
         if isinstance(usage, dict) and isinstance(usage.get("subagent_used"), bool):
             return usage["subagent_used"]
+        for candidate in (event, event.get("payload"), event.get("item")):
+            if not isinstance(candidate, dict):
+                continue
+            event_type = candidate.get("type")
+            name = candidate.get("name") or candidate.get("tool_name")
+            if (
+                event_type in {"tool_call", "function_call", "custom_tool_call"}
+                and isinstance(name, str)
+                and name.split(".")[-1] == "task"
+            ):
+                return True
+        message = event.get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if (
+                        isinstance(item, dict)
+                        and item.get("type") == "toolCall"
+                        and item.get("name") == "task"
+                    ):
+                        return True
     return None
 
 

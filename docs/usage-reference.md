@@ -456,6 +456,9 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
 - `programbench`: run Codex or OMP agents on ProgramBench instances, evaluate the
   resulting `submission.tar.gz` artifacts with official ProgramBench tooling, and
   report stateful/no-state quality plus time/token efficiency deltas.
+  ProgramBench Codex/OMP runs use host CLI adapters in an empty temporary
+  airlock seeded from the target container's `/workspace`; see the ProgramBench
+  guide for the run-behavior details.
 
 For DeNovoSWE, new official-style run commands should pass `--prompt-version v2`;
 the CLI's default remains compatible with historical behavior. See

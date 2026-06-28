@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -12,13 +14,17 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from programbench_codex_agent import (  # noqa: E402
     add_token_usage,
+    airlock_env,
     build_base_parser,
-    docker_exec_command,
+    archive_airlock_workspace,
+    copy_workspace_from_container,
     enable_stateful_repo,
     install_stateful_for_agent,
     iter_json_events,
     prompt_for_args,
+    resolve_host_binary,
     run_main,
+    stop_stateful_server,
     token_usage_from_value,
 )
 
@@ -48,21 +54,47 @@ def omp_token_usage_from_output(output: str):
 
 
 def run_agent(args, prompt):
-    if args.stateful:
-        install_stateful_for_agent(args, "omp")
-        enable_stateful_repo(args)
-    command = docker_exec_command(args, args.omp_bin, "--cwd", "/workspace")
-    if args.stateful:
-        command.extend(["--profile", "stateful"])
-    if args.model:
-        command.extend(["--model", args.model])
-    command.extend(["--prompt", prompt])
-    return subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=args.timeout_seconds,
-    )
+    with tempfile.TemporaryDirectory(prefix="programbench-airlock-") as airlock:
+        env = airlock_env(airlock)
+        env["PI_CODING_AGENT_DIR"] = str(Path(airlock) / ".omp" / "profiles" / "stateful" / "agent")
+        copy_workspace_from_container(args, airlock)
+        try:
+            if args.stateful:
+                install_stateful_for_agent(args, airlock, "omp")
+                enable_stateful_repo(args, airlock)
+
+            command = [
+                resolve_host_binary(args.omp_bin),
+                "--cwd",
+                airlock,
+                "--mode",
+                "json",
+                "--no-session",
+                "--approval-mode",
+                "yolo",
+            ]
+            if args.stateful:
+                command.extend(["--profile", "stateful"])
+            if args.model:
+                command.extend(["--model", args.model])
+            command.extend(["-p", prompt])
+            try:
+                return subprocess.run(
+                    command,
+                    capture_output=True,
+                    cwd=airlock,
+                    env=env,
+                    text=True,
+                    timeout=args.timeout_seconds,
+                )
+            finally:
+                if hasattr(args, "condition_dir"):
+                    args.submission_path = str(
+                        archive_airlock_workspace(airlock, Path(args.condition_dir) / args.instance_id)
+                    )
+        finally:
+            if args.stateful:
+                stop_stateful_server(args, airlock)
 
 
 def parse_args(argv: list[str] | None = None):

@@ -10,6 +10,11 @@ ProgramBench Docker images target Linux `amd64`. macOS developers can inspect
 commands and reports, but scored inference/evaluation needs a compatible Docker
 host.
 
+`stateful-bench` keeps each ProgramBench Docker container alive until the run
+finishes, then removes it explicitly. The Codex and OMP adapters copy the
+container's `/workspace` into an empty temporary host airlock, run the host CLI
+there, and archive that airlock as the ProgramBench submission.
+
 Install the official `programbench` CLI with one of:
 
 ```bash
@@ -32,13 +37,19 @@ stateful:on,subagent:on
 Use the same instance set, model, image tag, max turns, timeout, and network
 policy across compared conditions.
 
+For `stateful:on`, the adapter installs and enables Stateful in the host
+airlock used by that agent run. The ProgramBench container seeds the airlock and
+stays available for bundled `./executable` behavior checks.
+
 ## Inference Rules
 
 ProgramBench inference is offline by default. Agents must not search the
 internet, clone repositories, fetch target source from package registries, wrap
 the provided binary, decompile it, or run `strace`/`ltrace` on it.
 
-Agents may run `./executable` normally and read bundled documentation.
+Agents may run `./executable` normally and read bundled documentation from the
+airlock seeded from the target container. The airlock should not be used for
+internet, package-manager, source-control, or unrelated host filesystem work.
 
 ## Commands
 
@@ -97,5 +108,6 @@ Reports read `_stats/score.json` and label the score source.
 ## Efficiency Metrics
 
 Reports include wall time, token totals, uncached token totals, subagent usage,
-score per million tokens, and score per hour. Treat quality and efficiency
-separately.
+score per million tokens, and score per hour. Subagent usage is observed from
+adapter metadata and native `task` tool-call JSON events when available. Treat
+quality and efficiency separately.

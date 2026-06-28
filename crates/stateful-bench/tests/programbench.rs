@@ -310,7 +310,7 @@ case "$1" in
     printf 'fake-container-id\n'
     ;;
   cp)
-    : > "$3"
+    exit 0
     ;;
   exec|rm)
     exit 0
@@ -332,6 +332,13 @@ printf '{{"usage":{{"input_tokens":7,"output_tokens":5}}}}\n'
             codex_log.display()
         ),
     );
+    let stateful = fake_executable(
+        &root,
+        "fake-stateful",
+        r#"#!/bin/sh
+exit 0
+"#,
+    );
 
     let metadata = run_programbench_matrix_with_instances(
         ProgramBenchRunOptions {
@@ -348,7 +355,7 @@ printf '{{"usage":{{"input_tokens":7,"output_tokens":5}}}}\n'
             programbench_bin: "programbench".to_string(),
             docker_bin: docker.to_string_lossy().into_owned(),
             image_tag: "task_cleanroom_v6".to_string(),
-            stateful_binary: "stateful".to_string(),
+            stateful_binary: stateful.to_string_lossy().into_owned(),
             codex_bin: codex.to_string_lossy().into_owned(),
             omp_bin: "omp".to_string(),
         },
@@ -387,7 +394,7 @@ printf '{{"usage":{{"input_tokens":7,"output_tokens":5}}}}\n'
 
     let docker_calls = fs::read_to_string(docker_log).expect("docker log should exist");
     assert!(docker_calls.contains(
-        "run -d --init --network none -w /workspace --name stateful-bench-pb-dev-stateful-on_subagent-off-owner__repo-abc123 programbench/fake-image:task_cleanroom_v6 sleep 17s"
+        "run -d --init --network none -w /workspace --name stateful-bench-pb-dev-stateful-on_subagent-off-owner__repo-abc123 programbench/fake-image:task_cleanroom_v6 sleep infinity"
     ));
     assert!(docker_calls.contains("rm -f fake-container-id"));
 }
@@ -435,7 +442,7 @@ case "$1" in
     printf 'fake-container-id\n'
     ;;
   cp)
-    : > "$3"
+    exit 0
     ;;
   exec|rm)
     exit 0
@@ -561,7 +568,7 @@ fn programbench_omp_agent_command_marks_subagent_condition() {
 }
 
 #[test]
-fn programbench_codex_adapter_executes_stateful_codex_inside_container() {
+fn programbench_codex_adapter_runs_host_agent_in_empty_no_network_airlock() {
     let output = run_python_adapter(
         &programbench_codex_agent_path(),
         r#"import json
@@ -571,8 +578,15 @@ import types
 calls = []
 
 def fake_run(command, **kwargs):
-    calls.append({"command": command, "timeout": kwargs.get("timeout")})
-    return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+    calls.append({
+        "command": command,
+        "timeout": kwargs.get("timeout"),
+        "cwd": str(kwargs.get("cwd")),
+        "env_home": kwargs.get("env", {}).get("HOME"),
+        "env_stateful_home": kwargs.get("env", {}).get("STATEFUL_HOME"),
+    })
+    stdout = '{"usage":{"input_tokens":1}}\n' if command[0] == "codex" else ""
+    return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
 mod.subprocess.run = fake_run
 args = types.SimpleNamespace(
@@ -589,20 +603,32 @@ args = types.SimpleNamespace(
 )
 prompt = mod.prompt_for_args(args)
 result = mod.run_agent(args, prompt)
-print(json.dumps({"calls": calls, "prompt": prompt, "returncode": result.returncode}))
+agent_call_record = next(call for call in calls if call["command"][0] == "codex")
+agent_call = agent_call_record["command"]
+print(json.dumps({
+    "calls": calls,
+    "agent_call": agent_call,
+    "prompt": prompt,
+    "returncode": result.returncode,
+    "cd_value": agent_call[agent_call.index("--cd") + 1],
+    "home": agent_call_record["env_home"],
+    "stateful_home": agent_call_record["env_stateful_home"],
+}))
 "#,
     );
     let observed: serde_json::Value =
         serde_json::from_str(&output).expect("captured calls should be JSON");
 
     assert_eq!(
-        observed["calls"][0]["command"],
+        observed["calls"]
+            .as_array()
+            .expect("calls should be array")
+            .len(),
+        6
+    );
+    assert_eq!(
+        observed["calls"][1]["command"],
         serde_json::json!([
-            "docker",
-            "exec",
-            "-w",
-            "/workspace",
-            "programbench-container",
             "/usr/local/bin/stateful",
             "install",
             "--agent",
@@ -611,50 +637,337 @@ print(json.dumps({"calls": calls, "prompt": prompt, "returncode": result.returnc
         ])
     );
     assert_eq!(
-        observed["calls"][1]["command"],
+        observed["calls"][2]["command"],
+        serde_json::json!(["git", "init", "-q"])
+    );
+    assert_eq!(
+        observed["calls"][3]["command"],
         serde_json::json!([
-            "docker",
-            "exec",
-            "-w",
-            "/workspace",
-            "programbench-container",
             "/usr/local/bin/stateful",
             "enable",
             "--repo",
-            "/workspace"
+            observed["cd_value"].as_str().unwrap()
         ])
     );
     assert_eq!(
-        observed["calls"][2]["command"],
+        observed["agent_call"],
         serde_json::json!([
-            "docker",
-            "exec",
-            "-w",
-            "/workspace",
-            "programbench-container",
             "codex",
+            "-c",
+            "sandbox_workspace_write.network_access=false",
             "exec",
             "--json",
+            "--ignore-rules",
+            "--skip-git-repo-check",
+            "--ephemeral",
             "--cd",
-            "/workspace",
+            observed["cd_value"],
+            "--sandbox",
+            "workspace-write",
             "--model",
             "gpt-5.4-mini",
             observed["prompt"]
         ])
     );
-    assert_eq!(observed["calls"][2]["timeout"], 123);
-    assert!(
-        observed["prompt"]
-            .as_str()
-            .expect("prompt should be a string")
-            .contains("Benchmark max turns: 321."),
-        "prompt should include benchmark max turns: {observed}"
-    );
+    assert_ne!(observed["cd_value"], "/workspace");
+    assert_eq!(observed["calls"][4]["timeout"], 123);
+    assert_eq!(observed["home"], observed["cd_value"]);
+    assert_eq!(observed["stateful_home"], observed["cd_value"]);
+    let prompt = observed["prompt"]
+        .as_str()
+        .expect("prompt should be a string");
+    assert!(prompt.contains("Benchmark max turns: 321."));
+    assert!(prompt.contains("The current directory is the ProgramBench workspace"));
+    assert!(prompt.contains(
+        "Do not run internet, package-manager, source-control, or host filesystem commands."
+    ));
     assert_eq!(observed["returncode"], 0);
 }
 
 #[test]
-fn programbench_omp_adapter_executes_stateful_profile_inside_container() {
+fn programbench_codex_adapter_enables_native_subagents_when_requested() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+def fake_run(command, **kwargs):
+    return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+
+mod.subprocess.run = fake_run
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    codex_bin="codex",
+    stateful_binary="/usr/local/bin/stateful",
+    model=None,
+    benchmark_max_turns=321,
+    timeout_seconds=123,
+    stateful=False,
+    subagent=True,
+    subagent_min_count=3,
+)
+result = mod.run_agent(args, mod.prompt_for_args(args))
+print(json.dumps({"command": result.args}))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("captured command should be JSON");
+    assert!(
+        observed["command"]
+            .as_array()
+            .expect("command should be array")
+            .iter()
+            .any(|arg| arg == "features.multi_agent=true")
+    );
+}
+
+#[test]
+fn programbench_adapter_resolves_stateful_binary_before_airlock_chdir() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+calls = []
+
+def fake_run(command, **kwargs):
+    calls.append({"command": command})
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+mod.subprocess.run = fake_run
+args = types.SimpleNamespace(stateful_binary="./stateful", timeout_seconds=123)
+mod.run_stateful_command(args, "/tmp/programbench-airlock", "install")
+print(json.dumps(calls[-1]))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("stateful command should be JSON");
+    let binary = observed["command"][0]
+        .as_str()
+        .expect("binary should be a string");
+    assert_ne!(binary, "./stateful");
+    assert!(binary.ends_with("/stateful"));
+}
+
+#[test]
+fn programbench_adapter_leaves_bare_stateful_binary_for_path_lookup() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+calls = []
+
+def fake_run(command, **kwargs):
+    calls.append({"command": command})
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+mod.subprocess.run = fake_run
+args = types.SimpleNamespace(stateful_binary="stateful", timeout_seconds=123)
+mod.run_stateful_command(args, "/tmp/programbench-airlock", "install")
+print(json.dumps(calls[-1]))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("stateful command should be JSON");
+    assert_eq!(observed["command"][0], "stateful");
+}
+
+#[test]
+fn programbench_airlock_env_scrubs_parent_stateful_session() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import os
+
+for key in [
+    "STATEFUL_SERVER_URL",
+    "STATEFUL_SERVER_TOKEN",
+    "STATEFUL_SESSION_ID",
+    "STATEFUL_CODEX_RUN_ID",
+    "CODEX_THREAD_ID",
+]:
+    os.environ[key] = "parent"
+
+env = mod.airlock_env("/tmp/programbench-airlock")
+print(json.dumps({
+    key: env.get(key)
+    for key in [
+        "HOME",
+        "STATEFUL_HOME",
+        "CODEX_HOME",
+        "STATEFUL_SERVER_URL",
+        "STATEFUL_SERVER_TOKEN",
+        "STATEFUL_SESSION_ID",
+        "STATEFUL_CODEX_RUN_ID",
+        "CODEX_THREAD_ID",
+    ]
+}, sort_keys=True))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("airlock env should be JSON");
+
+    assert_eq!(observed["HOME"], "/tmp/programbench-airlock");
+    assert_eq!(observed["STATEFUL_HOME"], "/tmp/programbench-airlock");
+    assert_eq!(observed["CODEX_HOME"], "/tmp/programbench-airlock/.codex");
+    assert_eq!(observed["STATEFUL_SERVER_URL"], serde_json::Value::Null);
+    assert_eq!(observed["STATEFUL_SERVER_TOKEN"], serde_json::Value::Null);
+    assert_eq!(observed["STATEFUL_SESSION_ID"], serde_json::Value::Null);
+    assert_eq!(observed["STATEFUL_CODEX_RUN_ID"], serde_json::Value::Null);
+    assert_eq!(observed["CODEX_THREAD_ID"], serde_json::Value::Null);
+}
+
+#[test]
+fn programbench_prompt_omits_host_docker_command() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import types
+
+args = types.SimpleNamespace(
+    docker_bin="./docker-shim",
+    container_id="programbench-container",
+    benchmark_max_turns=None,
+    subagent=False,
+)
+print(json.dumps({"prompt": mod.prompt_for_args(args)}))
+"#,
+    );
+    let observed: serde_json::Value = serde_json::from_str(&output).expect("prompt should be JSON");
+    let prompt = observed["prompt"]
+        .as_str()
+        .expect("prompt should be a string");
+    assert!(!prompt.contains("docker-shim"));
+    assert!(prompt.contains("The current directory is the ProgramBench workspace"));
+}
+
+#[test]
+fn programbench_codex_adapter_resolves_relative_codex_binary_before_airlock_chdir() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+def fake_run(command, **kwargs):
+    return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+
+mod.subprocess.run = fake_run
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    codex_bin="./codex",
+    stateful_binary="/usr/local/bin/stateful",
+    model=None,
+    benchmark_max_turns=321,
+    timeout_seconds=123,
+    stateful=False,
+    subagent=False,
+    subagent_min_count=3,
+)
+result = mod.run_agent(args, mod.prompt_for_args(args))
+print(json.dumps({"command": result.args}))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("captured command should be JSON");
+    let binary = observed["command"][0]
+        .as_str()
+        .expect("binary should be a string");
+    assert_ne!(binary, "./codex");
+    assert!(binary.ends_with("/codex"));
+}
+
+#[test]
+fn programbench_omp_adapter_resolves_relative_omp_binary_before_airlock_chdir() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+def fake_run(command, **kwargs):
+    return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+
+mod.subprocess.run = fake_run
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    omp_bin="./omp",
+    stateful_binary="/usr/local/bin/stateful",
+    model=None,
+    benchmark_max_turns=321,
+    timeout_seconds=123,
+    stateful=False,
+    subagent=False,
+    subagent_min_count=3,
+)
+result = mod.run_agent(args, mod.prompt_for_args(args))
+print(json.dumps({"command": result.args}))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("captured command should be JSON");
+    let binary = observed["command"][0]
+        .as_str()
+        .expect("binary should be a string");
+    assert_ne!(binary, "./omp");
+    assert!(binary.ends_with("/omp"));
+}
+
+#[test]
+fn programbench_adapter_initializes_airlock_git_repo_before_stateful_enable() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+calls = []
+
+def fake_run(command, **kwargs):
+    calls.append({
+        "command": command,
+        "cwd": str(kwargs.get("cwd")),
+        "home": kwargs.get("env", {}).get("HOME"),
+    })
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+mod.subprocess.run = fake_run
+args = types.SimpleNamespace(stateful_binary="/usr/local/bin/stateful", timeout_seconds=123)
+mod.enable_stateful_repo(args, "/tmp/programbench-airlock")
+print(json.dumps(calls))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("stateful setup calls should be JSON");
+    let calls = observed.as_array().expect("calls should be array");
+
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0]["command"],
+        serde_json::json!(["git", "init", "-q"])
+    );
+    assert_eq!(calls[0]["cwd"], "/tmp/programbench-airlock");
+    assert_eq!(calls[0]["home"], "/tmp/programbench-airlock");
+    assert_eq!(
+        calls[1]["command"],
+        serde_json::json!([
+            "/usr/local/bin/stateful",
+            "enable",
+            "--repo",
+            "/tmp/programbench-airlock"
+        ])
+    );
+}
+
+#[test]
+fn programbench_omp_adapter_runs_host_agent_in_empty_airlock_after_stateful_setup() {
     let output = run_python_adapter(
         &programbench_omp_agent_path(),
         r#"import json
@@ -664,7 +977,14 @@ import types
 calls = []
 
 def fake_run(command, **kwargs):
-    calls.append({"command": command, "timeout": kwargs.get("timeout")})
+    calls.append({
+        "command": command,
+        "timeout": kwargs.get("timeout"),
+        "cwd": str(kwargs.get("cwd")),
+        "env_home": kwargs.get("env", {}).get("HOME"),
+        "env_stateful_home": kwargs.get("env", {}).get("STATEFUL_HOME"),
+        "env_agent_dir": kwargs.get("env", {}).get("PI_CODING_AGENT_DIR"),
+    })
     return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
 
 mod.subprocess.run = fake_run
@@ -682,20 +1002,34 @@ args = types.SimpleNamespace(
 )
 prompt = mod.prompt_for_args(args)
 result = mod.run_agent(args, prompt)
-print(json.dumps({"calls": calls, "prompt": prompt, "returncode": result.returncode}))
+agent_call_record = next(call for call in calls if call["command"][0] == "omp")
+agent_call = agent_call_record["command"]
+print(json.dumps({
+    "calls": calls,
+    "agent_call": agent_call,
+    "prompt": prompt,
+    "returncode": result.returncode,
+    "cwd": agent_call_record["cwd"],
+    "cwd_value": agent_call[agent_call.index("--cwd") + 1],
+    "home": agent_call_record["env_home"],
+    "stateful_home": agent_call_record["env_stateful_home"],
+    "agent_dir": agent_call_record["env_agent_dir"],
+}))
 "#,
     );
     let observed: serde_json::Value =
         serde_json::from_str(&output).expect("captured calls should be JSON");
 
     assert_eq!(
-        observed["calls"][0]["command"],
+        observed["calls"]
+            .as_array()
+            .expect("calls should be array")
+            .len(),
+        6
+    );
+    assert_eq!(
+        observed["calls"][1]["command"],
         serde_json::json!([
-            "docker",
-            "exec",
-            "-w",
-            "/workspace",
-            "programbench-container",
             "/usr/local/bin/stateful",
             "install",
             "--agent",
@@ -704,39 +1038,49 @@ print(json.dumps({"calls": calls, "prompt": prompt, "returncode": result.returnc
         ])
     );
     assert_eq!(
-        observed["calls"][1]["command"],
+        observed["calls"][2]["command"],
+        serde_json::json!(["git", "init", "-q"])
+    );
+    assert_eq!(
+        observed["calls"][3]["command"],
         serde_json::json!([
-            "docker",
-            "exec",
-            "-w",
-            "/workspace",
-            "programbench-container",
             "/usr/local/bin/stateful",
             "enable",
             "--repo",
-            "/workspace"
+            observed["cwd_value"].as_str().unwrap()
         ])
     );
     assert_eq!(
-        observed["calls"][2]["command"],
+        observed["agent_call"],
         serde_json::json!([
-            "docker",
-            "exec",
-            "-w",
-            "/workspace",
-            "programbench-container",
             "omp",
             "--cwd",
-            "/workspace",
+            observed["cwd_value"],
+            "--mode",
+            "json",
+            "--no-session",
+            "--approval-mode",
+            "yolo",
             "--profile",
             "stateful",
             "--model",
             "gpt-5.4-mini",
-            "--prompt",
+            "-p",
             observed["prompt"]
         ])
     );
-    assert_eq!(observed["calls"][2]["timeout"], 456);
+    assert_eq!(observed["cwd"], observed["cwd_value"]);
+    assert_ne!(observed["cwd_value"], "/workspace");
+    assert_eq!(observed["calls"][4]["timeout"], 456);
+    assert_eq!(observed["home"], observed["cwd_value"]);
+    assert_eq!(observed["stateful_home"], observed["cwd_value"]);
+    assert_eq!(
+        observed["agent_dir"],
+        format!(
+            "{}/.omp/profiles/stateful/agent",
+            observed["cwd_value"].as_str().unwrap()
+        )
+    );
     assert!(
         observed["prompt"]
             .as_str()
@@ -769,6 +1113,8 @@ with tempfile.TemporaryDirectory() as condition_dir:
         condition_dir=condition_dir,
         instance_id="owner__repo.abc123",
         condition_id="stateful-on_subagent-on",
+        container_id="programbench-container",
+        docker_bin="docker",
         timeout_seconds=123,
         subagent=True,
         subagent_min_count=3,
@@ -790,6 +1136,30 @@ print(json.dumps({"exit_code": exit_code, "has_subagent_used": "subagent_used" i
 
     assert_eq!(observed["exit_code"], 0);
     assert_eq!(observed["has_subagent_used"], false);
+}
+
+#[test]
+fn programbench_adapter_observes_native_task_tool_call() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+print(json.dumps({
+    "codex": mod.observed_subagent_used('{"type":"tool_call","name":"task"}\n', ""),
+    "codex_response_item": mod.observed_subagent_used('{"type":"response.item.completed","item":{"type":"function_call","name":"task"}}\n', ""),
+    "omp": mod.observed_subagent_used('{"type":"tool_call","tool_name":"functions.task"}\n', ""),
+    "omp_message": mod.observed_subagent_used('{"message":{"content":[{"type":"toolCall","name":"task","arguments":{"tasks":[{"assignment":"a"},{"assignment":"b"}]}}]}}\n', ""),
+    "none": mod.observed_subagent_used('{"type":"turn.completed","name":"task"}\n', ""),
+}))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("native task observation should be JSON");
+
+    assert_eq!(observed["codex"], true);
+    assert_eq!(observed["omp"], true);
+    assert_eq!(observed["codex_response_item"], true);
+    assert_eq!(observed["omp_message"], true);
+    assert_eq!(observed["none"], serde_json::Value::Null);
 }
 
 #[test]
@@ -1063,6 +1433,39 @@ fn programbench_compare_reports_score_time_and_token_deltas() {
             "stateful-on_subagent-on".to_string(),
         ]
     );
+}
+
+#[test]
+fn programbench_compare_markdown_renders_subagent_and_interaction_deltas() {
+    let off_off = condition_report(
+        "stateful-off_subagent-off",
+        false,
+        false,
+        0.5,
+        6000,
+        220,
+        140,
+    );
+    let on_off = condition_report(
+        "stateful-on_subagent-off",
+        true,
+        false,
+        0.75,
+        4000,
+        167,
+        107,
+    );
+    let off_on = condition_report("stateful-off_subagent-on", false, true, 0.6, 5000, 200, 120);
+    let on_on = condition_report("stateful-on_subagent-on", true, true, 0.9, 3500, 150, 90);
+
+    let markdown = compare_programbench_reports(vec![off_off, on_off, off_on, on_on])
+        .render(ReportFormat::Markdown)
+        .expect("comparison markdown should render");
+
+    assert!(markdown.contains("- Subagent score delta without stateful: 0.1"));
+    assert!(markdown.contains("- Subagent running time ms delta without stateful: -1000"));
+    assert!(markdown.contains("- Subagent input+output token delta without stateful: -20"));
+    assert!(markdown.contains("- Combined interaction score delta: 0.05"));
 }
 
 #[test]
