@@ -405,12 +405,9 @@ pub fn run_sandbox_in_repo(
                 });
 
                 if !denied_write_targets.is_empty() {
-                    let body = sandbox_authorization_denied_body(
-                        &authorize_context,
-                        allowed_write_targets,
-                        denied_write_targets,
-                    )
-                    .to_string();
+                    let body =
+                        sandbox_authorization_denied_body(allowed_write_targets, denied_write_targets)
+                            .to_string();
                     if let Some(release_context) = &release_after_run {
                         release_sandbox_write_claims(runtime, release_context);
                     }
@@ -495,12 +492,9 @@ pub fn run_sandbox_in_repo(
             });
 
             if !denied_write_targets.is_empty() {
-                let body = sandbox_authorization_denied_body(
-                    &authorize_context,
-                    allowed_write_targets,
-                    denied_write_targets,
-                )
-                .to_string();
+                let body =
+                    sandbox_authorization_denied_body(allowed_write_targets, denied_write_targets)
+                        .to_string();
                 if let Some(release_context) = &release_after_run {
                     release_sandbox_write_claims(runtime, release_context);
                 }
@@ -3418,77 +3412,15 @@ pub(crate) fn classify_sandbox_authorize_response(
 }
 
 fn sandbox_authorization_denied_body(
-    context: &SandboxAuthorizeContext<'_>,
     allowed_write_targets: Vec<String>,
     denied_write_targets: Vec<serde_json::Value>,
 ) -> serde_json::Value {
-    let context_resource =
-        denied_write_targets_context_resource(&denied_write_targets).map(str::to_owned);
-    let mut body = serde_json::json!({
+    serde_json::json!({
         "status": "error",
         "message": "stateful sandbox run target authorization denied",
         "allowed_write_targets": allowed_write_targets,
         "denied_write_targets": denied_write_targets,
-    });
-    if let Some(current_state) = sandbox_current_state_context(context, context_resource.as_deref())
-    {
-        body["current_state"] = current_state;
-    }
-    body
-}
-
-fn denied_write_targets_context_resource(
-    denied_write_targets: &[serde_json::Value],
-) -> Option<&str> {
-    if denied_write_targets.len() == 1 {
-        denied_write_targets[0]
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-    } else {
-        None
-    }
-}
-
-fn sandbox_current_state_request_body(
-    context: &SandboxAuthorizeContext<'_>,
-    resource: Option<&str>,
-) -> serde_json::Value {
-    let mut body = serde_json::json!({
-        "session_id": context.session_id,
-        "workspace_id": context.workspace_id,
-        "mode": "brief",
-    });
-    if let Some(resource) = resource
-        .map(str::trim)
-        .filter(|resource| !resource.is_empty())
-        && let Some(object) = body.as_object_mut()
-    {
-        object.insert("resource".to_string(), serde_json::json!(resource));
-    }
-    if let Ok(identity) = repo_identity_for_enabled_repo(context.paths, context.repo_root)
-        && let Some(object) = body.as_object_mut()
-    {
-        object.insert("repo_id".to_string(), serde_json::json!(identity.repo_id));
-        object.insert(
-            "worktree_id".to_string(),
-            serde_json::json!(identity.worktree_id),
-        );
-        object.insert("root".to_string(), serde_json::json!(identity.root));
-        object.insert("branch".to_string(), serde_json::json!(identity.branch));
-    }
-    body
-}
-
-fn sandbox_current_state_context(
-    context: &SandboxAuthorizeContext<'_>,
-    resource: Option<&str>,
-) -> Option<serde_json::Value> {
-    let body = sandbox_current_state_request_body(context, resource);
-    let response = post_json(context.runtime, "/v1/context/render", &body).ok()?;
-    if !(200..300).contains(&response.status_code) {
-        return None;
-    }
-    serde_json::from_str(&response.body).ok()
+    })
 }
 
 fn is_git_internal_segment(segment: &str) -> bool {
@@ -4379,35 +4311,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sandbox_current_state_request_body_includes_denied_resource() {
-        let temp = std::env::temp_dir().join(format!(
-            "stateful-sandbox-current-state-resource-{}",
-            std::process::id()
-        ));
-        let repo = temp.join("repo");
-        let home = temp.join("home");
-        fs::create_dir_all(&repo).expect("repo dir should create");
-        let paths = GlobalPaths::new(home);
-        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret", "workspace-a", 7);
-        let context = SandboxAuthorizeContext {
-            runtime: &runtime,
-            repo_root: &repo,
-            paths: &paths,
-            session_id: "session-a",
-            workspace_id: "workspace-a",
-            network: SandboxNetworkPolicy::Disabled,
-            fs_profile: "write-targets",
-        };
-
-        let body = sandbox_current_state_request_body(&context, Some("src/lib.rs"));
-
-        assert_eq!(body["session_id"], "session-a");
-        assert_eq!(body["workspace_id"], "workspace-a");
-        assert_eq!(body["mode"], "brief");
-        assert_eq!(body["resource"], "src/lib.rs");
-        fs::remove_dir_all(&temp).expect("temp dir should remove");
-    }
 
     #[test]
     fn process_find_request_requires_a_selector() {

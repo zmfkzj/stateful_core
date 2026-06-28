@@ -367,7 +367,8 @@ fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command(
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
         r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Target is outside active reservation scope.","required_next_action":"Declare matching reservation."}"#,
-        r#"{"status":"ok","current":{"active_reservation_count":1},"prompt_text":"Your Active Scope\n- [info] src/allowed.ts: This session has active scope for src/allowed.ts."}"#,
+        r#"{"status":"ok"}"#,
+        r#"{"status":"ok"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -397,9 +398,6 @@ fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command(
     let second = rx
         .recv_timeout(Duration::from_secs(1))
         .expect("second authorize request should arrive");
-    let context = rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("denial should render current state context");
     assert_eq!(
         request_json_body(&first)["payload"]["path"],
         "src/allowed.ts"
@@ -416,8 +414,18 @@ fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command(
         request_json_body(&second)["payload"]["purpose"],
         "Run sandbox command for write target `src/denied.ts`."
     );
-    assert!(context.contains("POST /v1/context/render HTTP/1.1"));
-    assert!(context.contains("\"session_id\":\"s-current\""));
+    let first_release = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first release request should arrive");
+    let second_release = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("second release request should arrive");
+    assert!(first_release.contains("POST /v1/claim/release HTTP/1.1"));
+    assert!(second_release.contains("POST /v1/claim/release HTTP/1.1"));
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "sandbox denial should not render current state context"
+    );
     assert_eq!(
         fs::read_to_string(repo_root.join("src/allowed.ts")).expect("allowed file should read"),
         "old\n",
@@ -427,8 +435,8 @@ fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command(
     assert!(stdout.contains("\"allowed_write_targets\":[\"src/allowed.ts\"]"));
     assert!(stdout.contains("\"path\":\"src/denied.ts\""));
     assert!(stdout.contains("\"decision\":\"deny\""));
-    assert!(stdout.contains("\"current_state\""));
-    assert!(stdout.contains("Your Active Scope"));
+    assert!(!stdout.contains("\"current_state\""));
+    assert!(!stdout.contains("Your Active Scope"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
