@@ -214,7 +214,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("stateful-omp-extension.js"));
     assert!(config.contains(
-        "tools:\n  approvalMode: yolo\nstateful:\n  autoApprove: false\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: false\n",
+        "tools:\n  approvalMode: yolo\nstateful:\n  autoApprove: false\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: true\n",
     ));
     assert!(!config.contains("approval:"));
     assert!(
@@ -370,6 +370,10 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("const externalBashGrants = new Map()"));
     assert!(extension.contains("function externalGrantDescriptor(params)"));
     assert!(extension.contains("async function ensureExternalBashGrant(ctx, params, signal)"));
+    assert!(extension.contains("pi.on(\"tool_call\""));
+    assert!(extension.contains("function statefulBashPassthroughDecision"));
+    assert!(extension.contains("event?.toolName !== \"bash\""));
+    assert!(extension.contains("ensureExternalBashGrant(ctx, params, signal)"));
     assert!(extension.contains("Approve external sandbox grant"));
     assert!(
         extension.contains("Raw command text is intentionally hidden from this approval prompt.")

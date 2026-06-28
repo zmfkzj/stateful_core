@@ -263,14 +263,13 @@ command-shaped inspection uses `<absolute-stateful-binary> sandbox run --fs
 read-only --network disabled --command <cmd>`; the read-only profile rejects
 `--network enabled`. Command-shaped repo writes use `--fs write-targets` with
 explicit `--write-target <file>` / `--create-target <file>` values and target authorization.
-OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution are denied
-at host approval and hook levels, even when the raw command itself invokes
-`stateful sandbox run`. OMP
-sandbox command execution uses generated custom tools: `sandbox_bash` invokes
-the trusted stateful binary for read-only, write-targets, build, git, and
-github-pr profiles, including common sandbox flags, and rejects `--fs external`
-with guidance to use `ext_ro_bash` or `ext_rw_bash`; `process_find` invokes
-`stateful sandbox process find` directly; `ext_ro_bash` starts
+OMP built-in Bash may run only strict trusted `stateful sandbox run ...` and
+`stateful sandbox process find ...` commands after Stateful preflight.
+Arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution is
+denied at host approval and hook levels. Generated custom tools remain
+compatibility helpers: `sandbox_bash` invokes the trusted stateful binary for
+read-only, write-targets, build, git, and github-pr profiles; `process_find`
+invokes `stateful sandbox process find` directly; `ext_ro_bash` starts
 purpose-and-command-only external reads without OMP UI confirmation. `ext_rw_bash`
 asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. It starts the trusted
 stateful binary with `sandbox run --fs external --purpose ...` for external
@@ -737,14 +736,16 @@ always-apply `rules/stateful-required.md` rule, `skills/stateful-command-policy/
 `subagent-write-recovery.md`) manual files, and OMP config under the
 `stateful` profile agent directory (`~/.omp/profiles/stateful/agent`) with
 `tools.approvalMode: yolo`, `stateful.autoApprove: false`,
-`bash.enabled: false`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
+`bash.enabled: true`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
 and `eval.jl: false`; it removes
 `tools.approval` from the stateful profile because yolo mode delegates safety to
-Stateful hooks. Raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution
-is still denied at host approval and hook levels, OMP process inspection uses
-`process_find`, sandbox runs still go through `sandbox_bash`, `ext_ro_bash`, or
-`ext_rw_bash`, and `stateful.autoApprove: true` or per-call `auto_approve: true`
-skips only the Stateful-owned `ext_rw_bash` prompt while sandbox scope
+Stateful hooks. OMP built-in Bash may run only strict trusted
+`stateful sandbox run ...` and `stateful sandbox process find ...` commands
+after Stateful preflight; arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia
+eval-tool execution is still denied at host approval and hook levels. Generated
+`sandbox_bash`, `process_find`, `ext_ro_bash`, and `ext_rw_bash` remain
+compatibility helpers; `stateful.autoApprove: true` or per-call `auto_approve: true`
+skips only the Stateful-owned external grant prompt while sandbox scope
 validation, hooks, reservation/claim checks, and grant limits still apply. `stateful enable`
 opts the current repo into enforcement. Repo-local packaging and managed hooks
 must reuse the same hook adapter library and HTTP protocol.

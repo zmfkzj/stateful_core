@@ -334,12 +334,20 @@ fn omp_pre_tool_action(
         {
             Ok(OmpPreToolAction::Allow)
         }
-        tool_name if tool_name.eq_ignore_ascii_case("bash") => Ok(OmpPreToolAction::Block {
-            reason: format!(
-                "OMP raw {} is denied; use process_find for process inspection, sandbox_bash for stateful sandbox run profiles except --fs external, ext_ro_bash for read-only external operations, or ext_rw_bash for external writes",
-                input.tool_name
-            ),
-        }),
+        tool_name if tool_name.eq_ignore_ascii_case("bash") => {
+            if let Some(action) = input.command().and_then(omp_sandbox_run_action) {
+                return Ok(action);
+            }
+            if let Some(action) = input.command().and_then(omp_process_find_action) {
+                return Ok(action);
+            }
+            Ok(OmpPreToolAction::Block {
+                reason: format!(
+                    "OMP raw {} is denied; only trusted stateful sandbox run or stateful sandbox process find commands are allowed through built-in Bash",
+                    input.tool_name
+                ),
+            })
+        }
         tool_name if is_omp_eval_tool(tool_name) => Ok(OmpPreToolAction::Block {
             reason: format!(
                 "OMP eval tool {} is denied; use process_find for process inspection, sandbox_bash for stateful sandbox run profiles except --fs external, ext_ro_bash for read-only external operations, or ext_rw_bash for external writes",
@@ -437,8 +445,22 @@ fn omp_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {
         return Some(OmpPreToolAction::Targets(targets));
     }
     if invocation.request.fs == SandboxFsProfile::External {
+        return Some(OmpPreToolAction::Allow);
+    }
+    Some(OmpPreToolAction::Allow)
+}
+
+fn omp_process_find_action(command: &str) -> Option<OmpPreToolAction> {
+    let invocation = parse_sandbox_process_find_bash_invocation(command).ok()?;
+    if !is_trusted_stateful_executable(&invocation.executable) {
         return Some(OmpPreToolAction::Block {
-            reason: "OMP raw Bash cannot run stateful sandbox run --fs external; use ext_ro_bash for read-only external operations or ext_rw_bash for external writes".to_string(),
+            reason: "stateful sandbox process find requires the trusted absolute stateful binary"
+                .to_string(),
+        });
+    }
+    if let Err(error) = validate_process_find_request(&invocation.request) {
+        return Some(OmpPreToolAction::Block {
+            reason: error.to_string(),
         });
     }
     Some(OmpPreToolAction::Allow)
@@ -2698,6 +2720,10 @@ impl OmpPreToolUseInput {
             "commit_id": self.commit_id,
             "cwd": self.cwd,
         })
+    }
+
+    fn command(&self) -> Option<&str> {
+        self.tool_input.get("command")?.as_str()
     }
 }
 

@@ -2919,10 +2919,12 @@ fn omp_edit_authorize_includes_lazy_queue_metadata_when_scope_exists() {
 }
 
 #[test]
-fn omp_raw_bash_denies_sandbox_write_target_and_points_to_sandbox_bash() {
+fn omp_raw_bash_authorizes_trusted_write_target_sandbox_run() {
     let stateful = trusted_stateful_path();
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
     let input = serde_json::json!({
         "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
         "cwd": "/repo",
         "yolo": false,
         "tool_name": "bash",
@@ -2932,19 +2934,19 @@ fn omp_raw_bash_denies_sandbox_write_target_and_points_to_sandbox_bash() {
     })
     .to_string();
 
-    let OmpHookOutcome::Block { reason } = handle_omp_pre_tool_use_with_runtime(
-        &input,
-        None,
-        Some(Path::new("/repo")),
-        Some(Path::new("/repo")),
-    )
-    .unwrap() else {
-        panic!("raw OMP bash should be denied even when it invokes stateful sandbox run");
-    };
-
-    assert!(reason.contains("OMP raw bash is denied"));
-    assert!(reason.contains("sandbox_bash"));
-    assert!(reason.contains("process_find"));
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &input,
+            Some(&runtime),
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Allow
+    );
+    let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
+    assert_eq!(body["payload"]["action"], "write_file");
+    assert_eq!(body["payload"]["path"], "docs/a.md");
 }
 
 #[test]
@@ -3026,7 +3028,7 @@ fn omp_sandbox_job_poll_tool_is_allowed_for_internal_runner() {
 }
 
 #[test]
-fn omp_raw_bash_denies_sandbox_external_and_points_to_external_tools() {
+fn omp_raw_bash_allows_trusted_external_sandbox_run_for_extension_preflight() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "omp-parent",
@@ -3039,18 +3041,16 @@ fn omp_raw_bash_denies_sandbox_external_and_points_to_external_tools() {
     })
     .to_string();
 
-    let OmpHookOutcome::Block { reason } = handle_omp_pre_tool_use_with_runtime(
-        &input,
-        None,
-        Some(Path::new("/repo")),
-        Some(Path::new("/repo")),
-    )
-    .unwrap() else {
-        panic!("raw OMP bash must not run external sandbox commands directly");
-    };
-
-    assert!(reason.contains("ext_rw_bash"));
-    assert!(reason.contains("--fs external"));
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Allow
+    );
 }
 
 #[test]
@@ -3119,15 +3119,32 @@ fn omp_repo_internal_raw_bash_rejects_shell_writes_and_unsafe_find_actions() {
 }
 
 #[test]
-fn omp_repo_internal_raw_bash_is_denied_even_for_sandbox_run_requests() {
+fn omp_repo_internal_raw_bash_allows_only_trusted_sandbox_requests() {
     let stateful = trusted_stateful_path();
-    let commands = vec![
-        "pwd".to_string(),
-        format!("{stateful} sandbox run --fs read-only --network disabled --command 'pwd'"),
-        "python scripts/gen.py".to_string(),
-    ];
+    let allowed =
+        format!("{stateful} sandbox run --fs read-only --network disabled --command 'pwd'");
+    let denied = ["pwd".to_string(), "python scripts/gen.py".to_string()];
 
-    for command in commands {
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "bash",
+        "tool_input": { "command": allowed }
+    })
+    .to_string();
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Allow
+    );
+
+    for command in denied {
         let input = serde_json::json!({
             "session_id": "omp-parent",
             "cwd": "/repo",
@@ -3144,20 +3161,22 @@ fn omp_repo_internal_raw_bash_is_denied_even_for_sandbox_run_requests() {
             Some(Path::new("/repo")),
         )
         .unwrap() else {
-            panic!("raw OMP bash should be denied");
+            panic!("non-stateful raw OMP bash should be denied");
         };
         assert!(reason.contains("OMP raw bash is denied"));
-        assert!(reason.contains("sandbox_bash"));
-        assert!(reason.contains("process_find"));
+        assert!(reason.contains("stateful sandbox run"));
     }
 }
 
 #[test]
-fn omp_namespaced_bash_is_denied_even_for_sandbox_run_requests() {
+fn omp_namespaced_bash_allows_only_trusted_sandbox_requests() {
     let stateful = trusted_stateful_path();
-    for command in [
-        "pwd".to_string(),
-        format!("{stateful} sandbox run --fs read-only --network disabled --command 'pwd'"),
+    for (command, allowed) in [
+        ("pwd".to_string(), false),
+        (
+            format!("{stateful} sandbox run --fs read-only --network disabled --command 'pwd'"),
+            true,
+        ),
     ] {
         let input = serde_json::json!({
             "session_id": "omp-parent",
@@ -3167,18 +3186,22 @@ fn omp_namespaced_bash_is_denied_even_for_sandbox_run_requests() {
             "tool_input": { "command": command }
         })
         .to_string();
-        let OmpHookOutcome::Block { reason } = handle_omp_pre_tool_use_with_runtime(
+        let outcome = handle_omp_pre_tool_use_with_runtime(
             &input,
             None,
             Some(Path::new("/repo")),
             Some(Path::new("/repo")),
         )
-        .unwrap() else {
-            panic!("namespaced raw OMP bash should be denied");
-        };
-        assert!(reason.contains("OMP raw functions.bash is denied"));
-        assert!(reason.contains("sandbox_bash"));
-        assert!(reason.contains("process_find"));
+        .unwrap();
+        if allowed {
+            assert_eq!(outcome, OmpHookOutcome::Allow);
+        } else {
+            let OmpHookOutcome::Block { reason } = outcome else {
+                panic!("non-stateful namespaced raw OMP bash should be denied");
+            };
+            assert!(reason.contains("OMP raw functions.bash is denied"));
+            assert!(reason.contains("stateful sandbox run"));
+        }
     }
 }
 
@@ -3350,11 +3373,11 @@ fn omp_repo_external_raw_bash_blocks_without_external_sandbox_profile() {
         panic!("repo-external targetless bash should block");
     };
     assert!(reason.contains("OMP raw bash is denied"));
-    assert!(reason.contains("ext_ro_bash"));
+    assert!(reason.contains("stateful sandbox run"));
 }
 
 #[test]
-fn omp_denies_sandbox_external_profile_without_external_tool_wrappers() {
+fn omp_allows_sandbox_external_profile_after_extension_preflight() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "omp-parent",
@@ -3367,18 +3390,16 @@ fn omp_denies_sandbox_external_profile_without_external_tool_wrappers() {
     })
     .to_string();
 
-    let outcome = handle_omp_pre_tool_use_with_runtime(
-        &input,
-        None,
-        Some(Path::new("/repo")),
-        Some(Path::new("/repo")),
-    )
-    .unwrap();
-    let OmpHookOutcome::Block { reason } = outcome else {
-        panic!("OMP raw bash external sandbox profile should be blocked");
-    };
-    assert!(reason.contains("ext_rw_bash"));
-    assert!(reason.contains("--fs external"));
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo")),
+        )
+        .unwrap(),
+        OmpHookOutcome::Allow
+    );
 }
 
 #[test]

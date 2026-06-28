@@ -1295,7 +1295,7 @@ fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow
     ensure_omp_child_scalar(&mut lines, "eval", "js", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "rb", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "jl", "false", update_existing)?;
-    ensure_omp_child_scalar(&mut lines, "bash", "enabled", "false", update_existing)?;
+    ensure_omp_child_scalar(&mut lines, "bash", "enabled", "true", update_existing)?;
 
     Ok(finish_omp_yaml_lines(lines))
 }
@@ -2323,6 +2323,114 @@ async function ensureExternalBashGrant(ctx, params, signal) {{
   return true;
 }}
 
+function splitStatefulCommandWords(command) {{
+  const words = [];
+  let current = "";
+  let quote = null;
+  for (let index = 0; index < command.length; index += 1) {{
+    const ch = command[index];
+    if (quote) {{
+      if (ch === quote) {{
+        quote = null;
+      }} else {{
+        current += ch;
+      }}
+      continue;
+    }}
+    if (ch === "'" || ch === "\"") {{
+      quote = ch;
+      continue;
+    }}
+    if (ch === "\\" || ch === "`" || ch === "\n" || ch === "\r") {{
+      throw new Error("Bash wrapper must be a single stateful sandbox command");
+    }}
+    if (ch === "$" && command[index + 1] === "(") {{
+      throw new Error("Bash wrapper must not use command substitution");
+    }}
+    if (";|&<>".includes(ch)) {{
+      throw new Error("Bash wrapper must be a single stateful sandbox command");
+    }}
+    if (/\s/.test(ch)) {{
+      if (current) {{
+        words.push(current);
+        current = "";
+      }}
+      continue;
+    }}
+    current += ch;
+  }}
+  if (quote) throw new Error("Bash wrapper command has unterminated quotes");
+  if (current) words.push(current);
+  return words;
+}}
+
+function parseStatefulSandboxRunWords(words) {{
+  if (words.length < 4 || words[1] !== "sandbox" || words[2] !== "run") {{
+    return {{ allow: false, reason: "Bash commands must use stateful sandbox run" }};
+  }}
+  const params = {{
+    fs: "read-only",
+    purpose: "",
+    write_targets: [],
+    create_targets: [],
+    write_dirs: [],
+    connect_sockets: [],
+    allow_signal: false,
+    network: undefined,
+    command: "",
+  }};
+  for (let index = 3; index < words.length; index += 1) {{
+    const arg = words[index];
+    const nextValue = (name) => {{
+      index += 1;
+      if (index >= words.length || !words[index]) throw new Error("stateful sandbox run " + name + " requires a value");
+      return words[index];
+    }};
+    if (arg === "--fs") params.fs = nextValue("--fs");
+    else if (arg === "--purpose") params.purpose = nextValue("--purpose");
+    else if (arg === "--write-target") params.write_targets.push(nextValue("--write-target"));
+    else if (arg === "--create-target") params.create_targets.push(nextValue("--create-target"));
+    else if (arg === "--write-dir") params.write_dirs.push(nextValue("--write-dir"));
+    else if (arg === "--connect-socket") params.connect_sockets.push(nextValue("--connect-socket"));
+    else if (arg === "--network") params.network = nextValue("--network");
+    else if (arg === "--timeout-seconds") nextValue("--timeout-seconds");
+    else if (arg === "--stream-events") continue;
+    else if (arg === "--allow-signal") params.allow_signal = true;
+    else if (arg === "--command") params.command = nextValue("--command");
+    else throw new Error("unsupported stateful sandbox run argument `" + arg + "`");
+  }}
+  if (!params.command) return {{ allow: false, reason: "stateful sandbox run requires exactly one --command" }};
+  if (params.fs === "external" && !params.purpose.trim()) {{
+    return {{ allow: false, reason: "stateful sandbox run --fs external requires --purpose" }};
+  }}
+  if (params.fs === "external" && (hasExternalWriteScope(params) || stringList(params.connect_sockets).length > 0 || params.allow_signal === true)) {{
+    return {{ allow: true, externalGrantParams: params }};
+  }}
+  return {{ allow: true }};
+}}
+
+function parseStatefulProcessFindWords(words) {{
+  if (words.length < 5 || words[1] !== "sandbox" || words[2] !== "process" || words[3] !== "find") {{
+    return {{ allow: false, reason: "Bash commands must use stateful sandbox process find" }};
+  }}
+  return {{ allow: true }};
+}}
+
+function statefulBashPassthroughDecision(command) {{
+  try {{
+    const words = splitStatefulCommandWords(String(command || "").trim());
+    if (words.length === 0) return {{ allow: false, reason: "Bash command is empty" }};
+    if (words[0] !== STATEFUL) {{
+      return {{ allow: false, reason: "OMP raw Bash is denied; use the trusted stateful sandbox command" }};
+    }}
+    if (words[1] === "sandbox" && words[2] === "run") return parseStatefulSandboxRunWords(words);
+    if (words[1] === "sandbox" && words[2] === "process" && words[3] === "find") return parseStatefulProcessFindWords(words);
+    return {{ allow: false, reason: "Bash commands must use stateful sandbox run or stateful sandbox process find" }};
+  }} catch (error) {{
+    return {{ allow: false, reason: error instanceof Error ? error.message : String(error) }};
+  }}
+}}
+
 function sandboxToolResultText(exitCode, stdout, stderr, error) {{
   if (!stderr && !error) {{
     return stdout || "exit_code: " + exitCode;
@@ -2851,6 +2959,24 @@ function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, si
 
 export default function statefulOmpExtension(pi) {{
   pi.setLabel("Stateful");
+  pi.on("tool_call", async (event, ctx) => {{
+    if (event?.toolName !== "bash" && event?.toolName !== "functions.bash") return;
+    const decision = statefulBashPassthroughDecision(event?.input?.command);
+    if (!decision.allow) return {{ block: true, reason: decision.reason }};
+    if (decision.externalGrantParams) {{
+      const params = decision.externalGrantParams;
+      if (shouldAutoApproveStatefulPrompt(ctx, params)) {{
+        approveExternalBashGrantWithoutPrompt(params);
+        return;
+      }}
+      if (typeof ctx?.ui?.confirm !== "function") {{
+        return {{ block: true, reason: "Built-in Bash external sandbox command requires OMP UI confirmation; use stateful.autoApprove to skip this prompt." }};
+      }}
+      const signal = undefined;
+      const approved = await ensureExternalBashGrant(ctx, params, signal);
+      if (!approved) return {{ block: true, reason: "user denied stateful external sandbox grant" }};
+    }}
+  }});
   pi.registerTool({{
     name: "process_find",
     label: "Process Find",

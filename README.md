@@ -218,12 +218,14 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 | GitHub PR list/view/status/create | `stateful sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` |
 | Repo-external shell operation | `stateful sandbox run --fs external --purpose <purpose> --command <cmd>` for reads; add exact `--write-target`, `--create-target`, or `--write-dir` scopes for writes |
 
-In OMP, use generated tools instead of raw Bash: `sandbox_bash` for
-non-external sandbox profiles, `process_find` for process inspection, and
-`ext_ro_bash` for read-only external shell work. `ext_rw_bash` asks for a scoped
-OMP UI grant by default; `stateful.autoApprove: true` or the per-call
-`auto_approve: true` flag skips only that Stateful-owned prompt while sandbox
-scope validation, hooks, reservation/claim checks, and grant limits still apply.
+In OMP, built-in Bash may run only strict trusted `stateful sandbox run ...`
+and `stateful sandbox process find ...` commands after Stateful preflight.
+Generated tools (`sandbox_bash`, `process_find`, `ext_ro_bash`, and
+`ext_rw_bash`) remain compatibility helpers. Scoped external writes still ask
+for a Stateful OMP UI grant by default; `stateful.autoApprove: true` or the
+per-call `auto_approve: true` flag skips only that Stateful-owned prompt while
+sandbox scope validation, hooks, reservation/claim checks, and grant limits
+still apply.
 When auto-approval is enabled, no prompt is shown. Use `lazy_edit_resume` for
 strict replay of blocked line-based OMP `edit` patches and `lazy_write_resume`
 for captured full OMP `write` replay with a stale-target guard.

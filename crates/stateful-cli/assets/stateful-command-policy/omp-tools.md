@@ -4,7 +4,7 @@
 
 - If Stateful MCP tools are missing from the active OMP tool list, use `search_tool_bm25` once with a query such as `stateful state current read`, then call the activated runtime-specific tool names.
 - Never fall back to Bash for Stateful coordination.
-- OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied before command text matters, including attempts to wrap valid `stateful sandbox run` commands.
+- OMP built-in Bash may run strict trusted `stateful sandbox run ...` and `stateful sandbox process find ...` commands after Stateful preflight; arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied.
 - Use `process_find` for process inspection.
 - Use `sandbox_bash` for non-external sandbox profiles: `read-only`, `write-targets`, `build`, `git`, and `github-pr`.
 - Use `ext_ro_bash` for read-only `--fs external` commands with only `purpose` and `command`; it runs without an OMP UI confirmation.
@@ -19,7 +19,7 @@ OMP installs the integration into the live OMP profile agent directory, defaulti
 - `skills/stateful-command-policy/SKILL.md` plus support files,
 - `sandbox_bash`, `ext_ro_bash`, `ext_rw_bash`, `process_find`, `lazy_edit_resume`, and `lazy_write_resume` tools.
 
-The installer merges an existing `config.yml` and rejects invalid YAML. Without `stateful install --agent omp --update`, existing OMP scalar config values are preserved and only missing Stateful keys are inserted. With `--update`, targeted OMP scalar values are overwritten to delegate safety to Stateful hooks while raw Bash/eval denials and sandbox confirmations remain hook-enforced.
+The installer merges an existing `config.yml` and rejects invalid YAML. Without `stateful install --agent omp --update`, existing OMP scalar config values are preserved and only missing Stateful keys are inserted. With `--update`, targeted OMP scalar values are overwritten to delegate safety to Stateful hooks while raw Bash/eval denials, Bash passthrough preflight, and sandbox confirmations remain hook-enforced.
 
 ## Generated Tool Behavior
 
