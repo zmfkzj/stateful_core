@@ -279,12 +279,12 @@ read-only `--fs external` commands. `ext_rw_bash`
 asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
 That grant omits raw command text, shows purpose and declared scope, and can
 cover matching calls until expiry or max uses. When auto-approval is enabled, no prompt is shown.
-All three generated `*_bash` tools run sandbox commands in the background by default.
-With `async` omitted or `true`, they return a job id immediately, stream
-stdout/output via OMP messages using `pi.sendMessage`, and send final stdout,
-stderr, and exit status as a follow-up message. Set `async: false` to keep the
-old awaited foreground behavior that returns final stdout/stderr/status in tool
-details. `sandbox_bash` rejects
+All generated OMP sandbox command tools run in the background by default. With
+`async` omitted or `true`, they return a `runId` immediately and store live
+stdout/stderr/status in the OMP extension. Agents use `sandbox_job_poll` to
+monitor output deltas and collect final exit status before final handoff. Set
+`async: false` for awaited foreground behavior with final stdout/stderr/status
+in the tool result. `sandbox_bash` rejects
 `--fs external` with guidance to use `ext_ro_bash` or `ext_rw_bash`. Raw Bash and
 Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
@@ -338,11 +338,11 @@ read-only external commands without OMP UI confirmation. `ext_rw_bash` asks for
 a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call
 `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox
 scope validation, hooks, reservation/claim checks, and grant limits still apply. All
-generated `*_bash` tools run sandbox commands in the
-background by default, return a job id immediately when `async` is omitted or
-`true`, stream stdout/output via OMP messages using `pi.sendMessage`, and send
-final stdout/stderr/exit status as a follow-up message; `async: false` waits for
-completion and returns final stdout/stderr/exit status in tool details;
+generated OMP sandbox command tools run in the background by default. With
+`async` omitted or `true`, they return a `runId` immediately and store live
+stdout/stderr/status in the OMP extension. Agents use `sandbox_job_poll` to
+monitor output deltas and collect final exit status before final handoff;
+`async: false` waits for completion and returns final stdout/stderr/exit status in tool details;
 stateful allow maps to allow; and stateful denial or unavailable state maps to
 block even when OMP yolo metadata is present.
 

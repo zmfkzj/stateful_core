@@ -23,7 +23,7 @@ The installer merges an existing `config.yml` and rejects invalid YAML. Without 
 
 ## Generated Tool Behavior
 
-- `sandbox_bash`, `ext_ro_bash`, and `ext_rw_bash` run in the background by default. With `async` omitted or `true`, they return a job id immediately and later post stdout, stderr, and exit status. Set `async: false` for awaited foreground behavior.
+- `sandbox_bash`, `ext_ro_bash`, `ext_rw_bash`, and `process_find` run in the background by default. With `async` omitted or `true`, they return a `runId` immediately and store live job state in the OMP extension. Use `sandbox_job_poll` with that `runId` to monitor stdout/stderr deltas and collect final exit status before ending the turn. Set `async: false` for awaited foreground behavior.
 - Generated sandbox tools expand unquoted, single-quoted, and double-quoted `skill://<name>` and `skill://<name>/<relative-path>` references in the command argument to files under the installed OMP agent `skills/` directory. Unknown skills, query/hash suffixes, and traversal paths are rejected.
 - Generated `process_find` invokes `stateful sandbox process find` directly. By default it includes safe metadata fields such as `pid`, `ppid`, `pgid`, `user`, `uid`, `stat`, `start`, `etime`, `time`, `pcpu`, `pmem`, `rss`, `vsz`, `nice`, `pri`, `tty`, and `comm`; command, argv, and env are not exposed by default.
 - The OMP extension subscribes to Stateful SSE notifications after `session-start`. When a queued reservation is claimable, it injects a next-turn message with the `wait_id`, action/path, and purpose. Agents must still reread the target and call `state_reservation_claim` or rely on an authorized lazy-claim write boundary.

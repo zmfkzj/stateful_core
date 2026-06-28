@@ -142,12 +142,12 @@ asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the p
 The grant prompt shows purpose, declared write/socket/signal scope, network
 mode, examples, max uses, and expiry instead of raw command text, and matching
 calls can reuse it until the limit is reached. When auto-approval is enabled, no prompt is shown.
-All three generated `*_bash` tools run sandbox commands in the background by
-default. With `async` omitted or `true`, they return a job id immediately,
-stream stdout/output via OMP messages using `pi.sendMessage`, and send final
-stdout, stderr, and exit status as a follow-up message. Set `async: false` to
-keep the old awaited foreground behavior, where final stdout/stderr/status are
-returned in tool details. `sandbox_bash` rejects
+All generated OMP sandbox command tools run in the background by default. With
+`async` omitted or `true`, they return a `runId` immediately and store live
+stdout/stderr/status in the OMP extension. Agents use `sandbox_job_poll` to
+monitor output deltas and collect final exit status before final handoff. Set
+`async: false` for awaited foreground behavior with final stdout/stderr/status
+in the tool result. `sandbox_bash` rejects
 `--fs external` with guidance to use `ext_ro_bash` or `ext_rw_bash`. Raw Bash and
 Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
@@ -202,10 +202,11 @@ execution for read-only, write-targets, build, git, and github-pr profiles;
 `process_find` owns process inspection; `ext_ro_bash` owns read-only external
 commands without OMP UI confirmation.
 `ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
-Each generated tool runs in the background by default: when `async` is omitted or
-`true`, it returns a job id immediately, streams stdout/output via
-`pi.sendMessage`, and sends final stdout/stderr/exit status as a follow-up
-message. `async: false` keeps the old awaited foreground behavior with final
+Each generated OMP sandbox command tool runs in the background by default: when
+`async` is omitted or `true`, it returns a `runId` immediately and stores live
+stdout/stderr/status in the OMP extension. Agents use `sandbox_job_poll` to
+monitor output deltas and collect final exit status before final handoff.
+`async: false` keeps the old awaited foreground behavior with final
 stdout/stderr/exit status in returned tool details.
 Other stateful allows translate to OMP allow. Stateful deny or unavailable server
 translates to a hard block, even when OMP yolo metadata is present.
@@ -372,11 +373,11 @@ classification, so `functions.bash` is Bash,
   `sandbox_bash` for read-only, write-targets, build, git, and github-pr
   profiles and `ext_ro_bash` for read-only `--fs external` commands without OMP
   UI confirmation. `ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
-  These tools run sandbox commands in the background by default, return a job id immediately when `async` is omitted or `true`, stream stdout/output
-  via OMP messages using `pi.sendMessage`, and send final stdout/stderr/exit
-  status as a follow-up message. `async: false` keeps the old awaited
-  foreground behavior and returns final stdout/stderr/exit status in tool
-  details.
+  All generated OMP sandbox command tools run in the background by default. With `async` omitted or `true`, they return a `runId` immediately and store live
+  stdout/stderr/status in the OMP extension. Agents use `sandbox_job_poll` to
+  monitor output deltas and collect final exit status before final handoff.
+  `async: false` keeps the old awaited foreground behavior and returns final
+  stdout/stderr/exit status in tool details.
   Ordinary read work should use native read/search/diff tools when available.
   Read-only command-shaped inspection that genuinely needs a shell uses
   `--fs read-only --network disabled`; OMP process inspection uses

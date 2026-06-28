@@ -159,10 +159,12 @@ prompt; sandbox scope validation, hooks, reservation/claim checks, and grant
 limits still apply. When prompted, the prompt shows purpose, declared scope,
 examples, max uses, and expiry rather than raw command text, and matching calls
 reuse the grant until it expires or reaches its use limit.
-Generated OMP `*_bash` tools and `process_find` run in the background by
-default: with `async` omitted or `true`, the tool returns a job id immediately,
-streams stdout through OMP messages, and sends final stdout/stderr/status as a
-follow-up message. Set `async: false` for awaited foreground behavior. They
+Generated OMP sandbox command tools run in the background by default: with
+`async` omitted or `true`, the tool returns a `runId` immediately and stores
+live stdout/stderr/status in the OMP extension. Agents use `sandbox_job_poll` to
+monitor output deltas and collect final exit status before final handoff. Set
+`async: false` for awaited foreground behavior with final stdout/stderr/status
+in the tool result. They
 cancel on OMP abort/ESC. The
 generated extension also subscribes to Stateful SSE reservation
 notifications and injects a next-turn OMP message when a queued `wait_id`
