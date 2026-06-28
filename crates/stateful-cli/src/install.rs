@@ -2427,7 +2427,7 @@ function killSandboxChild(child, signalName) {{
   }} catch (_) {{}}
 }}
 
-function runSandboxToolProcess(params, args, ctx, label, signal, onStdout) {{
+function runSandboxToolProcess(params, args, ctx, label, signal, onStdout, onStderr) {{
   return new Promise((resolve) => {{
     let stdout = "";
     let stderr = "";
@@ -2456,8 +2456,13 @@ function runSandboxToolProcess(params, args, ctx, label, signal, onStdout) {{
         timeoutTimer = undefined;
       }}
     }};
-    const emitOutputChunk = (chunk) => {{
+    const emitOutputChunk = (chunk, stream) => {{
       if (!chunk) return;
+      if (stream === "stderr") {{
+        stderr = truncateSandboxToolText(stderr + chunk, label);
+        onStderr(chunk);
+        return;
+      }}
       streamedOutput = true;
       streamedStdout = truncateSandboxToolText(streamedStdout + chunk, label);
       onStdout(chunk);
@@ -2467,7 +2472,8 @@ function runSandboxToolProcess(params, args, ctx, label, signal, onStdout) {{
       try {{
         const event = JSON.parse(line);
         if (event?.event === "sandbox_output" && typeof event.chunk === "string") {{
-          emitOutputChunk(event.chunk);
+          const stream = event.stream === "stderr" ? "stderr" : "stdout";
+          emitOutputChunk(event.chunk, stream);
           return;
         }}
       }} catch (_) {{}}
@@ -2553,6 +2559,7 @@ function runSandboxToolProcess(params, args, ctx, label, signal, onStdout) {{
     child.stdout?.on("data", handleStatefulStdout);
     child.stderr?.on("data", (chunk) => {{
       stderr = truncateSandboxToolText(stderr + chunk, label);
+      onStderr(chunk);
     }});
     child.on("error", (error) => {{
       processError = error instanceof Error ? error.message : String(error);
@@ -2565,7 +2572,7 @@ function runSandboxToolProcess(params, args, ctx, label, signal, onStdout) {{
   }});
 }}
 
-function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout) {{
+function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout, onStderr) {{
   return new Promise((resolve) => {{
     let stdout = "";
     let stderr = "";
@@ -2634,6 +2641,7 @@ function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout) {{
     }});
     child.stderr?.on("data", (chunk) => {{
       stderr = truncateSandboxToolText(stderr + chunk, label);
+      onStderr(chunk);
     }});
     child.on("error", (error) => {{
       processError = error instanceof Error ? error.message : String(error);
@@ -2654,10 +2662,10 @@ async function runSandboxAwaitedTool(params, args, ctx, label, signal, onUpdate)
   const runner = label === "sandbox_bash" && ompSandboxDisabled()
     ? runSandboxDisabledToolProcess(params, ctx, label, signal, (chunk) => {{
         stdoutStreamer.push(chunk);
-      }})
+      }}, () => {{}})
     : runSandboxToolProcess(params, args, ctx, label, signal, (chunk) => {{
         stdoutStreamer.push(chunk);
-      }});
+      }}, () => {{}});
   const result = await runner;
   await stdoutStreamer.drain();
   return result;
@@ -2725,13 +2733,21 @@ function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, si
       stream: "stdout",
     }});
   }}, runId, commandLabel);
+  const appendStderr = (chunk) => {{
+    job.stderr += chunk;
+    job.stderr = truncateSandboxToolText(job.stderr, label);
+    deliverSandboxBackgroundMessage(pi, runId, label, chunk, {{
+      command: commandText,
+      stream: "stderr",
+    }});
+  }};
   const runner = label === "sandbox_bash" && ompSandboxDisabled()
     ? runSandboxDisabledToolProcess(params, ctx, label, undefined, (chunk) => {{
         stdoutStreamer.push(chunk);
-      }})
+      }}, appendStderr)
     : runSandboxToolProcess(params, args, ctx, label, undefined, (chunk) => {{
         stdoutStreamer.push(chunk);
-      }});
+      }}, appendStderr);
   runner.then(async (result) => {{
     await stdoutStreamer.drain();
     const details = result?.details || {{}};

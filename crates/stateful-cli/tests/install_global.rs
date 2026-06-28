@@ -279,12 +279,12 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     );
     assert!(
         extension
-            .contains("function runSandboxToolProcess(params, args, ctx, label, signal, onStdout)")
+            .contains("function runSandboxToolProcess(params, args, ctx, label, signal, onStdout, onStderr)")
     );
     assert!(extension.contains("process.env.STATEFUL_OMP_SANDBOX === \"off\""));
     assert!(
         extension.contains(
-            "function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout)"
+            "function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout, onStderr)"
         )
     );
     assert!(!extension.contains("function runSandboxTool(params"));
@@ -348,6 +348,9 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("activeSandboxJobs.set(runId, job)"));
     assert!(extension.contains("job.stdout += chunk"));
     assert!(extension.contains("job.stderr = details.stderr || \"\""));
+    assert!(extension.contains("job.stderr += chunk"));
+    assert!(extension.contains("job.stderr = truncateSandboxToolText(job.stderr, label)"));
+    assert!(extension.contains("stream: \"stderr\""));
     assert!(extension.contains("result?.isError || details.exitCode !== 0 || details.error"));
     assert!(extension.contains("job.finishedAt = new Date().toISOString()"));
     assert!(extension.contains("function startReservationStream(pi, stream)"));
