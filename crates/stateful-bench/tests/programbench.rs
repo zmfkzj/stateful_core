@@ -6,7 +6,7 @@ use stateful_bench::{
     build_programbench_agent_command, build_programbench_condition_report,
     compare_programbench_reports, default_programbench_conditions, parse_programbench_condition,
 };
-use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, process::Command as ProcessCommand, time::{SystemTime, UNIX_EPOCH}};
 
 #[test]
 fn programbench_metadata_schema_uses_required_instance_fields() {
@@ -277,6 +277,42 @@ fn programbench_omp_agent_command_marks_subagent_condition() {
 }
 
 #[test]
+fn programbench_codex_adapter_parses_token_usage_events() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+usage = mod.codex_token_usage_from_output('{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":12,"reasoning_output_tokens":5}}\n')
+print(json.dumps(usage))
+"#,
+    );
+    let usage: serde_json::Value =
+        serde_json::from_str(&output).expect("codex usage should be JSON");
+
+    assert_eq!(usage["input_tokens"], 100);
+    assert_eq!(usage["cached_input_tokens"], 40);
+    assert_eq!(usage["output_tokens"], 12);
+    assert_eq!(usage["input_plus_output_tokens"], 112);
+    assert_eq!(usage["uncached_input_plus_output_tokens"], 72);
+}
+
+#[test]
+fn programbench_omp_adapter_parses_token_usage_events() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+usage = mod.omp_token_usage_from_output('{"usage":{"input_tokens":50,"cached_input_tokens":20,"output_tokens":5,"reasoning_output_tokens":2}}\n')
+print(json.dumps(usage))
+"#,
+    );
+    let usage: serde_json::Value =
+        serde_json::from_str(&output).expect("omp usage should be JSON");
+
+    assert_eq!(usage["input_tokens"], 50);
+    assert_eq!(usage["input_plus_output_tokens"], 55);
+    assert_eq!(usage["uncached_input_plus_output_tokens"], 35);
+}
+
+#[test]
 fn programbench_report_aggregates_official_score_and_efficiency() {
     let root = temp_root("stateful-bench-programbench-report");
     let condition_dir = root.join("conditions/stateful-on_subagent-on");
@@ -484,6 +520,46 @@ fn condition_report(
         score_per_hour: Some(score * 3_600_000.0 / running_time_ms as f64),
         score_source: "score-json".to_string(),
     }
+}
+
+fn programbench_codex_agent_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/programbench_codex_agent.py")
+}
+
+fn programbench_omp_agent_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/programbench_omp_agent.py")
+}
+
+fn run_python_adapter(script_path: &Path, body: &str) -> String {
+    let python = format!(
+        r#"import importlib.util
+import pathlib
+import sys
+
+script_path = pathlib.Path({script_path:?})
+spec = importlib.util.spec_from_file_location("programbench_agent_under_test", script_path)
+mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(mod)
+{body}
+"#,
+        script_path = script_path,
+        body = body,
+    );
+    let output = ProcessCommand::new("python3")
+        .arg("-c")
+        .arg(python)
+        .output()
+        .expect("python3 should run adapter import test");
+
+    assert!(
+        output.status.success(),
+        "python adapter import test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8(output.stdout).expect("python stdout should be UTF-8")
 }
 
 fn temp_root(prefix: &str) -> PathBuf {
