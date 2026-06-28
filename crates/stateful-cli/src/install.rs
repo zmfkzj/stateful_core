@@ -138,6 +138,9 @@ pub fn plan_codex_install(options: &CodexInstallOptions) -> anyhow::Result<Insta
     plan.files.push(options.codex_config_path.clone());
     plan.files
         .push(global_command_policy_skill_path(&options.codex_config_path));
+    plan.files.extend(global_command_policy_support_file_paths(
+        &options.codex_config_path,
+    ));
     plan.files
         .push(global_dispatching_parallel_agents_skill_path(
             &options.codex_config_path,
@@ -161,6 +164,7 @@ pub fn apply_codex_install(options: CodexInstallOptions) -> anyhow::Result<Insta
     })?;
     write_codex_config_update(&options.codex_config_path, codex_update)?;
     write_global_command_policy_skill(&options.codex_config_path)?;
+    write_global_command_policy_support_files(&options.codex_config_path)?;
     write_global_dispatching_parallel_agents_skill(&options.codex_config_path)?;
     write_global_external_sandbox_rules(&options.codex_config_path, &options.binary_path)?;
     plan.summary = format!(
@@ -199,6 +203,8 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
     plan.files.push(extension_path);
     plan.files.push(mcp_path);
     plan.files.push(command_policy_skill_path);
+    plan.files
+        .extend(omp_command_policy_support_file_paths(&agent_dir));
     plan.files.push(dispatching_skill_path);
     plan.files.push(rule_path);
     Ok(plan)
@@ -239,6 +245,7 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
     write_omp_extension(&extension_path, &options.binary_path)?;
     write_omp_mcp_config(&mcp_path, &options.binary_path)?;
     write_omp_command_policy_skill(&agent_dir)?;
+    write_omp_command_policy_support_files(&agent_dir)?;
     write_omp_dispatching_parallel_agents_skill(&agent_dir)?;
     write_omp_required_rule(&agent_dir)?;
     plan.summary = format!(
@@ -364,6 +371,20 @@ fn global_command_policy_skill_path(codex_config_path: &Path) -> PathBuf {
         .join("SKILL.md")
 }
 
+fn global_command_policy_skill_dir(codex_config_path: &Path) -> PathBuf {
+    containing_dir(codex_config_path)
+        .join("skills")
+        .join("stateful-command-policy")
+}
+
+fn global_command_policy_support_file_paths(codex_config_path: &Path) -> Vec<PathBuf> {
+    command_policy_support_file_paths(&global_command_policy_skill_dir(codex_config_path))
+}
+
+fn write_global_command_policy_support_files(codex_config_path: &Path) -> anyhow::Result<()> {
+    write_command_policy_support_files(&global_command_policy_skill_dir(codex_config_path))
+}
+
 fn write_omp_command_policy_skill(agent_dir: &Path) -> anyhow::Result<()> {
     let path = omp_command_policy_skill_path(agent_dir);
     let parent = containing_dir(&path);
@@ -378,6 +399,40 @@ fn omp_command_policy_skill_path(agent_dir: &Path) -> PathBuf {
         .join("skills")
         .join("stateful-command-policy")
         .join("SKILL.md")
+}
+
+fn omp_command_policy_support_file_paths(agent_dir: &Path) -> Vec<PathBuf> {
+    command_policy_support_file_paths(&omp_command_policy_skill_dir(agent_dir))
+}
+
+fn write_omp_command_policy_support_files(agent_dir: &Path) -> anyhow::Result<()> {
+    write_command_policy_support_files(&omp_command_policy_skill_dir(agent_dir))
+}
+
+fn omp_command_policy_skill_dir(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("skills").join("stateful-command-policy")
+}
+
+fn command_policy_support_file_paths(skill_dir: &Path) -> Vec<PathBuf> {
+    stateful_command_policy_support_files()
+        .iter()
+        .map(|(name, _)| skill_dir.join(name))
+        .collect()
+}
+
+fn write_command_policy_support_files(skill_dir: &Path) -> anyhow::Result<()> {
+    fs::create_dir_all(skill_dir).with_context(|| {
+        format!(
+            "failed to create Stateful command policy skill directory {}",
+            skill_dir.display()
+        )
+    })?;
+    for (name, contents) in stateful_command_policy_support_files() {
+        let path = skill_dir.join(name);
+        fs::write(&path, contents)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn write_global_dispatching_parallel_agents_skill(codex_config_path: &Path) -> anyhow::Result<()> {
@@ -2950,6 +3005,27 @@ fn stateful_command_policy_skill() -> &'static str {
     include_str!("../assets/stateful-command-policy/SKILL.md")
 }
 
+fn stateful_command_policy_support_files() -> &'static [(&'static str, &'static str)] {
+    &[
+        (
+            "omp-tools.md",
+            include_str!("../assets/stateful-command-policy/omp-tools.md"),
+        ),
+        (
+            "sandbox-tools.md",
+            include_str!("../assets/stateful-command-policy/sandbox-tools.md"),
+        ),
+        (
+            "denial-recovery.md",
+            include_str!("../assets/stateful-command-policy/denial-recovery.md"),
+        ),
+        (
+            "subagent-write-recovery.md",
+            include_str!("../assets/stateful-command-policy/subagent-write-recovery.md"),
+        ),
+    ]
+}
+
 fn dispatching_parallel_agents_skill() -> &'static str {
     include_str!("../assets/dispatching-parallel-agents/SKILL.md")
 }
@@ -2997,6 +3073,42 @@ mod tests {
             omp_required_rule_path(Path::new("home/.omp/profiles/stateful/agent")),
             PathBuf::from("home/.omp/profiles/stateful/agent/rules/stateful-required.md")
         );
+    }
+
+    #[test]
+    fn command_policy_support_files_are_installed_with_skill() {
+        assert_eq!(
+            global_command_policy_support_file_paths(Path::new("home/.codex/config.toml")),
+            vec![
+                PathBuf::from("home/.codex/skills/stateful-command-policy/omp-tools.md"),
+                PathBuf::from("home/.codex/skills/stateful-command-policy/sandbox-tools.md"),
+                PathBuf::from("home/.codex/skills/stateful-command-policy/denial-recovery.md"),
+                PathBuf::from(
+                    "home/.codex/skills/stateful-command-policy/subagent-write-recovery.md"
+                ),
+            ]
+        );
+        assert_eq!(
+            omp_command_policy_support_file_paths(Path::new("home/.omp/profiles/stateful/agent")),
+            vec![
+                PathBuf::from(
+                    "home/.omp/profiles/stateful/agent/skills/stateful-command-policy/omp-tools.md"
+                ),
+                PathBuf::from(
+                    "home/.omp/profiles/stateful/agent/skills/stateful-command-policy/sandbox-tools.md"
+                ),
+                PathBuf::from(
+                    "home/.omp/profiles/stateful/agent/skills/stateful-command-policy/denial-recovery.md"
+                ),
+                PathBuf::from(
+                    "home/.omp/profiles/stateful/agent/skills/stateful-command-policy/subagent-write-recovery.md"
+                ),
+            ]
+        );
+
+        let support_files = stateful_command_policy_support_files();
+        assert_eq!(support_files.len(), 4);
+        assert!(stateful_command_policy_skill().contains("Support Files"));
     }
 
     #[test]

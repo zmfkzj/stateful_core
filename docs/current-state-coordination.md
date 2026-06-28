@@ -252,7 +252,8 @@ profile.
 
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --agent codex --yes` configures global Codex hooks and MCP,
-and writes `skills/stateful-command-policy/SKILL.md` and
+and writes `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
+`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`) and
 `skills/dispatching-parallel-agents/SKILL.md`.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
@@ -265,12 +266,12 @@ Stateful hooks. Without `--update`, existing scalar values are preserved and
 only missing keys are inserted; with `--update`, existing target scalar values
 are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
 tools are denied at the host approval and hook levels. The installer also writes
-`rules/stateful-required.md`, `skills/stateful-command-policy/SKILL.md`, and
-`skills/dispatching-parallel-agents/SKILL.md` under that isolated agent
-directory: the always-apply rule tells the model when Stateful policy applies,
-the `stateful-command-policy` manual keeps the detailed procedure, and hooks
-remain the
-enforcement boundary. The
+`rules/stateful-required.md`, `skills/stateful-command-policy/` (`SKILL.md`,
+`omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
+`subagent-write-recovery.md`), and `skills/dispatching-parallel-agents/SKILL.md`
+under that isolated agent directory: the always-apply rule tells the model when
+Stateful policy applies, the `stateful-command-policy` manual keeps the detailed
+procedure, and hooks remain the enforcement boundary. The
 generated extension registers `sandbox_bash` for read-only, write-targets,
 build, git, and github-pr sandbox runs, including common sandbox flags,
 registers `process_find` for process inspection, and registers `ext_ro_bash` for

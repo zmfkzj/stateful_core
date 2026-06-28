@@ -26,8 +26,9 @@ installer prints a dry-run plan.
 stateful install --agent codex --yes
 ```
 
-Installs global stateful files, writes global
-`skills/stateful-command-policy/SKILL.md` and
+Installs global stateful files, writes global `skills/stateful-command-policy/`
+(`SKILL.md`, `omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
+`subagent-write-recovery.md`) and
 `skills/dispatching-parallel-agents/SKILL.md`, writes Codex external sandbox
 prompt rules under the Codex config directory's `rules/stateful.rules`, and
 merges the stateful block into Codex
@@ -77,7 +78,8 @@ preserved and only missing keys are inserted. With `--update`, existing target
 scalar values are updated.
 
 The installer also writes `rules/stateful-required.md`,
-`skills/stateful-command-policy/SKILL.md`, and
+`skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
+`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`), and
 `skills/dispatching-parallel-agents/SKILL.md` under that isolated agent
 directory. The always-apply rule owns activation; the
 `stateful-command-policy` manual owns the detailed Stateful procedure.
