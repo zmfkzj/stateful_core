@@ -1032,20 +1032,26 @@ fn render_context_prompt_text(
     session_id: &str,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<String> {
-    Ok(render_context_response(runtime, session_id, identity)?.prompt_text)
+    Ok(render_context_response(runtime, session_id, identity, None)?.prompt_text)
 }
 
-fn render_context_response(
+fn context_render_request_body(
     runtime: &ServerRuntime,
     session_id: &str,
     identity: Option<&RepoIdentity>,
-) -> anyhow::Result<ContextRenderResponse> {
+    resource: Option<&str>,
+) -> serde_json::Value {
     let workspace_id = effective_workspace_id(runtime, identity);
     let mut body = json!({
         "session_id": session_id,
         "workspace_id": workspace_id,
         "mode": "brief"
     });
+    if let Some(resource) = resource.map(str::trim).filter(|resource| !resource.is_empty())
+        && let Some(object) = body.as_object_mut()
+    {
+        object.insert("resource".to_string(), json!(resource));
+    }
     if let Some(identity) = identity
         && let Some(object) = body.as_object_mut()
     {
@@ -1054,6 +1060,16 @@ fn render_context_response(
         object.insert("root".to_string(), json!(&identity.root));
         object.insert("branch".to_string(), json!(&identity.branch));
     }
+    body
+}
+
+fn render_context_response(
+    runtime: &ServerRuntime,
+    session_id: &str,
+    identity: Option<&RepoIdentity>,
+    resource: Option<&str>,
+) -> anyhow::Result<ContextRenderResponse> {
+    let body = context_render_request_body(runtime, session_id, identity, resource);
     let response = post_json(runtime, "/v1/context/render", &body)?;
 
     if !(200..300).contains(&response.status_code) {
@@ -1285,6 +1301,7 @@ fn handle_pre_tool_use_with_runtime(
                 &input,
                 runtime,
                 identity.as_ref(),
+                None,
             ))
         }
         tool_name if tool_name.eq_ignore_ascii_case("apply_patch") => {
@@ -2057,9 +2074,14 @@ fn authorize_apply_patch(
             reason: "apply_patch target is outside the enabled repo".to_string(),
         });
     };
+    let context_resource = context_resource_for_targets(&targets).map(str::to_owned);
     let outcome = authorize_targets(input, runtime, repo_root, targets, identity)?;
     Ok(with_file_tool_live_context(
-        outcome, input, runtime, identity,
+        outcome,
+        input,
+        runtime,
+        identity,
+        context_resource.as_deref(),
     ))
 }
 
@@ -2068,12 +2090,13 @@ fn with_file_tool_live_context(
     input: &PreToolUseInput,
     runtime: Option<&ServerRuntime>,
     identity: Option<&RepoIdentity>,
+    resource: Option<&str>,
 ) -> HookOutcome {
     let Some(runtime) = runtime else {
         return outcome;
     };
     let Ok(context_response) =
-        render_context_response(runtime, input.stateful_session_id(), identity)
+        render_context_response(runtime, input.stateful_session_id(), identity, resource)
     else {
         return outcome;
     };
@@ -2163,8 +2186,20 @@ fn authorize_file_write_tool(
         identity,
     )?;
     Ok(with_file_tool_live_context(
-        outcome, input, runtime, identity,
+        outcome,
+        input,
+        runtime,
+        identity,
+        Some(target.as_str()),
     ))
+}
+
+fn context_resource_for_targets(targets: &[PatchTarget]) -> Option<&str> {
+    if targets.len() == 1 && targets[0].new_path.is_none() {
+        Some(targets[0].path.as_str())
+    } else {
+        None
+    }
 }
 
 fn normalize_targets(
@@ -2992,6 +3027,38 @@ mod tests {
             guidance.contains(&current_exe),
             "denial guidance should show the trusted executable path: {guidance}"
         );
+    }
+
+    #[test]
+    fn context_render_request_body_includes_resource_when_target_is_known() {
+        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret", "local", 7);
+        let identity = RepoIdentity {
+            repo_id: "repo-a".to_string(),
+            worktree_id: "worktree-a".to_string(),
+            root: "/repo".to_string(),
+            branch: "main".to_string(),
+        };
+
+        let body = context_render_request_body(
+            &runtime,
+            "session-a",
+            Some(&identity),
+            Some("src/lib.rs"),
+        );
+
+        assert_eq!(body["session_id"], "session-a");
+        assert_eq!(body["workspace_id"], "workspace-worktree-a");
+        assert_eq!(body["mode"], "brief");
+        assert_eq!(body["resource"], "src/lib.rs");
+        assert_eq!(body["repo_id"], "repo-a");
+        assert_eq!(body["worktree_id"], "worktree-a");
+    }
+
+    #[test]
+    fn context_resource_for_targets_stays_broad_for_moves() {
+        let targets = vec![PatchTarget::move_file("src/old.rs", "src/new.rs")];
+
+        assert_eq!(context_resource_for_targets(&targets), None);
     }
 
     #[test]

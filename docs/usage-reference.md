@@ -101,9 +101,11 @@ Generated OMP tools:
   scope or receives a claimable reservation, it re-authorizes the original edit,
   checks the file has not changed since queue time, then applies the stored patch.
 
-Generated OMP bash tools wait for sandbox commands to finish before returning,
-emit stdout through inline OMP tool updates, include final stdout/stderr/status
-before the agent can end the turn, and cancel on OMP abort/ESC.
+Generated OMP bash tools run sandbox commands in the background by default:
+omitted or `true` `async` returns a job id immediately, streams output through
+OMP messages, and posts final stdout/stderr/status later. Set `async: false` to
+wait for the final result in the initial tool response. OMP abort/ESC cancels
+the running sandbox command.
 
 Raw Bash and eval tool calls are denied by stateful hooks; use the generated
 OMP tools instead.

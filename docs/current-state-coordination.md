@@ -933,13 +933,14 @@ record and authorization path.
 Prompt context rendering:
 
 ```text
-state_context_render(workspace, session_id, resources?, mode)
+state_context_render(workspace, session_id, resource?, mode)
 mode: brief | detailed
 sections: Blocking, Required Next Action, Warnings, Nearby Activity, Stale/Expired
 ```
 
-`brief` is used for session start and user prompt context. `detailed` is used
-after denied actions or for focused resource checks. Rendering should be
+`brief` is used for session start, user prompt context, and known-target
+resource checks. `detailed` is used for manual deep inspection after denials or
+when brief output lacks enough evidence. Rendering should be
 actionable, not a raw event dump.
 
 The current server route renders store-backed live context from active reservations,

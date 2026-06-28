@@ -628,9 +628,10 @@ Raw event logs should not be dumped into prompts. The rendered view should help
 the agent decide what to avoid, wait for, or coordinate.
 
 `state_context_render` supports `brief` and `detailed` modes plus an optional
-resource filter. `brief` is for session start and prompt submit context.
-`detailed` is for denied actions or focused resource checks. Rendered output
-must include concrete next actions when a block or warning is present.
+singular `resource` filter. `brief` is for session start, prompt submit context,
+and known-target resource checks. `detailed` is for manual deep inspection after
+denials or when brief output lacks enough evidence.
+Rendered output must include concrete next actions when a block or warning is present.
 
 The current server route renders store-backed live context from active reservations,
 active claims, and queued or claimable (`reserved`) wait records. The response

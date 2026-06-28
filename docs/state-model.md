@@ -708,13 +708,14 @@ Expected materialized views:
 The current server exposes `/v1/context/render` and `state_context_render` as a
 store-backed live view over active reservations, active claims, and queued or
 claimable (`reserved`) wait records. Responses include current summary counts,
-structured `items`, and prompt-ready `prompt_text`; an empty live state produces an empty prompt.
+structured `items`, and prompt-ready `prompt_text`; an empty unfiltered live
+state produces an empty prompt.
 
 Prompt context packages should support:
 
 ```text
 mode: brief | detailed
-resources: optional file or directory filter
+resource: optional file or directory filter
 status: ok | error
 prompt_text
 sections:
