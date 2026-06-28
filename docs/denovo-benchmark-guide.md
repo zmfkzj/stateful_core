@@ -193,6 +193,16 @@ stateful-off/stateful-on subagent-on pair with that event sequence. Treat missin
 registration, no heartbeat, or missing finalization as lifecycle evidence
 failure, not as a model-quality result.
 
+Captured orchestration traces now keep the raw `orchestration-trace.json` for
+audit while condition and progress reports carry compact summary fields:
+`orchestration_event_types`, `orchestration_heartbeat_events`,
+`orchestration_heartbeat_windows`, `orchestration_heartbeat_max_gap_ms`,
+`orchestration_denial_events`, `orchestration_denial_paths`, and
+`orchestration_denial_messages`. Use those summary fields for paired run
+analysis; open the raw trace only when the summary points at a suspicious event
+type, path, or heartbeat gap.
+
+
 Lifecycle troubleshooting checklist:
 
 - `SessionRegistered` alone is insufficient. Require subsequent nested

@@ -443,6 +443,13 @@ adapter `results.jsonl` files. Matrix runs may rewrite or reset raw
 `results.jsonl` files while conditions advance, so raw row counts can be
 misleading until the run has settled.
 
+Progress output includes compact orchestration trace summaries when stateful
+trace capture is available. Prefer the summary counters for first-pass analysis:
+`events`, `heartbeat`, and `denial` in the rendered table, plus JSON fields such
+as `orchestration_event_types`, `orchestration_denial_paths`, and
+`orchestration_heartbeat_max_gap_ms` with `--format json`. The raw
+`orchestration-trace.json` remains the audit artifact for detailed event order.
+
 If `results.jsonl` shows `finish_reason: "benchmark-contamination"`, inspect
 `codex-command.json.benchmark_contamination`; `kind: "upstream-worktree"` means
 an `upstream/` checkout remained in the final workspace, and

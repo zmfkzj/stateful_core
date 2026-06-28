@@ -2656,7 +2656,7 @@ fn denovo_progress_report_aggregates_in_progress_shards_from_results_jsonl() {
     fs::write(
         shard_a_off.join("results.jsonl"),
         [
-            r#"{"instance_id":"a-1","success":true,"score":1.0,"finish_reason":"stop","subagent_used":true,"orchestration_trace":{"trace_captured":true,"reservation_events":2,"claim_events":1,"conflict_events":0}}"#,
+            r#"{"instance_id":"a-1","success":true,"score":1.0,"finish_reason":"stop","subagent_used":true,"orchestration_trace":{"trace_captured":true,"reservation_events":2,"claim_events":1,"conflict_events":0,"event_count":6,"event_types":{"SessionHeartbeat":4,"AuthorizationDenied":1,"ReservationDeclared":1},"heartbeat_events":4,"heartbeat_windows":2,"heartbeat_max_gap_ms":40000,"denial_events":1,"denial_paths":{"src/pkg.py":1},"denial_messages":{"Target existence changed since the supplied base observation.":1}}}"#,
             r#"{"instance_id":"a-2","success":false,"score":0.5,"finish_reason":"setup-error","subagent_used":false,"orchestration_trace":{"trace_captured":false,"reservation_events":0,"claim_events":0,"conflict_events":0}}"#,
         ]
         .join("\n")
@@ -2724,6 +2724,18 @@ print(json.dumps(summary, sort_keys=True))
     assert_eq!(off["orchestration_reservation_events"], 2);
     assert_eq!(off["orchestration_claim_events"], 1);
     assert_eq!(off["orchestration_conflict_events"], 0);
+    assert_eq!(off["orchestration_event_count"], 6);
+    assert_eq!(off["orchestration_event_types"]["SessionHeartbeat"], 4);
+    assert_eq!(off["orchestration_event_types"]["AuthorizationDenied"], 1);
+    assert_eq!(off["orchestration_heartbeat_events"], 4);
+    assert_eq!(off["orchestration_heartbeat_windows"], 2);
+    assert_eq!(off["orchestration_heartbeat_max_gap_ms"], 40000);
+    assert_eq!(off["orchestration_denial_events"], 1);
+    assert_eq!(off["orchestration_denial_paths"]["src/pkg.py"], 1);
+    assert_eq!(
+        off["orchestration_denial_messages"]["Target existence changed since the supplied base observation."],
+        1
+    );
     assert_eq!(off["progress_rate"], 0.75);
     assert!(
         (off["average_score"]
@@ -2763,7 +2775,7 @@ fn denovo_progress_report_prefers_cumulative_condition_report() {
     fs::create_dir_all(&result_dir).expect("fixture result dir should be created");
     fs::write(
         result_dir.join("results.jsonl"),
-        r#"{"instance_id":"transient-current","success":false,"score":0.0,"finish_reason":"setup-error"}"#,
+        r#"{"instance_id":"transient-current","success":false,"score":0.0,"finish_reason":"setup-error","orchestration_trace":{"trace_captured":true,"event_count":6,"event_types":{"SessionHeartbeat":4,"AuthorizationDenied":1,"ReservationDeclared":1},"heartbeat_events":4,"heartbeat_windows":2,"heartbeat_max_gap_ms":46000,"denial_events":1,"denial_paths":{"src/pkg.py":1},"denial_messages":{"Target existence changed since the supplied base observation.":1}}}"#,
     )
     .expect("fixture results should be written");
     fs::write(
@@ -2816,6 +2828,16 @@ print(json.dumps(summary, sort_keys=True))
     assert_eq!(condition["orchestration_reservation_events"], 5);
     assert_eq!(condition["orchestration_claim_events"], 4);
     assert_eq!(condition["orchestration_conflict_events"], 1);
+    assert_eq!(condition["orchestration_event_count"], 6);
+    assert_eq!(
+        condition["orchestration_event_types"]["SessionHeartbeat"],
+        4
+    );
+    assert_eq!(condition["orchestration_heartbeat_events"], 4);
+    assert_eq!(condition["orchestration_heartbeat_windows"], 2);
+    assert_eq!(condition["orchestration_heartbeat_max_gap_ms"], 46000);
+    assert_eq!(condition["orchestration_denial_events"], 1);
+    assert_eq!(condition["orchestration_denial_paths"]["src/pkg.py"], 1);
 
     let run = output["runs"]
         .as_array()
@@ -4332,6 +4354,53 @@ print(json.dumps(module.summarize_orchestration_events(
     assert_eq!(output["event_count"], 3);
     assert_eq!(output["reservation_events"], 1);
     assert_eq!(output["claim_events"], 1);
+    assert_eq!(output["conflict_events"], 1);
+}
+
+#[test]
+fn denovo_codex_agent_summarizes_heartbeat_windows_and_denial_hot_paths() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_trace_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+events = [
+    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:16:39Z", "session_id": "omp-session", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
+    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:16:44Z", "session_id": "omp-session", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
+    {{"event_type": "AuthorizationDenied", "timestamp": "2026-06-28T14:16:45Z", "session_id": "omp-session", "workspace_id": "workspace-a", "payload": {{"path": "src/pkg.py", "message": "Target existence changed since the supplied base observation."}}}},
+    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:17:30Z", "session_id": "omp-session", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
+    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:17:35Z", "session_id": "omp-session", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
+    {{"event_type": "ReservationDeclared", "timestamp": "2026-06-28T14:17:31Z", "session_id": "omp-session", "workspace_id": "workspace-a"}},
+    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:17:35Z", "session_id": "omp-session", "workspace_id": "workspace-other"}},
+]
+print(json.dumps(module.summarize_orchestration_events(
+    events,
+    session_id="denovo-instance",
+    workspace_id="workspace-a",
+), sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["event_count"], 6);
+    assert_eq!(output["event_types"]["SessionHeartbeat"], 4);
+    assert_eq!(output["heartbeat_events"], 4);
+    assert_eq!(output["heartbeat_windows"], 2);
+    assert_eq!(output["heartbeat_max_gap_ms"], 46000);
+    assert_eq!(output["denial_events"], 1);
+    assert_eq!(output["denial_paths"]["src/pkg.py"], 1);
+    assert_eq!(
+        output["denial_messages"]["Target existence changed since the supplied base observation."],
+        1
+    );
+    assert_eq!(output["reservation_events"], 1);
     assert_eq!(output["conflict_events"], 1);
 }
 

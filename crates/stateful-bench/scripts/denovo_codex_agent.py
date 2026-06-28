@@ -22,6 +22,8 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from collections import Counter
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -2044,6 +2046,68 @@ def stateful_http_json(
         return json.loads(response.read().decode("utf-8"))
 
 
+def event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+def event_field(event: dict[str, Any], key: str) -> Any:
+    payload = event_payload(event)
+    return payload.get(key, event.get(key))
+
+
+def parse_event_time(event: dict[str, Any]) -> datetime | None:
+    value = event.get("timestamp") or event.get("created_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def top_counts(counter: Counter[str], limit: int) -> dict[str, int]:
+    return dict(sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:limit])
+
+
+def heartbeat_key(event: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        event.get("session_id"),
+        event.get("workspace_id"),
+        event.get("repo_id"),
+        event.get("worktree_id"),
+    )
+
+
+def heartbeat_summary(events: list[dict[str, Any]]) -> dict[str, int | None]:
+    windows = 0
+    count = 0
+    max_gap_ms: int | None = None
+    previous_key: tuple[Any, ...] | None = None
+    previous_time: datetime | None = None
+    in_window = False
+    for event in events:
+        if event.get("event_type") != "SessionHeartbeat":
+            in_window = False
+            continue
+        count += 1
+        current_key = heartbeat_key(event)
+        current_time = parse_event_time(event)
+        if not in_window or current_key != previous_key:
+            windows += 1
+        if current_key == previous_key and current_time is not None and previous_time is not None:
+            gap_ms = int((current_time - previous_time).total_seconds() * 1000)
+            max_gap_ms = gap_ms if max_gap_ms is None else max(max_gap_ms, gap_ms)
+        in_window = True
+        previous_key = current_key
+        previous_time = current_time
+    return {
+        "heartbeat_events": count,
+        "heartbeat_windows": windows,
+        "heartbeat_max_gap_ms": max_gap_ms,
+    }
+
+
 def summarize_orchestration_events(
     events: list[dict[str, Any]],
     session_id: str | None,
@@ -2059,16 +2123,37 @@ def summarize_orchestration_events(
             for event in events
             if not session_id or event.get("session_id") == session_id
         ]
-    event_types = [str(event.get("event_type", "")) for event in matching]
+    event_types = Counter(str(event.get("event_type", "")) for event in matching)
+    denial_paths: Counter[str] = Counter()
+    denial_messages: Counter[str] = Counter()
+    for event in matching:
+        if event.get("event_type") != "AuthorizationDenied":
+            continue
+        path = event_field(event, "path") or event_field(event, "resource") or event_field(event, "requested_path")
+        message = event_field(event, "message") or event_field(event, "denial_reason")
+        if path:
+            denial_paths[str(path)] += 1
+        if message:
+            denial_messages[str(message)] += 1
+    heartbeat = heartbeat_summary(matching)
     return {
         "event_count": len(matching),
-        "reservation_events": sum(1 for event_type in event_types if event_type.startswith("Reservation")),
-        "claim_events": sum(1 for event_type in event_types if event_type.startswith("Claim")),
+        "event_types": dict(sorted(event_types.items())),
+        "reservation_events": sum(
+            count for event_type, count in event_types.items() if event_type.startswith("Reservation")
+        ),
+        "claim_events": sum(
+            count for event_type, count in event_types.items() if event_type.startswith("Claim")
+        ),
         "conflict_events": sum(
-            1
-            for event_type in event_types
+            count
+            for event_type, count in event_types.items()
             if event_type == "AuthorizationDenied" or "Conflict" in event_type
         ),
+        "denial_events": event_types.get("AuthorizationDenied", 0),
+        "denial_paths": top_counts(denial_paths, 10),
+        "denial_messages": top_counts(denial_messages, 5),
+        **heartbeat,
     }
 
 
@@ -2123,6 +2208,14 @@ def write_orchestration_trace(
         "reservation_events": trace.get("reservation_events", 0),
         "claim_events": trace.get("claim_events", 0),
         "conflict_events": trace.get("conflict_events", 0),
+        "event_count": trace.get("event_count", 0),
+        "event_types": trace.get("event_types", {}),
+        "heartbeat_events": trace.get("heartbeat_events", 0),
+        "heartbeat_windows": trace.get("heartbeat_windows", 0),
+        "heartbeat_max_gap_ms": trace.get("heartbeat_max_gap_ms"),
+        "denial_events": trace.get("denial_events", 0),
+        "denial_paths": trace.get("denial_paths", {}),
+        "denial_messages": trace.get("denial_messages", {}),
     }
 
 

@@ -121,7 +121,7 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
     };
     let results = vec![
         serde_json::from_str::<DeNovoOfficialResult>(
-            r#"{"instance_id":"a","success":true,"score":1.0,"subagent_used":true,"token_usage":{"turns":2,"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"reasoning_output_tokens":3},"eval_result":{"details":{"pass_rate":1.0}}}"#,
+            r#"{"instance_id":"a","success":true,"score":1.0,"subagent_used":true,"token_usage":{"turns":2,"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"reasoning_output_tokens":3},"eval_result":{"details":{"pass_rate":1.0}},"orchestration_trace":{"trace_captured":true,"reservation_events":2,"claim_events":1,"conflict_events":1,"event_count":6,"event_types":{"SessionHeartbeat":4,"AuthorizationDenied":1,"ReservationDeclared":1},"heartbeat_events":4,"heartbeat_windows":2,"heartbeat_max_gap_ms":40000,"denial_events":1,"denial_paths":{"src/pkg.py":1},"denial_messages":{"Target existence changed since the supplied base observation.":1}}}"#,
         )
         .expect("result a"),
         serde_json::from_str::<DeNovoOfficialResult>(
@@ -170,6 +170,22 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
     assert_eq!(report.token_uncached_input_plus_output_tokens, 105);
     assert_eq!(report.average_input_plus_output_tokens, Some(82.5));
     assert_eq!(report.average_uncached_input_plus_output_tokens, Some(52.5));
+    assert_eq!(report.orchestration_trace_observed, 1);
+    assert_eq!(report.orchestration_trace_captured, 1);
+    assert_eq!(report.orchestration_reservation_events, 2);
+    assert_eq!(report.orchestration_claim_events, 1);
+    assert_eq!(report.orchestration_conflict_events, 1);
+    assert_eq!(report.orchestration_event_count, 6);
+    assert_eq!(report.orchestration_event_types["SessionHeartbeat"], 4);
+    assert_eq!(report.orchestration_heartbeat_events, 4);
+    assert_eq!(report.orchestration_heartbeat_windows, 2);
+    assert_eq!(report.orchestration_heartbeat_max_gap_ms, Some(40000));
+    assert_eq!(report.orchestration_denial_events, 1);
+    assert_eq!(report.orchestration_denial_paths["src/pkg.py"], 1);
+    assert_eq!(
+        report.orchestration_denial_messages["Target existence changed since the supplied base observation."],
+        1
+    );
 }
 
 #[test]
