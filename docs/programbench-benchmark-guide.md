@@ -63,12 +63,18 @@ stateful-bench programbench eval \
   --docker-cpus 8
 ```
 
-Render one condition report:
+Write JSON reports for each compared condition:
 
 ```bash
 stateful-bench programbench report \
+  --condition-dir .stateful_bench/programbench/runs/pb-dev/conditions/stateful-off_subagent-off \
+  --format json \
+  --output .stateful_bench/programbench/runs/pb-dev/reports/stateful-off_subagent-off.json
+
+stateful-bench programbench report \
   --condition-dir .stateful_bench/programbench/runs/pb-dev/conditions/stateful-on_subagent-off \
-  --format markdown
+  --format json \
+  --output .stateful_bench/programbench/runs/pb-dev/reports/stateful-on_subagent-off.json
 ```
 
 Compare two saved reports:
