@@ -16,13 +16,14 @@ pub use denovo::{
 pub use programbench::{
     ProgramBenchAgentKind, ProgramBenchCommand, ProgramBenchComparisonReport,
     ProgramBenchCondition, ProgramBenchConditionMetadata, ProgramBenchConditionReport,
-    ProgramBenchEvalOptions, ProgramBenchInstanceMetadata, ProgramBenchInstanceRunOptions,
-    ProgramBenchRecipeCommand, ProgramBenchRunOptions, ProgramBenchTokenUsage,
-    build_programbench_agent_command, build_programbench_condition_report,
-    build_programbench_eval_commands, compare_programbench_reports,
-    default_programbench_conditions, parse_programbench_condition, planned_programbench_conditions,
-    render_programbench_comparison_markdown, render_programbench_report_markdown,
-    run_programbench_eval, run_programbench_matrix,
+    ProgramBenchDiscoveredInstance, ProgramBenchEvalOptions, ProgramBenchInstanceMetadata,
+    ProgramBenchInstanceReport, ProgramBenchInstanceRunOptions, ProgramBenchRecipeCommand,
+    ProgramBenchRunOptions, ProgramBenchTokenUsage, build_programbench_agent_command,
+    build_programbench_condition_report, build_programbench_eval_commands,
+    compare_programbench_reports, default_programbench_conditions, parse_programbench_condition,
+    planned_programbench_conditions, render_programbench_comparison_markdown,
+    render_programbench_report_markdown, run_programbench_eval, run_programbench_matrix,
+    run_programbench_matrix_with_instances,
 };
 
 use std::{

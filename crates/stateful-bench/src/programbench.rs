@@ -1205,7 +1205,12 @@ print(json.dumps([
 fn programbench_python_command(programbench_bin: &str) -> Result<ProcessCommand> {
     let executable = resolve_programbench_executable(programbench_bin)?;
     let first_line = fs::read_to_string(&executable)
-        .with_context(|| format!("failed to read ProgramBench executable {}", executable.display()))?
+        .with_context(|| {
+            format!(
+                "failed to read ProgramBench executable {}",
+                executable.display()
+            )
+        })?
         .lines()
         .next()
         .unwrap_or_default()
@@ -1216,7 +1221,10 @@ fn programbench_python_command(programbench_bin: &str) -> Result<ProcessCommand>
             executable.display()
         )
     })?;
-    let mut parts = shebang.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+    let mut parts = shebang
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     if parts.is_empty() {
         bail!(
             "ProgramBench executable {} has an empty shebang",
