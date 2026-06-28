@@ -383,11 +383,15 @@ args = types.SimpleNamespace(
     codex_bin="codex",
     stateful_binary="/usr/local/bin/stateful",
     model="gpt-5.4-mini",
+    benchmark_max_turns=321,
     timeout_seconds=123,
     stateful=True,
+    subagent=False,
+    subagent_min_count=3,
 )
-result = mod.run_agent(args, "solve this")
-print(json.dumps({"calls": calls, "returncode": result.returncode}))
+prompt = mod.prompt_for_args(args)
+result = mod.run_agent(args, prompt)
+print(json.dumps({"calls": calls, "prompt": prompt, "returncode": result.returncode}))
 "#,
     );
     let observed: serde_json::Value =
@@ -416,6 +420,20 @@ print(json.dumps({"calls": calls, "returncode": result.returncode}))
             "-w",
             "/workspace",
             "programbench-container",
+            "/usr/local/bin/stateful",
+            "enable",
+            "--repo",
+            "/workspace"
+        ])
+    );
+    assert_eq!(
+        observed["calls"][2]["command"],
+        serde_json::json!([
+            "docker",
+            "exec",
+            "-w",
+            "/workspace",
+            "programbench-container",
             "codex",
             "exec",
             "--json",
@@ -423,10 +441,17 @@ print(json.dumps({"calls": calls, "returncode": result.returncode}))
             "/workspace",
             "--model",
             "gpt-5.4-mini",
-            "solve this"
+            observed["prompt"]
         ])
     );
-    assert_eq!(observed["calls"][1]["timeout"], 123);
+    assert_eq!(observed["calls"][2]["timeout"], 123);
+    assert!(
+        observed["prompt"]
+            .as_str()
+            .expect("prompt should be a string")
+            .contains("Benchmark max turns: 321."),
+        "prompt should include benchmark max turns: {observed}"
+    );
     assert_eq!(observed["returncode"], 0);
 }
 
@@ -449,12 +474,17 @@ args = types.SimpleNamespace(
     docker_bin="docker",
     container_id="programbench-container",
     omp_bin="omp",
+    stateful_binary="/usr/local/bin/stateful",
     model="gpt-5.4-mini",
+    benchmark_max_turns=654,
     timeout_seconds=456,
     stateful=True,
+    subagent=False,
+    subagent_min_count=3,
 )
-result = mod.run_agent(args, "solve this")
-print(json.dumps({"calls": calls, "returncode": result.returncode}))
+prompt = mod.prompt_for_args(args)
+result = mod.run_agent(args, prompt)
+print(json.dumps({"calls": calls, "prompt": prompt, "returncode": result.returncode}))
 "#,
     );
     let observed: serde_json::Value =
@@ -462,6 +492,35 @@ print(json.dumps({"calls": calls, "returncode": result.returncode}))
 
     assert_eq!(
         observed["calls"][0]["command"],
+        serde_json::json!([
+            "docker",
+            "exec",
+            "-w",
+            "/workspace",
+            "programbench-container",
+            "/usr/local/bin/stateful",
+            "install",
+            "--agent",
+            "omp",
+            "--yes"
+        ])
+    );
+    assert_eq!(
+        observed["calls"][1]["command"],
+        serde_json::json!([
+            "docker",
+            "exec",
+            "-w",
+            "/workspace",
+            "programbench-container",
+            "/usr/local/bin/stateful",
+            "enable",
+            "--repo",
+            "/workspace"
+        ])
+    );
+    assert_eq!(
+        observed["calls"][2]["command"],
         serde_json::json!([
             "docker",
             "exec",
@@ -476,10 +535,17 @@ print(json.dumps({"calls": calls, "returncode": result.returncode}))
             "--model",
             "gpt-5.4-mini",
             "--prompt",
-            "solve this"
+            observed["prompt"]
         ])
     );
-    assert_eq!(observed["calls"][0]["timeout"], 456);
+    assert_eq!(observed["calls"][2]["timeout"], 456);
+    assert!(
+        observed["prompt"]
+            .as_str()
+            .expect("prompt should be a string")
+            .contains("Benchmark max turns: 654."),
+        "prompt should include benchmark max turns: {observed}"
+    );
     assert_eq!(observed["returncode"], 0);
 }
 

@@ -14,7 +14,10 @@ from programbench_codex_agent import (  # noqa: E402
     add_token_usage,
     build_base_parser,
     docker_exec_command,
+    enable_stateful_repo,
+    install_stateful_for_agent,
     iter_json_events,
+    prompt_for_args,
     run_main,
     token_usage_from_value,
 )
@@ -45,6 +48,9 @@ def omp_token_usage_from_output(output: str):
 
 
 def run_agent(args, prompt):
+    if args.stateful:
+        install_stateful_for_agent(args, "omp")
+        enable_stateful_repo(args)
     command = docker_exec_command(args, args.omp_bin, "--cwd", "/workspace")
     if args.stateful:
         command.extend(["--profile", "stateful"])

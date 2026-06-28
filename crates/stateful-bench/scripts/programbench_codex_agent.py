@@ -153,16 +153,9 @@ def docker_exec_command(args, *inner: str) -> list[str]:
     return [args.docker_bin, "exec", "-w", "/workspace", args.container_id, *inner]
 
 
-def install_stateful_for_codex(args) -> None:
+def run_stateful_command(args, *stateful_args: str) -> None:
     subprocess.run(
-        docker_exec_command(
-            args,
-            args.stateful_binary,
-            "install",
-            "--agent",
-            "codex",
-            "--yes",
-        ),
+        docker_exec_command(args, args.stateful_binary, *stateful_args),
         check=True,
         capture_output=True,
         text=True,
@@ -170,9 +163,22 @@ def install_stateful_for_codex(args) -> None:
     )
 
 
+def install_stateful_for_agent(args, agent: str) -> None:
+    run_stateful_command(args, "install", "--agent", agent, "--yes")
+
+
+def enable_stateful_repo(args) -> None:
+    run_stateful_command(args, "enable", "--repo", "/workspace")
+
+
+def install_stateful_for_codex(args) -> None:
+    install_stateful_for_agent(args, "codex")
+
+
 def run_agent(args, prompt):
     if args.stateful:
         install_stateful_for_codex(args)
+        enable_stateful_repo(args)
     command = docker_exec_command(args, args.codex_bin, "exec", "--json", "--cd", "/workspace")
     if args.model:
         command.extend(["--model", args.model])
@@ -216,6 +222,9 @@ def output_text(value: Any) -> str:
 
 def prompt_for_args(args) -> str:
     prompt = PROGRAMBENCH_SYSTEM_PROMPT
+    max_turns = getattr(args, "benchmark_max_turns", None)
+    if max_turns is not None:
+        prompt += f"\n\nBenchmark max turns: {max_turns}."
     if args.subagent:
         prompt += f"\n\nUse at least {args.subagent_min_count} native subagents before implementation."
     return prompt
