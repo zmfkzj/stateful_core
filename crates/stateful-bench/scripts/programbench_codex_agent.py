@@ -9,6 +9,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from pathlib import Path
@@ -124,14 +125,33 @@ def codex_token_usage_from_output(output: str):
     return total
 
 
+ARCHIVE_EXCLUDED_TOP_LEVEL = {
+    ".cache",
+    ".codex",
+    ".config",
+    ".omp",
+    ".stateful",
+    ".stateful_core",
+    ".stateful-tmp",
+}
+
+
+def archive_member_allowed(path: Path) -> bool:
+    if not path.parts:
+        return True
+    first = path.parts[0]
+    return first not in ARCHIVE_EXCLUDED_TOP_LEVEL and not first.startswith(".stateful")
+
+
 def archive_airlock_workspace(airlock: str, instance_dir: Path) -> Path:
     submission_path = instance_dir / "submission.tar.gz"
-    subprocess.run(
-        ["tar", "-czf", str(submission_path), "-C", airlock, "."],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    root = Path(airlock)
+    with tarfile.open(submission_path, "w:gz") as archive:
+        for path in sorted(root.rglob("*")):
+            relative = path.relative_to(root)
+            if not archive_member_allowed(relative):
+                continue
+            archive.add(path, arcname=f"./{relative}", recursive=False)
     return submission_path
 
 

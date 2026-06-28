@@ -1092,6 +1092,109 @@ print(json.dumps({
 }
 
 #[test]
+fn programbench_omp_adapter_seeds_openai_codex_auth_credentials() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import os
+import sqlite3
+import tempfile
+from pathlib import Path
+
+with tempfile.TemporaryDirectory() as root:
+    source_agent = Path(root) / "source-agent"
+    target_agent = Path(root) / "target-agent"
+    source_agent.mkdir()
+    with sqlite3.connect(source_agent / "agent.db") as db:
+        db.execute("""
+            CREATE TABLE auth_credentials (
+                provider TEXT,
+                credential_type TEXT,
+                data TEXT,
+                disabled_cause TEXT,
+                identity_key TEXT,
+                created_at INTEGER,
+                updated_at INTEGER
+            )
+        """)
+        db.execute(
+            """
+            INSERT INTO auth_credentials
+                (provider, credential_type, data, disabled_cause, identity_key, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("openai-codex", "oauth", "secret-json", None, "identity", 1, 2),
+        )
+        db.execute(
+            """
+            INSERT INTO auth_credentials
+                (provider, credential_type, data, disabled_cause, identity_key, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("other", "oauth", "leak", None, "other", 1, 2),
+        )
+    env = {
+        "OMP_AUTH_SOURCE_AGENT_DIR": str(source_agent),
+        "PI_CODING_AGENT_DIR": str(target_agent),
+    }
+    mod.seed_omp_auth_credentials(env)
+    with sqlite3.connect(target_agent / "agent.db") as db:
+        rows = db.execute(
+            "SELECT provider, credential_type, data, identity_key FROM auth_credentials"
+        ).fetchall()
+print(json.dumps(rows))
+"#,
+    );
+    let rows: serde_json::Value =
+        serde_json::from_str(&output).expect("seeded auth rows should be JSON");
+
+    assert_eq!(
+        rows,
+        serde_json::json!([["openai-codex", "oauth", "secret-json", "identity"]])
+    );
+}
+
+#[test]
+fn programbench_archive_excludes_omp_credentials() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import tarfile
+import tempfile
+from pathlib import Path
+
+with tempfile.TemporaryDirectory() as root:
+    root = Path(root)
+    airlock = root / "airlock"
+    instance_dir = root / "instance"
+    (airlock / ".omp" / "profiles" / "stateful" / "agent").mkdir(parents=True)
+    (airlock / ".omp" / "profiles" / "stateful" / "agent" / "agent.db").write_text("secret", encoding="utf-8")
+    (airlock / ".stateful_core").mkdir()
+    (airlock / ".stateful_core" / "runtime.json").write_text("stateful", encoding="utf-8")
+    (airlock / "compile.sh").write_text("cc main.c -o executable\n", encoding="utf-8")
+    (airlock / "main.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
+    instance_dir.mkdir()
+    archive = mod.archive_airlock_workspace(str(airlock), instance_dir)
+    with tarfile.open(archive, "r:gz") as tar:
+        names = sorted(tar.getnames())
+print(json.dumps(names))
+"#,
+    );
+    let names: Vec<String> = serde_json::from_str(&output).expect("archive names should be JSON");
+
+    assert!(names.iter().any(|name| name.ends_with("compile.sh")));
+    assert!(names.iter().any(|name| name.ends_with("main.c")));
+    assert!(
+        names.iter().all(|name| !name.contains(".omp")),
+        "archive must not contain OMP credentials: {names:?}"
+    );
+    assert!(
+        names.iter().all(|name| !name.contains(".stateful")),
+        "archive must not contain stateful runtime files: {names:?}"
+    );
+}
+
+#[test]
 fn programbench_adapter_omits_subagent_used_without_observation() {
     let output = run_python_adapter(
         &programbench_codex_agent_path(),

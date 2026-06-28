@@ -15,6 +15,12 @@ finishes, then removes it explicitly. The Codex and OMP adapters copy the
 container's `/workspace` into an empty temporary host airlock, run the host CLI
 there, and archive that airlock as the ProgramBench submission.
 
+For OMP runs, the adapter mirrors DeNovoSWE auth seeding: it copies only the
+`openai-codex` OAuth provider credential from `OMP_AUTH_SOURCE_AGENT_DIR`,
+`~/.omp/profiles/stateful/agent`, or `~/.omp/agent` into the isolated airlock
+profile. Submission archives exclude agent/runtime directories such as `.omp`,
+`.codex`, `.stateful*`, `.config`, and `.cache`.
+
 Install the official `programbench` CLI with one of:
 
 ```bash
