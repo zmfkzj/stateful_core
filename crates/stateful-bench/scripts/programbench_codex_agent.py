@@ -63,6 +63,8 @@ def token_usage_from_value(value):
     cached_input_tokens = int_field(value.get("cached_input_tokens"))
     output_tokens = int_field(value.get("output_tokens"))
     reasoning_output_tokens = int_field(value.get("reasoning_output_tokens"))
+    total_tokens = int_field(value.get("total_tokens"))
+    token_count = int_field(value.get("token_count"))
 
     input_details = value.get("input_tokens_details")
     if isinstance(input_details, dict):
@@ -73,7 +75,7 @@ def token_usage_from_value(value):
         reasoning_output_tokens += int_field(output_details.get("reasoning_tokens"))
 
     direct_turns = int_field(value.get("turns"))
-    if not any((direct_turns, input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens)):
+    if not any((direct_turns, input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens, total_tokens, token_count)):
         return None
 
     uncached_input_tokens = max(input_tokens - cached_input_tokens, 0)
@@ -115,6 +117,7 @@ def codex_token_usage_from_output(output: str):
             usage = usage_at(event, path)
             if usage is not None:
                 add_token_usage(total, usage)
+                break
     return total
 
 

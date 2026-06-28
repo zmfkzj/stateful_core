@@ -39,6 +39,7 @@ def omp_token_usage_from_output(output: str):
             usage = usage_at(event, path)
             if usage is not None:
                 add_token_usage(total, usage)
+                break
     return total
 
 

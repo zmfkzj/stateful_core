@@ -313,6 +313,75 @@ print(json.dumps(usage))
 }
 
 #[test]
+fn programbench_codex_adapter_counts_first_usage_candidate_per_event() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+event = {
+    "usage": {"input_tokens": 10, "cached_input_tokens": 3, "output_tokens": 2},
+    "payload": {"usage": {"input_tokens": 10, "cached_input_tokens": 3, "output_tokens": 2}},
+}
+usage = mod.codex_token_usage_from_output(json.dumps(event) + "\n")
+print(json.dumps(usage))
+"#,
+    );
+    let usage: serde_json::Value =
+        serde_json::from_str(&output).expect("codex duplicate usage should be JSON");
+
+    assert_eq!(usage["turns"], 1);
+    assert_eq!(usage["input_tokens"], 10);
+    assert_eq!(usage["cached_input_tokens"], 3);
+    assert_eq!(usage["output_tokens"], 2);
+    assert_eq!(usage["input_plus_output_tokens"], 12);
+    assert_eq!(usage["uncached_input_plus_output_tokens"], 9);
+}
+
+#[test]
+fn programbench_omp_adapter_counts_first_usage_candidate_per_event() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+event = {
+    "usage": {"input_tokens": 8, "cached_input_tokens": 2, "output_tokens": 4},
+    "payload": {"usage": {"input_tokens": 8, "cached_input_tokens": 2, "output_tokens": 4}},
+}
+usage = mod.omp_token_usage_from_output(json.dumps(event) + "\n")
+print(json.dumps(usage))
+"#,
+    );
+    let usage: serde_json::Value =
+        serde_json::from_str(&output).expect("omp duplicate usage should be JSON");
+
+    assert_eq!(usage["turns"], 1);
+    assert_eq!(usage["input_tokens"], 8);
+    assert_eq!(usage["cached_input_tokens"], 2);
+    assert_eq!(usage["output_tokens"], 4);
+    assert_eq!(usage["input_plus_output_tokens"], 12);
+    assert_eq!(usage["uncached_input_plus_output_tokens"], 10);
+}
+
+#[test]
+fn programbench_adapter_observes_total_only_usage() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+usage = {
+    "total_tokens": mod.token_usage_from_value({"total_tokens": 77}),
+    "token_count": mod.token_usage_from_value({"token_count": 13}),
+}
+print(json.dumps(usage))
+"#,
+    );
+    let usage: serde_json::Value =
+        serde_json::from_str(&output).expect("total-only usage should be JSON");
+
+    assert_eq!(usage["total_tokens"]["turns"], 1);
+    assert_eq!(usage["total_tokens"]["input_plus_output_tokens"], 0);
+    assert_eq!(usage["token_count"]["turns"], 1);
+    assert_eq!(usage["token_count"]["input_plus_output_tokens"], 0);
+}
+
+#[test]
 fn programbench_report_aggregates_official_score_and_efficiency() {
     let root = temp_root("stateful-bench-programbench-report");
     let condition_dir = root.join("conditions/stateful-on_subagent-on");
