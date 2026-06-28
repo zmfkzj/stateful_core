@@ -156,8 +156,8 @@ struct SandboxProcessRow {
 }
 
 const PROCESS_FIND_DEFAULT_FIELDS: &[&str] = &[
-    "pid", "ppid", "pgid", "user", "uid", "stat", "start", "etime", "time", "pcpu", "pmem",
-    "rss", "vsz", "nice", "pri", "tty", "comm",
+    "pid", "ppid", "pgid", "user", "uid", "stat", "start", "etime", "time", "pcpu", "pmem", "rss",
+    "vsz", "nice", "pri", "tty", "comm",
 ];
 
 const PROCESS_FIND_FORBIDDEN_FIELDS: &[&str] = &["command", "args", "argv", "env"];
@@ -3422,16 +3422,15 @@ fn sandbox_authorization_denied_body(
     allowed_write_targets: Vec<String>,
     denied_write_targets: Vec<serde_json::Value>,
 ) -> serde_json::Value {
-    let context_resource = denied_write_targets_context_resource(&denied_write_targets)
-        .map(str::to_owned);
+    let context_resource =
+        denied_write_targets_context_resource(&denied_write_targets).map(str::to_owned);
     let mut body = serde_json::json!({
         "status": "error",
         "message": "stateful sandbox run target authorization denied",
         "allowed_write_targets": allowed_write_targets,
         "denied_write_targets": denied_write_targets,
     });
-    if let Some(current_state) =
-        sandbox_current_state_context(context, context_resource.as_deref())
+    if let Some(current_state) = sandbox_current_state_context(context, context_resource.as_deref())
     {
         body["current_state"] = current_state;
     }
@@ -3459,7 +3458,9 @@ fn sandbox_current_state_request_body(
         "workspace_id": context.workspace_id,
         "mode": "brief",
     });
-    if let Some(resource) = resource.map(str::trim).filter(|resource| !resource.is_empty())
+    if let Some(resource) = resource
+        .map(str::trim)
+        .filter(|resource| !resource.is_empty())
         && let Some(object) = body.as_object_mut()
     {
         object.insert("resource".to_string(), serde_json::json!(resource));

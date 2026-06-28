@@ -19,8 +19,8 @@ pub use programbench::{
     ProgramBenchEvalOptions, ProgramBenchInstanceMetadata, ProgramBenchInstanceRunOptions,
     ProgramBenchRecipeCommand, ProgramBenchRunOptions, ProgramBenchTokenUsage,
     build_programbench_agent_command, build_programbench_condition_report,
-    build_programbench_eval_commands, compare_programbench_reports, default_programbench_conditions,
-    parse_programbench_condition, planned_programbench_conditions,
+    build_programbench_eval_commands, compare_programbench_reports,
+    default_programbench_conditions, parse_programbench_condition, planned_programbench_conditions,
     render_programbench_comparison_markdown, render_programbench_report_markdown,
     run_programbench_eval, run_programbench_matrix,
 };

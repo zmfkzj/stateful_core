@@ -4,9 +4,9 @@ use std::{
 };
 
 use stateful_cli::{
+    CodexInstallOptions, GlobalPaths, InstallOptions, OmpInstallOptions, RepoRegistry,
     apply_codex_install, apply_global_install, apply_omp_install, plan_codex_install,
-    plan_global_install, plan_omp_install, CodexInstallOptions, GlobalPaths, InstallOptions,
-    OmpInstallOptions, RepoRegistry,
+    plan_global_install, plan_omp_install,
 };
 
 #[cfg(unix)]
@@ -154,8 +154,11 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
         !first_config.contains("[mcp_servers.stateful.tools.state_current_read]"),
         "stateful MCP tools should inherit the default approve mode"
     );
-    assert!(!first_config
-        .contains("[mcp_servers.stateful.tools.state_claim_acquire]\napproval_mode = \"approve\""));
+    assert!(
+        !first_config.contains(
+            "[mcp_servers.stateful.tools.state_claim_acquire]\napproval_mode = \"approve\""
+        )
+    );
     assert!(first_config.contains("hook codex pre-tool-use"));
     assert!(!first_config.contains("hook pre-tool-use"));
     assert!(first_config.contains("[[hooks.PreToolUse]]\nmatcher = \".*\""));
@@ -203,18 +206,22 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(omp_extension.is_file());
     assert!(omp_skill.is_file());
     assert!(!omp_dispatching_skill.exists());
-    assert!(fs::read_to_string(&omp_config)
-        .expect("omp config should read")
-        .contains("stateful-omp-extension.js"));
+    assert!(
+        fs::read_to_string(&omp_config)
+            .expect("omp config should read")
+            .contains("stateful-omp-extension.js")
+    );
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("stateful-omp-extension.js"));
     assert!(config.contains(
         "tools:\n  approvalMode: yolo\nstateful:\n  autoApprove: false\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: false\n",
     ));
     assert!(!config.contains("approval:"));
-    assert!(fs::read_to_string(&omp_mcp)
-        .expect("omp mcp should read")
-        .contains("\"mcpServers\""));
+    assert!(
+        fs::read_to_string(&omp_mcp)
+            .expect("omp mcp should read")
+            .contains("\"mcpServers\"")
+    );
     let extension = fs::read_to_string(&omp_extension).expect("omp extension should read");
     assert!(!extension.contains("@sinclair/typebox"));
     assert!(!extension.contains("Type.Object"));
@@ -263,13 +270,21 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("function expandSkillInternalUrlsInCommand(command)"));
     assert!(extension.contains("function singleQuoteEscape(value)"));
     assert!(extension.contains("quote === \"'\" ? singleQuoteEscape(resolved)"));
-    assert!(extension
-        .contains("args.push(\"--command\", expandSkillInternalUrlsInCommand(params.command));"));
-    assert!(extension
-        .contains("function runSandboxToolProcess(params, args, ctx, label, signal, onStdout)"));
+    assert!(
+        extension.contains(
+            "args.push(\"--command\", expandSkillInternalUrlsInCommand(params.command));"
+        )
+    );
+    assert!(
+        extension
+            .contains("function runSandboxToolProcess(params, args, ctx, label, signal, onStdout)")
+    );
     assert!(extension.contains("process.env.STATEFUL_OMP_SANDBOX === \"off\""));
-    assert!(extension
-        .contains("function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout)"));
+    assert!(
+        extension.contains(
+            "function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout)"
+        )
+    );
     assert!(!extension.contains("function runSandboxTool(params"));
     assert!(extension.contains("spawn(STATEFUL, args"));
     assert!(extension.contains(
@@ -277,8 +292,10 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     ));
     assert!(extension.contains("timeoutTimer = setTimeout"));
     assert!(extension.contains("\"timed out after \" + timeoutSeconds + \"s\""));
-    assert!(extension
-        .contains("function deliverSandboxBackgroundMessage(pi, jobId, label, text, details)"));
+    assert!(
+        extension
+            .contains("function deliverSandboxBackgroundMessage(pi, jobId, label, text, details)")
+    );
     assert!(extension.contains("stateful_sandbox_bash_output"));
     assert!(extension.contains("stateful_sandbox_bash_result"));
     assert!(extension.contains(
@@ -334,8 +351,11 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(!extension.contains("\"Sandbox invocation:\""));
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", \"external\""));
     assert!(extension.contains("without OMP UI confirmation"));
-    assert!(extension
-        .contains("At least one write_targets, create_targets, or write_dirs entry is required"));
+    assert!(
+        extension.contains(
+            "At least one write_targets, create_targets, or write_dirs entry is required"
+        )
+    );
     assert!(extension.contains("ext_ro_bash does not accept write, socket, or signal scope"));
     assert!(extension.contains("ext_rw_bash requires at least one write_targets"));
     assert!(extension.contains("required: [\"purpose\", \"command\"]"));
@@ -418,10 +438,12 @@ fn install_omp_yes_can_target_user_omp_profile_separate_from_stateful_home() {
 
     assert!(omp_agent_dir.join("config.yml").is_file());
     assert!(omp_agent_dir.join("mcp.json").is_file());
-    assert!(omp_agent_dir
-        .join("extensions")
-        .join("stateful-omp-extension.js")
-        .is_file());
+    assert!(
+        omp_agent_dir
+            .join("extensions")
+            .join("stateful-omp-extension.js")
+            .is_file()
+    );
     assert!(plan.files.contains(&omp_agent_dir.join("config.yml")));
     assert!(!misplaced_agent_dir.exists());
 }
@@ -452,12 +474,16 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
     assert_eq!(count(&config, "\n  rb: false"), 1);
     assert_eq!(count(&config, "\n  jl: false"), 1);
     assert_eq!(count(&config, "\n  enabled: false"), 1);
-    assert!(fs::read_to_string(&omp_mcp)
-        .expect("omp mcp should read")
-        .contains("\"mcpServers\""));
-    assert!(fs::read_to_string(&omp_extension)
-        .expect("omp extension should read")
-        .contains("[\"hook\", \"omp\", event]"));
+    assert!(
+        fs::read_to_string(&omp_mcp)
+            .expect("omp mcp should read")
+            .contains("\"mcpServers\"")
+    );
+    assert!(
+        fs::read_to_string(&omp_extension)
+            .expect("omp extension should read")
+            .contains("[\"hook\", \"omp\", event]")
+    );
 }
 
 #[test]
@@ -674,12 +700,14 @@ fn install_codex_yes_creates_global_command_policy_skill() {
         "denial-recovery.md",
         "subagent-write-recovery.md",
     ] {
-        assert!(plan.files.contains(
-            &fixture
-                .codex_config_parent()
-                .join("skills/stateful-command-policy")
-                .join(name)
-        ));
+        assert!(
+            plan.files.contains(
+                &fixture
+                    .codex_config_parent()
+                    .join("skills/stateful-command-policy")
+                    .join(name)
+            )
+        );
     }
     assert!(plan.files.contains(&dispatching_skill_path));
     assert_eq!(

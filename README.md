@@ -290,8 +290,8 @@ local generated state.
 - `crates/stateful-cli`: CLI, hook adapter, runtime discovery, repo registry,
   outbox sync, and sandbox wrappers.
 - `crates/stateful-mcp`: MCP tool surface.
-- `crates/stateful-bench`: benchmark tooling for paired-agent, synthetic, and
-  DeNovoSWE experiments.
+- `crates/stateful-bench`: benchmark tooling for paired-agent, synthetic,
+  DeNovoSWE, and ProgramBench experiments.
 - `docs/`: concept, state model, architecture, implementation contract,
   coordination, hardening-scope, ADR, and benchmark guidance.
 
@@ -299,16 +299,18 @@ local generated state.
 
 `stateful-bench` supports SWE-bench pair preparation/runs, reports, comparisons,
 synthetic coordination experiments, and DeNovoSWE adapters for official AweAgent,
-host Codex CLI, and OMP CLI workflows.
+host Codex CLI, and OMP CLI workflows, and ProgramBench stateful/no-state
+condition runs with official ProgramBench evaluation and efficiency reporting.
 
 Benchmark artifacts live under `.stateful_bench/` and are intentionally ignored.
 The checked-in synthetic fixture is a smoke test for report plumbing, not
 empirical evidence that real paired agents avoid conflicts. This repository does
 not currently ship a checked-in empirical paired-agent stateful/no-state result.
 
-For DeNovoSWE setup, interpretation rules, and reusable command lines, read
-[DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md) and
-[DeNovoSWE Benchmark Commands](docs/denovo-benchmark-commands.md).
+For DeNovoSWE and ProgramBench setup, interpretation rules, and reusable command
+lines, read [DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md),
+[DeNovoSWE Benchmark Commands](docs/denovo-benchmark-commands.md), and
+[ProgramBench Benchmark Guide](docs/programbench-benchmark-guide.md).
 
 ## Development
 
@@ -341,6 +343,7 @@ release workflow notes.
 - [V1 hardening scope decisions](docs/v1-hardening-scope-decisions.md)
 - [DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md)
 - [DeNovoSWE Benchmark Commands](docs/denovo-benchmark-commands.md)
+- [ProgramBench Benchmark Guide](docs/programbench-benchmark-guide.md)
 - [ADR 0001: State-first, not memory-first](docs/adr/0001-state-first-not-memory-first.md)
 
 Some historical implementation plans and specs are tracked under

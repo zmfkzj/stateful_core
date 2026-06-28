@@ -443,12 +443,18 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
 - `denovo`: wrap AweAgent DeNovoSWE extract/evaluation workflows and run the
   official AweAgent agent recipe, a host Codex CLI adapter, or an OMP CLI adapter
   while recording `stateful`, `subagent`, and `running_time_ms` comparison axes.
+- `programbench`: run Codex or OMP agents on ProgramBench instances, evaluate the
+  resulting `submission.tar.gz` artifacts with official ProgramBench tooling, and
+  report stateful/no-state quality plus time/token efficiency deltas.
 
 For DeNovoSWE, new official-style run commands should pass `--prompt-version v2`;
 the CLI's default remains compatible with historical behavior. See
 [DeNovoSWE Benchmark Guide](denovo-benchmark-guide.md) for interpretation rules
 and [DeNovoSWE Benchmark Commands](denovo-benchmark-commands.md) for reusable
 command lines.
+
+For ProgramBench, scored runs require Linux `amd64` Docker support and official
+`programbench eval`; see [ProgramBench Benchmark Guide](programbench-benchmark-guide.md).
 
 Benchmark artifacts live under `.stateful_bench/` and are intentionally ignored.
 

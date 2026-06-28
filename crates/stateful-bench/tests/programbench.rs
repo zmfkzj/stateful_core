@@ -4,11 +4,17 @@ use stateful_bench::{
     ProgramBenchConditionMetadata, ProgramBenchConditionReport, ProgramBenchEvalOptions,
     ProgramBenchInstanceMetadata, ProgramBenchInstanceRunOptions, ProgramBenchRunOptions,
     ProgramBenchTokenUsage, ReportFormat, build_programbench_agent_command,
-    build_programbench_condition_report, build_programbench_eval_commands, compare_programbench_reports,
-    default_programbench_conditions,
-    parse_programbench_condition, planned_programbench_conditions, run_programbench_matrix,
+    build_programbench_condition_report, build_programbench_eval_commands,
+    compare_programbench_reports, default_programbench_conditions, parse_programbench_condition,
+    planned_programbench_conditions, run_programbench_matrix,
 };
-use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, process::Command as ProcessCommand, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[test]
 fn programbench_metadata_schema_uses_required_instance_fields() {
@@ -192,8 +198,8 @@ fn programbench_eval_report_compare_commands_parse() {
 
 #[test]
 fn programbench_condition_parser_accepts_axes_and_defaults_cover_four_conditions() {
-    let condition = parse_programbench_condition("stateful:on,subagent:off")
-        .expect("condition should parse");
+    let condition =
+        parse_programbench_condition("stateful:on,subagent:off").expect("condition should parse");
 
     assert!(condition.stateful);
     assert!(!condition.subagent);
@@ -385,8 +391,7 @@ usage = mod.omp_token_usage_from_output('{"usage":{"input_tokens":50,"cached_inp
 print(json.dumps(usage))
 "#,
     );
-    let usage: serde_json::Value =
-        serde_json::from_str(&output).expect("omp usage should be JSON");
+    let usage: serde_json::Value = serde_json::from_str(&output).expect("omp usage should be JSON");
 
     assert_eq!(usage["input_tokens"], 50);
     assert_eq!(usage["input_plus_output_tokens"], 55);
@@ -479,8 +484,18 @@ fn programbench_report_aggregates_official_score_and_efficiency() {
         finished_at_ms: 4010,
         running_time_ms: 4000,
         instances: vec![
-            instance_metadata("instance-a", None, Some(true), token_usage(2, 100, 40, 12, 5)),
-            instance_metadata("instance-b", Some("agent exited 1"), Some(false), token_usage(1, 50, 20, 5, 2)),
+            instance_metadata(
+                "instance-a",
+                None,
+                Some(true),
+                token_usage(2, 100, 40, 12, 5),
+            ),
+            instance_metadata(
+                "instance-b",
+                Some("agent exited 1"),
+                Some(false),
+                token_usage(1, 50, 20, 5, 2),
+            ),
         ],
     };
     fs::write(
@@ -497,8 +512,7 @@ fn programbench_report_aggregates_official_score_and_efficiency() {
     )
     .expect("score should write");
 
-    let report = build_programbench_condition_report(&condition_dir)
-        .expect("report should build");
+    let report = build_programbench_condition_report(&condition_dir).expect("report should build");
 
     assert_eq!(report.condition_id, "stateful-on_subagent-on");
     assert_eq!(report.instances, 2);
@@ -561,8 +575,7 @@ fn programbench_report_does_not_resolve_rounded_partial_scores() {
     )
     .expect("score should write");
 
-    let report = build_programbench_condition_report(&condition_dir)
-        .expect("report should build");
+    let report = build_programbench_condition_report(&condition_dir).expect("report should build");
 
     assert_eq!(report.average_score, Some(1.0));
     assert_eq!(report.resolved_count, 0);
@@ -573,18 +586,43 @@ fn programbench_report_does_not_resolve_rounded_partial_scores() {
 
 #[test]
 fn programbench_compare_reports_score_time_and_token_deltas() {
-    let off = condition_report("stateful-off_subagent-off", false, false, 0.5, 6000, 220, 140);
-    let on = condition_report("stateful-on_subagent-off", true, false, 0.75, 4000, 167, 107);
+    let off = condition_report(
+        "stateful-off_subagent-off",
+        false,
+        false,
+        0.5,
+        6000,
+        220,
+        140,
+    );
+    let on = condition_report(
+        "stateful-on_subagent-off",
+        true,
+        false,
+        0.75,
+        4000,
+        167,
+        107,
+    );
 
     let comparison = compare_programbench_reports(vec![off, on]);
 
     assert_eq!(comparison.stateful_score_delta_without_subagent, Some(0.25));
-    assert_eq!(comparison.stateful_running_time_ms_delta_without_subagent, Some(-2000));
-    assert_eq!(comparison.stateful_input_plus_output_tokens_delta_without_subagent, Some(-53));
-    assert_eq!(comparison.missing_axis_ids, vec![
-        "stateful-off_subagent-on".to_string(),
-        "stateful-on_subagent-on".to_string(),
-    ]);
+    assert_eq!(
+        comparison.stateful_running_time_ms_delta_without_subagent,
+        Some(-2000)
+    );
+    assert_eq!(
+        comparison.stateful_input_plus_output_tokens_delta_without_subagent,
+        Some(-53)
+    );
+    assert_eq!(
+        comparison.missing_axis_ids,
+        vec![
+            "stateful-off_subagent-on".to_string(),
+            "stateful-on_subagent-on".to_string(),
+        ]
+    );
 }
 
 fn instance_metadata(
@@ -623,7 +661,8 @@ fn token_usage(
         reasoning_output_tokens,
         input_plus_output_tokens: input_tokens + output_tokens,
         uncached_input_tokens: input_tokens.saturating_sub(cached_input_tokens),
-        uncached_input_plus_output_tokens: input_tokens.saturating_sub(cached_input_tokens) + output_tokens,
+        uncached_input_plus_output_tokens: input_tokens.saturating_sub(cached_input_tokens)
+            + output_tokens,
     }
 }
 
@@ -665,8 +704,12 @@ fn condition_report(
         subagent_observed_instances: 0,
         subagent_used_count: 0,
         subagent_used_rate: None,
-        score_per_million_input_plus_output_tokens: Some(score * 1_000_000.0 / input_plus_output as f64),
-        score_per_million_uncached_input_plus_output_tokens: Some(score * 1_000_000.0 / uncached_input_plus_output as f64),
+        score_per_million_input_plus_output_tokens: Some(
+            score * 1_000_000.0 / input_plus_output as f64,
+        ),
+        score_per_million_uncached_input_plus_output_tokens: Some(
+            score * 1_000_000.0 / uncached_input_plus_output as f64,
+        ),
         score_per_hour: Some(score * 3_600_000.0 / running_time_ms as f64),
         score_source: "score-json".to_string(),
     }

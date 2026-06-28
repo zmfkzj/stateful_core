@@ -1047,7 +1047,9 @@ fn context_render_request_body(
         "workspace_id": workspace_id,
         "mode": "brief"
     });
-    if let Some(resource) = resource.map(str::trim).filter(|resource| !resource.is_empty())
+    if let Some(resource) = resource
+        .map(str::trim)
+        .filter(|resource| !resource.is_empty())
         && let Some(object) = body.as_object_mut()
     {
         object.insert("resource".to_string(), json!(resource));
@@ -3039,12 +3041,8 @@ mod tests {
             branch: "main".to_string(),
         };
 
-        let body = context_render_request_body(
-            &runtime,
-            "session-a",
-            Some(&identity),
-            Some("src/lib.rs"),
-        );
+        let body =
+            context_render_request_body(&runtime, "session-a", Some(&identity), Some("src/lib.rs"));
 
         assert_eq!(body["session_id"], "session-a");
         assert_eq!(body["workspace_id"], "workspace-worktree-a");

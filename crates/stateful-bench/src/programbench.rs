@@ -319,7 +319,8 @@ pub struct ProgramBenchConditionReport {
 impl ProgramBenchConditionReport {
     pub fn render(&self, format: ReportFormat) -> Result<String> {
         match format {
-            ReportFormat::Json => serde_json::to_string_pretty(self).context("failed to render ProgramBench report JSON"),
+            ReportFormat::Json => serde_json::to_string_pretty(self)
+                .context("failed to render ProgramBench report JSON"),
             ReportFormat::Markdown => Ok(render_programbench_report_markdown(self)),
         }
     }
@@ -362,7 +363,8 @@ pub fn build_programbench_condition_report(
     condition_dir: impl AsRef<Path>,
 ) -> Result<ProgramBenchConditionReport> {
     let condition_dir = condition_dir.as_ref();
-    let metadata: ProgramBenchConditionMetadata = read_json_file(condition_dir.join("condition.json"))?;
+    let metadata: ProgramBenchConditionMetadata =
+        read_json_file(condition_dir.join("condition.json"))?;
     let score_by_instance: BTreeMap<String, BTreeMap<String, bool>> =
         read_json_file(condition_dir.join("_stats/score.json"))?;
     let attempted_instances = metadata.instances.len();
@@ -510,7 +512,10 @@ pub fn compare_programbench_reports(
     for report in &reports {
         let expected_condition_id = report.condition.id();
         if report.condition_id != expected_condition_id {
-            condition_id_mismatches.push(format!("{} != {}", report.condition_id, expected_condition_id));
+            condition_id_mismatches.push(format!(
+                "{} != {}",
+                report.condition_id, expected_condition_id
+            ));
         }
         by_axes
             .entry((report.condition.stateful, report.condition.subagent))
@@ -546,7 +551,12 @@ pub fn compare_programbench_reports(
         condition_id_mismatches,
         stateful_score_delta_without_subagent: delta(on_off_score, off_off_score),
         subagent_score_delta_without_stateful: delta(off_on_score, off_off_score),
-        combined_interaction_score_delta: match (on_on_score, on_off_score, off_on_score, off_off_score) {
+        combined_interaction_score_delta: match (
+            on_on_score,
+            on_off_score,
+            off_on_score,
+            off_off_score,
+        ) {
             (Some(on_on), Some(on_off), Some(off_on), Some(off_off)) => {
                 Some(round_three(on_on - on_off - off_on + off_off))
             }
@@ -614,10 +624,16 @@ pub fn render_programbench_comparison_markdown(report: &ProgramBenchComparisonRe
         optional_i64(report.stateful_input_plus_output_tokens_delta_without_subagent)
     ));
     if !report.missing_axis_ids.is_empty() {
-        output.push_str(&format!("- Missing axes: {}\n", report.missing_axis_ids.join(", ")));
+        output.push_str(&format!(
+            "- Missing axes: {}\n",
+            report.missing_axis_ids.join(", ")
+        ));
     }
     if !report.duplicate_axis_ids.is_empty() {
-        output.push_str(&format!("- Duplicate axes: {}\n", report.duplicate_axis_ids.join(", ")));
+        output.push_str(&format!(
+            "- Duplicate axes: {}\n",
+            report.duplicate_axis_ids.join(", ")
+        ));
     }
     if !report.condition_id_mismatches.is_empty() {
         output.push_str(&format!(
@@ -627,7 +643,6 @@ pub fn render_programbench_comparison_markdown(report: &ProgramBenchComparisonRe
     }
     output
 }
-
 
 fn instance_score(
     scores: &BTreeMap<String, BTreeMap<String, bool>>,
