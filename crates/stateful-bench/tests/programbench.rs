@@ -3,7 +3,7 @@ use stateful_bench::{
     Cli, Command, ProgramBenchAgentKind, ProgramBenchCommand, ProgramBenchCondition,
     ReportFormat, default_programbench_conditions, parse_programbench_condition,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn programbench_run_command_parses_defaultable_options() {
@@ -143,7 +143,7 @@ fn programbench_eval_report_compare_commands_parse() {
         compare.command,
         Command::Programbench {
             command: ProgramBenchCommand::Compare { ref report, .. }
-        } if report == &vec!["stateful-off.json".into(), "stateful-on.json".into()]
+        } if report == &vec![PathBuf::from("stateful-off.json"), PathBuf::from("stateful-on.json")]
     ));
 }
 

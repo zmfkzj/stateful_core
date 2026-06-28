@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf, str::FromStr};
+use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Subcommand, ValueEnum};
@@ -21,23 +21,6 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 7200;
 pub enum ProgramBenchAgentKind {
     CodexCli,
     OmpCli,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProgramBenchReportPath(PathBuf);
-
-impl From<&str> for ProgramBenchReportPath {
-    fn from(value: &str) -> Self {
-        Self(PathBuf::from(value))
-    }
-}
-
-impl FromStr for ProgramBenchReportPath {
-    type Err = io::Error;
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        Ok(Self(PathBuf::from(value)))
-    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -102,7 +85,7 @@ pub enum ProgramBenchCommand {
     },
     Compare {
         #[arg(long, required = true)]
-        report: Vec<ProgramBenchReportPath>,
+        report: Vec<PathBuf>,
         #[arg(long, value_enum, default_value_t = ReportFormat::Json)]
         format: ReportFormat,
         #[arg(long)]
