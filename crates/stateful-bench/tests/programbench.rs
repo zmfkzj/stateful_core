@@ -1,11 +1,12 @@
 use clap::Parser;
 use stateful_bench::{
     Cli, Command, ProgramBenchAgentKind, ProgramBenchCommand, ProgramBenchCondition,
-    ProgramBenchInstanceMetadata, ProgramBenchInstanceRunOptions, ProgramBenchTokenUsage,
-    ReportFormat, build_programbench_agent_command, default_programbench_conditions,
-    parse_programbench_condition,
+    ProgramBenchConditionMetadata, ProgramBenchConditionReport, ProgramBenchInstanceMetadata,
+    ProgramBenchInstanceRunOptions, ProgramBenchTokenUsage, ReportFormat,
+    build_programbench_agent_command, build_programbench_condition_report,
+    compare_programbench_reports, default_programbench_conditions, parse_programbench_condition,
 };
-use std::path::{Path, PathBuf};
+use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
 
 #[test]
 fn programbench_metadata_schema_uses_required_instance_fields() {
@@ -273,6 +274,224 @@ fn programbench_omp_agent_command_marks_subagent_condition() {
     assert!(command.program.ends_with("programbench_omp_agent.py"));
     assert!(has_arg(&command.args, "--subagent"));
     assert!(!has_arg(&command.args, "--stateful"));
+}
+
+#[test]
+fn programbench_report_aggregates_official_score_and_efficiency() {
+    let root = temp_root("stateful-bench-programbench-report");
+    let condition_dir = root.join("conditions/stateful-on_subagent-on");
+    fs::create_dir_all(condition_dir.join("instance-a")).expect("instance dir should exist");
+    fs::create_dir_all(condition_dir.join("instance-b")).expect("instance dir should exist");
+    fs::create_dir_all(condition_dir.join("_stats")).expect("stats dir should exist");
+
+    let metadata = ProgramBenchConditionMetadata {
+        run_id: "pb-dev".to_string(),
+        condition_id: "stateful-on_subagent-on".to_string(),
+        condition: ProgramBenchCondition::new(true, true),
+        agent: ProgramBenchAgentKind::CodexCli,
+        started_at_ms: 10,
+        finished_at_ms: 4010,
+        running_time_ms: 4000,
+        instances: vec![
+            instance_metadata("instance-a", None, Some(true), token_usage(2, 100, 40, 12, 5)),
+            instance_metadata("instance-b", Some("agent exited 1"), Some(false), token_usage(1, 50, 20, 5, 2)),
+        ],
+    };
+    fs::write(
+        condition_dir.join("condition.json"),
+        serde_json::to_string_pretty(&metadata).expect("metadata should serialize"),
+    )
+    .expect("condition metadata should write");
+    fs::write(
+        condition_dir.join("_stats/score.json"),
+        r#"{
+          "instance-a": {"test-a": true, "test-b": true},
+          "instance-b": {"test-c": true, "test-d": false}
+        }"#,
+    )
+    .expect("score should write");
+
+    let report = build_programbench_condition_report(&condition_dir)
+        .expect("report should build");
+
+    assert_eq!(report.condition_id, "stateful-on_subagent-on");
+    assert_eq!(report.instances, 2);
+    assert_eq!(report.evaluated_instances, 2);
+    assert_eq!(report.agent_error_count, 1);
+    assert_eq!(report.average_score, Some(0.75));
+    assert_eq!(report.resolved_count, 1);
+    assert_eq!(report.resolved_rate, Some(0.5));
+    assert_eq!(report.running_time_ms, 4000);
+    assert_eq!(report.average_running_time_ms, Some(2000.0));
+    assert_eq!(report.token_observed_instances, 2);
+    assert_eq!(report.token_usage_turns, 3);
+    assert_eq!(report.token_input_plus_output_tokens, 167);
+    assert_eq!(report.token_uncached_input_plus_output_tokens, 107);
+    assert_eq!(report.average_input_plus_output_tokens, Some(83.5));
+    assert_eq!(report.average_uncached_input_plus_output_tokens, Some(53.5));
+    assert_eq!(report.subagent_observed_instances, 2);
+    assert_eq!(report.subagent_used_count, 1);
+    assert_eq!(report.subagent_used_rate, Some(0.5));
+    assert_eq!(report.score_source, "score-json");
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn programbench_report_does_not_resolve_rounded_partial_scores() {
+    let root = temp_root("stateful-bench-programbench-rounding");
+    let condition_dir = root.join("conditions/stateful-on_subagent-on");
+    fs::create_dir_all(condition_dir.join("_stats")).expect("stats dir should exist");
+
+    let metadata = ProgramBenchConditionMetadata {
+        run_id: "pb-dev".to_string(),
+        condition_id: "stateful-on_subagent-on".to_string(),
+        condition: ProgramBenchCondition::new(true, true),
+        agent: ProgramBenchAgentKind::CodexCli,
+        started_at_ms: 10,
+        finished_at_ms: 1010,
+        running_time_ms: 1000,
+        instances: vec![instance_metadata(
+            "instance-near-perfect",
+            None,
+            Some(false),
+            token_usage(1, 1, 0, 1, 0),
+        )],
+    };
+    fs::write(
+        condition_dir.join("condition.json"),
+        serde_json::to_string_pretty(&metadata).expect("metadata should serialize"),
+    )
+    .expect("condition metadata should write");
+
+    let mut tests = BTreeMap::new();
+    for index in 0..2000 {
+        tests.insert(format!("test-{index}"), index != 0);
+    }
+    let score = BTreeMap::from([("instance-near-perfect".to_string(), tests)]);
+    fs::write(
+        condition_dir.join("_stats/score.json"),
+        serde_json::to_string_pretty(&score).expect("score should serialize"),
+    )
+    .expect("score should write");
+
+    let report = build_programbench_condition_report(&condition_dir)
+        .expect("report should build");
+
+    assert_eq!(report.average_score, Some(1.0));
+    assert_eq!(report.resolved_count, 0);
+    assert_eq!(report.resolved_rate, Some(0.0));
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn programbench_compare_reports_score_time_and_token_deltas() {
+    let off = condition_report("stateful-off_subagent-off", false, false, 0.5, 6000, 220, 140);
+    let on = condition_report("stateful-on_subagent-off", true, false, 0.75, 4000, 167, 107);
+
+    let comparison = compare_programbench_reports(vec![off, on]);
+
+    assert_eq!(comparison.stateful_score_delta_without_subagent, Some(0.25));
+    assert_eq!(comparison.stateful_running_time_ms_delta_without_subagent, Some(-2000));
+    assert_eq!(comparison.stateful_input_plus_output_tokens_delta_without_subagent, Some(-53));
+    assert_eq!(comparison.missing_axis_ids, vec![
+        "stateful-off_subagent-on".to_string(),
+        "stateful-on_subagent-on".to_string(),
+    ]);
+}
+
+fn instance_metadata(
+    instance_id: &str,
+    error: Option<&str>,
+    subagent_used: Option<bool>,
+    token_usage: ProgramBenchTokenUsage,
+) -> ProgramBenchInstanceMetadata {
+    ProgramBenchInstanceMetadata {
+        instance_id: instance_id.to_string(),
+        condition_id: "stateful-on_subagent-on".to_string(),
+        agent: ProgramBenchAgentKind::CodexCli,
+        started_at_ms: 10,
+        finished_at_ms: 1010,
+        running_time_ms: 1000,
+        submission_path: format!("{instance_id}/submission.tar.gz"),
+        exit_code: Some(if error.is_some() { 1 } else { 0 }),
+        error: error.map(str::to_string),
+        subagent_used,
+        token_usage: Some(token_usage),
+    }
+}
+
+fn token_usage(
+    turns: usize,
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    output_tokens: u64,
+    reasoning_output_tokens: u64,
+) -> ProgramBenchTokenUsage {
+    ProgramBenchTokenUsage {
+        turns,
+        input_tokens,
+        cached_input_tokens,
+        output_tokens,
+        reasoning_output_tokens,
+        input_plus_output_tokens: input_tokens + output_tokens,
+        uncached_input_tokens: input_tokens.saturating_sub(cached_input_tokens),
+        uncached_input_plus_output_tokens: input_tokens.saturating_sub(cached_input_tokens) + output_tokens,
+    }
+}
+
+fn condition_report(
+    condition_id: &str,
+    stateful: bool,
+    subagent: bool,
+    score: f64,
+    running_time_ms: u64,
+    input_plus_output: u64,
+    uncached_input_plus_output: u64,
+) -> ProgramBenchConditionReport {
+    ProgramBenchConditionReport {
+        run_id: "pb-dev".to_string(),
+        condition_id: condition_id.to_string(),
+        condition: ProgramBenchCondition::new(stateful, subagent),
+        instances: 2,
+        attempted_instances: 2,
+        evaluated_instances: 2,
+        average_score: Some(score),
+        resolved_count: 0,
+        resolved_rate: Some(0.0),
+        eval_error_count: 0,
+        agent_error_count: 0,
+        timeout_count: 0,
+        running_time_ms,
+        average_running_time_ms: Some(running_time_ms as f64 / 2.0),
+        token_observed_instances: 2,
+        token_usage_turns: 4,
+        token_input_tokens: 0,
+        token_cached_input_tokens: 0,
+        token_output_tokens: 0,
+        token_reasoning_output_tokens: 0,
+        token_input_plus_output_tokens: input_plus_output,
+        token_uncached_input_tokens: 0,
+        token_uncached_input_plus_output_tokens: uncached_input_plus_output,
+        average_input_plus_output_tokens: Some(input_plus_output as f64 / 2.0),
+        average_uncached_input_plus_output_tokens: Some(uncached_input_plus_output as f64 / 2.0),
+        subagent_observed_instances: 0,
+        subagent_used_count: 0,
+        subagent_used_rate: None,
+        score_per_million_input_plus_output_tokens: Some(score * 1_000_000.0 / input_plus_output as f64),
+        score_per_million_uncached_input_plus_output_tokens: Some(score * 1_000_000.0 / uncached_input_plus_output as f64),
+        score_per_hour: Some(score * 3_600_000.0 / running_time_ms as f64),
+        score_source: "score-json".to_string(),
+    }
+}
+
+fn temp_root(prefix: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{unique}"))
 }
 
 fn has_arg(args: &[String], value: &str) -> bool {

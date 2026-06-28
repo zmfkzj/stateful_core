@@ -1,9 +1,10 @@
 use std::{
     collections::BTreeMap,
+    fs,
     path::{Path, PathBuf},
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
@@ -213,6 +214,543 @@ pub struct ProgramBenchConditionMetadata {
     pub finished_at_ms: u64,
     pub running_time_ms: u64,
     pub instances: Vec<ProgramBenchInstanceMetadata>,
+}
+
+impl ProgramBenchTokenUsage {
+    fn has_observed_tokens(&self) -> bool {
+        self.turns > 0
+            || self.input_tokens > 0
+            || self.cached_input_tokens > 0
+            || self.output_tokens > 0
+            || self.reasoning_output_tokens > 0
+    }
+
+    fn input_plus_output_tokens(&self) -> u64 {
+        if self.input_plus_output_tokens == 0 {
+            self.input_tokens + self.output_tokens
+        } else {
+            self.input_plus_output_tokens
+        }
+    }
+
+    fn uncached_input_tokens(&self) -> u64 {
+        if self.uncached_input_tokens == 0 {
+            self.input_tokens.saturating_sub(self.cached_input_tokens)
+        } else {
+            self.uncached_input_tokens
+        }
+    }
+
+    fn uncached_input_plus_output_tokens(&self) -> u64 {
+        if self.uncached_input_plus_output_tokens == 0 {
+            self.uncached_input_tokens() + self.output_tokens
+        } else {
+            self.uncached_input_plus_output_tokens
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProgramBenchConditionReport {
+    pub run_id: String,
+    pub condition_id: String,
+    pub condition: ProgramBenchCondition,
+    pub instances: usize,
+    pub attempted_instances: usize,
+    pub evaluated_instances: usize,
+    pub average_score: Option<f64>,
+    pub resolved_count: usize,
+    pub resolved_rate: Option<f64>,
+    pub eval_error_count: usize,
+    pub agent_error_count: usize,
+    pub timeout_count: usize,
+    pub running_time_ms: u64,
+    pub average_running_time_ms: Option<f64>,
+    #[serde(default)]
+    pub token_observed_instances: usize,
+    #[serde(default)]
+    pub token_usage_turns: usize,
+    #[serde(default)]
+    pub token_input_tokens: u64,
+    #[serde(default)]
+    pub token_cached_input_tokens: u64,
+    #[serde(default)]
+    pub token_output_tokens: u64,
+    #[serde(default)]
+    pub token_reasoning_output_tokens: u64,
+    #[serde(default)]
+    pub token_input_plus_output_tokens: u64,
+    #[serde(default)]
+    pub token_uncached_input_tokens: u64,
+    #[serde(default)]
+    pub token_uncached_input_plus_output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_input_plus_output_tokens: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_uncached_input_plus_output_tokens: Option<f64>,
+    #[serde(default)]
+    pub subagent_observed_instances: usize,
+    #[serde(default)]
+    pub subagent_used_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_used_rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_per_million_input_plus_output_tokens: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_per_million_uncached_input_plus_output_tokens: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_per_hour: Option<f64>,
+    pub score_source: String,
+}
+
+impl ProgramBenchConditionReport {
+    pub fn render(&self, format: ReportFormat) -> Result<String> {
+        match format {
+            ReportFormat::Json => serde_json::to_string_pretty(self).context("failed to render ProgramBench report JSON"),
+            ReportFormat::Markdown => Ok(render_programbench_report_markdown(self)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProgramBenchComparisonReport {
+    pub reports: Vec<ProgramBenchConditionReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duplicate_axis_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_axis_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub condition_id_mismatches: Vec<String>,
+    pub stateful_score_delta_without_subagent: Option<f64>,
+    pub subagent_score_delta_without_stateful: Option<f64>,
+    pub combined_interaction_score_delta: Option<f64>,
+    pub stateful_running_time_ms_delta_without_subagent: Option<i64>,
+    pub subagent_running_time_ms_delta_without_stateful: Option<i64>,
+    pub stateful_input_plus_output_tokens_delta_without_subagent: Option<i64>,
+    pub subagent_input_plus_output_tokens_delta_without_stateful: Option<i64>,
+    pub total_running_time_ms: u64,
+    #[serde(default)]
+    pub total_input_plus_output_tokens: u64,
+    #[serde(default)]
+    pub total_uncached_input_plus_output_tokens: u64,
+}
+
+impl ProgramBenchComparisonReport {
+    pub fn render(&self, format: ReportFormat) -> Result<String> {
+        match format {
+            ReportFormat::Json => serde_json::to_string_pretty(self)
+                .context("failed to render ProgramBench comparison JSON"),
+            ReportFormat::Markdown => Ok(render_programbench_comparison_markdown(self)),
+        }
+    }
+}
+
+pub fn build_programbench_condition_report(
+    condition_dir: impl AsRef<Path>,
+) -> Result<ProgramBenchConditionReport> {
+    let condition_dir = condition_dir.as_ref();
+    let metadata: ProgramBenchConditionMetadata = read_json_file(condition_dir.join("condition.json"))?;
+    let score_by_instance: BTreeMap<String, BTreeMap<String, bool>> =
+        read_json_file(condition_dir.join("_stats/score.json"))?;
+    let attempted_instances = metadata.instances.len();
+    let scores = metadata
+        .instances
+        .iter()
+        .filter_map(|instance| instance_score(&score_by_instance, &instance.instance_id))
+        .collect::<Vec<_>>();
+    let evaluated_instances = scores.len();
+    let resolved_count = scores.iter().filter(|score| **score >= 1.0).count();
+    let eval_error_count = metadata
+        .instances
+        .iter()
+        .filter(|instance| instance_score(&score_by_instance, &instance.instance_id).is_none())
+        .count();
+    let agent_error_count = metadata
+        .instances
+        .iter()
+        .filter(|instance| instance.error.is_some())
+        .count();
+    let timeout_count = metadata
+        .instances
+        .iter()
+        .filter(|instance| {
+            instance
+                .error
+                .as_deref()
+                .map(|error| error.to_ascii_lowercase().contains("timeout"))
+                .unwrap_or(false)
+        })
+        .count();
+    let subagent_observed_instances = metadata
+        .instances
+        .iter()
+        .filter(|instance| instance.subagent_used.is_some())
+        .count();
+    let subagent_used_count = metadata
+        .instances
+        .iter()
+        .filter(|instance| instance.subagent_used == Some(true))
+        .count();
+    let token_usages = metadata
+        .instances
+        .iter()
+        .filter_map(|instance| instance.token_usage.as_ref())
+        .filter(|usage| usage.has_observed_tokens())
+        .collect::<Vec<_>>();
+    let token_observed_instances = token_usages.len();
+    let token_usage_turns = token_usages.iter().map(|usage| usage.turns).sum::<usize>();
+    let token_input_tokens = token_usages
+        .iter()
+        .map(|usage| usage.input_tokens)
+        .sum::<u64>();
+    let token_cached_input_tokens = token_usages
+        .iter()
+        .map(|usage| usage.cached_input_tokens)
+        .sum::<u64>();
+    let token_output_tokens = token_usages
+        .iter()
+        .map(|usage| usage.output_tokens)
+        .sum::<u64>();
+    let token_reasoning_output_tokens = token_usages
+        .iter()
+        .map(|usage| usage.reasoning_output_tokens)
+        .sum::<u64>();
+    let token_input_plus_output_tokens = token_usages
+        .iter()
+        .map(|usage| usage.input_plus_output_tokens())
+        .sum::<u64>();
+    let token_uncached_input_tokens = token_usages
+        .iter()
+        .map(|usage| usage.uncached_input_tokens())
+        .sum::<u64>();
+    let token_uncached_input_plus_output_tokens = token_usages
+        .iter()
+        .map(|usage| usage.uncached_input_plus_output_tokens())
+        .sum::<u64>();
+    let average_score = average(&scores);
+
+    Ok(ProgramBenchConditionReport {
+        run_id: metadata.run_id,
+        condition_id: metadata.condition_id,
+        condition: metadata.condition,
+        instances: attempted_instances,
+        attempted_instances,
+        evaluated_instances,
+        average_score,
+        resolved_count,
+        resolved_rate: ratio(resolved_count, evaluated_instances),
+        eval_error_count,
+        agent_error_count,
+        timeout_count,
+        running_time_ms: metadata.running_time_ms,
+        average_running_time_ms: average_u64(metadata.running_time_ms, attempted_instances),
+        token_observed_instances,
+        token_usage_turns,
+        token_input_tokens,
+        token_cached_input_tokens,
+        token_output_tokens,
+        token_reasoning_output_tokens,
+        token_input_plus_output_tokens,
+        token_uncached_input_tokens,
+        token_uncached_input_plus_output_tokens,
+        average_input_plus_output_tokens: average_u64(
+            token_input_plus_output_tokens,
+            token_observed_instances,
+        ),
+        average_uncached_input_plus_output_tokens: average_u64(
+            token_uncached_input_plus_output_tokens,
+            token_observed_instances,
+        ),
+        subagent_observed_instances,
+        subagent_used_count,
+        subagent_used_rate: ratio(subagent_used_count, subagent_observed_instances),
+        score_per_million_input_plus_output_tokens: score_per_million(
+            average_score,
+            token_input_plus_output_tokens,
+        ),
+        score_per_million_uncached_input_plus_output_tokens: score_per_million(
+            average_score,
+            token_uncached_input_plus_output_tokens,
+        ),
+        score_per_hour: score_per_hour(average_score, metadata.running_time_ms),
+        score_source: "score-json".to_string(),
+    })
+}
+
+pub fn compare_programbench_reports(
+    reports: Vec<ProgramBenchConditionReport>,
+) -> ProgramBenchComparisonReport {
+    let total_running_time_ms = reports
+        .iter()
+        .map(|report| report.running_time_ms)
+        .sum::<u64>();
+    let total_input_plus_output_tokens = reports
+        .iter()
+        .map(|report| report.token_input_plus_output_tokens)
+        .sum::<u64>();
+    let total_uncached_input_plus_output_tokens = reports
+        .iter()
+        .map(|report| report.token_uncached_input_plus_output_tokens)
+        .sum::<u64>();
+    let mut by_axes: BTreeMap<(bool, bool), Vec<&ProgramBenchConditionReport>> = BTreeMap::new();
+    let mut condition_id_mismatches = Vec::new();
+    for report in &reports {
+        let expected_condition_id = report.condition.id();
+        if report.condition_id != expected_condition_id {
+            condition_id_mismatches.push(format!("{} != {}", report.condition_id, expected_condition_id));
+        }
+        by_axes
+            .entry((report.condition.stateful, report.condition.subagent))
+            .or_default()
+            .push(report);
+    }
+    let duplicate_axis_ids = by_axes
+        .iter()
+        .filter(|(_, reports)| reports.len() > 1)
+        .map(|((stateful, subagent), _)| ProgramBenchCondition::new(*stateful, *subagent).id())
+        .collect::<Vec<_>>();
+    let missing_axis_ids = default_programbench_conditions()
+        .into_iter()
+        .filter(|condition| !by_axes.contains_key(&(condition.stateful, condition.subagent)))
+        .map(|condition| condition.id())
+        .collect::<Vec<_>>();
+
+    let off_off_score = score_for(&by_axes, false, false);
+    let on_off_score = score_for(&by_axes, true, false);
+    let off_on_score = score_for(&by_axes, false, true);
+    let on_on_score = score_for(&by_axes, true, true);
+    let off_off_time = running_time_for(&by_axes, false, false);
+    let on_off_time = running_time_for(&by_axes, true, false);
+    let off_on_time = running_time_for(&by_axes, false, true);
+    let off_off_tokens = input_plus_output_tokens_for(&by_axes, false, false);
+    let on_off_tokens = input_plus_output_tokens_for(&by_axes, true, false);
+    let off_on_tokens = input_plus_output_tokens_for(&by_axes, false, true);
+
+    ProgramBenchComparisonReport {
+        reports,
+        duplicate_axis_ids,
+        missing_axis_ids,
+        condition_id_mismatches,
+        stateful_score_delta_without_subagent: delta(on_off_score, off_off_score),
+        subagent_score_delta_without_stateful: delta(off_on_score, off_off_score),
+        combined_interaction_score_delta: match (on_on_score, on_off_score, off_on_score, off_off_score) {
+            (Some(on_on), Some(on_off), Some(off_on), Some(off_off)) => {
+                Some(round_three(on_on - on_off - off_on + off_off))
+            }
+            _ => None,
+        },
+        stateful_running_time_ms_delta_without_subagent: delta_i64(on_off_time, off_off_time),
+        subagent_running_time_ms_delta_without_stateful: delta_i64(off_on_time, off_off_time),
+        stateful_input_plus_output_tokens_delta_without_subagent: delta_i64(
+            on_off_tokens,
+            off_off_tokens,
+        ),
+        subagent_input_plus_output_tokens_delta_without_stateful: delta_i64(
+            off_on_tokens,
+            off_off_tokens,
+        ),
+        total_running_time_ms,
+        total_input_plus_output_tokens,
+        total_uncached_input_plus_output_tokens,
+    }
+}
+
+pub fn render_programbench_report_markdown(report: &ProgramBenchConditionReport) -> String {
+    format!(
+        "# ProgramBench Report\n\n| Condition | Stateful | Subagent | Instances | Evaluated | Average score | Resolved rate | Running time ms | Input+output tokens | Uncached input+output tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+        report.condition_id,
+        axis_label(report.condition.stateful),
+        axis_label(report.condition.subagent),
+        report.instances,
+        report.evaluated_instances,
+        optional_float(report.average_score),
+        optional_float(report.resolved_rate),
+        report.running_time_ms,
+        report.token_input_plus_output_tokens,
+        report.token_uncached_input_plus_output_tokens,
+    )
+}
+
+pub fn render_programbench_comparison_markdown(report: &ProgramBenchComparisonReport) -> String {
+    let mut output = String::from(
+        "# ProgramBench Comparison\n\n| Condition | Stateful | Subagent | Instances | Average score | Running time ms | Input+output tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: |\n",
+    );
+    for condition_report in &report.reports {
+        output.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            condition_report.condition_id,
+            axis_label(condition_report.condition.stateful),
+            axis_label(condition_report.condition.subagent),
+            condition_report.instances,
+            optional_float(condition_report.average_score),
+            condition_report.running_time_ms,
+            condition_report.token_input_plus_output_tokens,
+        ));
+    }
+    output.push_str("\n## Deltas\n\n");
+    output.push_str(&format!(
+        "- Stateful score delta without subagent: {}\n",
+        optional_float(report.stateful_score_delta_without_subagent)
+    ));
+    output.push_str(&format!(
+        "- Stateful running time ms delta without subagent: {}\n",
+        optional_i64(report.stateful_running_time_ms_delta_without_subagent)
+    ));
+    output.push_str(&format!(
+        "- Stateful input+output token delta without subagent: {}\n",
+        optional_i64(report.stateful_input_plus_output_tokens_delta_without_subagent)
+    ));
+    if !report.missing_axis_ids.is_empty() {
+        output.push_str(&format!("- Missing axes: {}\n", report.missing_axis_ids.join(", ")));
+    }
+    if !report.duplicate_axis_ids.is_empty() {
+        output.push_str(&format!("- Duplicate axes: {}\n", report.duplicate_axis_ids.join(", ")));
+    }
+    if !report.condition_id_mismatches.is_empty() {
+        output.push_str(&format!(
+            "- Condition ID mismatches: {}\n",
+            report.condition_id_mismatches.join(", ")
+        ));
+    }
+    output
+}
+
+
+fn instance_score(
+    scores: &BTreeMap<String, BTreeMap<String, bool>>,
+    instance_id: &str,
+) -> Option<f64> {
+    let tests = scores.get(instance_id)?;
+    if tests.is_empty() {
+        return None;
+    }
+    let passed = tests.values().filter(|passed| **passed).count();
+    Some(passed as f64 / tests.len() as f64)
+}
+
+fn score_for(
+    reports: &BTreeMap<(bool, bool), Vec<&ProgramBenchConditionReport>>,
+    stateful: bool,
+    subagent: bool,
+) -> Option<f64> {
+    let reports = reports.get(&(stateful, subagent))?;
+    if reports.len() != 1 {
+        return None;
+    }
+    let report = reports[0];
+    if report.condition_id != report.condition.id() {
+        return None;
+    }
+    report.average_score
+}
+
+fn running_time_for(
+    reports: &BTreeMap<(bool, bool), Vec<&ProgramBenchConditionReport>>,
+    stateful: bool,
+    subagent: bool,
+) -> Option<u64> {
+    report_for(reports, stateful, subagent).map(|report| report.running_time_ms)
+}
+
+fn input_plus_output_tokens_for(
+    reports: &BTreeMap<(bool, bool), Vec<&ProgramBenchConditionReport>>,
+    stateful: bool,
+    subagent: bool,
+) -> Option<u64> {
+    report_for(reports, stateful, subagent).map(|report| report.token_input_plus_output_tokens)
+}
+
+fn report_for<'a>(
+    reports: &'a BTreeMap<(bool, bool), Vec<&'a ProgramBenchConditionReport>>,
+    stateful: bool,
+    subagent: bool,
+) -> Option<&'a ProgramBenchConditionReport> {
+    let reports = reports.get(&(stateful, subagent))?;
+    if reports.len() != 1 {
+        return None;
+    }
+    let report = reports[0];
+    if report.condition_id != report.condition.id() {
+        return None;
+    }
+    Some(report)
+}
+
+fn score_per_million(score: Option<f64>, tokens: u64) -> Option<f64> {
+    if tokens == 0 {
+        None
+    } else {
+        Some(round_three(score? * 1_000_000.0 / tokens as f64))
+    }
+}
+
+fn score_per_hour(score: Option<f64>, running_time_ms: u64) -> Option<f64> {
+    if running_time_ms == 0 {
+        None
+    } else {
+        Some(round_three(score? * 3_600_000.0 / running_time_ms as f64))
+    }
+}
+
+fn delta(value: Option<f64>, baseline: Option<f64>) -> Option<f64> {
+    Some(round_three(value? - baseline?))
+}
+
+fn delta_i64(value: Option<u64>, baseline: Option<u64>) -> Option<i64> {
+    Some(value? as i64 - baseline? as i64)
+}
+
+fn ratio(numerator: usize, denominator: usize) -> Option<f64> {
+    if denominator == 0 {
+        None
+    } else {
+        Some(round_three(numerator as f64 / denominator as f64))
+    }
+}
+
+fn average(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(round_three(
+            values.iter().sum::<f64>() / values.len() as f64,
+        ))
+    }
+}
+
+fn average_u64(total: u64, count: usize) -> Option<f64> {
+    if count == 0 {
+        None
+    } else {
+        Some(round_three(total as f64 / count as f64))
+    }
+}
+
+fn round_three(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
+}
+
+fn optional_float(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.3}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn optional_i64(value: Option<i64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn read_json_file<T>(path: impl AsRef<Path>) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let path = path.as_ref();
+    let input = fs::read_to_string(path)
+        .with_context(|| format!("failed to read JSON file {}", path.display()))?;
+    serde_json::from_str(&input)
+        .with_context(|| format!("failed to parse JSON file {}", path.display()))
 }
 
 pub fn default_programbench_conditions() -> Vec<ProgramBenchCondition> {
