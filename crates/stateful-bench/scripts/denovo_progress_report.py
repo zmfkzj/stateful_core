@@ -324,8 +324,26 @@ def summarize_report(
     def report_int_or_result(key: str) -> int:
         return int_or_zero(report.get(key)) if key in report else int_or_zero(result_summary.get(key))
 
-    def report_value_or_result(key: str, default: Any) -> Any:
-        return report.get(key) if key in report else result_summary.get(key, default)
+
+    report_has_trace_summary = any(
+        key in report
+        for key in (
+            "orchestration_event_count",
+            "orchestration_heartbeat_events",
+            "orchestration_heartbeat_windows",
+            "orchestration_denial_events",
+        )
+    )
+
+    def report_trace_int_or_result(key: str) -> int:
+        if report_has_trace_summary:
+            return int_or_zero(report.get(key))
+        return int_or_zero(result_summary.get(key))
+
+    def report_trace_value_or_result(key: str, default: Any) -> Any:
+        if report_has_trace_summary:
+            return report.get(key, default)
+        return result_summary.get(key, default)
 
 
     return {
@@ -349,26 +367,28 @@ def summarize_report(
         ),
         "orchestration_claim_events": report_int_or_result("orchestration_claim_events"),
         "orchestration_conflict_events": report_int_or_result("orchestration_conflict_events"),
-        "orchestration_event_count": report_int_or_result("orchestration_event_count"),
-        "orchestration_event_types": report_value_or_result(
+        "orchestration_event_count": report_trace_int_or_result("orchestration_event_count"),
+        "orchestration_event_types": report_trace_value_or_result(
             "orchestration_event_types", {}
         )
         or {},
-        "orchestration_heartbeat_events": report_int_or_result(
+        "orchestration_heartbeat_events": report_trace_int_or_result(
             "orchestration_heartbeat_events"
         ),
-        "orchestration_heartbeat_windows": report_int_or_result(
+        "orchestration_heartbeat_windows": report_trace_int_or_result(
             "orchestration_heartbeat_windows"
         ),
-        "orchestration_heartbeat_max_gap_ms": report_value_or_result(
+        "orchestration_heartbeat_max_gap_ms": report_trace_value_or_result(
             "orchestration_heartbeat_max_gap_ms", None
         ),
-        "orchestration_denial_events": report_int_or_result("orchestration_denial_events"),
-        "orchestration_denial_paths": report_value_or_result(
+        "orchestration_denial_events": report_trace_int_or_result(
+            "orchestration_denial_events"
+        ),
+        "orchestration_denial_paths": report_trace_value_or_result(
             "orchestration_denial_paths", {}
         )
         or {},
-        "orchestration_denial_messages": report_value_or_result(
+        "orchestration_denial_messages": report_trace_value_or_result(
             "orchestration_denial_messages", {}
         )
         or {},

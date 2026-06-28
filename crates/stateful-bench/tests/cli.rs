@@ -2853,6 +2853,79 @@ print(json.dumps(summary, sort_keys=True))
 }
 
 #[test]
+fn denovo_progress_report_treats_omitted_empty_trace_maps_as_empty() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-progress-report-empty-trace-maps");
+    let run_dir = temp_dir.join("runs").join("r38-denovo-shard-a");
+    let condition_dir = run_dir.join("conditions").join("stateful-off_subagent-on");
+    let result_dir = condition_dir.join("codex-cli").join("_");
+    fs::create_dir_all(&result_dir).expect("fixture result dir should be created");
+    fs::write(
+        result_dir.join("results.jsonl"),
+        r#"{"instance_id":"stale-row","success":false,"score":0.0,"finish_reason":"setup-error","orchestration_trace":{"trace_captured":true,"event_count":9,"event_types":{"SessionHeartbeat":7,"AuthorizationDenied":2},"heartbeat_events":7,"heartbeat_windows":1,"heartbeat_max_gap_ms":90000,"denial_events":2,"denial_paths":{"src/stale.py":2},"denial_messages":{"stale denial":2}}}"#,
+    )
+    .expect("fixture results should be written");
+    fs::write(
+        condition_dir.join("denovo-report.json"),
+        r#"{"condition_id":"stateful-off_subagent-on","total_instances":1,"success_count":1,"average_score":1.0,"completed_instances":1,"scored_instances":1,"error_count":0,"finish_reasons":{"stop":1},"subagent_observed_instances":1,"subagent_used_count":0,"subagent_used_rate":0.0,"orchestration_trace_observed":1,"orchestration_trace_captured":0,"orchestration_reservation_events":0,"orchestration_claim_events":0,"orchestration_conflict_events":0,"orchestration_event_count":0,"orchestration_heartbeat_events":0,"orchestration_heartbeat_windows":0,"orchestration_denial_events":0,"running_time_ms":1234}"#,
+    )
+    .expect("fixture cumulative report should be written");
+
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_progress_report_empty_trace_maps_test", {script_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+summary = module.collect_progress(
+    [Path({run_dir})],
+    expected_instances_per_condition=1,
+)
+print(json.dumps(summary, sort_keys=True))
+"#,
+        script_path = denovo_progress_report_path_json(),
+        run_dir = serde_json::to_string(&run_dir.to_string_lossy())
+            .expect("run path should encode as json"),
+    );
+    let output = run_python_json(&script);
+    let condition = output["conditions"]
+        .as_array()
+        .expect("conditions should be an array")
+        .iter()
+        .find(|condition| condition["condition_id"] == "stateful-off_subagent-on")
+        .expect("condition should be summarized");
+
+    assert_eq!(condition["rows"], 1);
+    assert_eq!(condition["orchestration_event_count"], 0);
+    assert_eq!(
+        condition["orchestration_event_types"],
+        serde_json::json!({})
+    );
+    assert_eq!(condition["orchestration_heartbeat_events"], 0);
+    assert_eq!(condition["orchestration_heartbeat_windows"], 0);
+    assert_eq!(
+        condition["orchestration_heartbeat_max_gap_ms"],
+        serde_json::Value::Null
+    );
+    assert_eq!(condition["orchestration_denial_events"], 0);
+    assert_eq!(
+        condition["orchestration_denial_paths"],
+        serde_json::json!({})
+    );
+    assert_eq!(
+        condition["orchestration_denial_messages"],
+        serde_json::json!({})
+    );
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
 fn denovo_progress_report_uses_results_jsonl_for_report_finish_reasons() {
     let temp_dir = target_temp_dir("stateful-bench-denovo-progress-report-finish-reasons");
     let run_dir = temp_dir.join("runs").join("r38-denovo-shard-a");
