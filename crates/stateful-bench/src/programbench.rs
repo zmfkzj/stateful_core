@@ -2,6 +2,8 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -163,6 +165,17 @@ pub struct ProgramBenchRunOptions {
     pub stateful_binary: String,
     pub codex_bin: String,
     pub omp_bin: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramBenchEvalOptions {
+    pub run_dir: PathBuf,
+    pub programbench_bin: String,
+    pub workers: usize,
+    pub branch_workers: usize,
+    pub docker_cpus: usize,
+    pub force: bool,
+    pub no_package: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -781,6 +794,95 @@ pub fn parse_programbench_condition(input: &str) -> Result<ProgramBenchCondition
     ))
 }
 
+pub fn planned_programbench_conditions(raw: &[String]) -> Result<Vec<ProgramBenchCondition>> {
+    if raw.is_empty() {
+        return Ok(default_programbench_conditions());
+    }
+    raw.iter()
+        .map(|condition| parse_programbench_condition(condition))
+        .collect()
+}
+
+pub fn build_programbench_eval_commands(
+    options: ProgramBenchEvalOptions,
+) -> Result<Vec<ProgramBenchRecipeCommand>> {
+    let run_dir = path_arg(&options.run_dir);
+    let mut eval_args = vec![
+        "eval".to_string(),
+        run_dir.clone(),
+        "--workers".to_string(),
+        options.workers.to_string(),
+        "--branch-workers".to_string(),
+        options.branch_workers.to_string(),
+        "--docker-cpus".to_string(),
+        options.docker_cpus.to_string(),
+    ];
+    if options.force {
+        eval_args.push("--force".to_string());
+    }
+
+    let mut commands = vec![
+        ProgramBenchRecipeCommand {
+            program: options.programbench_bin.clone(),
+            args: eval_args,
+            env: BTreeMap::new(),
+        },
+        ProgramBenchRecipeCommand {
+            program: options.programbench_bin.clone(),
+            args: vec!["info".to_string(), run_dir.clone()],
+            env: BTreeMap::new(),
+        },
+    ];
+    if !options.no_package {
+        commands.push(ProgramBenchRecipeCommand {
+            program: options.programbench_bin,
+            args: vec!["submit".to_string(), "package".to_string(), run_dir],
+            env: BTreeMap::new(),
+        });
+    }
+    Ok(commands)
+}
+
+pub fn run_programbench_matrix(
+    options: ProgramBenchRunOptions,
+) -> Result<Vec<ProgramBenchConditionMetadata>> {
+    let conditions = if options.conditions.is_empty() {
+        default_programbench_conditions()
+    } else {
+        options.conditions
+    };
+    let run_dir = options.output_dir.join(&options.run_id);
+    let mut metadata = Vec::with_capacity(conditions.len());
+    for condition in conditions {
+        let condition_id = condition.id();
+        let condition_dir = run_dir.join("conditions").join(&condition_id);
+        fs::create_dir_all(&condition_dir)
+            .with_context(|| format!("failed to create {}", condition_dir.display()))?;
+        let started_at_ms = unix_ms();
+        let finished_at_ms = unix_ms();
+        let condition_metadata = ProgramBenchConditionMetadata {
+            run_id: options.run_id.clone(),
+            condition_id,
+            condition,
+            agent: options.agent,
+            started_at_ms,
+            finished_at_ms,
+            running_time_ms: finished_at_ms.saturating_sub(started_at_ms),
+            instances: Vec::new(),
+        };
+        write_json_file(condition_dir.join("condition.json"), &condition_metadata)?;
+        metadata.push(condition_metadata);
+    }
+    Ok(metadata)
+}
+
+pub fn run_programbench_eval(options: ProgramBenchEvalOptions) -> Result<()> {
+    for command in build_programbench_eval_commands(options)? {
+        execute_recipe_command(&command)?;
+    }
+    Ok(())
+}
+
 pub fn build_programbench_agent_command(
     options: ProgramBenchInstanceRunOptions,
 ) -> Result<ProgramBenchRecipeCommand> {
@@ -835,8 +937,145 @@ pub fn build_programbench_agent_command(
     })
 }
 
-pub fn run_programbench_cli(_command: ProgramBenchCommand) -> Result<()> {
-    bail!("ProgramBench command execution is not implemented yet")
+pub fn run_programbench_cli(command: ProgramBenchCommand) -> Result<()> {
+    match command {
+        ProgramBenchCommand::Run {
+            output_dir,
+            run_id,
+            agent,
+            condition,
+            model,
+            benchmark_max_turns,
+            timeout_seconds,
+            filter,
+            slice,
+            max_instances,
+            programbench_bin,
+            docker_bin,
+            image_tag,
+            stateful_binary,
+            codex_bin,
+            omp_bin,
+        } => {
+            let metadata = run_programbench_matrix(ProgramBenchRunOptions {
+                output_dir,
+                run_id,
+                agent,
+                conditions: planned_programbench_conditions(&condition)?,
+                model,
+                benchmark_max_turns,
+                timeout_seconds,
+                filter,
+                slice,
+                max_instances,
+                programbench_bin,
+                docker_bin,
+                image_tag,
+                stateful_binary,
+                codex_bin,
+                omp_bin,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&metadata)?);
+        }
+        ProgramBenchCommand::Eval {
+            run_dir,
+            programbench_bin,
+            workers,
+            branch_workers,
+            docker_cpus,
+            force,
+            no_package,
+        } => run_programbench_eval(ProgramBenchEvalOptions {
+            run_dir,
+            programbench_bin,
+            workers,
+            branch_workers,
+            docker_cpus,
+            force,
+            no_package,
+        })?,
+        ProgramBenchCommand::Report {
+            condition_dir,
+            format,
+            output,
+        } => {
+            let report = build_programbench_condition_report(condition_dir)?;
+            let rendered = report.render(format)?;
+            write_or_print(output.as_deref(), &rendered)?;
+        }
+        ProgramBenchCommand::Compare {
+            report,
+            format,
+            output,
+        } => {
+            let reports = report
+                .iter()
+                .map(read_json_file::<ProgramBenchConditionReport>)
+                .collect::<Result<Vec<_>>>()?;
+            let comparison = compare_programbench_reports(reports);
+            let rendered = comparison.render(format)?;
+            write_or_print(output.as_deref(), &rendered)?;
+        }
+    }
+    Ok(())
+}
+
+fn execute_recipe_command(command: &ProgramBenchRecipeCommand) -> Result<()> {
+    let status = ProcessCommand::new(&command.program)
+        .args(&command.args)
+        .envs(&command.env)
+        .status()
+        .with_context(|| format!("failed to execute {}", command_line(command)))?;
+    if !status.success() {
+        bail!(
+            "ProgramBench command failed with status {status}: {}",
+            command_line(command)
+        );
+    }
+    Ok(())
+}
+
+fn command_line(command: &ProgramBenchRecipeCommand) -> String {
+    std::iter::once(command.program.as_str())
+        .chain(command.args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn write_json_file<T>(path: impl AsRef<Path>, value: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let rendered = serde_json::to_string_pretty(value)
+        .with_context(|| format!("failed to render JSON for {}", path.display()))?;
+    fs::write(path, rendered).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_or_print(output: Option<&Path>, rendered: &str) -> Result<()> {
+    if let Some(output) = output {
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(output, rendered)
+            .with_context(|| format!("failed to write {}", output.display()))?;
+    } else {
+        println!("{rendered}");
+    }
+    Ok(())
+}
+
+fn unix_ms() -> u64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
 fn parse_axis(value: &str) -> Result<bool> {

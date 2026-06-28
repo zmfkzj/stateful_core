@@ -1,10 +1,12 @@
 use clap::Parser;
 use stateful_bench::{
     Cli, Command, ProgramBenchAgentKind, ProgramBenchCommand, ProgramBenchCondition,
-    ProgramBenchConditionMetadata, ProgramBenchConditionReport, ProgramBenchInstanceMetadata,
-    ProgramBenchInstanceRunOptions, ProgramBenchTokenUsage, ReportFormat,
-    build_programbench_agent_command, build_programbench_condition_report,
-    compare_programbench_reports, default_programbench_conditions, parse_programbench_condition,
+    ProgramBenchConditionMetadata, ProgramBenchConditionReport, ProgramBenchEvalOptions,
+    ProgramBenchInstanceMetadata, ProgramBenchInstanceRunOptions, ProgramBenchRunOptions,
+    ProgramBenchTokenUsage, ReportFormat, build_programbench_agent_command,
+    build_programbench_condition_report, build_programbench_eval_commands, compare_programbench_reports,
+    default_programbench_conditions,
+    parse_programbench_condition, planned_programbench_conditions, run_programbench_matrix,
 };
 use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, process::Command as ProcessCommand, time::{SystemTime, UNIX_EPOCH}};
 
@@ -209,6 +211,85 @@ fn programbench_condition_parser_accepts_axes_and_defaults_cover_four_conditions
             "stateful-on_subagent-on",
         ]
     );
+}
+
+#[test]
+fn programbench_run_uses_default_four_axis_matrix_when_no_conditions_passed() {
+    let conditions = planned_programbench_conditions(&[]).expect("default conditions should build");
+    assert_eq!(
+        conditions
+            .iter()
+            .map(ProgramBenchCondition::id)
+            .collect::<Vec<_>>(),
+        vec![
+            "stateful-off_subagent-off",
+            "stateful-on_subagent-off",
+            "stateful-off_subagent-on",
+            "stateful-on_subagent-on",
+        ]
+    );
+}
+
+#[test]
+fn programbench_eval_commands_run_eval_info_and_package_by_default() {
+    let commands = build_programbench_eval_commands(ProgramBenchEvalOptions {
+        run_dir: "runs/pb-dev".into(),
+        programbench_bin: "programbench".to_string(),
+        workers: 4,
+        branch_workers: 2,
+        docker_cpus: 8,
+        force: true,
+        no_package: false,
+    })
+    .expect("commands should build");
+    let rendered = commands
+        .iter()
+        .map(|command| format!("{} {}", command.program, command.args.join(" ")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rendered[0],
+        "programbench eval runs/pb-dev --workers 4 --branch-workers 2 --docker-cpus 8 --force"
+    );
+    assert_eq!(rendered[1], "programbench info runs/pb-dev");
+    assert_eq!(rendered[2], "programbench submit package runs/pb-dev");
+}
+
+#[test]
+fn programbench_run_matrix_writes_condition_metadata_without_launching_tools() {
+    let output_dir = temp_root("programbench-run-matrix");
+    let metadata = run_programbench_matrix(ProgramBenchRunOptions {
+        output_dir: output_dir.clone(),
+        run_id: "pb-dev".to_string(),
+        agent: ProgramBenchAgentKind::CodexCli,
+        conditions: vec![ProgramBenchCondition::new(true, false)],
+        model: None,
+        benchmark_max_turns: 500,
+        timeout_seconds: 7200,
+        filter: None,
+        slice: None,
+        max_instances: None,
+        programbench_bin: "programbench".to_string(),
+        docker_bin: "docker".to_string(),
+        image_tag: "task_cleanroom_v6".to_string(),
+        stateful_binary: "stateful".to_string(),
+        codex_bin: "codex".to_string(),
+        omp_bin: "omp".to_string(),
+    })
+    .expect("matrix metadata should be written");
+
+    assert_eq!(metadata.len(), 1);
+    assert_eq!(metadata[0].condition_id, "stateful-on_subagent-off");
+    assert!(metadata[0].instances.is_empty());
+
+    let condition_path = output_dir
+        .join("pb-dev")
+        .join("conditions")
+        .join("stateful-on_subagent-off")
+        .join("condition.json");
+    let written: ProgramBenchConditionMetadata =
+        serde_json::from_str(&fs::read_to_string(condition_path).expect("metadata should exist"))
+            .expect("metadata should parse");
+    assert_eq!(written, metadata[0]);
 }
 
 #[test]
