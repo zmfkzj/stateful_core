@@ -1214,6 +1214,32 @@ def empty_native_subagent_usage(subagent_min_count: int) -> dict[str, Any]:
     }
 
 
+def stateful_workspace_id_from_repo_metadata(
+    env: dict[str, str],
+    workspace_root: Path | str,
+) -> str | None:
+    repos_dir = Path(env.get("STATEFUL_HOME") or env["HOME"]) / "repos"
+    if not repos_dir.exists():
+        return None
+    roots = {str(workspace_root).rstrip("/")}
+    try:
+        roots.add(str(Path(workspace_root).resolve()).rstrip("/"))
+    except OSError:
+        pass
+    workspace_ids: list[str] = []
+    for metadata_path in repos_dir.glob("*.json"):
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        repo_id = metadata.get("repo_id")
+        if not isinstance(repo_id, str) or not repo_id.startswith("repo-"):
+            continue
+        workspace_id = "workspace-" + repo_id.removeprefix("repo-")
+        workspace_ids.append(workspace_id)
+        root = metadata.get("root")
+        if isinstance(root, str) and root.rstrip("/") in roots:
+            return workspace_id
+    return workspace_ids[0] if len(workspace_ids) == 1 else None
+
+
 def enable_stateful_repo(
     env: dict[str, str],
     workspace: Path,
@@ -1244,6 +1270,12 @@ def enable_stateful_repo(
         raise StatefulRepoEnableError(message)
     if runtime_workspace is not None:
         rewrite_stateful_repo_metadata_for_runtime_workspace(env, workspace, runtime_workspace)
+    workspace_id = stateful_workspace_id_from_repo_metadata(
+        env,
+        runtime_workspace or workspace,
+    )
+    if workspace_id is not None:
+        env["STATEFUL_WORKSPACE_ID"] = workspace_id
     return cleanup
 
 
@@ -2015,12 +2047,18 @@ def stateful_http_json(
 def summarize_orchestration_events(
     events: list[dict[str, Any]],
     session_id: str | None,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
-    matching = [
-        event
-        for event in events
-        if not session_id or event.get("session_id") == session_id
-    ]
+    if workspace_id:
+        matching = [
+            event for event in events if event.get("workspace_id") == workspace_id
+        ]
+    else:
+        matching = [
+            event
+            for event in events
+            if not session_id or event.get("session_id") == session_id
+        ]
     event_types = [str(event.get("event_type", "")) for event in matching]
     return {
         "event_count": len(matching),
@@ -2059,11 +2097,13 @@ def write_orchestration_trace(
         events = events_body.get("events", [])
         if not isinstance(events, list):
             events = []
-        trace.update(summarize_orchestration_events(events, session_id))
+        workspace_id = env.get("STATEFUL_WORKSPACE_ID")
+        if workspace_id:
+            trace["workspace_id"] = workspace_id
+        trace.update(summarize_orchestration_events(events, session_id, workspace_id))
         trace["trace_captured"] = True
         trace["current"] = current.get("current", current)
         trace["events"] = events
-        workspace_id = env.get("STATEFUL_WORKSPACE_ID")
         if workspace_id:
             trace["context"] = stateful_http_json(
                 env,

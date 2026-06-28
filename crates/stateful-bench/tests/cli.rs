@@ -4301,6 +4301,41 @@ print(json.dumps(module.instance_result_row(result), sort_keys=True))
 }
 
 #[test]
+fn denovo_codex_agent_summarizes_orchestration_events_by_workspace() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_trace_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+events = [
+    {{"event_type": "ReservationDeclared", "session_id": "omp-session", "workspace_id": "workspace-a"}},
+    {{"event_type": "ClaimAcquired", "session_id": "omp-session", "workspace_id": "workspace-a"}},
+    {{"event_type": "AuthorizationDenied", "session_id": "omp-session", "workspace_id": "workspace-a"}},
+    {{"event_type": "AuthorizationDenied", "session_id": "omp-session", "workspace_id": "workspace-other"}},
+]
+print(json.dumps(module.summarize_orchestration_events(
+    events,
+    session_id="denovo-instance",
+    workspace_id="workspace-a",
+), sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["event_count"], 3);
+    assert_eq!(output["reservation_events"], 1);
+    assert_eq!(output["claim_events"], 1);
+    assert_eq!(output["conflict_events"], 1);
+}
+
+#[test]
 fn denovo_codex_agent_validate_run_skips_codex() {
     let script = format!(
         r#"
