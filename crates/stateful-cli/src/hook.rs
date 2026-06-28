@@ -329,7 +329,8 @@ fn omp_pre_tool_action(
             if tool_name.eq_ignore_ascii_case("ext_ro_bash")
                 || tool_name.eq_ignore_ascii_case("ext_rw_bash")
                 || tool_name.eq_ignore_ascii_case("sandbox_bash")
-                || tool_name.eq_ignore_ascii_case("process_find") =>
+                || tool_name.eq_ignore_ascii_case("process_find")
+                || tool_name.eq_ignore_ascii_case("sandbox_job_poll") =>
         {
             Ok(OmpPreToolAction::Allow)
         }

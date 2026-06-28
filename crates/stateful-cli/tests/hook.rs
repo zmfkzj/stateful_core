@@ -2977,6 +2977,32 @@ fn omp_process_find_tool_is_allowed_for_internal_runner() {
 }
 
 #[test]
+fn omp_sandbox_job_poll_tool_is_allowed_for_internal_runner() {
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "sandbox_job_poll",
+        "tool_input": {
+            "run_id": "sandbox_bash-1",
+            "wait_ms": 1000
+        }
+    })
+    .to_string();
+
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Allow
+    );
+}
+
+#[test]
 fn omp_raw_bash_denies_sandbox_external_and_points_to_external_tools() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({

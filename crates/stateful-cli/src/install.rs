@@ -2735,7 +2735,8 @@ function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, si
   runner.then(async (result) => {{
     await stdoutStreamer.drain();
     const details = result?.details || {{}};
-    Object.assign(job, details.error ? {{ status: "failed" }} : {{ status: "done" }});
+    const failed = result?.isError || details.exitCode !== 0 || details.error;
+    job.status = failed ? "failed" : "done";
     job.finishedAt = new Date().toISOString();
     job.stderr = details.stderr || "";
     job.exitCode = details.exitCode;

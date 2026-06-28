@@ -342,12 +342,13 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("exitCode: job.exitCode"));
     assert!(extension.contains("error: job.error"));
     assert!(extension.contains("status: \"running\""));
-    assert!(extension.contains("status: \"done\""));
+    assert!(extension.contains("job.status = failed ? \"failed\" : \"done\""));
     assert!(extension.contains("status: \"failed\""));
     assert!(extension.contains("status: \"not_found\""));
     assert!(extension.contains("activeSandboxJobs.set(runId, job)"));
     assert!(extension.contains("job.stdout += chunk"));
     assert!(extension.contains("job.stderr = details.stderr || \"\""));
+    assert!(extension.contains("result?.isError || details.exitCode !== 0 || details.error"));
     assert!(extension.contains("job.finishedAt = new Date().toISOString()"));
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?session_id="));
