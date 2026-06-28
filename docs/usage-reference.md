@@ -100,7 +100,12 @@ Generated OMP tools:
   The live extension stores the original patch after `missing_reservation`,
   `missing_claim`, or claim-conflict denials; after the agent fixes the missing
   scope or receives a claimable reservation, it re-authorizes the original edit,
-  checks the file has not changed since queue time, then applies the stored patch.
+  checks the file has not changed since queue time, then applies the stored
+  line-based patch.
+- `lazy_write_resume` for replay of blocked full OMP `write` content. It uses the
+  same queued wait id or generated operation id path, re-authorizes after the
+  agent fixes the missing scope or receives a claimable reservation, and fails
+  if the target changed since the write was queued.
 
 Generated OMP bash tools run sandbox commands in the background by default:
 omitted or `true` `async` returns a job id immediately, streams output through

@@ -27,7 +27,8 @@ The prototype supports user-level installation with repo allowlist gating.
 --agent omp --yes` configures the isolated OMP `stateful` profile with stateful
 hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `process_find` for
 process inspection, `ext_ro_bash` for read-only `--fs external`, `ext_rw_bash`,
-`lazy_edit_resume` for strict replay of queued line-based OMP edits, and approval
+`lazy_edit_resume` for strict replay of queued line-based OMP edits,
+`lazy_write_resume` for queued full OMP writes with a stale-target guard, and approval
 entries that deny raw Bash while setting Python/JavaScript/JS/Ruby/Julia eval tools to false.
 `ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. The OMP installer also writes `rules/stateful-required.md` and `skills/stateful-command-policy/`
 (`SKILL.md`, `omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
@@ -231,13 +232,17 @@ claims that authorized the completed write boundary. Released claims leave the
 live context render and do not authorize a later write; the session must reread
 and reacquire a claim, or lazy-claim a claimable reservation, before retrying.
 OMP `edit` denials are captured by the generated extension as live-session lazy
-edit operations when the patch has safe repo-relative line targets. Denials with
-a wait id reuse that id; missing reservation or missing claim denials receive a
-generated live-session operation id. `lazy_edit_resume` re-authorizes the original
-edit after the agent fixes the missing scope or receives a claimable reservation,
-verifies the file content still matches the queued base text, and applies only
-line-based edit patch operations; block operations or changed files require
-regenerating the patch.
+edit operations when the patch has safe repo-relative line targets. OMP `write`
+denials are captured as live-session lazy write operations with the original
+full write content. Denials with a wait id reuse that id; missing reservation or
+missing claim denials receive a generated live-session operation id.
+`lazy_edit_resume` re-authorizes the original edit after the agent fixes the
+missing scope or receives a claimable reservation, verifies the file content
+still matches the queued base text, and applies only line-based edit patch
+operations; block operations or changed files require regenerating the patch.
+`lazy_write_resume` re-authorizes the original write after the same scope repair
+or claimable reservation, verifies the target still matches the queued state,
+and writes the captured full content; changed targets require retrying the write.
 For Bash, command text alone never authorizes tool use.
 `/v1/authorize` accepts optional `base_observations` for OCC-style freshness
 checks. When supplied, each observation is compared against the current

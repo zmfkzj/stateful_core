@@ -235,14 +235,20 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("name: \"sandbox_bash\""));
     assert!(extension.contains("name: \"process_find\""));
     assert!(extension.contains("name: \"lazy_edit_resume\""));
+    assert!(extension.contains("name: \"lazy_write_resume\""));
     assert!(extension.contains("name: \"sandbox_job_poll\""));
     assert!(extension.contains("Poll a background sandbox job by runId"));
     assert!(extension.contains("applyOmpLinePatch"));
     assert!(extension.contains("lazyEditOperations"));
     assert!(extension.contains("let lazyEditOperationCounter = 0"));
     assert!(extension.contains("nextLazyEditOperationId()"));
+    assert!(extension.contains("lazyWriteOperations"));
+    assert!(extension.contains("nextLazyWriteOperationId()"));
     assert!(extension.contains("reservation or claim is ready"));
     assert!(extension.contains("structuredLazyEditOperationId(decision)"));
+    assert!(extension.contains("structuredLazyWriteOperationId(decision)"));
+    assert!(extension.contains("Queued lazy write operation_id"));
+    assert!(extension.contains("!target.includes(\":\")"));
     assert!(extension.contains("validateOmpLinePatchBases"));
     assert!(extension.contains("line === \"*** Begin Patch\""));
     assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
@@ -264,9 +270,10 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     );
     assert!(!extension.contains("process_find --fs external"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
-    assert!(
-        extension.contains("import { existsSync, readFileSync, writeFileSync } from \"node:fs\"")
-    );
+    assert!(extension.contains(
+        "import { existsSync, mkdirSync, readFileSync, writeFileSync } from \"node:fs\""
+    ));
+    assert!(extension.contains("import { dirname, resolve } from \"node:path\""));
     assert!(extension.contains("import { fileURLToPath } from \"node:url\""));
     assert!(extension.contains("function resolveSkillInternalUrl(rawUrl)"));
     assert!(extension.contains("function expandSkillInternalUrlsInCommand(command)"));
@@ -277,16 +284,13 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
             "args.push(\"--command\", expandSkillInternalUrlsInCommand(params.command));"
         )
     );
-    assert!(
-        extension
-            .contains("function runSandboxToolProcess(params, args, ctx, label, signal, onStdout, onStderr)")
-    );
+    assert!(extension.contains(
+        "function runSandboxToolProcess(params, args, ctx, label, signal, onStdout, onStderr)"
+    ));
     assert!(extension.contains("process.env.STATEFUL_OMP_SANDBOX === \"off\""));
-    assert!(
-        extension.contains(
-            "function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout, onStderr)"
-        )
-    );
+    assert!(extension.contains(
+        "function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout, onStderr)"
+    ));
     assert!(!extension.contains("function runSandboxTool(params"));
     assert!(extension.contains("spawn(STATEFUL, args"));
     assert!(extension.contains(

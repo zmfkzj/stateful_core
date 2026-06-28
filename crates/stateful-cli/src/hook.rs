@@ -391,6 +391,7 @@ fn is_omp_safe_without_repo_write_authorization(tool_name: &str) -> bool {
         "grep",
         "irc",
         "lazy_edit_resume",
+        "lazy_write_resume",
         "job",
         "read",
         "report_tool_issue",
@@ -1297,16 +1298,7 @@ fn handle_pre_tool_use_with_runtime(
 
     let tool_name = runtime_tool_name_leaf(&input.tool_name);
     match tool_name {
-        tool_name if tool_name.eq_ignore_ascii_case("bash") => {
-            let outcome = authorize_bash(&input)?;
-            Ok(with_file_tool_live_context(
-                outcome,
-                &input,
-                runtime,
-                identity.as_ref(),
-                None,
-            ))
-        }
+        tool_name if tool_name.eq_ignore_ascii_case("bash") => authorize_bash(&input),
         tool_name if tool_name.eq_ignore_ascii_case("apply_patch") => {
             authorize_apply_patch(&input, runtime, repo_root, cwd, identity.as_ref())
         }
@@ -2077,57 +2069,7 @@ fn authorize_apply_patch(
             reason: "apply_patch target is outside the enabled repo".to_string(),
         });
     };
-    let context_resource = context_resource_for_targets(&targets).map(str::to_owned);
-    let outcome = authorize_targets(input, runtime, repo_root, targets, identity)?;
-    Ok(with_file_tool_live_context(
-        outcome,
-        input,
-        runtime,
-        identity,
-        context_resource.as_deref(),
-    ))
-}
-
-fn with_file_tool_live_context(
-    outcome: HookOutcome,
-    input: &PreToolUseInput,
-    runtime: Option<&ServerRuntime>,
-    identity: Option<&RepoIdentity>,
-    resource: Option<&str>,
-) -> HookOutcome {
-    let Some(runtime) = runtime else {
-        return outcome;
-    };
-    let Ok(context_response) =
-        render_context_response(runtime, input.stateful_session_id(), identity, resource)
-    else {
-        return outcome;
-    };
-    if context_response.prompt_text.trim().is_empty() {
-        return outcome;
-    }
-
-    match outcome {
-        HookOutcome::Allow if context_response_has_actionable_items(&context_response) => {
-            HookOutcome::AllowWithContext {
-                message: context_response.prompt_text,
-            }
-        }
-        HookOutcome::Allow => HookOutcome::Allow,
-        HookOutcome::AllowWithContext { .. } => outcome,
-        HookOutcome::Deny { reason } => HookOutcome::Deny {
-            reason: format!("{reason}\n\n{}", context_response.prompt_text),
-        },
-    }
-}
-
-fn context_response_has_actionable_items(response: &ContextRenderResponse) -> bool {
-    response.items.iter().any(|item| {
-        matches!(
-            item.severity,
-            ContextRenderSeverity::Block | ContextRenderSeverity::Warn
-        )
-    })
+    authorize_targets(input, runtime, repo_root, targets, identity)
 }
 
 fn authorize_file_change_tool(
@@ -2181,28 +2123,13 @@ fn authorize_file_write_tool(
         });
     };
 
-    let outcome = authorize_targets(
+    authorize_targets(
         input,
         runtime,
         repo_root,
         vec![PatchTarget::write(&target)],
         identity,
-    )?;
-    Ok(with_file_tool_live_context(
-        outcome,
-        input,
-        runtime,
-        identity,
-        Some(target.as_str()),
-    ))
-}
-
-fn context_resource_for_targets(targets: &[PatchTarget]) -> Option<&str> {
-    if targets.len() == 1 && targets[0].new_path.is_none() {
-        Some(targets[0].path.as_str())
-    } else {
-        None
-    }
+    )
 }
 
 fn normalize_targets(
@@ -2906,22 +2833,7 @@ struct UserPromptSubmitInput {
 
 #[derive(Debug, Deserialize)]
 struct ContextRenderResponse {
-    #[serde(default)]
-    items: Vec<ContextRenderItem>,
     prompt_text: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContextRenderItem {
-    severity: ContextRenderSeverity,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum ContextRenderSeverity {
-    Block,
-    Warn,
-    Info,
 }
 
 impl SessionStartInput {
@@ -3051,13 +2963,6 @@ mod tests {
         assert_eq!(body["resource"], "src/lib.rs");
         assert_eq!(body["repo_id"], "repo-a");
         assert_eq!(body["worktree_id"], "worktree-a");
-    }
-
-    #[test]
-    fn context_resource_for_targets_stays_broad_for_moves() {
-        let targets = vec![PatchTarget::move_file("src/old.rs", "src/new.rs")];
-
-        assert_eq!(context_resource_for_targets(&targets), None);
     }
 
     #[test]

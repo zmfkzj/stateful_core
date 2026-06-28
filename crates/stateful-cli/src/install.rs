@@ -1436,8 +1436,8 @@ fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Resu
     let binary_json = serde_json::to_string(binary_path)?;
     let contents = format!(
         r#"import {{ spawn, spawnSync }} from "node:child_process";
-import {{ existsSync, readFileSync, writeFileSync }} from "node:fs";
-import {{ resolve }} from "node:path";
+import {{ existsSync, mkdirSync, readFileSync, writeFileSync }} from "node:fs";
+import {{ dirname, resolve }} from "node:path";
 import {{ fileURLToPath }} from "node:url";
 
 const STATEFUL = {binary_json};
@@ -1753,6 +1753,8 @@ function processIdList(value) {{
 
 const lazyEditOperations = new Map();
 let lazyEditOperationCounter = 0;
+const lazyWriteOperations = new Map();
+let lazyWriteOperationCounter = 0;
 
 function extractWaitId(reason) {{
   const match = String(reason || "").match(/wait_id ([A-Za-z0-9_-]+)/);
@@ -1767,9 +1769,22 @@ function structuredLazyEditOperationId(decision) {{
     || extractWaitId(decision?.message);
 }}
 
+function structuredLazyWriteOperationId(decision) {{
+  return decision?.wait?.wait_id
+    || decision?.reservation?.wait_id
+    || decision?.reservation?.id
+    || extractWaitId(decision?.reason)
+    || extractWaitId(decision?.message);
+}}
+
 function nextLazyEditOperationId() {{
   lazyEditOperationCounter += 1;
   return "lazy-edit-" + Date.now().toString(36) + "-" + lazyEditOperationCounter.toString(36);
+}}
+
+function nextLazyWriteOperationId() {{
+  lazyWriteOperationCounter += 1;
+  return "lazy-write-" + Date.now().toString(36) + "-" + lazyWriteOperationCounter.toString(36);
 }}
 
 function editPatchTargets(input) {{
@@ -1782,11 +1797,12 @@ function editPatchTargets(input) {{
   return [...new Set(targets)];
 }}
 
-function safeLazyEditTarget(target) {{
+function safeLazyOperationTarget(target) {{
   return typeof target === "string"
     && target.length > 0
     && !target.startsWith("/")
     && !target.includes("\\")
+    && !target.includes(":")
     && !target.split("/").some((part) => part === "" || part === "." || part === "..");
 }}
 
@@ -1802,9 +1818,33 @@ function readOperationBases(cwd, targets) {{
 function rememberLazyEditOperation(event, ctx, decision) {{
   if (event?.toolName !== "edit") return "";
   const targets = editPatchTargets(event.input || {{}});
-  if (targets.length === 0 || !targets.every(safeLazyEditTarget)) return "";
+  if (targets.length === 0 || !targets.every(safeLazyOperationTarget)) return "";
   const operationId = structuredLazyEditOperationId(decision) || nextLazyEditOperationId();
   lazyEditOperations.set(operationId, {{
+    operation_id: operationId,
+    session_id: sessionId(event, ctx),
+    cwd: ctx.cwd,
+    tool_name: event.toolName,
+    tool_input: event.input || {{}},
+    targets,
+    bases: readOperationBases(ctx.cwd, targets),
+    blocked_reason: decision?.reason || "",
+  }});
+  return operationId;
+}}
+
+function writeToolTarget(input) {{
+  const target = String(input?.path || "").trim();
+  return safeLazyOperationTarget(target) ? target : "";
+}}
+
+function rememberLazyWriteOperation(event, ctx, decision) {{
+  if (event?.toolName !== "write") return "";
+  const target = writeToolTarget(event.input || {{}});
+  if (!target) return "";
+  const operationId = structuredLazyWriteOperationId(decision) || nextLazyWriteOperationId();
+  const targets = [target];
+  lazyWriteOperations.set(operationId, {{
     operation_id: operationId,
     session_id: sessionId(event, ctx),
     cwd: ctx.cwd,
@@ -1932,7 +1972,17 @@ function applyOmpLinePatch(cwd, patch, bases) {{
   return {{ status: "applied", message: "lazy edit applied" }};
 }}
 
-function lazyEditToolResult(status, text, details) {{
+function applyOmpWrite(cwd, operation) {{
+  const target = operation.targets[0];
+  const stale = validateOmpLinePatchBases(cwd, new Map([[target, []]]), operation.bases);
+  if (stale) return stale;
+  const filePath = resolve(cwd, target);
+  mkdirSync(dirname(filePath), {{ recursive: true }});
+  writeFileSync(filePath, String(operation.tool_input?.content ?? ""), "utf8");
+  return {{ status: "applied", message: "lazy write applied" }};
+}}
+
+function lazyToolResult(status, text, details) {{
   return {{
     isError: status !== "applied",
     content: [{{ type: "text", text }}],
@@ -2860,7 +2910,7 @@ export default function statefulOmpExtension(pi) {{
       const operationId = String(params?.operation_id || "").trim();
       const operation = lazyEditOperations.get(operationId);
       if (!operation) {{
-        return lazyEditToolResult("failed", "lazy edit operation not found in this live OMP extension session", {{ operation_id: operationId }});
+        return lazyToolResult("failed", "lazy edit operation not found in this live OMP extension session", {{ operation_id: operationId }});
       }}
       const authorization = runStatefulHook("pre-tool-use", {{
         session_id: operation.session_id,
@@ -2870,7 +2920,7 @@ export default function statefulOmpExtension(pi) {{
         tool_input: operation.tool_input,
       }});
       if (authorization.decision !== "allow") {{
-        return lazyEditToolResult("failed", authorization.reason || "stateful authorization denied lazy edit resume", {{ operation_id: operationId, authorization }});
+        return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy edit resume", {{ operation_id: operationId, authorization }});
       }}
       let result;
       try {{
@@ -2887,7 +2937,52 @@ export default function statefulOmpExtension(pi) {{
           tool_input: operation.tool_input,
         }});
       }}
-      return lazyEditToolResult(result.status, result.message, {{ operation_id: operationId, targets: operation.targets }});
+      return lazyToolResult(result.status, result.message, {{ operation_id: operationId, targets: operation.targets }});
+    }},
+  }});
+  pi.registerTool({{
+    name: "lazy_write_resume",
+    label: "Lazy Write Resume",
+    description: "Resume a blocked OMP write operation after the needed reservation or claim is ready. Replays only write operations captured in this live extension session and fails if the target changed while queued.",
+    parameters: {{
+      type: "object",
+      properties: {{
+        operation_id: {{ type: "string", description: "Queued lazy write operation id; either a Stateful wait_id or a generated live-session id printed in the block message." }},
+      }},
+      required: ["operation_id"],
+    }},
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {{
+      const operationId = String(params?.operation_id || "").trim();
+      const operation = lazyWriteOperations.get(operationId);
+      if (!operation) {{
+        return lazyToolResult("failed", "lazy write operation not found in this live OMP extension session", {{ operation_id: operationId }});
+      }}
+      const authorization = runStatefulHook("pre-tool-use", {{
+        session_id: operation.session_id,
+        cwd: operation.cwd || ctx.cwd,
+        yolo: true,
+        tool_name: operation.tool_name,
+        tool_input: operation.tool_input,
+      }});
+      if (authorization.decision !== "allow") {{
+        return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy write resume", {{ operation_id: operationId, authorization }});
+      }}
+      let result;
+      try {{
+        result = applyOmpWrite(operation.cwd || ctx.cwd, operation);
+      }} catch (error) {{
+        result = {{ status: "failed", message: error instanceof Error ? error.message : String(error) }};
+      }}
+      if (result.status === "applied") {{
+        lazyWriteOperations.delete(operationId);
+        runStatefulHook("post-tool-use", {{
+          session_id: operation.session_id,
+          cwd: operation.cwd || ctx.cwd,
+          tool_name: operation.tool_name,
+          tool_input: operation.tool_input,
+        }});
+      }}
+      return lazyToolResult(result.status, result.message, {{ operation_id: operationId, targets: operation.targets }});
     }},
   }});
   pi.registerTool({{
@@ -3040,10 +3135,13 @@ export default function statefulOmpExtension(pi) {{
       }}
     }}
     if (decision.decision === "block") {{
-      const operationId = rememberLazyEditOperation(event, ctx, decision);
-      const suffix = operationId
-        ? "\n\nQueued lazy edit operation_id: " + operationId + "\nNext: when reservation or claim is ready, call lazy_edit_resume with this operation_id."
-        : "";
+      const editOperationId = rememberLazyEditOperation(event, ctx, decision);
+      const writeOperationId = rememberLazyWriteOperation(event, ctx, decision);
+      const suffix = editOperationId
+        ? "\n\nQueued lazy edit operation_id: " + editOperationId + "\nNext: when reservation or claim is ready, call lazy_edit_resume with this operation_id."
+        : writeOperationId
+          ? "\n\nQueued lazy write operation_id: " + writeOperationId + "\nNext: when reservation or claim is ready, call lazy_write_resume with this operation_id."
+          : "";
       return {{ block: true, reason: decision.reason + suffix }};
     }}
   }});

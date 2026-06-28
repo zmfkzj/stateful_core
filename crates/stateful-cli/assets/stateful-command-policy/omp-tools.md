@@ -17,7 +17,7 @@ OMP installs the integration into the live OMP profile agent directory, defaulti
 - the Stateful extension,
 - `rules/stateful-required.md`,
 - `skills/stateful-command-policy/SKILL.md` plus support files,
-- `sandbox_bash`, `ext_ro_bash`, `ext_rw_bash`, and `process_find` tools.
+- `sandbox_bash`, `ext_ro_bash`, `ext_rw_bash`, `process_find`, `lazy_edit_resume`, and `lazy_write_resume` tools.
 
 The installer merges an existing `config.yml` and rejects invalid YAML. Without `stateful install --agent omp --update`, existing OMP scalar config values are preserved and only missing Stateful keys are inserted. With `--update`, targeted OMP scalar values are overwritten to delegate safety to Stateful hooks while raw Bash/eval denials and sandbox confirmations remain hook-enforced.
 
@@ -27,7 +27,7 @@ The installer merges an existing `config.yml` and rejects invalid YAML. Without 
 - Generated sandbox tools expand unquoted, single-quoted, and double-quoted `skill://<name>` and `skill://<name>/<relative-path>` references in the command argument to files under the installed OMP agent `skills/` directory. Unknown skills, query/hash suffixes, and traversal paths are rejected.
 - Generated `process_find` invokes `stateful sandbox process find` directly. By default it includes safe metadata fields such as `pid`, `ppid`, `pgid`, `user`, `uid`, `stat`, `start`, `etime`, `time`, `pcpu`, `pmem`, `rss`, `vsz`, `nice`, `pri`, `tty`, and `comm`; command, argv, and env are not exposed by default.
 - The OMP extension subscribes to Stateful SSE notifications after `session-start`. When a queued reservation is claimable, it injects a next-turn message with the `wait_id`, action/path, and purpose. Agents must still reread the target and call `state_reservation_claim` or rely on an authorized lazy-claim write boundary.
-- Blocked OMP `edit` calls with safe repo-relative line targets can be stored as live-session lazy edit operations. Wait-queue denials use the `wait_id`; `missing_reservation` and `missing_claim` denials use a generated operation id.
+- Blocked OMP `edit` calls with safe repo-relative line targets can be stored as live-session lazy edit operations. Blocked OMP `write` calls can be stored as live-session lazy write operations with captured full write content. Wait-queue denials use the `wait_id`; `missing_reservation` and `missing_claim` denials use a generated operation id. Resume line-based edits with `lazy_edit_resume`; resume captured writes with `lazy_write_resume`, which fails if the target changed since the operation was queued.
 
 ## DeNovo OMP Runs
 

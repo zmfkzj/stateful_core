@@ -144,7 +144,7 @@ stateful codex
 ### OMP
 
 Install OMP integration when you want the isolated OMP `stateful` profile,
-stateful hooks, MCP, generated sandbox command tools, lazy edit resume, and
+stateful hooks, MCP, generated sandbox command tools, lazy edit/write resume, and
 `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
 `sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`):
 
@@ -192,9 +192,11 @@ session stops being fresh.
 When another active claim blocks a write, the writer can queue for that resource.
 When the resource is released or expires, the server reserves it for the next
 eligible waiter and sends a resume notification. In OMP, blocked line-based
-`edit` patches are kept as live-session lazy edit operations, so an agent can
-acquire the missing reservation or claim and call `lazy_edit_resume` instead of
-regenerating the patch.
+`edit` patches and captured full `write` payloads are kept as live-session lazy
+operations, so an agent can acquire the missing reservation or claim and call
+`lazy_edit_resume` for strict line-based patch replay or `lazy_write_resume` for
+captured write replay. Write replay fails if the target changed since the
+operation was queued.
 
 Detailed queue states, claim expiry behavior, and promotion rules are documented
 in [State model](docs/state-model.md),
@@ -223,7 +225,8 @@ OMP UI grant by default; `stateful.autoApprove: true` or the per-call
 `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox
 scope validation, hooks, reservation/claim checks, and grant limits still apply.
 When auto-approval is enabled, no prompt is shown. Use `lazy_edit_resume` for
-strict replay of blocked line-based OMP `edit` patches.
+strict replay of blocked line-based OMP `edit` patches and `lazy_write_resume`
+for captured full OMP `write` replay with a stale-target guard.
 
 See [Usage reference](docs/usage-reference.md) for detailed CLI, hook, sandbox,
 LAN sharing, generated-file, and release notes.
