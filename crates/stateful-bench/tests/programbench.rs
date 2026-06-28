@@ -1,4 +1,8 @@
 use clap::Parser;
+use stateful_bench::programbench::{
+    ProgramBenchDiscoveredInstance, ProgramBenchInstanceReport,
+    run_programbench_matrix_with_instances,
+};
 use stateful_bench::{
     Cli, Command, ProgramBenchAgentKind, ProgramBenchCommand, ProgramBenchCondition,
     ProgramBenchConditionMetadata, ProgramBenchConditionReport, ProgramBenchEvalOptions,
@@ -6,11 +10,14 @@ use stateful_bench::{
     ProgramBenchTokenUsage, ReportFormat, build_programbench_agent_command,
     build_programbench_condition_report, build_programbench_eval_commands,
     compare_programbench_reports, default_programbench_conditions, parse_programbench_condition,
-    planned_programbench_conditions, run_programbench_matrix,
+    planned_programbench_conditions,
 };
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
     time::{SystemTime, UNIX_EPOCH},
@@ -237,9 +244,15 @@ fn programbench_run_uses_default_four_axis_matrix_when_no_conditions_passed() {
 }
 
 #[test]
-fn programbench_eval_commands_run_eval_info_and_package_by_default() {
+fn programbench_eval_commands_target_each_condition_directory() {
+    let run_dir = temp_root("programbench-eval-conditions").join("pb-dev");
+    let first_condition = run_dir.join("conditions").join("stateful-off_subagent-off");
+    let second_condition = run_dir.join("conditions").join("stateful-on_subagent-off");
+    fs::create_dir_all(&second_condition).expect("second condition dir should exist");
+    fs::create_dir_all(&first_condition).expect("first condition dir should exist");
+
     let commands = build_programbench_eval_commands(ProgramBenchEvalOptions {
-        run_dir: "runs/pb-dev".into(),
+        run_dir,
         programbench_bin: "programbench".to_string(),
         workers: 4,
         branch_workers: 2,
@@ -252,40 +265,106 @@ fn programbench_eval_commands_run_eval_info_and_package_by_default() {
         .iter()
         .map(|command| format!("{} {}", command.program, command.args.join(" ")))
         .collect::<Vec<_>>();
+    let first_condition = first_condition.to_string_lossy();
+    let second_condition = second_condition.to_string_lossy();
+
     assert_eq!(
-        rendered[0],
-        "programbench eval runs/pb-dev --workers 4 --branch-workers 2 --docker-cpus 8 --force"
+        rendered,
+        vec![
+            format!(
+                "programbench eval {first_condition} --workers 4 --branch-workers 2 --docker-cpus 8 --force"
+            ),
+            format!("programbench info {first_condition}"),
+            format!("programbench submit package {first_condition}"),
+            format!(
+                "programbench eval {second_condition} --workers 4 --branch-workers 2 --docker-cpus 8 --force"
+            ),
+            format!("programbench info {second_condition}"),
+            format!("programbench submit package {second_condition}"),
+        ]
     );
-    assert_eq!(rendered[1], "programbench info runs/pb-dev");
-    assert_eq!(rendered[2], "programbench submit package runs/pb-dev");
+    assert!(
+        rendered
+            .iter()
+            .all(|command| !command.contains("programbench eval runs/pb-dev"))
+    );
 }
 
+#[cfg(unix)]
 #[test]
-fn programbench_run_matrix_writes_condition_metadata_without_launching_tools() {
-    let output_dir = temp_root("programbench-run-matrix");
-    let metadata = run_programbench_matrix(ProgramBenchRunOptions {
-        output_dir: output_dir.clone(),
-        run_id: "pb-dev".to_string(),
-        agent: ProgramBenchAgentKind::CodexCli,
-        conditions: vec![ProgramBenchCondition::new(true, false)],
-        model: None,
-        benchmark_max_turns: 500,
-        timeout_seconds: 7200,
-        filter: None,
-        slice: None,
-        max_instances: None,
-        programbench_bin: "programbench".to_string(),
-        docker_bin: "docker".to_string(),
-        image_tag: "task_cleanroom_v6".to_string(),
-        stateful_binary: "stateful".to_string(),
-        codex_bin: "codex".to_string(),
-        omp_bin: "omp".to_string(),
-    })
+fn programbench_run_matrix_executes_selected_instance_and_records_metadata() {
+    let root = temp_root("programbench-run-matrix");
+    fs::create_dir_all(&root).expect("temp root should exist");
+    let output_dir = root.join("runs");
+    let docker_log = root.join("docker.log");
+    let codex_log = root.join("codex.log");
+    let docker = fake_executable(
+        &root,
+        "fake-docker",
+        &format!(
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "{}"
+case "$1" in
+  run)
+    printf 'fake-container-id\n'
+    ;;
+  cp)
+    : > "$3"
+    ;;
+  exec|rm)
+    exit 0
+    ;;
+esac
+"#,
+            docker_log.display()
+        ),
+    );
+    let codex = fake_executable(
+        &root,
+        "fake-codex",
+        &format!(
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "{}"
+printf '{{"usage":{{"input_tokens":7,"output_tokens":5}}}}\n'
+"#,
+            codex_log.display()
+        ),
+    );
+
+    let metadata = run_programbench_matrix_with_instances(
+        ProgramBenchRunOptions {
+            output_dir: output_dir.clone(),
+            run_id: "pb-dev".to_string(),
+            agent: ProgramBenchAgentKind::CodexCli,
+            conditions: vec![ProgramBenchCondition::new(true, false)],
+            model: None,
+            benchmark_max_turns: 500,
+            timeout_seconds: 17,
+            filter: None,
+            slice: None,
+            max_instances: None,
+            programbench_bin: "programbench".to_string(),
+            docker_bin: docker.to_string_lossy().into_owned(),
+            image_tag: "task_cleanroom_v6".to_string(),
+            stateful_binary: "stateful".to_string(),
+            codex_bin: codex.to_string_lossy().into_owned(),
+            omp_bin: "omp".to_string(),
+        },
+        vec![ProgramBenchDiscoveredInstance {
+            instance_id: "owner__repo.abc123".to_string(),
+            image_name: "programbench/fake-image".to_string(),
+        }],
+    )
     .expect("matrix metadata should be written");
 
     assert_eq!(metadata.len(), 1);
     assert_eq!(metadata[0].condition_id, "stateful-on_subagent-off");
-    assert!(metadata[0].instances.is_empty());
+    assert_eq!(metadata[0].instances.len(), 1);
+    assert_eq!(metadata[0].instances[0].instance_id, "owner__repo.abc123");
+    assert_eq!(metadata[0].instances[0].exit_code, Some(0));
+    assert_eq!(metadata[0].instances[0].error, None);
 
     let condition_path = output_dir
         .join("pb-dev")
@@ -296,6 +375,124 @@ fn programbench_run_matrix_writes_condition_metadata_without_launching_tools() {
         serde_json::from_str(&fs::read_to_string(condition_path).expect("metadata should exist"))
             .expect("metadata should parse");
     assert_eq!(written, metadata[0]);
+    assert_eq!(written.instances.len(), 1);
+
+    let instance_path = output_dir
+        .join("pb-dev")
+        .join("conditions")
+        .join("stateful-on_subagent-off")
+        .join("owner__repo.abc123")
+        .join("instance.json");
+    assert!(instance_path.exists(), "instance metadata should exist");
+
+    let docker_calls = fs::read_to_string(docker_log).expect("docker log should exist");
+    assert!(docker_calls.contains(
+        "run -d --init --network none -w /workspace --name stateful-bench-pb-dev-stateful-on_subagent-off-owner__repo-abc123 programbench/fake-image:task_cleanroom_v6 sleep 17s"
+    ));
+    assert!(docker_calls.contains("rm -f fake-container-id"));
+}
+
+#[cfg(unix)]
+#[test]
+fn programbench_run_matrix_discovers_instances_with_configured_programbench_executable() {
+    let root = temp_root("programbench-discovery-bin");
+    fs::create_dir_all(&root).expect("temp root should exist");
+    let output_dir = root.join("runs");
+    let discovery_log = root.join("discovery.log");
+    let docker_log = root.join("docker.log");
+    let codex_log = root.join("codex.log");
+    let discovery_python = fake_executable(
+        &root,
+        "fake-programbench-python",
+        &format!(
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "{}"
+printf '[{{"instance_id":"stateful_bench__fake_discovery.deadbee","image_name":"programbench/fake-discovery"}}]\n'
+"#,
+            discovery_log.display()
+        ),
+    );
+    let programbench = fake_executable(
+        &root,
+        "fake-programbench",
+        &format!(
+            r#"#!{}
+# fake ProgramBench console script; discovery should use this shebang.
+"#,
+            discovery_python.display()
+        ),
+    );
+    let docker = fake_executable(
+        &root,
+        "fake-docker",
+        &format!(
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "{}"
+case "$1" in
+  run)
+    printf 'fake-container-id\n'
+    ;;
+  cp)
+    : > "$3"
+    ;;
+  exec|rm)
+    exit 0
+    ;;
+esac
+"#,
+            docker_log.display()
+        ),
+    );
+    let codex = fake_executable(
+        &root,
+        "fake-codex",
+        &format!(
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "{}"
+printf '{{"usage":{{"input_tokens":7,"output_tokens":5}}}}\n'
+"#,
+            codex_log.display()
+        ),
+    );
+
+    let metadata = stateful_bench::programbench::run_programbench_matrix(ProgramBenchRunOptions {
+        output_dir,
+        run_id: "pb-dev".to_string(),
+        agent: ProgramBenchAgentKind::CodexCli,
+        conditions: vec![ProgramBenchCondition::new(false, false)],
+        model: None,
+        benchmark_max_turns: 500,
+        timeout_seconds: 17,
+        filter: Some("stateful_bench__fake_discovery\\.deadbee$".to_string()),
+        slice: Some("0:1".to_string()),
+        max_instances: Some(1),
+        programbench_bin: programbench.to_string_lossy().into_owned(),
+        docker_bin: docker.to_string_lossy().into_owned(),
+        image_tag: "task_cleanroom_v6".to_string(),
+        stateful_binary: "stateful".to_string(),
+        codex_bin: codex.to_string_lossy().into_owned(),
+        omp_bin: "omp".to_string(),
+    })
+    .expect("matrix should discover through configured ProgramBench executable");
+
+    assert_eq!(metadata.len(), 1);
+    assert_eq!(metadata[0].instances.len(), 1);
+    assert_eq!(
+        metadata[0].instances[0].instance_id,
+        "stateful_bench__fake_discovery.deadbee"
+    );
+    let discovery_calls = fs::read_to_string(discovery_log)
+        .expect("configured ProgramBench discovery executable should be invoked");
+    assert!(discovery_calls.contains("-c"));
+    assert!(discovery_calls.contains("--filter"));
+    assert!(discovery_calls.contains("stateful_bench__fake_discovery\\.deadbee$"));
+    assert!(discovery_calls.contains("--slice"));
+    assert!(discovery_calls.contains("0:1"));
+    assert!(discovery_calls.contains("--max-instances"));
+    assert!(discovery_calls.contains("1"));
 }
 
 #[test]
@@ -362,6 +559,7 @@ fn programbench_omp_agent_command_marks_subagent_condition() {
     assert!(has_arg(&command.args, "--subagent"));
     assert!(!has_arg(&command.args, "--stateful"));
 }
+
 #[test]
 fn programbench_codex_adapter_executes_stateful_codex_inside_container() {
     let output = run_python_adapter(
@@ -594,7 +792,6 @@ print(json.dumps({"exit_code": exit_code, "has_subagent_used": "subagent_used" i
     assert_eq!(observed["has_subagent_used"], false);
 }
 
-
 #[test]
 fn programbench_codex_adapter_parses_token_usage_events() {
     let output = run_python_adapter(
@@ -690,6 +887,7 @@ usage = {
 print(json.dumps(usage))
 "#,
     );
+
     let usage: serde_json::Value =
         serde_json::from_str(&output).expect("total-only usage should be JSON");
 
@@ -765,6 +963,16 @@ fn programbench_report_aggregates_official_score_and_efficiency() {
     assert_eq!(report.subagent_used_count, 1);
     assert_eq!(report.subagent_used_rate, Some(0.5));
     assert_eq!(report.score_source, "score-json");
+    assert_eq!(report.instance_reports.len(), 2);
+    let instance_a = report
+        .instance_reports
+        .iter()
+        .find(|instance| instance.instance_id == "instance-a")
+        .expect("instance-a should be reported");
+    assert_eq!(instance_a.score, Some(1.0));
+    assert_eq!(instance_a.running_time_ms, 1000);
+    assert_eq!(instance_a.token_input_plus_output_tokens, 112);
+    assert_eq!(instance_a.token_uncached_input_plus_output_tokens, 72);
 
     fs::remove_dir_all(root).expect("temp root should clean up");
 }
@@ -857,6 +1065,155 @@ fn programbench_compare_reports_score_time_and_token_deltas() {
     );
 }
 
+#[test]
+fn programbench_compare_reports_requires_common_instances_for_deltas() {
+    let off_off = condition_report_with_instances(
+        "stateful-off_subagent-off",
+        false,
+        false,
+        0.25,
+        1000,
+        100,
+        80,
+        &["baseline-only"],
+    );
+    let on_off = condition_report_with_instances(
+        "stateful-on_subagent-off",
+        true,
+        false,
+        1.0,
+        10,
+        5,
+        4,
+        &["stateful-only"],
+    );
+    let off_on = condition_report_with_instances(
+        "stateful-off_subagent-on",
+        false,
+        true,
+        0.75,
+        20,
+        7,
+        6,
+        &["subagent-only"],
+    );
+
+    let comparison = compare_programbench_reports(vec![off_off, on_off, off_on]);
+
+    assert_eq!(comparison.stateful_score_delta_without_subagent, None);
+    assert_eq!(
+        comparison.stateful_running_time_ms_delta_without_subagent,
+        None
+    );
+    assert_eq!(
+        comparison.stateful_input_plus_output_tokens_delta_without_subagent,
+        None
+    );
+    assert_eq!(comparison.subagent_score_delta_without_stateful, None);
+    assert_eq!(
+        comparison.subagent_running_time_ms_delta_without_stateful,
+        None
+    );
+    assert_eq!(
+        comparison.subagent_input_plus_output_tokens_delta_without_stateful,
+        None
+    );
+    assert_eq!(
+        comparison.instance_set_mismatches,
+        vec![
+            "stateful-on_subagent-off vs stateful-off_subagent-off: 0 common instance(s), 1 left-only, 1 right-only".to_string(),
+            "stateful-off_subagent-on vs stateful-off_subagent-off: 0 common instance(s), 1 left-only, 1 right-only".to_string(),
+        ]
+    );
+    let markdown = comparison
+        .render(ReportFormat::Markdown)
+        .expect("comparison markdown should render");
+    assert!(markdown.contains("- Instance set mismatches: stateful-on_subagent-off vs stateful-off_subagent-off: 0 common instance(s), 1 left-only, 1 right-only; stateful-off_subagent-on vs stateful-off_subagent-off: 0 common instance(s), 1 left-only, 1 right-only"));
+}
+
+#[test]
+fn programbench_compare_reports_diagnoses_missing_instance_details() {
+    let mut off = condition_report(
+        "stateful-off_subagent-off",
+        false,
+        false,
+        0.5,
+        1000,
+        100,
+        80,
+    );
+    let mut on = condition_report("stateful-on_subagent-off", true, false, 1.0, 2000, 200, 160);
+    off.instance_reports.clear();
+    on.instance_reports.clear();
+
+    let comparison = compare_programbench_reports(vec![off, on]);
+
+    assert_eq!(comparison.stateful_score_delta_without_subagent, None);
+    assert_eq!(
+        comparison.stateful_running_time_ms_delta_without_subagent,
+        None
+    );
+    assert_eq!(
+        comparison.stateful_input_plus_output_tokens_delta_without_subagent,
+        None
+    );
+    assert_eq!(
+        comparison.instance_set_mismatches,
+        vec![
+            "stateful-on_subagent-off vs stateful-off_subagent-off: 0 common instance(s), 0 left-only, 0 right-only".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn programbench_compare_reports_diagnoses_combined_interaction_instance_mismatch() {
+    let off_off = condition_report_with_instances(
+        "stateful-off_subagent-off",
+        false,
+        false,
+        0.25,
+        1000,
+        100,
+        80,
+        &["shared"],
+    );
+    let on_off = condition_report_with_instances(
+        "stateful-on_subagent-off",
+        true,
+        false,
+        0.5,
+        1000,
+        100,
+        80,
+        &["shared"],
+    );
+    let off_on = condition_report_with_instances(
+        "stateful-off_subagent-on",
+        false,
+        true,
+        0.75,
+        1000,
+        100,
+        80,
+        &["shared"],
+    );
+    let on_on = condition_report_with_instances(
+        "stateful-on_subagent-on",
+        true,
+        true,
+        1.0,
+        1000,
+        100,
+        80,
+        &["combined-only"],
+    );
+
+    let comparison = compare_programbench_reports(vec![off_off, on_off, off_on, on_on]);
+
+    assert_eq!(comparison.combined_interaction_score_delta, None);
+    assert!(comparison.instance_set_mismatches.contains(&"combined interaction: 0 common instance(s) across stateful-off_subagent-off, stateful-on_subagent-off, stateful-off_subagent-on, stateful-on_subagent-on".to_string()));
+}
+
 fn instance_metadata(
     instance_id: &str,
     error: Option<&str>,
@@ -907,13 +1264,70 @@ fn condition_report(
     input_plus_output: u64,
     uncached_input_plus_output: u64,
 ) -> ProgramBenchConditionReport {
+    condition_report_with_instances(
+        condition_id,
+        stateful,
+        subagent,
+        score,
+        running_time_ms,
+        input_plus_output,
+        uncached_input_plus_output,
+        &["instance-a", "instance-b"],
+    )
+}
+
+fn condition_report_with_instances(
+    condition_id: &str,
+    stateful: bool,
+    subagent: bool,
+    score: f64,
+    running_time_ms: u64,
+    input_plus_output: u64,
+    uncached_input_plus_output: u64,
+    instance_ids: &[&str],
+) -> ProgramBenchConditionReport {
+    let instance_count = instance_ids.len();
+    let first_running_time_ms = running_time_ms / instance_count as u64;
+    let last_running_time_ms =
+        running_time_ms - first_running_time_ms * (instance_count.saturating_sub(1) as u64);
+    let first_input_plus_output = input_plus_output / instance_count as u64;
+    let last_input_plus_output =
+        input_plus_output - first_input_plus_output * (instance_count.saturating_sub(1) as u64);
+    let first_uncached_input_plus_output = uncached_input_plus_output / instance_count as u64;
+    let last_uncached_input_plus_output = uncached_input_plus_output
+        - first_uncached_input_plus_output * (instance_count.saturating_sub(1) as u64);
+    let instance_reports = instance_ids
+        .iter()
+        .enumerate()
+        .map(|(index, instance_id)| ProgramBenchInstanceReport {
+            instance_id: (*instance_id).to_string(),
+            score: Some(score),
+            running_time_ms: if index + 1 == instance_count {
+                last_running_time_ms
+            } else {
+                first_running_time_ms
+            },
+            token_input_plus_output_tokens: if index + 1 == instance_count {
+                last_input_plus_output
+            } else {
+                first_input_plus_output
+            },
+            token_uncached_input_plus_output_tokens: if index + 1 == instance_count {
+                last_uncached_input_plus_output
+            } else {
+                first_uncached_input_plus_output
+            },
+            subagent_used: None,
+        })
+        .collect::<Vec<_>>();
+
     ProgramBenchConditionReport {
         run_id: "pb-dev".to_string(),
         condition_id: condition_id.to_string(),
         condition: ProgramBenchCondition::new(stateful, subagent),
-        instances: 2,
-        attempted_instances: 2,
-        evaluated_instances: 2,
+        instances: instance_count,
+        attempted_instances: instance_count,
+        evaluated_instances: instance_count,
         average_score: Some(score),
         resolved_count: 0,
         resolved_rate: Some(0.0),
@@ -921,9 +1335,9 @@ fn condition_report(
         agent_error_count: 0,
         timeout_count: 0,
         running_time_ms,
-        average_running_time_ms: Some(running_time_ms as f64 / 2.0),
-        token_observed_instances: 2,
-        token_usage_turns: 4,
+        average_running_time_ms: Some(running_time_ms as f64 / instance_count as f64),
+        token_observed_instances: instance_count,
+        token_usage_turns: instance_count * 2,
         token_input_tokens: 0,
         token_cached_input_tokens: 0,
         token_output_tokens: 0,
@@ -931,8 +1345,10 @@ fn condition_report(
         token_input_plus_output_tokens: input_plus_output,
         token_uncached_input_tokens: 0,
         token_uncached_input_plus_output_tokens: uncached_input_plus_output,
-        average_input_plus_output_tokens: Some(input_plus_output as f64 / 2.0),
-        average_uncached_input_plus_output_tokens: Some(uncached_input_plus_output as f64 / 2.0),
+        average_input_plus_output_tokens: Some(input_plus_output as f64 / instance_count as f64),
+        average_uncached_input_plus_output_tokens: Some(
+            uncached_input_plus_output as f64 / instance_count as f64,
+        ),
         subagent_observed_instances: 0,
         subagent_used_count: 0,
         subagent_used_rate: None,
@@ -944,6 +1360,7 @@ fn condition_report(
         ),
         score_per_hour: Some(score * 3_600_000.0 / running_time_ms as f64),
         score_source: "score-json".to_string(),
+        instance_reports,
     }
 }
 
@@ -985,6 +1402,22 @@ spec.loader.exec_module(mod)
     );
 
     String::from_utf8(output.stdout).expect("python stdout should be UTF-8")
+}
+
+fn fake_executable(root: &Path, name: &str, body: &str) -> PathBuf {
+    let path = root.join(name);
+    let mut file = fs::File::create(&path).expect("fake executable should create");
+    file.write_all(body.as_bytes())
+        .expect("fake executable should write");
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&path)
+            .expect("fake executable metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).expect("fake executable should be executable");
+    }
+    path
 }
 
 fn temp_root(prefix: &str) -> PathBuf {

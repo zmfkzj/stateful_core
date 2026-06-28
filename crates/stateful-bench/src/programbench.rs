@@ -1,8 +1,8 @@
 use std::{
     collections::BTreeMap,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
-    process::Command as ProcessCommand,
+    process::{Command as ProcessCommand, ExitStatus},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -179,6 +179,12 @@ pub struct ProgramBenchEvalOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramBenchDiscoveredInstance {
+    pub instance_id: String,
+    pub image_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgramBenchTokenUsage {
     #[serde(default)]
     pub turns: usize,
@@ -264,6 +270,21 @@ impl ProgramBenchTokenUsage {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProgramBenchInstanceReport {
+    pub instance_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub running_time_ms: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub token_input_plus_output_tokens: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub token_uncached_input_plus_output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_used: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProgramBenchConditionReport {
     pub run_id: String,
     pub condition_id: String,
@@ -314,6 +335,8 @@ pub struct ProgramBenchConditionReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_per_hour: Option<f64>,
     pub score_source: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instance_reports: Vec<ProgramBenchInstanceReport>,
 }
 
 impl ProgramBenchConditionReport {
@@ -335,6 +358,8 @@ pub struct ProgramBenchComparisonReport {
     pub missing_axis_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub condition_id_mismatches: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instance_set_mismatches: Vec<String>,
     pub stateful_score_delta_without_subagent: Option<f64>,
     pub subagent_score_delta_without_stateful: Option<f64>,
     pub combined_interaction_score_delta: Option<f64>,
@@ -442,6 +467,28 @@ pub fn build_programbench_condition_report(
         .iter()
         .map(|usage| usage.uncached_input_plus_output_tokens())
         .sum::<u64>();
+    let instance_reports = metadata
+        .instances
+        .iter()
+        .map(|instance| {
+            let token_usage = instance
+                .token_usage
+                .as_ref()
+                .filter(|usage| usage.has_observed_tokens());
+            ProgramBenchInstanceReport {
+                instance_id: instance.instance_id.clone(),
+                score: instance_score(&score_by_instance, &instance.instance_id),
+                running_time_ms: instance.running_time_ms,
+                token_input_plus_output_tokens: token_usage
+                    .map(|usage| usage.input_plus_output_tokens())
+                    .unwrap_or(0),
+                token_uncached_input_plus_output_tokens: token_usage
+                    .map(|usage| usage.uncached_input_plus_output_tokens())
+                    .unwrap_or(0),
+                subagent_used: instance.subagent_used,
+            }
+        })
+        .collect::<Vec<_>>();
     let average_score = average(&scores);
 
     Ok(ProgramBenchConditionReport {
@@ -488,6 +535,7 @@ pub fn build_programbench_condition_report(
             token_uncached_input_plus_output_tokens,
         ),
         score_per_hour: score_per_hour(average_score, metadata.running_time_ms),
+        instance_reports,
         score_source: "score-json".to_string(),
     })
 }
@@ -533,45 +581,40 @@ pub fn compare_programbench_reports(
         .map(|condition| condition.id())
         .collect::<Vec<_>>();
 
-    let off_off_score = score_for(&by_axes, false, false);
-    let on_off_score = score_for(&by_axes, true, false);
-    let off_on_score = score_for(&by_axes, false, true);
-    let on_on_score = score_for(&by_axes, true, true);
-    let off_off_time = running_time_for(&by_axes, false, false);
-    let on_off_time = running_time_for(&by_axes, true, false);
-    let off_on_time = running_time_for(&by_axes, false, true);
-    let off_off_tokens = input_plus_output_tokens_for(&by_axes, false, false);
-    let on_off_tokens = input_plus_output_tokens_for(&by_axes, true, false);
-    let off_on_tokens = input_plus_output_tokens_for(&by_axes, false, true);
+    let mut instance_set_mismatches = Vec::new();
+    let (stateful_without_subagent, stateful_mismatch) =
+        common_instance_deltas(&by_axes, true, false, false, false);
+    if let Some(mismatch) = stateful_mismatch {
+        instance_set_mismatches.push(mismatch);
+    }
+    let (subagent_without_stateful, subagent_mismatch) =
+        common_instance_deltas(&by_axes, false, true, false, false);
+    if let Some(mismatch) = subagent_mismatch {
+        instance_set_mismatches.push(mismatch);
+    }
+    let (combined_interaction_score_delta, combined_mismatch) =
+        common_interaction_score_delta(&by_axes);
+    if let Some(mismatch) = combined_mismatch {
+        instance_set_mismatches.push(mismatch);
+    }
 
     ProgramBenchComparisonReport {
         reports,
         duplicate_axis_ids,
         missing_axis_ids,
         condition_id_mismatches,
-        stateful_score_delta_without_subagent: delta(on_off_score, off_off_score),
-        subagent_score_delta_without_stateful: delta(off_on_score, off_off_score),
-        combined_interaction_score_delta: match (
-            on_on_score,
-            on_off_score,
-            off_on_score,
-            off_off_score,
-        ) {
-            (Some(on_on), Some(on_off), Some(off_on), Some(off_off)) => {
-                Some(round_three(on_on - on_off - off_on + off_off))
-            }
-            _ => None,
-        },
-        stateful_running_time_ms_delta_without_subagent: delta_i64(on_off_time, off_off_time),
-        subagent_running_time_ms_delta_without_stateful: delta_i64(off_on_time, off_off_time),
-        stateful_input_plus_output_tokens_delta_without_subagent: delta_i64(
-            on_off_tokens,
-            off_off_tokens,
-        ),
-        subagent_input_plus_output_tokens_delta_without_stateful: delta_i64(
-            off_on_tokens,
-            off_off_tokens,
-        ),
+        instance_set_mismatches,
+        stateful_score_delta_without_subagent: stateful_without_subagent.score_delta,
+        subagent_score_delta_without_stateful: subagent_without_stateful.score_delta,
+        combined_interaction_score_delta,
+        stateful_running_time_ms_delta_without_subagent: stateful_without_subagent
+            .running_time_ms_delta,
+        subagent_running_time_ms_delta_without_stateful: subagent_without_stateful
+            .running_time_ms_delta,
+        stateful_input_plus_output_tokens_delta_without_subagent: stateful_without_subagent
+            .input_plus_output_tokens_delta,
+        subagent_input_plus_output_tokens_delta_without_stateful: subagent_without_stateful
+            .input_plus_output_tokens_delta,
         total_running_time_ms,
         total_input_plus_output_tokens,
         total_uncached_input_plus_output_tokens,
@@ -641,6 +684,12 @@ pub fn render_programbench_comparison_markdown(report: &ProgramBenchComparisonRe
             report.condition_id_mismatches.join(", ")
         ));
     }
+    if !report.instance_set_mismatches.is_empty() {
+        output.push_str(&format!(
+            "- Instance set mismatches: {}\n",
+            report.instance_set_mismatches.join("; ")
+        ));
+    }
     output
 }
 
@@ -656,36 +705,193 @@ fn instance_score(
     Some(passed as f64 / tests.len() as f64)
 }
 
-fn score_for(
-    reports: &BTreeMap<(bool, bool), Vec<&ProgramBenchConditionReport>>,
-    stateful: bool,
-    subagent: bool,
-) -> Option<f64> {
-    let reports = reports.get(&(stateful, subagent))?;
-    if reports.len() != 1 {
-        return None;
-    }
-    let report = reports[0];
-    if report.condition_id != report.condition.id() {
-        return None;
-    }
-    report.average_score
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct CommonInstanceDeltas {
+    score_delta: Option<f64>,
+    running_time_ms_delta: Option<i64>,
+    input_plus_output_tokens_delta: Option<i64>,
 }
 
-fn running_time_for(
+fn common_instance_deltas(
     reports: &BTreeMap<(bool, bool), Vec<&ProgramBenchConditionReport>>,
-    stateful: bool,
-    subagent: bool,
-) -> Option<u64> {
-    report_for(reports, stateful, subagent).map(|report| report.running_time_ms)
+    value_stateful: bool,
+    value_subagent: bool,
+    baseline_stateful: bool,
+    baseline_subagent: bool,
+) -> (CommonInstanceDeltas, Option<String>) {
+    let Some(value_report) = report_for(reports, value_stateful, value_subagent) else {
+        return (CommonInstanceDeltas::default(), None);
+    };
+    let Some(baseline_report) = report_for(reports, baseline_stateful, baseline_subagent) else {
+        return (CommonInstanceDeltas::default(), None);
+    };
+
+    let value_instances = instance_reports_by_id(value_report);
+    let baseline_instances = instance_reports_by_id(baseline_report);
+    let common_ids = value_instances
+        .keys()
+        .filter(|instance_id| baseline_instances.contains_key(**instance_id))
+        .copied()
+        .collect::<Vec<_>>();
+    let diagnostic = if common_ids.is_empty()
+        || common_ids.len() != value_instances.len()
+        || common_ids.len() != baseline_instances.len()
+    {
+        Some(format!(
+            "{} vs {}: {} common instance(s), {} left-only, {} right-only",
+            value_report.condition_id,
+            baseline_report.condition_id,
+            common_ids.len(),
+            value_instances.len().saturating_sub(common_ids.len()),
+            baseline_instances.len().saturating_sub(common_ids.len()),
+        ))
+    } else {
+        None
+    };
+    if common_ids.is_empty() {
+        return (CommonInstanceDeltas::default(), diagnostic);
+    }
+
+    let mut value_scores = Vec::new();
+    let mut baseline_scores = Vec::new();
+    let mut value_running_time_ms = 0_u64;
+    let mut baseline_running_time_ms = 0_u64;
+    let mut value_tokens = 0_u64;
+    let mut baseline_tokens = 0_u64;
+    for instance_id in common_ids {
+        let value_instance = value_instances
+            .get(instance_id)
+            .expect("common instance should exist in value report");
+        let baseline_instance = baseline_instances
+            .get(instance_id)
+            .expect("common instance should exist in baseline report");
+        if let (Some(value_score), Some(baseline_score)) =
+            (value_instance.score, baseline_instance.score)
+        {
+            value_scores.push(value_score);
+            baseline_scores.push(baseline_score);
+        }
+        value_running_time_ms += value_instance.running_time_ms;
+        baseline_running_time_ms += baseline_instance.running_time_ms;
+        value_tokens += value_instance.token_input_plus_output_tokens;
+        baseline_tokens += baseline_instance.token_input_plus_output_tokens;
+    }
+
+    (
+        CommonInstanceDeltas {
+            score_delta: delta(average(&value_scores), average(&baseline_scores)),
+            running_time_ms_delta: delta_i64(
+                Some(value_running_time_ms),
+                Some(baseline_running_time_ms),
+            ),
+            input_plus_output_tokens_delta: delta_i64(Some(value_tokens), Some(baseline_tokens)),
+        },
+        diagnostic,
+    )
 }
 
-fn input_plus_output_tokens_for(
+fn common_interaction_score_delta(
     reports: &BTreeMap<(bool, bool), Vec<&ProgramBenchConditionReport>>,
-    stateful: bool,
-    subagent: bool,
-) -> Option<u64> {
-    report_for(reports, stateful, subagent).map(|report| report.token_input_plus_output_tokens)
+) -> (Option<f64>, Option<String>) {
+    let Some(off_off) = report_for(reports, false, false) else {
+        return (None, None);
+    };
+    let Some(on_off) = report_for(reports, true, false) else {
+        return (None, None);
+    };
+    let Some(off_on) = report_for(reports, false, true) else {
+        return (None, None);
+    };
+    let Some(on_on) = report_for(reports, true, true) else {
+        return (None, None);
+    };
+    let off_off_instances = instance_reports_by_id(off_off);
+    let on_off_instances = instance_reports_by_id(on_off);
+    let off_on_instances = instance_reports_by_id(off_on);
+    let on_on_instances = instance_reports_by_id(on_on);
+    let common_ids = off_off_instances
+        .keys()
+        .filter(|instance_id| {
+            on_off_instances.contains_key(**instance_id)
+                && off_on_instances.contains_key(**instance_id)
+                && on_on_instances.contains_key(**instance_id)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    let diagnostic = if common_ids.is_empty()
+        || common_ids.len() != off_off_instances.len()
+        || common_ids.len() != on_off_instances.len()
+        || common_ids.len() != off_on_instances.len()
+        || common_ids.len() != on_on_instances.len()
+    {
+        Some(format!(
+            "combined interaction: {} common instance(s) across {}, {}, {}, {}",
+            common_ids.len(),
+            off_off.condition_id,
+            on_off.condition_id,
+            off_on.condition_id,
+            on_on.condition_id,
+        ))
+    } else {
+        None
+    };
+    if common_ids.is_empty() {
+        return (None, diagnostic);
+    }
+
+    let mut off_off_scores = Vec::new();
+    let mut on_off_scores = Vec::new();
+    let mut off_on_scores = Vec::new();
+    let mut on_on_scores = Vec::new();
+    for instance_id in common_ids {
+        let off_off_instance = off_off_instances
+            .get(instance_id)
+            .expect("common instance should exist in off/off report");
+        let on_off_instance = on_off_instances
+            .get(instance_id)
+            .expect("common instance should exist in on/off report");
+        let off_on_instance = off_on_instances
+            .get(instance_id)
+            .expect("common instance should exist in off/on report");
+        let on_on_instance = on_on_instances
+            .get(instance_id)
+            .expect("common instance should exist in on/on report");
+        if let (Some(off_off_score), Some(on_off_score), Some(off_on_score), Some(on_on_score)) = (
+            off_off_instance.score,
+            on_off_instance.score,
+            off_on_instance.score,
+            on_on_instance.score,
+        ) {
+            off_off_scores.push(off_off_score);
+            on_off_scores.push(on_off_score);
+            off_on_scores.push(off_on_score);
+            on_on_scores.push(on_on_score);
+        }
+    }
+
+    let score_delta = match (
+        average(&on_on_scores),
+        average(&on_off_scores),
+        average(&off_on_scores),
+        average(&off_off_scores),
+    ) {
+        (Some(on_on), Some(on_off), Some(off_on), Some(off_off)) => {
+            Some(round_three(on_on - on_off - off_on + off_off))
+        }
+        _ => None,
+    };
+
+    (score_delta, diagnostic)
+}
+
+fn instance_reports_by_id(
+    report: &ProgramBenchConditionReport,
+) -> BTreeMap<&str, &ProgramBenchInstanceReport> {
+    report
+        .instance_reports
+        .iter()
+        .map(|instance| (instance.instance_id.as_str(), instance))
+        .collect()
 }
 
 fn report_for<'a>(
@@ -752,6 +958,10 @@ fn average_u64(total: u64, count: usize) -> Option<f64> {
     } else {
         Some(round_three(total as f64 / count as f64))
     }
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 fn round_three(value: f64) -> f64 {
@@ -821,50 +1031,81 @@ pub fn planned_programbench_conditions(raw: &[String]) -> Result<Vec<ProgramBenc
 pub fn build_programbench_eval_commands(
     options: ProgramBenchEvalOptions,
 ) -> Result<Vec<ProgramBenchRecipeCommand>> {
-    let run_dir = path_arg(&options.run_dir);
-    let mut eval_args = vec![
-        "eval".to_string(),
-        run_dir.clone(),
-        "--workers".to_string(),
-        options.workers.to_string(),
-        "--branch-workers".to_string(),
-        options.branch_workers.to_string(),
-        "--docker-cpus".to_string(),
-        options.docker_cpus.to_string(),
-    ];
-    if options.force {
-        eval_args.push("--force".to_string());
-    }
+    let condition_dirs = programbench_condition_dirs(&options.run_dir)?;
+    let mut commands = Vec::new();
+    for condition_dir in condition_dirs {
+        let condition_dir = path_arg(&condition_dir);
+        let mut eval_args = vec![
+            "eval".to_string(),
+            condition_dir.clone(),
+            "--workers".to_string(),
+            options.workers.to_string(),
+            "--branch-workers".to_string(),
+            options.branch_workers.to_string(),
+            "--docker-cpus".to_string(),
+            options.docker_cpus.to_string(),
+        ];
+        if options.force {
+            eval_args.push("--force".to_string());
+        }
 
-    let mut commands = vec![
-        ProgramBenchRecipeCommand {
+        commands.push(ProgramBenchRecipeCommand {
             program: options.programbench_bin.clone(),
             args: eval_args,
             env: BTreeMap::new(),
-        },
-        ProgramBenchRecipeCommand {
-            program: options.programbench_bin.clone(),
-            args: vec!["info".to_string(), run_dir.clone()],
-            env: BTreeMap::new(),
-        },
-    ];
-    if !options.no_package {
+        });
         commands.push(ProgramBenchRecipeCommand {
-            program: options.programbench_bin,
-            args: vec!["submit".to_string(), "package".to_string(), run_dir],
+            program: options.programbench_bin.clone(),
+            args: vec!["info".to_string(), condition_dir.clone()],
             env: BTreeMap::new(),
         });
+        if !options.no_package {
+            commands.push(ProgramBenchRecipeCommand {
+                program: options.programbench_bin.clone(),
+                args: vec!["submit".to_string(), "package".to_string(), condition_dir],
+                env: BTreeMap::new(),
+            });
+        }
     }
     Ok(commands)
+}
+
+fn programbench_condition_dirs(run_dir: &Path) -> Result<Vec<PathBuf>> {
+    let conditions_dir = run_dir.join("conditions");
+    let mut condition_dirs = fs::read_dir(&conditions_dir)
+        .with_context(|| format!("failed to read {}", conditions_dir.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("failed to list {}", conditions_dir.display()))?;
+    condition_dirs.retain(|path| path.is_dir());
+    condition_dirs.sort();
+    if condition_dirs.is_empty() {
+        bail!(
+            "no ProgramBench condition directories found under {}",
+            conditions_dir.display()
+        );
+    }
+    Ok(condition_dirs)
 }
 
 pub fn run_programbench_matrix(
     options: ProgramBenchRunOptions,
 ) -> Result<Vec<ProgramBenchConditionMetadata>> {
+    let instances = discover_programbench_instances(&options)?;
+    run_programbench_matrix_with_instances(options, instances)
+}
+
+pub fn run_programbench_matrix_with_instances(
+    options: ProgramBenchRunOptions,
+    instances: Vec<ProgramBenchDiscoveredInstance>,
+) -> Result<Vec<ProgramBenchConditionMetadata>> {
+    if instances.is_empty() {
+        bail!("no ProgramBench instances selected");
+    }
     let conditions = if options.conditions.is_empty() {
         default_programbench_conditions()
     } else {
-        options.conditions
+        options.conditions.clone()
     };
     let run_dir = options.output_dir.join(&options.run_id);
     let mut metadata = Vec::with_capacity(conditions.len());
@@ -874,6 +1115,15 @@ pub fn run_programbench_matrix(
         fs::create_dir_all(&condition_dir)
             .with_context(|| format!("failed to create {}", condition_dir.display()))?;
         let started_at_ms = unix_ms();
+        let mut instance_metadata = Vec::with_capacity(instances.len());
+        for instance in &instances {
+            instance_metadata.push(run_programbench_instance(
+                &options,
+                condition,
+                &condition_dir,
+                instance,
+            )?);
+        }
         let finished_at_ms = unix_ms();
         let condition_metadata = ProgramBenchConditionMetadata {
             run_id: options.run_id.clone(),
@@ -883,12 +1133,231 @@ pub fn run_programbench_matrix(
             started_at_ms,
             finished_at_ms,
             running_time_ms: finished_at_ms.saturating_sub(started_at_ms),
-            instances: Vec::new(),
+            instances: instance_metadata,
         };
         write_json_file(condition_dir.join("condition.json"), &condition_metadata)?;
         metadata.push(condition_metadata);
     }
     Ok(metadata)
+}
+
+fn discover_programbench_instances(
+    options: &ProgramBenchRunOptions,
+) -> Result<Vec<ProgramBenchDiscoveredInstance>> {
+    let script = r#"
+import argparse
+import json
+
+from programbench.utils.instance_filters import filter_instances
+from programbench.utils.load_data import load_all_instances
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--filter", default="")
+parser.add_argument("--slice", default="")
+parser.add_argument("--max-instances", type=int)
+args = parser.parse_args()
+
+instances = load_all_instances(include_tests=False)
+instances = filter_instances(
+    instances,
+    filter_spec=args.filter,
+    slice_spec=args.slice,
+    shuffle=False,
+)
+if args.max_instances is not None:
+    instances = instances[: args.max_instances]
+
+print(json.dumps([
+    {"instance_id": instance["instance_id"], "image_name": instance["image_name"]}
+    for instance in instances
+]))
+"#;
+    let mut command = programbench_python_command(&options.programbench_bin)?;
+    command.arg("-c").arg(script);
+    if let Some(filter) = &options.filter {
+        command.arg("--filter").arg(filter);
+    }
+    if let Some(slice) = &options.slice {
+        command.arg("--slice").arg(slice);
+    }
+    if let Some(max_instances) = options.max_instances {
+        command
+            .arg("--max-instances")
+            .arg(max_instances.to_string());
+    }
+    let output = command
+        .output()
+        .context("failed to discover ProgramBench instances using Python API")?;
+    if !output.status.success() {
+        bail!(
+            "failed to discover ProgramBench instances using Python API: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let instances: Vec<ProgramBenchDiscoveredInstance> = serde_json::from_slice(&output.stdout)
+        .context("failed to parse ProgramBench instance discovery output")?;
+    if instances.is_empty() {
+        bail!("no ProgramBench instances selected");
+    }
+    Ok(instances)
+}
+
+fn programbench_python_command(programbench_bin: &str) -> Result<ProcessCommand> {
+    let executable = resolve_programbench_executable(programbench_bin)?;
+    let first_line = fs::read_to_string(&executable)
+        .with_context(|| format!("failed to read ProgramBench executable {}", executable.display()))?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let shebang = first_line.strip_prefix("#!").ok_or_else(|| {
+        anyhow::anyhow!(
+            "ProgramBench executable {} is not a Python console script with a shebang",
+            executable.display()
+        )
+    })?;
+    let mut parts = shebang.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+    if parts.is_empty() {
+        bail!(
+            "ProgramBench executable {} has an empty shebang",
+            executable.display()
+        );
+    }
+    let mut program = parts.remove(0);
+    if program.ends_with("/env") {
+        if parts.first().map(String::as_str) == Some("-S") {
+            parts.remove(0);
+        }
+        if parts.is_empty() {
+            bail!(
+                "ProgramBench executable {} uses env without an interpreter",
+                executable.display()
+            );
+        }
+        program = parts.remove(0);
+    }
+    let mut command = ProcessCommand::new(program);
+    command.args(parts);
+    Ok(command)
+}
+
+fn resolve_programbench_executable(programbench_bin: &str) -> Result<PathBuf> {
+    let path = Path::new(programbench_bin);
+    if path.is_absolute() || path.components().count() > 1 {
+        return Ok(path.to_path_buf());
+    }
+    let Some(paths) = env::var_os("PATH") else {
+        bail!("failed to resolve ProgramBench executable `{programbench_bin}`: PATH is not set");
+    };
+    for dir in env::split_paths(&paths) {
+        let candidate = dir.join(programbench_bin);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    bail!("failed to resolve ProgramBench executable `{programbench_bin}` in PATH")
+}
+
+fn run_programbench_instance(
+    options: &ProgramBenchRunOptions,
+    condition: ProgramBenchCondition,
+    condition_dir: &Path,
+    instance: &ProgramBenchDiscoveredInstance,
+) -> Result<ProgramBenchInstanceMetadata> {
+    let condition_id = condition.id();
+    let container_name =
+        programbench_container_name(&options.run_id, &condition_id, &instance.instance_id);
+    let image = format!("{}:{}", instance.image_name, options.image_tag);
+    let container_id = start_programbench_container(
+        &options.docker_bin,
+        &container_name,
+        &image,
+        options.timeout_seconds,
+    )?;
+    let command = build_programbench_agent_command(ProgramBenchInstanceRunOptions {
+        agent: options.agent,
+        condition,
+        instance_id: instance.instance_id.clone(),
+        container_id: container_id.clone(),
+        condition_dir: condition_dir.to_path_buf(),
+        docker_bin: options.docker_bin.clone(),
+        codex_bin: options.codex_bin.clone(),
+        omp_bin: options.omp_bin.clone(),
+        stateful_binary: options.stateful_binary.clone(),
+        model: options.model.clone(),
+        benchmark_max_turns: options.benchmark_max_turns,
+        timeout_seconds: options.timeout_seconds,
+        subagent_min_count: 3,
+    })?;
+    let adapter_result = execute_recipe_command_status(&command);
+    remove_programbench_container(&options.docker_bin, &container_id);
+    adapter_result.with_context(|| format!("failed to execute {}", command_line(&command)))?;
+
+    let metadata_path = condition_dir
+        .join(&instance.instance_id)
+        .join("instance.json");
+    read_json_file(&metadata_path).with_context(|| {
+        format!(
+            "ProgramBench adapter did not write required metadata {}",
+            metadata_path.display()
+        )
+    })
+}
+
+fn start_programbench_container(
+    docker_bin: &str,
+    container_name: &str,
+    image: &str,
+    timeout_seconds: u64,
+) -> Result<String> {
+    let output = ProcessCommand::new(docker_bin)
+        .args([
+            "run",
+            "-d",
+            "--init",
+            "--network",
+            "none",
+            "-w",
+            "/workspace",
+            "--name",
+            container_name,
+            image,
+            "sleep",
+            &format!("{timeout_seconds}s"),
+        ])
+        .output()
+        .with_context(|| format!("failed to start ProgramBench Docker container from {image}"))?;
+    if !output.status.success() {
+        bail!(
+            "failed to start ProgramBench Docker container from {image}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if container_id.is_empty() {
+        bail!("Docker did not return a ProgramBench container id for {image}");
+    }
+    Ok(container_id)
+}
+
+fn remove_programbench_container(docker_bin: &str, container_id: &str) {
+    let _ = ProcessCommand::new(docker_bin)
+        .args(["rm", "-f", container_id])
+        .status();
+}
+
+fn programbench_container_name(run_id: &str, condition_id: &str, instance_id: &str) -> String {
+    let raw = format!("stateful-bench-{run_id}-{condition_id}-{instance_id}");
+    raw.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .take(96)
+        .collect()
 }
 
 pub fn run_programbench_eval(options: ProgramBenchEvalOptions) -> Result<()> {
@@ -1048,6 +1517,14 @@ fn execute_recipe_command(command: &ProgramBenchRecipeCommand) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn execute_recipe_command_status(command: &ProgramBenchRecipeCommand) -> Result<ExitStatus> {
+    ProcessCommand::new(&command.program)
+        .args(&command.args)
+        .envs(&command.env)
+        .status()
+        .with_context(|| format!("failed to execute {}", command_line(command)))
 }
 
 fn command_line(command: &ProgramBenchRecipeCommand) -> String {
