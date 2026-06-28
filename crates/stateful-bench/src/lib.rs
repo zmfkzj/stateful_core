@@ -1,4 +1,5 @@
 pub mod denovo;
+pub mod programbench;
 
 pub use denovo::{
     DeNovoAgentDockerSandbox, DeNovoAgentKind, DeNovoCliRuntime, DeNovoCodexRunOptions,
@@ -10,6 +11,11 @@ pub use denovo::{
     build_denovo_extract_recipe_command, build_denovo_run_recipe_command, compare_denovo_reports,
     default_denovo_conditions, parse_denovo_condition, render_denovo_comparison_markdown,
     render_denovo_report_markdown, run_denovo_condition, run_denovo_extract, run_denovo_matrix,
+};
+
+pub use programbench::{
+    ProgramBenchAgentKind, ProgramBenchCommand, ProgramBenchCondition,
+    default_programbench_conditions, parse_programbench_condition,
 };
 
 use std::{
@@ -162,6 +168,10 @@ pub enum Command {
     Denovo {
         #[command(subcommand)]
         command: denovo::DeNovoCommand,
+    },
+    Programbench {
+        #[command(subcommand)]
+        command: programbench::ProgramBenchCommand,
     },
 }
 
@@ -319,6 +329,9 @@ pub fn run_cli() -> Result<()> {
         }
         Command::Denovo { command } => {
             denovo::run_denovo_cli(command)?;
+        }
+        Command::Programbench { command } => {
+            programbench::run_programbench_cli(command)?;
         }
     }
 
