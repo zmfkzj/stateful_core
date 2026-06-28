@@ -235,6 +235,8 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("name: \"sandbox_bash\""));
     assert!(extension.contains("name: \"process_find\""));
     assert!(extension.contains("name: \"lazy_edit_resume\""));
+    assert!(extension.contains("name: \"sandbox_job_poll\""));
+    assert!(extension.contains("Poll a background sandbox job by runId"));
     assert!(extension.contains("applyOmpLinePatch"));
     assert!(extension.contains("lazyEditOperations"));
     assert!(extension.contains("let lazyEditOperationCounter = 0"));
@@ -330,6 +332,19 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("pi.sendMessage"));
     assert!(extension.contains("display: true"));
     assert!(extension.contains("triggerTurn: true"));
+    assert!(extension.contains("const activeSandboxJobs = new Map();"));
+    assert!(extension.contains("function sandboxJobSnapshot(job)"));
+    assert!(extension.contains("function pollSandboxJob(params)"));
+    assert!(extension.contains("stdoutPollOffset"));
+    assert!(extension.contains("stderrPollOffset"));
+    assert!(extension.contains("status: \"running\""));
+    assert!(extension.contains("status: \"done\""));
+    assert!(extension.contains("status: \"failed\""));
+    assert!(extension.contains("status: \"not_found\""));
+    assert!(extension.contains("activeSandboxJobs.set(runId, job)"));
+    assert!(extension.contains("job.stdout += chunk"));
+    assert!(extension.contains("job.stderr = details.stderr || \"\""));
+    assert!(extension.contains("job.finishedAt = new Date().toISOString()"));
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?session_id="));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));
