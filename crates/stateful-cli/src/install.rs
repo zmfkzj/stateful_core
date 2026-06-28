@@ -1653,6 +1653,72 @@ const SANDBOX_BASH_FS_PROFILES = new Set(["read-only", "write-targets", "build",
 
 let sandboxJobCounter = 0;
 const backgroundSandboxToolCallIds = new Set();
+const activeSandboxJobs = new Map();
+
+function sandboxJobSnapshot(job) {{
+  if (!job) {{
+    return {{
+      isError: false,
+      content: [{{ type: "text", text: "Sandbox job not found." }}],
+      details: {{ status: "not_found" }},
+    }};
+  }}
+  const stdoutDelta = job.stdout.slice(job.stdoutPollOffset);
+  const stderrDelta = job.stderr.slice(job.stderrPollOffset);
+  job.stdoutPollOffset = job.stdout.length;
+  job.stderrPollOffset = job.stderr.length;
+  const text = [
+    "Sandbox job " + job.runId + " " + job.status + ".",
+    stdoutDelta ? "\nstdout:\n" + stdoutDelta : "",
+    stderrDelta ? "\nstderr:\n" + stderrDelta : "",
+  ].join("");
+  return {{
+    isError: false,
+    content: [{{ type: "text", text }}],
+    details: {{
+      status: job.status,
+      runId: job.runId,
+      label: job.label,
+      command: job.command,
+      commandLabel: job.commandLabel,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
+      stdoutDelta,
+      stderrDelta,
+      stdout: job.stdout,
+      stderr: job.stderr,
+      exitCode: job.exitCode,
+      error: job.error,
+      result: job.result,
+    }},
+  }};
+}}
+
+function sleep(ms) {{
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}}
+
+async function pollSandboxJob(params) {{
+  const runId = String(params?.run_id || params?.runId || "").trim();
+  if (!runId) {{
+    return sandboxToolError("sandbox_job_poll requires run_id");
+  }}
+  const waitMs = Number.isInteger(params?.wait_ms) && params.wait_ms > 0
+    ? Math.min(params.wait_ms, 5000)
+    : 0;
+  const job = activeSandboxJobs.get(runId);
+  if (!job) return sandboxJobSnapshot(undefined);
+  if (job.status === "running" && waitMs > 0) {{
+    const start = Date.now();
+    const stdoutLength = job.stdout.length;
+    const stderrLength = job.stderr.length;
+    while (job.status === "running" && Date.now() - start < waitMs) {{
+      if (job.stdout.length !== stdoutLength || job.stderr.length !== stderrLength) break;
+      await sleep(100);
+    }}
+  }}
+  return sandboxJobSnapshot(job);
+}}
 
 const EXTERNAL_GRANT_DEFAULT_MAX_USES = 5;
 const EXTERNAL_GRANT_MAX_USES_LIMIT = 20;
@@ -2633,8 +2699,27 @@ function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, si
   const runId = nextSandboxJobId(label);
   const commandText = toolDisplayCommand(params, args);
   const commandLabel = commandText.length > 120 ? commandText.slice(0, 117) + "..." : commandText;
+  const job = {{
+    runId,
+    label,
+    command: params.command || commandText,
+    commandLabel,
+    status: "running",
+    startedAt: new Date().toISOString(),
+    finishedAt: undefined,
+    stdout: "",
+    stderr: "",
+    stdoutPollOffset: 0,
+    stderrPollOffset: 0,
+    exitCode: undefined,
+    error: undefined,
+    result: undefined,
+  }};
+  activeSandboxJobs.set(runId, job);
   const stdoutStreamer = createSandboxStdoutStreamer((update) => {{
     const chunk = update?.content?.[0]?.text || "";
+    job.stdout += chunk;
+    job.stdout = truncateSandboxToolText(job.stdout, label);
     deliverSandboxBackgroundMessage(pi, runId, label, chunk, {{
       command: commandText,
       stream: "stdout",
@@ -2650,6 +2735,12 @@ function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, si
   runner.then(async (result) => {{
     await stdoutStreamer.drain();
     const details = result?.details || {{}};
+    Object.assign(job, details.error ? {{ status: "failed" }} : {{ status: "done" }});
+    job.finishedAt = new Date().toISOString();
+    job.stderr = details.stderr || "";
+    job.exitCode = details.exitCode;
+    job.error = details.error;
+    job.result = result;
     postBackgroundSandboxToolUse(ctx, label, params);
     deliverSandboxBackgroundMessage(
       pi,
@@ -2663,6 +2754,10 @@ function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, si
       }}
     );
   }}).catch((error) => {{
+    const errorText = error instanceof Error ? error.message : String(error);
+    job.status = "failed";
+    job.finishedAt = new Date().toISOString();
+    job.error = errorText;
     deliverSandboxBackgroundMessage(
       pi,
       runId,
@@ -2677,7 +2772,7 @@ function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, si
   }});
   return {{
     isError: false,
-    content: [{{ type: "text", text: "Background job " + runId + " started." }}],
+    content: [{{ type: "text", text: "Background job " + runId + " started. Poll sandbox_job_poll with run_id until status is done or failed before final handoff." }}],
     details: {{
       runId,
       background: true,
@@ -2715,6 +2810,22 @@ export default function statefulOmpExtension(pi) {{
       }}
       if (params?.async === false) return await runSandboxAwaitedTool(params || {{}}, args, ctx, "process_find", signal, onUpdate);
       return startSandboxBackgroundTool(pi, _toolCallId, params || {{}}, args, ctx, "process_find", signal, onUpdate);
+    }},
+  }});
+  pi.registerTool({{
+    name: "sandbox_job_poll",
+    label: "Sandbox Job Poll",
+    description: "Poll a background sandbox job by runId and return status plus stdout/stderr deltas.",
+    parameters: {{
+      type: "object",
+      properties: {{
+        run_id: {{ type: "string", description: "Background sandbox runId returned by sandbox_bash, ext_ro_bash, ext_rw_bash, or process_find." }},
+        wait_ms: {{ type: "number", description: "Optional milliseconds to wait for new output or completion, capped at 5000." }},
+      }},
+      required: ["run_id"],
+    }},
+    async execute(_toolCallId, params) {{
+      return await pollSandboxJob(params || {{}});
     }},
   }});
   pi.registerTool({{
