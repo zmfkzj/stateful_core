@@ -337,6 +337,10 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("function pollSandboxJob(params)"));
     assert!(extension.contains("stdoutPollOffset"));
     assert!(extension.contains("stderrPollOffset"));
+    assert!(extension.contains("startedAt: job.startedAt"));
+    assert!(extension.contains("commandLabel: job.commandLabel"));
+    assert!(extension.contains("exitCode: job.exitCode"));
+    assert!(extension.contains("error: job.error"));
     assert!(extension.contains("status: \"running\""));
     assert!(extension.contains("status: \"done\""));
     assert!(extension.contains("status: \"failed\""));
