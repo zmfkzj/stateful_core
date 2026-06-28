@@ -362,6 +362,172 @@ fn programbench_omp_agent_command_marks_subagent_condition() {
     assert!(has_arg(&command.args, "--subagent"));
     assert!(!has_arg(&command.args, "--stateful"));
 }
+#[test]
+fn programbench_codex_adapter_executes_stateful_codex_inside_container() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+calls = []
+
+def fake_run(command, **kwargs):
+    calls.append({"command": command, "timeout": kwargs.get("timeout")})
+    return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+
+mod.subprocess.run = fake_run
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    codex_bin="codex",
+    stateful_binary="/usr/local/bin/stateful",
+    model="gpt-5.4-mini",
+    timeout_seconds=123,
+    stateful=True,
+)
+result = mod.run_agent(args, "solve this")
+print(json.dumps({"calls": calls, "returncode": result.returncode}))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("captured calls should be JSON");
+
+    assert_eq!(
+        observed["calls"][0]["command"],
+        serde_json::json!([
+            "docker",
+            "exec",
+            "-w",
+            "/workspace",
+            "programbench-container",
+            "/usr/local/bin/stateful",
+            "install",
+            "--agent",
+            "codex",
+            "--yes"
+        ])
+    );
+    assert_eq!(
+        observed["calls"][1]["command"],
+        serde_json::json!([
+            "docker",
+            "exec",
+            "-w",
+            "/workspace",
+            "programbench-container",
+            "codex",
+            "exec",
+            "--json",
+            "--cd",
+            "/workspace",
+            "--model",
+            "gpt-5.4-mini",
+            "solve this"
+        ])
+    );
+    assert_eq!(observed["calls"][1]["timeout"], 123);
+    assert_eq!(observed["returncode"], 0);
+}
+
+#[test]
+fn programbench_omp_adapter_executes_stateful_profile_inside_container() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+calls = []
+
+def fake_run(command, **kwargs):
+    calls.append({"command": command, "timeout": kwargs.get("timeout")})
+    return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+
+mod.subprocess.run = fake_run
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    omp_bin="omp",
+    model="gpt-5.4-mini",
+    timeout_seconds=456,
+    stateful=True,
+)
+result = mod.run_agent(args, "solve this")
+print(json.dumps({"calls": calls, "returncode": result.returncode}))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("captured calls should be JSON");
+
+    assert_eq!(
+        observed["calls"][0]["command"],
+        serde_json::json!([
+            "docker",
+            "exec",
+            "-w",
+            "/workspace",
+            "programbench-container",
+            "omp",
+            "--cwd",
+            "/workspace",
+            "--profile",
+            "stateful",
+            "--model",
+            "gpt-5.4-mini",
+            "--prompt",
+            "solve this"
+        ])
+    );
+    assert_eq!(observed["calls"][0]["timeout"], 456);
+    assert_eq!(observed["returncode"], 0);
+}
+
+#[test]
+fn programbench_adapter_omits_subagent_used_without_observation() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import subprocess
+import tempfile
+import types
+from pathlib import Path
+
+def fake_agent(args, prompt):
+    return subprocess.CompletedProcess(["codex"], 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+
+def fake_archive(args, instance_dir):
+    return instance_dir / "submission.tar.gz"
+
+mod.archive_workspace = fake_archive
+with tempfile.TemporaryDirectory() as condition_dir:
+    args = types.SimpleNamespace(
+        condition_dir=condition_dir,
+        instance_id="owner__repo.abc123",
+        condition_id="stateful-on_subagent-on",
+        timeout_seconds=123,
+        subagent=True,
+        subagent_min_count=3,
+    )
+    exit_code = mod.run_main(
+        args,
+        agent_name="codex-cli",
+        exited_error_prefix="codex",
+        token_usage_from_output=mod.codex_token_usage_from_output,
+        run_agent_func=fake_agent,
+    )
+    metadata_path = Path(condition_dir) / "owner__repo.abc123" / "instance.json"
+    metadata = json.loads(metadata_path.read_text())
+print(json.dumps({"exit_code": exit_code, "has_subagent_used": "subagent_used" in metadata}))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("metadata observation should be JSON");
+
+    assert_eq!(observed["exit_code"], 0);
+    assert_eq!(observed["has_subagent_used"], false);
+}
+
 
 #[test]
 fn programbench_codex_adapter_parses_token_usage_events() {

@@ -149,8 +149,31 @@ def archive_workspace(args, instance_dir: Path):
     return submission_path
 
 
+def docker_exec_command(args, *inner: str) -> list[str]:
+    return [args.docker_bin, "exec", "-w", "/workspace", args.container_id, *inner]
+
+
+def install_stateful_for_codex(args) -> None:
+    subprocess.run(
+        docker_exec_command(
+            args,
+            args.stateful_binary,
+            "install",
+            "--agent",
+            "codex",
+            "--yes",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=args.timeout_seconds,
+    )
+
+
 def run_agent(args, prompt):
-    command = [args.codex_bin, "exec", "--json", "--cd", "/workspace"]
+    if args.stateful:
+        install_stateful_for_codex(args)
+    command = docker_exec_command(args, args.codex_bin, "exec", "--json", "--cd", "/workspace")
     if args.model:
         command.extend(["--model", args.model])
     command.append(prompt)
@@ -196,6 +219,17 @@ def prompt_for_args(args) -> str:
     if args.subagent:
         prompt += f"\n\nUse at least {args.subagent_min_count} native subagents before implementation."
     return prompt
+
+
+def observed_subagent_used(stdout: str, stderr: str) -> bool | None:
+    for event in iter_json_events(stdout + "\n" + stderr):
+        value = event.get("subagent_used")
+        if isinstance(value, bool):
+            return value
+        usage = event.get("subagent_usage")
+        if isinstance(usage, dict) and isinstance(usage.get("subagent_used"), bool):
+            return usage["subagent_used"]
+    return None
 
 
 def run_main(
@@ -251,9 +285,11 @@ def run_main(
         "submission_path": str(submission_path),
         "exit_code": exit_code,
         "error": error,
-        "subagent_used": bool(args.subagent),
         "token_usage": token_usage_from_output(stdout),
     }
+    subagent_used = observed_subagent_used(stdout, stderr)
+    if subagent_used is not None:
+        metadata["subagent_used"] = subagent_used
     (instance_dir / "instance.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

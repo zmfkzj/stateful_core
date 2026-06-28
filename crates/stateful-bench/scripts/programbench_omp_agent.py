@@ -13,6 +13,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from programbench_codex_agent import (  # noqa: E402
     add_token_usage,
     build_base_parser,
+    docker_exec_command,
     iter_json_events,
     run_main,
     token_usage_from_value,
@@ -44,7 +45,7 @@ def omp_token_usage_from_output(output: str):
 
 
 def run_agent(args, prompt):
-    command = [args.omp_bin, "--cwd", "/workspace"]
+    command = docker_exec_command(args, args.omp_bin, "--cwd", "/workspace")
     if args.stateful:
         command.extend(["--profile", "stateful"])
     if args.model:
