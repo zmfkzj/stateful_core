@@ -733,6 +733,7 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
             "task",
             "yield",
             "lsp",
+            "glob",
             "KnownTool"
         ])
     );

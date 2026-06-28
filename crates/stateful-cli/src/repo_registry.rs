@@ -19,7 +19,7 @@ const DEFAULT_CODEX_ALLOWED_TOOLS: &[&str] = &[
     "multi_agent_v1send_input",
 ];
 
-const DEFAULT_OMP_ALLOWED_TOOLS: &[&str] = &["task", "yield", "lsp"];
+const DEFAULT_OMP_ALLOWED_TOOLS: &[&str] = &["task", "yield", "lsp", "glob"];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RepoRegistry {

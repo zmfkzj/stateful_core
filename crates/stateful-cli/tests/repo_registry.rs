@@ -18,6 +18,7 @@ fn default_allowed_tools() -> Vec<String> {
         "task",
         "yield",
         "lsp",
+        "glob",
     ]
     .into_iter()
     .map(str::to_string)
