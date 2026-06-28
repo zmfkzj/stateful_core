@@ -1,10 +1,49 @@
 use clap::Parser;
 use stateful_bench::{
     Cli, Command, ProgramBenchAgentKind, ProgramBenchCommand, ProgramBenchCondition,
-    ProgramBenchInstanceRunOptions, ReportFormat, build_programbench_agent_command,
-    default_programbench_conditions, parse_programbench_condition,
+    ProgramBenchInstanceMetadata, ProgramBenchInstanceRunOptions, ProgramBenchTokenUsage,
+    ReportFormat, build_programbench_agent_command, default_programbench_conditions,
+    parse_programbench_condition,
 };
 use std::path::{Path, PathBuf};
+
+#[test]
+fn programbench_metadata_schema_uses_required_instance_fields() {
+    fn accepts_usize(value: usize) -> usize {
+        value
+    }
+
+    let token_usage = ProgramBenchTokenUsage {
+        turns: 3,
+        input_tokens: 10,
+        cached_input_tokens: 4,
+        output_tokens: 6,
+        reasoning_output_tokens: 2,
+        input_plus_output_tokens: 16,
+        uncached_input_tokens: 6,
+        uncached_input_plus_output_tokens: 12,
+    };
+
+    assert_eq!(accepts_usize(token_usage.turns), 3);
+
+    let metadata = ProgramBenchInstanceMetadata {
+        instance_id: "BurntSushi__ripgrep.abc123".to_string(),
+        condition_id: "stateful-on_subagent-off".to_string(),
+        agent: ProgramBenchAgentKind::CodexCli,
+        started_at_ms: 1,
+        finished_at_ms: 2,
+        running_time_ms: 1,
+        submission_path: "submission.tar.gz".to_string(),
+        exit_code: None,
+        error: None,
+        subagent_used: None,
+        token_usage: Some(token_usage),
+    };
+
+    assert_eq!(metadata.finished_at_ms - metadata.started_at_ms, 1);
+    assert_eq!(metadata.running_time_ms, 1);
+    assert_eq!(metadata.submission_path, "submission.tar.gz");
+}
 
 #[test]
 fn programbench_run_command_parses_defaultable_options() {

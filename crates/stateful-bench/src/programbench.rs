@@ -167,7 +167,7 @@ pub struct ProgramBenchRunOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgramBenchTokenUsage {
     #[serde(default)]
-    pub turns: u64,
+    pub turns: usize,
     #[serde(default)]
     pub input_tokens: u64,
     #[serde(default)]
@@ -190,12 +190,9 @@ pub struct ProgramBenchInstanceMetadata {
     pub condition_id: String,
     pub agent: ProgramBenchAgentKind,
     pub started_at_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finished_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub running_time_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub submission_path: Option<PathBuf>,
+    pub finished_at_ms: u64,
+    pub running_time_ms: u64,
+    pub submission_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
