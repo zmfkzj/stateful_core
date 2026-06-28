@@ -2291,7 +2291,7 @@ fn pre_tool_use_denies_unclassified_tool_names() {
 }
 
 #[test]
-fn pre_tool_use_bash_denial_in_repo_includes_live_context() {
+fn pre_tool_use_bash_denial_in_repo_does_not_render_live_context() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-bash-denial-context-test-{}",
         std::process::id()
@@ -2304,7 +2304,7 @@ fn pre_tool_use_bash_denial_in_repo_includes_live_context() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"status":"ok","prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared reservation for src/auth.ts."}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- unexpected context"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -2331,20 +2331,18 @@ fn pre_tool_use_bash_denial_in_repo_includes_live_context() {
         "stateful hook failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("Bash denial should render live context");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
-    assert!(context_request.contains("\"session_id\":\"s1\""));
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "Bash denial should not render live context"
+    );
     let rendered: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
     assert_eq!(rendered["hookSpecificOutput"]["permissionDecision"], "deny");
-    assert!(
-        rendered["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("deny reason should contain rendered context")
-            .contains("Nearby Activity")
-    );
+    let reason = rendered["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("deny reason should be text");
+    assert!(reason.contains("Raw Bash is denied"));
+    assert!(!reason.contains("Nearby Activity"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -3558,7 +3556,7 @@ fn pre_tool_use_edit_denies_when_authorize_connection_drops() {
 }
 
 #[test]
-fn pre_tool_use_edit_posts_authorize_and_renders_live_context_when_server_allows() {
+fn pre_tool_use_edit_posts_authorize_without_rendering_live_context_when_server_allows() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-edit-allow-context-test-{}",
         std::process::id()
@@ -3574,7 +3572,7 @@ fn pre_tool_use_edit_posts_authorize_and_renders_live_context_when_server_allows
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","items":[{"severity":"info"}],"prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared reservation for src/auth.ts."}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- unexpected context"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -3607,15 +3605,13 @@ fn pre_tool_use_edit_posts_authorize_and_renders_live_context_when_server_allows
     assert!(request.contains("POST /v1/authorize HTTP/1.1"));
     assert!(request.contains("\"action\":\"write_file\""));
     assert!(request.contains("\"path\":\"src/auth.ts\""));
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("Edit should render live context after authorization");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
-    assert!(context_request.contains("\"session_id\":\"s1\""));
-    assert!(context_request.contains("\"mode\":\"brief\""));
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "Edit authorization should not render live context"
+    );
     assert!(
         output.stdout.is_empty(),
-        "info-only context should not be injected for allowed Edit writes: {}",
+        "allowed Edit writes should not inject live context: {}",
         String::from_utf8_lossy(&output.stdout)
     );
 
@@ -3851,7 +3847,7 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared reservation for src/auth.ts."}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- unexpected context"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -3915,15 +3911,13 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     assert_eq!(body["payload"]["queue_on_conflict"], true);
     assert_eq!(body["payload"]["purpose"], "Fix auth validation behavior.");
     assert!(body.get("action").is_none());
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("apply_patch should render live context after authorization");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
-    assert!(context_request.contains("\"session_id\":\"s1\""));
-    assert!(context_request.contains("\"mode\":\"brief\""));
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "apply_patch authorization should not render live context"
+    );
     assert!(
         output.stdout.is_empty(),
-        "info-only context should not be injected for allowed writes: {}",
+        "allowed writes should not inject live context: {}",
         String::from_utf8_lossy(&output.stdout)
     );
 
@@ -3931,123 +3925,7 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
 }
 
 #[test]
-fn pre_tool_use_apply_patch_injects_warn_context_when_server_allows() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-warn-context-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    let paths = GlobalPaths::new(temp_root.join("home"));
-    let repo_root = temp_root.join("repo");
-    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
-    enable_test_repo(&paths, &repo_root);
-    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","items":[{"severity":"warn"}],"prompt_text":"Warnings\n- [warn] src/auth.ts: related active work."}"#,
-    ]);
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "apply_patch",
-      "tool_input": {
-        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
-      }
-    }"#;
-
-    let output = run_hook_subprocess(
-        &repo_root,
-        &paths,
-        &["hook", "codex", "pre-tool-use"],
-        input,
-    );
-
-    assert!(
-        output.status.success(),
-        "stateful hook failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let _authorize_request = rx.recv().expect("authorize request should arrive");
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("apply_patch should render live context after authorization");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
-    let rendered: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("allow outcome should serialize");
-    assert!(
-        rendered["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .expect("additional context should be present")
-            .contains("Warnings")
-    );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[test]
-fn pre_tool_use_apply_patch_injects_block_context_when_server_allows() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-block-context-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    let paths = GlobalPaths::new(temp_root.join("home"));
-    let repo_root = temp_root.join("repo");
-    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
-    enable_test_repo(&paths, &repo_root);
-    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","items":[{"severity":"block"}],"prompt_text":"Blocking\n- [block] src/auth.ts: another session has a claim."}"#,
-    ]);
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "apply_patch",
-      "tool_input": {
-        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
-      }
-    }"#;
-
-    let output = run_hook_subprocess(
-        &repo_root,
-        &paths,
-        &["hook", "codex", "pre-tool-use"],
-        input,
-    );
-
-    assert!(
-        output.status.success(),
-        "stateful hook failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let _authorize_request = rx.recv().expect("authorize request should arrive");
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("apply_patch should render live context after authorization");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
-    let rendered: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("allow outcome should serialize");
-    assert!(
-        rendered["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .expect("additional context should be present")
-            .contains("Blocking")
-    );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[test]
-fn pre_tool_use_apply_patch_denial_keeps_info_context() {
+fn pre_tool_use_apply_patch_denial_does_not_render_live_context() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-deny-info-context-test-{}",
         std::process::id()
@@ -4061,7 +3939,7 @@ fn pre_tool_use_apply_patch_denial_keeps_info_context() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Write target is outside active reservation scope.","required_next_action":"Declare matching reservation."}"#,
-        r#"{"status":"ok","items":[{"severity":"info"}],"prompt_text":"Nearby Activity\n- [info] src/session.ts: another session declared reservation."}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- unexpected context"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -4088,19 +3966,19 @@ fn pre_tool_use_apply_patch_denial_keeps_info_context() {
         String::from_utf8_lossy(&output.stderr)
     );
     let _authorize_request = rx.recv().expect("authorize request should arrive");
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("apply_patch should render live context after denial");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "apply_patch denial should not render live context"
+    );
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
     assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("deny reason should be text")
-            .contains("Nearby Activity")
-    );
+    let reason = json["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("deny reason should be text");
+    assert!(reason.contains("Write target is outside active reservation scope."));
+    assert!(reason.contains("Declare matching reservation."));
+    assert!(!reason.contains("Nearby Activity"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -4520,7 +4398,7 @@ dependencies = ["langchain-core>=0.3"]
     .expect("pyproject should write");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- unexpected context"}"#,
     );
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -4552,17 +4430,9 @@ dependencies = ["langchain-core>=0.3"]
     assert!(stdout.contains("dependency shadowing guard"));
     assert!(stdout.contains("langchain_core"));
     assert!(stdout.contains("langchain-core"));
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("apply_patch should render live context even when locally denied");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
-    assert!(
-        !context_request.contains("POST /v1/authorize HTTP/1.1"),
-        "shadowing guard should deny before posting /v1/authorize"
-    );
     assert!(
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
-        "shadowing guard should not post /v1/authorize after live context render"
+        "shadowing guard should not post /v1/context/render or /v1/authorize"
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
