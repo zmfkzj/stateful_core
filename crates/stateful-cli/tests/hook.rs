@@ -345,7 +345,8 @@ fn pre_tool_use_raw_bash_denial_mentions_command_policy_skill_and_example() {
     };
 
     assert!(reason.contains("stateful-command-policy"));
-    assert!(reason.contains("state_current_read"));
+    assert!(reason.contains("state_context_render"));
+    assert!(reason.contains("planning/manual inspection"));
     assert!(reason.contains("state_reservation_declare"));
     assert!(reason.contains("state_claim_acquire"));
     assert!(reason.contains("--fs read-only --network disabled"));
@@ -5240,7 +5241,7 @@ fn user_prompt_submit_posts_context_render() {
     );
     let rendered = String::from_utf8(output.stdout).expect("prompt output should be utf8");
     assert!(rendered.contains("Nearby Activity"));
-    assert!(rendered.contains("Before using Bash"));
+    assert!(rendered.contains("planning/manual inspection"));
     assert!(rendered.contains("stateful-command-policy"));
     assert!(rendered.contains("Use canonical Stateful MCP tool names"));
     assert!(rendered.contains("state_reservation_declare"));

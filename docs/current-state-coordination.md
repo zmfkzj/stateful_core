@@ -939,10 +939,11 @@ mode: brief | detailed
 sections: Blocking, Required Next Action, Warnings, Nearby Activity, Stale/Expired
 ```
 
-`brief` is used for session start, user prompt context, and known-target
-resource checks. `detailed` is used for manual deep inspection after denials or
-when brief output lacks enough evidence. Rendering should be
-actionable, not a raw event dump.
+`brief` is used for session start, user prompt context, and planning-time
+known-target resource checks. `detailed` is used for manual deep inspection when
+brief planning context lacks enough evidence. Rendering should be actionable,
+not a raw event dump, and denial recovery should follow direct next-action
+payloads instead of automatically rendering context.
 
 The current server route renders store-backed live context from active reservations,
 active claims, and queued or claimable (`reserved`) wait records. The response includes

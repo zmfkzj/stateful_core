@@ -631,9 +631,9 @@ the agent decide what to avoid, wait for, or coordinate.
 
 `state_context_render` supports `brief` and `detailed` modes plus an optional
 singular `resource` filter. `brief` is for session start, prompt submit context,
-and known-target resource checks. `detailed` is for manual deep inspection after
-denials or when brief output lacks enough evidence.
-Rendered output must include concrete next actions when a block or warning is present.
+and planning-time known-target resource checks. `detailed` is for manual deep
+inspection when planning context lacks enough evidence. Denial recovery should
+follow the denial's direct next action rather than rendering ambient context.
 
 The current server route renders store-backed live context from active reservations,
 active claims, and queued or claimable (`reserved`) wait records. The response

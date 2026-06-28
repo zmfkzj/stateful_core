@@ -706,10 +706,10 @@ Expected materialized views:
 - prompt context package for Codex hooks and MCP tools
 
 The current server exposes `/v1/context/render` and `state_context_render` as a
-store-backed live view over active reservations, active claims, and queued or
-claimable (`reserved`) wait records. Responses include current summary counts,
-structured `items`, and prompt-ready `prompt_text`; an empty unfiltered live
-state produces an empty prompt.
+store-backed planning/manual inspection view over active reservations, active
+claims, and queued or claimable (`reserved`) wait records. Responses include
+current summary counts, structured `items`, and prompt-ready `prompt_text`; an
+empty unfiltered live render means no planning context needs to be shown.
 
 Prompt context packages should support:
 

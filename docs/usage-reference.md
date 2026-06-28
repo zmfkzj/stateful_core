@@ -375,6 +375,11 @@ names:
 - `state_current_read` / `state.current.read`
 - `state_events_read` / `state.events.read`
 - `state_context_render` / `state.context.render`
+
+`state_context_render` is for planning/manual inspection. Routine write and
+denial recovery should use reservation, claim, resume, and the denial's direct
+next action instead of rendering ambient context.
+
 - `state_reconcile_ack` / `state.reconcile.ack`
 - `state_notifications_poll` / `state.notifications.poll`
 - `state_resume_next` / `state.resume.next`
