@@ -450,7 +450,7 @@ fn install_omp_yes_removes_existing_tool_approval_without_update() {
     let omp_config = omp_agent_dir.join("config.yml");
     fs::write(
         &omp_config,
-        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    bash: prompt\n    edit: prompt\nstateful:\n  autoApprove: true\n",
+        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    bash: prompt\n    edit: prompt\nstateful:\n  autoApprove: true\nbash:\n  enabled: false\n",
     )
     .expect("existing config should write");
 

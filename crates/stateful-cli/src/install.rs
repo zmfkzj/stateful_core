@@ -1295,7 +1295,7 @@ fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow
     ensure_omp_child_scalar(&mut lines, "eval", "js", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "rb", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "jl", "false", update_existing)?;
-    ensure_omp_child_scalar(&mut lines, "bash", "enabled", "true", update_existing)?;
+    ensure_omp_child_scalar(&mut lines, "bash", "enabled", "true", true)?;
 
     Ok(finish_omp_yaml_lines(lines))
 }
