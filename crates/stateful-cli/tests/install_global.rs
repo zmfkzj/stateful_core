@@ -231,6 +231,11 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("pi.registerTool"));
     assert!(extension.contains("name: \"lazy_edit_resume\""));
     assert!(extension.contains("name: \"lazy_write_resume\""));
+    assert!(!extension.contains("name: \"sandbox_bash\""));
+    assert!(!extension.contains("name: \"ext_ro_bash\""));
+    assert!(!extension.contains("name: \"ext_rw_bash\""));
+    assert!(!extension.contains("name: \"process_find\""));
+    assert!(!extension.contains("name: \"sandbox_job_poll\""));
     assert!(extension.contains("applyOmpLinePatch"));
     assert!(extension.contains("lazyEditOperations"));
     assert!(extension.contains("let lazyEditOperationCounter = 0"));
