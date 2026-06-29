@@ -3010,7 +3010,6 @@ fn omp_raw_bash_allows_trusted_external_sandbox_run_for_extension_preflight() {
     );
 }
 
-
 #[test]
 fn omp_repo_internal_raw_bash_rejects_shell_writes_and_unsafe_find_actions() {
     for command in ["ls > docs/a.md", "find . -delete"] {
@@ -3904,6 +3903,162 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
         "allowed writes should not inject live context: {}",
         String::from_utf8_lossy(&output.stdout)
     );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_apply_patch_repeated_same_path_denial_suggests_single_writer() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-repeated-denial-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "apply_patch",
+      "tool_input": {
+        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
+      }
+    }"#;
+
+    let first = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
+    let second = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
+
+    assert!(
+        first.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let _first_request = rx.recv().expect("first authorize request should arrive");
+    let _second_request = rx.recv().expect("second authorize request should arrive");
+
+    let first_json: serde_json::Value =
+        serde_json::from_slice(&first.stdout).expect("first deny outcome should serialize");
+    let first_reason = first_json["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("first denial reason should be text");
+    assert!(first_reason.contains("Reread target"));
+    assert!(!first_reason.contains("Use one writer"));
+
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("second deny outcome should serialize");
+    assert_eq!(
+        second_json["hookSpecificOutput"]["permissionDecision"],
+        "deny"
+    );
+    let second_reason = second_json["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("second denial reason should be text");
+    assert!(second_reason.contains("Repeated denial for src/auth.ts"));
+    assert!(second_reason.contains("Use one writer"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_apply_patch_different_path_denial_does_not_trigger_single_writer() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-repeated-denial-different-path-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let first_input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "apply_patch",
+      "tool_input": {
+        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
+      }
+    }"#;
+    let second_input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "apply_patch",
+      "tool_input": {
+        "command": "*** Begin Patch\n*** Update File: src/session.ts\n*** End Patch\n"
+      }
+    }"#;
+
+    let first = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        first_input,
+    );
+    let second = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        second_input,
+    );
+
+    assert!(
+        first.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let _first_request = rx.recv().expect("first authorize request should arrive");
+    let _second_request = rx.recv().expect("second authorize request should arrive");
+
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("second deny outcome should serialize");
+    assert_eq!(
+        second_json["hookSpecificOutput"]["permissionDecision"],
+        "deny"
+    );
+    let second_reason = second_json["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("second denial reason should be text");
+    assert!(!second_reason.contains("Use one writer"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

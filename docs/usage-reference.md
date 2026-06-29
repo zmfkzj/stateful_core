@@ -109,14 +109,6 @@ Installed OMP support:
   agent fixes the missing scope or receives a claimable reservation, and fails
   if the target changed since the write was queued.
 
-Generated OMP bash tools run sandbox commands in the background by default:
-omitted or `true` `async` returns a job id immediately, streams output through
-OMP messages, and posts final stdout/stderr/status later. Set `async: false` to
-wait for the final result in the initial tool response. OMP abort/ESC cancels
-the running sandbox command.
-
-Raw Bash and eval tool calls are denied by stateful hooks; use the generated
-OMP tools instead.
 
 ### Repo allowlist
 

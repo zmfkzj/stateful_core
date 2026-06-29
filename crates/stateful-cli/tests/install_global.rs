@@ -276,9 +276,9 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     );
     assert!(!extension.contains("\"Command:\""));
     assert!(!extension.contains("\"Sandbox invocation:\""));
-    assert!(extension.contains(
-        "Built-in Bash external sandbox command requires OMP UI confirmation"
-    ));
+    assert!(
+        extension.contains("Built-in Bash external sandbox command requires OMP UI confirmation")
+    );
     assert!(extension.contains("process.env.STATEFUL_SESSION_ID = id"));
     assert!(extension.contains("pre-tool-use"));
     assert!(extension.contains("decision: \"block\""));
@@ -391,7 +391,7 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
     assert_eq!(count(&config, "\n  js: false"), 1);
     assert_eq!(count(&config, "\n  rb: false"), 1);
     assert_eq!(count(&config, "\n  jl: false"), 1);
-    assert_eq!(count(&config, "\n  enabled: false"), 1);
+    assert_eq!(count(&config, "\n  enabled: true"), 1);
     assert!(
         fs::read_to_string(&omp_mcp)
             .expect("omp mcp should read")
@@ -431,7 +431,7 @@ fn install_omp_yes_preserves_existing_config_and_uses_yolo_approval() {
     assert!(!config.contains("ext_rw_bash: allow"));
     assert!(!config.contains("external_bash:"));
     assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
-    assert!(config.contains("bash:\n  enabled: false\n"));
+    assert!(config.contains("bash:\n  enabled: true\n"));
     let extension = fs::read_to_string(
         omp_agent_dir
             .join("extensions")
@@ -469,7 +469,7 @@ fn install_omp_yes_removes_existing_tool_approval_without_update() {
     assert!(!config.contains("ext_rw_bash: allow"));
     assert!(!config.contains("external_bash:"));
     assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
-    assert!(config.contains("bash:\n  enabled: false\n"));
+    assert!(config.contains("bash:\n  enabled: true\n"));
     assert_eq!(count(&config, "approvalMode:"), 1);
     assert_eq!(count(&config, "approval:"), 0);
 }
@@ -501,7 +501,7 @@ fn install_omp_update_removes_existing_tool_approval() {
     assert!(!config.contains("external_bash:"));
     assert!(!config.contains("edit: prompt"));
     assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
-    assert!(config.contains("bash:\n  enabled: false\n"));
+    assert!(config.contains("bash:\n  enabled: true\n"));
     assert_eq!(count(&config, "approvalMode: yolo"), 1);
     assert_eq!(count(&config, "approval:"), 0);
 }
