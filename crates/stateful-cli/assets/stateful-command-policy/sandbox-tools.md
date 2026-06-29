@@ -2,6 +2,8 @@
 
 Choose the narrowest existing entry point before writing a command.
 
+For OMP entries below, strict trusted bare `stateful` means session-start preflight has hash-verified the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted. Arbitrary raw Bash/eval remains denied.
+
 | Need | Codex | OMP | Do not use |
 | --- | --- | --- | --- |
 | File inspection after native tools are insufficient | `sandbox run --fs read-only --network disabled` | built-in Bash with strict trusted `stateful sandbox run --fs read-only --network disabled ...` | raw Bash, eval tools, networked read-only |

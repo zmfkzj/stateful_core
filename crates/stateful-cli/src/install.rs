@@ -1436,10 +1436,64 @@ fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Resu
     let binary_json = serde_json::to_string(binary_path)?;
     let contents = format!(
         r#"import {{ spawnSync }} from "node:child_process";
-import {{ existsSync, mkdirSync, readFileSync, writeFileSync }} from "node:fs";
-import {{ dirname, resolve }} from "node:path";
+import {{ createHash }} from "node:crypto";
+import {{ existsSync, mkdirSync, readFileSync, statSync, writeFileSync }} from "node:fs";
+import {{ delimiter, dirname, resolve }} from "node:path";
 
 const STATEFUL = {binary_json};
+let verifiedBareStatefulPath = null;
+
+function statefulBinaryDigest(path) {{
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}}
+
+function executableFile(path) {{
+  try {{
+    const stat = statSync(path);
+    return stat.isFile() && (stat.mode & 0o111) !== 0;
+  }} catch {{
+    return false;
+  }}
+}}
+
+function firstPathStateful(cwd) {{
+  const base = cwd || process.cwd();
+  for (const entry of String(process.env.PATH || "").split(delimiter)) {{
+    const directory = entry ? resolve(base, entry) : base;
+    const candidate = resolve(directory, "stateful");
+    if (executableFile(candidate)) return candidate;
+  }}
+  return null;
+}}
+
+function verifyBareStateful(cwd) {{
+  verifiedBareStatefulPath = null;
+  const candidate = firstPathStateful(cwd);
+  if (!candidate) return false;
+  try {{
+    if (statefulBinaryDigest(candidate) !== statefulBinaryDigest(STATEFUL)) return false;
+    verifiedBareStatefulPath = candidate;
+    return true;
+  }} catch {{
+    verifiedBareStatefulPath = null;
+    return false;
+  }}
+}}
+
+function bareStatefulStillVerified() {{
+  if (!verifiedBareStatefulPath) return false;
+  try {{
+    return statefulBinaryDigest(verifiedBareStatefulPath) === statefulBinaryDigest(STATEFUL);
+  }} catch {{
+    return false;
+  }}
+}}
+
+function isTrustedStatefulCommand(word) {{
+  if (word === STATEFUL) return true;
+  if (word !== "stateful") return false;
+  return bareStatefulStillVerified();
+}}
 
 
 function runStatefulHook(event, payload) {{
@@ -1468,13 +1522,30 @@ function isYolo(event, ctx) {{
   return values.some((value) => value === true || value === "yolo" || value === "auto-approve");
 }}
 
+function firstString(...values) {{
+  for (const value of values) {{
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }}
+  return undefined;
+}}
+
 function detectSessionId(event, ctx) {{
-  return event?.sessionId || ctx?.sessionManager?.session?.id || process.env.STATEFUL_SESSION_ID || "omp-session";
+  return firstString(
+    event?.sessionId,
+    event?.session?.id,
+    ctx?.sessionId,
+    ctx?.session?.id,
+    ctx?.sessionManager?.session?.id
+  );
 }}
 
 function sessionId(event, ctx) {{
   const id = detectSessionId(event, ctx);
-  process.env.STATEFUL_SESSION_ID = id;
+  if (id) {{
+    process.env.STATEFUL_SESSION_ID = id;
+  }} else {{
+    delete process.env.STATEFUL_SESSION_ID;
+  }}
   return id;
 }}
 
@@ -1897,10 +1968,15 @@ function applyOmpWrite(cwd, operation) {{
   return {{ status: "applied", message: "lazy write applied" }};
 }}
 
+function emptyToolOutputText(text) {{
+  if (!String(text || "").trim()) return "No output.";
+  return String(text);
+}}
+
 function lazyToolResult(status, text, details) {{
   return {{
     isError: status !== "applied",
-    content: [{{ type: "text", text }}],
+    content: [{{ type: "text", text: emptyToolOutputText(text) }}],
     details,
   }};
 }}
@@ -2161,7 +2237,7 @@ function statefulBashPassthroughDecision(command) {{
   try {{
     const words = splitStatefulCommandWords(String(command || "").trim());
     if (words.length === 0) return {{ allow: false, reason: "Bash command is empty" }};
-    if (words[0] !== STATEFUL) {{
+    if (!isTrustedStatefulCommand(words[0])) {{
       return {{ allow: false, reason: "OMP raw Bash is denied; use the trusted stateful sandbox command" }};
     }}
     if (words[1] === "sandbox" && words[2] === "run") return parseStatefulSandboxRunWords(words);
@@ -2284,6 +2360,7 @@ export default function statefulOmpExtension(pi) {{
     }},
   }});
   pi.on("session_start", async (event, ctx) => {{
+    verifyBareStateful(ctx.cwd);
     const result = runStatefulHook("session-start", {{
       session_id: sessionId(event, ctx),
       cwd: ctx.cwd,
@@ -2490,6 +2567,26 @@ mod tests {
         let support_files = stateful_command_policy_support_files();
         assert_eq!(support_files.len(), 4);
         assert!(stateful_command_policy_skill().contains("Support Files"));
+    }
+
+    #[test]
+    fn omp_extension_compacts_empty_tool_output() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "stateful-omp-extension-empty-output-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("temp dir should be creatable");
+        let extension_path = temp_dir.join("stateful.js");
+
+        write_omp_extension(&extension_path, "/usr/local/bin/stateful")
+            .expect("extension should be written");
+        let contents = fs::read_to_string(&extension_path).expect("extension should be readable");
+
+        assert!(contents.contains("function emptyToolOutputText"));
+        assert!(contents.contains("return \"No output.\";"));
+
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
     }
 
     #[test]

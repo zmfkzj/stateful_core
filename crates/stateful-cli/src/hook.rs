@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    ffi::OsStr,
     fs,
     io::{self, Read},
     path::{Component, Path, PathBuf},
@@ -409,8 +410,7 @@ fn omp_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {
     let invocation = parse_sandbox_run_bash_invocation(command).ok()?;
     if !is_trusted_stateful_executable(&invocation.executable) {
         return Some(OmpPreToolAction::Block {
-            reason: "stateful sandbox run requires the trusted absolute stateful binary"
-                .to_string(),
+            reason: "stateful sandbox run requires a trusted stateful binary".to_string(),
         });
     }
     if let Err(error) = validate_sandbox_run_request_shape(&invocation.request) {
@@ -445,8 +445,7 @@ fn omp_process_find_action(command: &str) -> Option<OmpPreToolAction> {
     let invocation = parse_sandbox_process_find_bash_invocation(command).ok()?;
     if !is_trusted_stateful_executable(&invocation.executable) {
         return Some(OmpPreToolAction::Block {
-            reason: "stateful sandbox process find requires the trusted absolute stateful binary"
-                .to_string(),
+            reason: "stateful sandbox process find requires a trusted stateful binary".to_string(),
         });
     }
     if let Err(error) = validate_process_find_request(&invocation.request) {
@@ -580,7 +579,20 @@ fn authorize_omp_targets(
             }
         };
         if decision.decision != "allow" {
-            let reason = authorization_denial_reason(decision);
+            let reason = if let Some(repo_root) = repo_root {
+                if repeated_denial_seen(
+                    repo_root,
+                    &input.session_id,
+                    &target.path,
+                    &decision.reason_code,
+                ) {
+                    repeated_denial_reason(&target.path)
+                } else {
+                    authorization_denial_reason(decision)
+                }
+            } else {
+                authorization_denial_reason(decision)
+            };
             return Ok(OmpHookOutcome::Block { reason });
         }
     }
@@ -1121,6 +1133,54 @@ fn user_prompt_context_marker_path(repo_root: &Path, session_id: &str) -> PathBu
         .join(format!("{session_id}.sent"))
 }
 
+fn repeated_denial_marker_path(
+    repo_root: &Path,
+    session_id: &str,
+    path: &str,
+    reason_code: &str,
+) -> PathBuf {
+    let session_key = marker_component(session_id);
+    let reason_key = marker_component(reason_code);
+    let path_key = marker_component(path);
+    repo_root
+        .join(".stateful_core")
+        .join("runtime")
+        .join("denials")
+        .join(session_key)
+        .join(format!("{reason_key}-{path_key}.seen"))
+}
+
+fn marker_component(value: &str) -> String {
+    if value.is_empty() {
+        return "_".to_owned();
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.as_bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn repeated_denial_seen(repo_root: &Path, session_id: &str, path: &str, reason_code: &str) -> bool {
+    let marker = repeated_denial_marker_path(repo_root, session_id, path, reason_code);
+    let seen = marker.exists();
+    if !seen {
+        if let Some(parent) = marker.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(marker, b"seen");
+    }
+    seen
+}
+
+fn repeated_denial_reason(path: &str) -> String {
+    format!(
+        "Repeated denial for {path}. Stop retrying this path. Use one writer: parent/main agent owns the edit; subagents report findings only."
+    )
+}
+
 fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
     let reminder = stateful_command_policy_reminder();
     if prompt_text.trim().is_empty() {
@@ -1616,9 +1676,7 @@ fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
     };
 
     if !is_trusted_stateful_executable(&invocation.executable) {
-        return bash_policy_deny(
-            "stateful sandbox run requires the trusted absolute stateful binary",
-        );
+        return bash_policy_deny("stateful sandbox run requires a trusted stateful binary");
     }
     if invocation.request.fs == SandboxFsProfile::External
         && !sandbox_external_profile_has_prompt_prefix(command)
@@ -1654,7 +1712,7 @@ fn authorize_sandbox_process_find_bash(command: &str) -> HookOutcome {
 
     if !is_trusted_stateful_executable(&invocation.executable) {
         return bash_policy_deny(
-            "stateful sandbox process find requires the trusted absolute stateful binary",
+            "stateful sandbox process find requires a trusted stateful binary",
         );
     }
     if let Err(error) = validate_process_find_request(&invocation.request) {
@@ -1673,7 +1731,7 @@ fn authorize_nested_codex_benchmark_sandbox_bash(command: &str) -> HookOutcome {
 
     if !is_trusted_stateful_executable(&invocation.executable) {
         return bash_policy_deny(
-            "stateful sandbox run-nested-codex-benchmark requires the trusted absolute stateful binary",
+            "stateful sandbox run-nested-codex-benchmark requires a trusted stateful binary",
         );
     }
     if invocation.purpose.trim().is_empty() {
@@ -1726,9 +1784,7 @@ fn authorize_stateful_control_bash(command: &str) -> HookOutcome {
     };
 
     if !is_trusted_stateful_executable(&invocation.executable) {
-        return bash_policy_deny(
-            "stateful control commands require the trusted absolute stateful binary",
-        );
+        return bash_policy_deny("stateful control commands require a trusted stateful binary");
     }
 
     HookOutcome::Allow
@@ -2041,6 +2097,19 @@ fn hook_path_is_under_target(path: &str) -> bool {
 }
 
 fn is_trusted_stateful_executable(executable: &str) -> bool {
+    let Ok(current) = std::env::current_exe() else {
+        return false;
+    };
+    let current = current.canonicalize().unwrap_or(current);
+
+    if is_verified_bare_stateful_executable(
+        executable,
+        &current,
+        std::env::var_os("PATH").as_deref(),
+    ) {
+        return true;
+    }
+
     let path = Path::new(executable);
     if !path.is_absolute() {
         return false;
@@ -2048,11 +2117,60 @@ fn is_trusted_stateful_executable(executable: &str) -> bool {
     let Ok(candidate) = path.canonicalize() else {
         return false;
     };
-    let Ok(current) = std::env::current_exe() else {
+    candidate == current
+}
+
+fn is_verified_bare_stateful_executable(
+    executable: &str,
+    current: &Path,
+    path_env: Option<&OsStr>,
+) -> bool {
+    if executable != "stateful" {
+        return false;
+    }
+    let Some(path_env) = path_env else {
         return false;
     };
-    let current = current.canonicalize().unwrap_or(current);
-    candidate == current
+
+    for directory in std::env::split_paths(path_env) {
+        let candidate = directory.join("stateful");
+        if !is_executable_file(&candidate) {
+            continue;
+        }
+        if !candidate.is_absolute() {
+            return false;
+        }
+        return files_have_same_bytes(current, &candidate);
+    }
+    false
+}
+
+fn files_have_same_bytes(left: &Path, right: &Path) -> bool {
+    let Ok(left) = fs::read(left) else {
+        return false;
+    };
+    let Ok(right) = fs::read(right) else {
+        return false;
+    };
+    left == right
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn authorize_apply_patch(
@@ -2316,9 +2434,17 @@ fn authorize_targets(
         };
         if decision.decision != "allow" {
             release_pre_tool_authorized_claims(runtime, &session_id, &workspace_id, &allowed_paths);
-            return Ok(HookOutcome::Deny {
-                reason: authorization_denial_reason(decision),
-            });
+            let reason = if let Some(repo_root) = repo_root {
+                if repeated_denial_seen(repo_root, &session_id, &target.path, &decision.reason_code)
+                {
+                    repeated_denial_reason(&target.path)
+                } else {
+                    authorization_denial_reason(decision)
+                }
+            } else {
+                authorization_denial_reason(decision)
+            };
+            return Ok(HookOutcome::Deny { reason });
         }
         allowed_paths.insert(target.path.clone());
         if let Some(new_path) = &target.new_path {
@@ -2808,6 +2934,8 @@ struct AuthorizeDecision {
     decision: String,
     message: String,
     #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
     required_next_action: Option<String>,
     #[serde(default)]
     wait: Option<AuthorizeWait>,
@@ -2910,6 +3038,62 @@ mod tests {
         assert!(!source.contains(concat!("trait ", "RuntimeAdapter")));
     }
 
+    #[test]
+    fn bare_stateful_is_trusted_when_first_path_match_has_current_binary_bytes() {
+        let temp =
+            std::env::temp_dir().join(format!("stateful-bare-trust-match-{}", std::process::id()));
+        let bin_dir = temp.join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir should be created");
+        let current = std::env::current_exe().expect("current executable should resolve");
+        let bare = bin_dir.join("stateful");
+        fs::copy(&current, &bare).expect("bare stateful should be copied");
+
+        let path_env = std::env::join_paths([bin_dir]).expect("test PATH should join");
+
+        assert!(is_verified_bare_stateful_executable(
+            "stateful",
+            &current,
+            Some(path_env.as_os_str())
+        ));
+
+        fs::remove_dir_all(temp).expect("temp dir should be removable");
+    }
+
+    #[test]
+    fn bare_stateful_is_denied_when_first_path_match_differs() {
+        let temp = std::env::temp_dir().join(format!(
+            "stateful-bare-trust-mismatch-{}",
+            std::process::id()
+        ));
+        let bin_dir = temp.join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir should be created");
+        let current = std::env::current_exe().expect("current executable should resolve");
+        fs::write(
+            bin_dir.join("stateful"),
+            b"not the installed stateful binary",
+        )
+        .expect("fake stateful should be written");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(bin_dir.join("stateful"))
+                .expect("fake stateful metadata should read")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(bin_dir.join("stateful"), permissions)
+                .expect("fake stateful should be executable");
+        }
+
+        let path_env = std::env::join_paths([bin_dir]).expect("test PATH should join");
+
+        assert!(!is_verified_bare_stateful_executable(
+            "stateful",
+            &current,
+            Some(path_env.as_os_str())
+        ));
+
+        fs::remove_dir_all(temp).expect("temp dir should be removable");
+    }
     #[test]
     fn stateful_command_policy_reminder_mentions_process_lookup_git_github_pr_and_binary_path() {
         let reminder = stateful_command_policy_reminder();

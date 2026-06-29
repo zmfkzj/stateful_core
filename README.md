@@ -219,8 +219,11 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 | Repo-external shell operation | `stateful sandbox run --fs external --purpose <purpose> --command <cmd>` for reads; add exact `--write-target`, `--create-target`, or `--write-dir` scopes for writes |
 
 In OMP, built-in Bash may run only strict trusted `stateful sandbox run ...`
-and `stateful sandbox process find ...` commands after Stateful preflight.
-Command execution and process inspection are not generated tool calls.
+and `stateful sandbox process find ...` commands. Bare `stateful` is trusted
+only after session-start preflight hash-verifies the first PATH `stateful`
+binary against the installed Stateful binary; otherwise use the installed
+absolute binary path. Command execution and process inspection are not generated
+tool calls.
 External write/create/write-dir/socket/signal scope still asks for a Stateful
 OMP UI grant by default; `stateful.autoApprove: true` skips only that
 Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim

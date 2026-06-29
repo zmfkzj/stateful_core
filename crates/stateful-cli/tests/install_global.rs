@@ -227,7 +227,11 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(!extension.contains("Type.Object"));
     assert!(extension.contains("export default function statefulOmpExtension"));
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
-    assert!(extension.contains("event?.sessionId || ctx?.sessionManager?.session?.id"));
+    assert!(extension.contains("function detectSessionId(event, ctx)"));
+    assert!(extension.contains("event?.sessionId"));
+    assert!(extension.contains("ctx?.sessionManager?.session?.id"));
+    assert!(!extension.contains("|| \"omp-session\""));
+    assert!(!extension.contains("process.env.STATEFUL_SESSION_ID ||"));
     assert!(extension.contains("pi.registerTool"));
     assert!(extension.contains("name: \"lazy_edit_resume\""));
     assert!(extension.contains("name: \"lazy_write_resume\""));
@@ -250,10 +254,11 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("validateOmpLinePatchBases"));
     assert!(extension.contains("line === \"*** Begin Patch\""));
     assert!(extension.contains("import { spawnSync } from \"node:child_process\""));
+    assert!(extension.contains("import { createHash } from \"node:crypto\""));
     assert!(extension.contains(
-        "import { existsSync, mkdirSync, readFileSync, writeFileSync } from \"node:fs\""
+        "import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from \"node:fs\""
     ));
-    assert!(extension.contains("import { dirname, resolve } from \"node:path\""));
+    assert!(extension.contains("import { delimiter, dirname, resolve } from \"node:path\""));
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?session_id="));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));
@@ -268,6 +273,10 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("async function ensureExternalBashGrant(ctx, params, signal)"));
     assert!(extension.contains("pi.on(\"tool_call\""));
     assert!(extension.contains("function statefulBashPassthroughDecision"));
+    assert!(extension.contains("let verifiedBareStatefulPath = null"));
+    assert!(extension.contains("function statefulBinaryDigest(path)"));
+    assert!(extension.contains("verifyBareStateful(ctx.cwd)"));
+    assert!(extension.contains("isTrustedStatefulCommand(words[0])"));
     assert!(extension.contains("event?.toolName !== \"bash\""));
     assert!(extension.contains("ensureExternalBashGrant(ctx, params, signal)"));
     assert!(extension.contains("Approve external sandbox grant"));
@@ -279,7 +288,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(
         extension.contains("Built-in Bash external sandbox command requires OMP UI confirmation")
     );
-    assert!(extension.contains("process.env.STATEFUL_SESSION_ID = id"));
+    assert!(extension.contains("delete process.env.STATEFUL_SESSION_ID"));
     assert!(extension.contains("pre-tool-use"));
     assert!(extension.contains("decision: \"block\""));
     assert!(extension.contains("if (decision.decision === \"prompt\" && !shouldAutoApproveStatefulPrompt(ctx, event.input || {}))"));
