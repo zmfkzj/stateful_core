@@ -1418,6 +1418,7 @@ impl Store {
             return Err(StoreError::InvalidClaimPath(relative_path));
         }
         if self.active_exact_lease_for_session(
+            reservation_id,
             session_id,
             workspace_id,
             &relative_path,
@@ -1486,6 +1487,7 @@ impl Store {
 
     fn active_exact_lease_for_session(
         &self,
+        reservation_id: Option<&str>,
         session_id: &str,
         workspace_id: &str,
         relative_path: &str,
@@ -1500,8 +1502,9 @@ impl Store {
                        AND relative_path = ?3
                        AND action = ?4
                        AND status = 'active'
+                       AND (?5 IS NULL OR reservation_id = ?5)
                 )",
-                params![session_id, workspace_id, relative_path, lease_action],
+                params![session_id, workspace_id, relative_path, lease_action, reservation_id],
                 |row| row.get::<_, bool>(0),
             )
             .map_err(StoreError::from)
@@ -4432,6 +4435,7 @@ impl Store {
                 "reservation_granted",
                 serde_json::json!({
                     "wait_id": waiter.wait_id,
+                    "reservation_id": waiter.wait_id,
                     "relative_path": waiter.relative_path,
                     "action": waiter.action,
                     "reservation_expires_at": waiter.reservation_expires_at,

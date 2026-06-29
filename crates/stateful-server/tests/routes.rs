@@ -1042,7 +1042,7 @@ async fn same_session_different_reservation_claim_does_not_authorize_write() {
         serde_json::json!({
             "action": "write_file",
             "path": "src/auth.ts",
-            "reservation_id": reservation_b
+            "reservation_id": reservation_b.clone()
         }),
     );
     body["source"]["kind"] = serde_json::json!("hook");
@@ -1050,6 +1050,7 @@ async fn same_session_different_reservation_claim_does_not_authorize_write() {
     body["source"]["tool_name"] = serde_json::json!("apply_patch");
 
     let authorize = app
+        .clone()
         .oneshot(json_request("/v1/authorize", body))
         .await
         .expect("authorize should complete");
@@ -1061,6 +1062,25 @@ async fn same_session_different_reservation_claim_does_not_authorize_write() {
         .as_str()
         .unwrap_or_default()
         .contains("same-reservation"));
+
+    let duplicate_reservation_claim = app
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "reservation_id": reservation_b,
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("duplicate reservation claim should complete");
+    let duplicate_status = duplicate_reservation_claim.status();
+    let duplicate_json = response_json(duplicate_reservation_claim, 2048).await;
+    assert!(
+        duplicate_status != StatusCode::OK || duplicate_json["claim_state"] != "already_held",
+        "reservation B acquire must not be satisfied by reservation A claim: {duplicate_json}"
+    );
 }
 
 #[tokio::test]
@@ -3855,6 +3875,11 @@ async fn activity_finalize_reclaims_claims_and_notifications_poll_returns_resume
         .await
         .expect("authorize should complete");
     assert_eq!(queued.status(), StatusCode::OK);
+    let queued = response_json(queued, 2048).await;
+    let wait_id = queued["wait"]["wait_id"]
+        .as_str()
+        .expect("wait_id should be present")
+        .to_string();
 
     let finalize = app
         .clone()
@@ -3896,6 +3921,8 @@ async fn activity_finalize_reclaims_claims_and_notifications_poll_returns_resume
         json["notifications"][0]["payload"]["purpose"],
         "Queue requested write after blocker clears."
     );
+    assert_eq!(json["notifications"][0]["payload"]["wait_id"], wait_id);
+    assert_eq!(json["notifications"][0]["payload"]["reservation_id"], wait_id);
 
     let second_poll = app
         .oneshot(json_request(
