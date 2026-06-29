@@ -1967,8 +1967,8 @@ function statefulPromptAutoApproveConfig(ctx) {{
   return ctx?.config?.stateful?.autoApprove === true;
 }}
 
-function shouldAutoApproveStatefulPrompt(ctx, params) {{
-  return statefulPromptAutoApproveConfig(ctx) || params?.auto_approve === true;
+function shouldAutoApproveStatefulPrompt(ctx, _params) {{
+  return statefulPromptAutoApproveConfig(ctx);
 }}
 
 function recordExternalBashGrant(params, now) {{

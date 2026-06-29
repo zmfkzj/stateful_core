@@ -7,7 +7,7 @@
 - OMP built-in Bash may run strict trusted `stateful sandbox run ...` and `stateful sandbox process find ...` commands after Stateful preflight; arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied.
 - Use built-in Bash for sandboxed command execution via a single trusted `stateful sandbox run ...` command with the narrowest valid sandbox profile and any required Stateful reservation/claim preflight.
 - Use built-in Bash for process inspection via a single trusted `stateful sandbox process find ...` command.
-- External sandbox write/create/write-dir, socket, or signal scope prompts for a scoped OMP UI grant unless `stateful.autoApprove: true`; there is no per-call auto-approve option for built-in Bash.
+- External sandbox write/create/write-dir, socket, or signal scope prompts for a scoped OMP UI grant unless the profile sets `stateful.autoApprove: true`.
 
 ## Installed OMP Profile
 

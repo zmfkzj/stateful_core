@@ -4,15 +4,15 @@ Choose the narrowest existing entry point before writing a command.
 
 | Need | Codex | OMP | Do not use |
 | --- | --- | --- | --- |
-| File inspection after native tools are insufficient | `sandbox run --fs read-only --network disabled` | `sandbox_bash` with `fs: read-only`, `network: disabled` | raw Bash, eval tools, networked read-only |
-| Process inspection | `stateful sandbox process find ...` | `process_find` | `ps`, `pgrep`, process checks inside sandbox commands |
-| Build, test, package manager, disposable generator output | `sandbox run --fs build --network enabled --write-dir <scratch-purpose>` | `sandbox_bash` with `fs: build` | raw tests/builds, repo `tmp` scratch |
-| Non-git repo write command | `sandbox run --fs write-targets` with exact targets after reservation/claims | `sandbox_bash` with `fs: write-targets` | native edits without file claims, broad dirs, git commands |
-| Local git | `sandbox run --fs git --network disabled --command 'git <args>'` | `sandbox_bash` with `fs: git`, `network: disabled` | raw git, write-targets |
+| File inspection after native tools are insufficient | `sandbox run --fs read-only --network disabled` | built-in Bash with strict trusted `stateful sandbox run --fs read-only --network disabled ...` | raw Bash, eval tools, networked read-only |
+| Process inspection | `stateful sandbox process find ...` | built-in Bash with strict trusted `stateful sandbox process find ...` | `ps`, `pgrep`, process checks inside sandbox commands |
+| Build, test, package manager, disposable generator output | `sandbox run --fs build --network enabled --write-dir <scratch-purpose>` | built-in Bash with strict trusted `stateful sandbox run --fs build ...` | raw tests/builds, repo `tmp` scratch |
+| Non-git repo write command | `sandbox run --fs write-targets` with exact targets after reservation/claims | built-in Bash with strict trusted `stateful sandbox run --fs write-targets ...` after reservation/claims | native edits without file claims, broad dirs, git commands |
+| Local git | `sandbox run --fs git --network disabled --command 'git <args>'` | built-in Bash with strict trusted `stateful sandbox run --fs git --network disabled ...` | raw git, write-targets |
 | Remote git | same git profile with `--network enabled` | same | raw git, config-mutating remote setup |
-| GitHub PR list/view/status/create | `sandbox run --fs github-pr --network enabled --command 'gh pr ...'` | `sandbox_bash` with `fs: github-pr` | raw `gh`, browser/editor PR flows |
-| Read-only external shell command | `sandbox run --fs external --purpose ... --command ...` | `ext_ro_bash` | raw Bash/eval |
-| External write/socket/signal scope | `sandbox run --fs external` with explicit scope | `ext_rw_bash` | repo-internal profiles for external writes |
+| GitHub PR list/view/status/create | `sandbox run --fs github-pr --network enabled --command 'gh pr ...'` | built-in Bash with strict trusted `stateful sandbox run --fs github-pr ...` | raw `gh`, browser/editor PR flows |
+| Read-only external shell command | `sandbox run --fs external --purpose ... --command ...` | built-in Bash with strict trusted `stateful sandbox run --fs external ...` | raw Bash/eval |
+| External write/socket/signal scope | `sandbox run --fs external` with explicit scope | built-in Bash with strict trusted `stateful sandbox run --fs external ...`; prompts unless `stateful.autoApprove: true` | repo-internal profiles for external writes |
 | Nested Codex benchmark | `sandbox run-nested-codex-benchmark ...` | not a generic OMP command path | generic relaxed profiles or nested wrapping |
 
 ## Git And PR Rules
@@ -53,6 +53,6 @@ Choose the narrowest existing entry point before writing a command.
 - Session-repair probes such as `stateful hook codex session-start`, `stateful hook omp session-start`, `stateful current`, `stateful notifications`, `stateful resume`, `stateful reservation declare/request/claim`, `strings <stateful>`, shell snapshots, or manual `STATEFUL_SESSION_ID`.
 - Shell writes outside sandbox `--command`: `>`, `>>`, heredocs, and `| tee`.
 - Direct mutation through raw `rm`, `mv`, `cp`, `mkdir`, `touch`, `chmod`, or `chown`.
-- Raw process inspection (`ps`, `pgrep`, `ps auxww`, `ps -ef`, `ps -eo ...`) inside sandbox commands or `sandbox_bash`.
+- Raw process inspection (`ps`, `pgrep`, `ps auxww`, `ps -ef`, `ps -eo ...`) inside sandbox commands.
 - `sandbox run --fs read-only --network enabled`.
 - `sandbox run --fs build` without exactly one write dir.

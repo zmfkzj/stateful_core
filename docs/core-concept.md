@@ -143,50 +143,39 @@ write transaction. Bash command text alone is never a repo-internal
 authorization source. Runtime tool names are classified by their leaf segment,
 so `functions.bash` follows Bash rules, `functions.python` follows Python
 rules, and `functions.read` / `functions.search` remain native read/search
-tools. Codex raw Bash is denied with sandbox guidance. OMP raw Bash and native
-Python execution are denied at host approval and hook levels, even when the raw
-command itself invokes `stateful sandbox run`; OMP sessions use generated custom
-tools instead. `sandbox_bash` invokes the trusted stateful binary for read-only,
-write-targets, build, git, and github-pr sandbox profiles, including common
-sandbox flags, and rejects `--fs external` with guidance to use `ext_ro_bash` or
-`ext_rw_bash`. `process_find` handles OMP process inspection directly.
-`ext_ro_bash` runs purpose-and-command-only external reads
-without OMP UI confirmation. `ext_rw_bash` prompts by default for a scoped OMP
-UI grant before running external writes that declare at least one write target,
-create target, or write dir unless `stateful.autoApprove: true` or per-call
-`auto_approve: true` is enabled. Auto-approval skips only the Stateful-owned UI
-prompt; sandbox scope validation, hooks, reservation/claim checks, and grant
-limits still apply. When prompted, the prompt shows purpose, declared scope,
-examples, max uses, and expiry rather than raw command text, and matching calls
-reuse the grant until it expires or reaches its use limit.
-Generated OMP sandbox command tools run in the background by default: with
-`async` omitted or `true`, the tool returns a `runId` immediately and stores
-live stdout/stderr/status in the OMP extension. Agents use `sandbox_job_poll` to
-monitor output deltas and collect final exit status before final handoff. Set
-`async: false` for awaited foreground behavior with final stdout/stderr/status
-in the tool result. They
-cancel on OMP abort/ESC. The
+tools. Codex raw Bash is denied with sandbox guidance. OMP built-in Bash may run
+only strict trusted `stateful sandbox run ...` and
+`stateful sandbox process find ...` commands after Stateful preflight; arbitrary
+raw Bash and native Python execution are denied at host approval and hook
+levels. Command execution and process inspection are not generated tool calls.
+External write/create/write-dir/socket/signal scope prompts by default for a
+scoped OMP UI grant unless `stateful.autoApprove: true` is enabled.
+Auto-approval skips only the Stateful-owned UI prompt; sandbox scope validation,
+hooks, reservation/claim checks, and grant limits still apply. When prompted,
+the prompt shows purpose, declared scope, examples, max uses, and expiry rather
+than raw command text, and matching calls reuse the grant until it expires or
+reaches its use limit. The generated extension subscribes to Stateful SSE
+reservation notifications and injects a next-turn OMP message when a queued
+`wait_id` becomes a `claimable_reservation`; the claim and write still use the normal Stateful tools.
 generated extension also subscribes to Stateful SSE reservation
 notifications and injects a next-turn OMP message when a queued `wait_id`
 becomes a `claimable_reservation`; the claim and write still use the normal Stateful tools.
 Ordinary read work should use agent-native read, search, or diff tools when
 available.
-Read-only inspection that genuinely needs a shell must use the trusted absolute
-`stateful` wrapper: `<absolute-stateful-binary> sandbox run --fs read-only
---network disabled --command <cmd>`; in OMP, use `sandbox_bash` for that
-profile. Process inspection uses `<absolute-stateful-binary> sandbox process
-find <selector>`; in OMP, use `process_find`, not `sandbox_bash`.
-Command-shaped repo writes must use the wrapper with
-`--fs write-targets` and explicit repo-relative target flags after reservation and
-same-session claim; in OMP, use `sandbox_bash`. Repo-external operations use
-`--fs external` with purpose and command; read-only external commands may omit
-targets and use OMP `ext_ro_bash`, while external writes must declare
-write/create/dir scope and use OMP `ext_rw_bash`, which prompts by default or
-uses the configured/per-call auto-approval boundary for its scoped purpose grant.
-Raw Bash test commands are not allowlisted; use
-`stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
---command <cmd>` so build artifacts go under
-`/tmp/stateful/<session>/<scratch-purpose>/`; in OMP, use `sandbox_bash`.
+Read-only inspection that genuinely needs a shell must use a single trusted
+`stateful sandbox run --fs read-only --network disabled --command <cmd>` command;
+in OMP, run that command through built-in Bash after Stateful preflight. Process
+inspection uses `stateful sandbox process find <selector>`; in OMP, run that
+command through built-in Bash, not a generated process tool. Command-shaped repo
+writes must use `stateful sandbox run --fs write-targets` with explicit
+repo-relative target flags after reservation and same-session claim; in OMP, use
+built-in Bash with the same trusted command. Repo-external operations use
+`stateful sandbox run --fs external` with purpose and command; external writes
+must declare write/create/dir scope and ask for a scoped OMP UI grant by default
+unless `stateful.autoApprove: true` is enabled. Raw Bash test commands are not
+allowlisted; use `stateful sandbox run --fs build --network enabled --write-dir
+<scratch-purpose> --command <cmd>` so build artifacts go under
+`/tmp/stateful/<session>/<scratch-purpose>/`.
 
 ## Product Shape
 

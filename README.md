@@ -144,7 +144,7 @@ stateful codex
 ### OMP
 
 Install OMP integration when you want the isolated OMP `stateful` profile,
-stateful hooks, MCP, generated sandbox command tools, lazy edit/write resume, and
+stateful hooks, MCP, built-in Bash preflight, lazy edit/write resume, and
 `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
 `sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`):
 
@@ -220,12 +220,11 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 
 In OMP, built-in Bash may run only strict trusted `stateful sandbox run ...`
 and `stateful sandbox process find ...` commands after Stateful preflight.
-Generated tools (`sandbox_bash`, `process_find`, `ext_ro_bash`, and
-`ext_rw_bash`) remain compatibility helpers. Scoped external writes still ask
-for a Stateful OMP UI grant by default; `stateful.autoApprove: true` or the
-per-call `auto_approve: true` flag skips only that Stateful-owned prompt while
-sandbox scope validation, hooks, reservation/claim checks, and grant limits
-still apply.
+Command execution and process inspection are not generated tool calls.
+External write/create/write-dir/socket/signal scope still asks for a Stateful
+OMP UI grant by default; `stateful.autoApprove: true` skips only that
+Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim
+checks, and grant limits still apply.
 When auto-approval is enabled, no prompt is shown. Use `lazy_edit_resume` for
 strict replay of blocked line-based OMP `edit` patches and `lazy_write_resume`
 for captured full OMP `write` replay with a stale-target guard.

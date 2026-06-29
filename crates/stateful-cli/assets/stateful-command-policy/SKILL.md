@@ -27,7 +27,7 @@ This is the procedural manual for Stateful hooks. Rules decide when the skill ap
 
 Read only the focused support file needed for the current denial or command shape:
 
-- `omp-tools.md`: OMP tool mapping, generated sandbox tools, process inspection, skill URI expansion, SSE/lazy edit and write resume behavior, and DeNovo OMP notes.
+- `omp-tools.md`: OMP tool mapping, built-in Bash sandbox/process guidance, skill URI expansion, SSE/lazy edit and write resume behavior, and DeNovo OMP notes.
 - `sandbox-tools.md`: sandbox profile selection, command examples, git/GitHub/build/external profiles, tmp retention, and raw Bash/eval avoidance.
 - `denial-recovery.md`: missing reservation, missing claim, claim conflict, wait queue, hook denial, raw Bash/eval block, and no-supported-path recovery.
 - `subagent-write-recovery.md`: how native Codex/OMP subagents recover write authorization without shell session repair.

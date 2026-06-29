@@ -25,12 +25,12 @@ The prototype supports user-level installation with repo allowlist gating.
 `sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`) and
 `skills/dispatching-parallel-agents/SKILL.md`. `stateful install
 --agent omp --yes` configures the isolated OMP `stateful` profile with stateful
-hooks, MCP, `sandbox_bash` for non-external sandbox profiles, `process_find` for
-process inspection, `ext_ro_bash` for read-only `--fs external`, `ext_rw_bash`,
-`lazy_edit_resume` for strict replay of queued line-based OMP edits,
-`lazy_write_resume` for queued full OMP writes with a stale-target guard, and approval
-entries that deny raw Bash while setting Python/JavaScript/JS/Ruby/Julia eval tools to false.
-`ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. The OMP installer also writes `rules/stateful-required.md` and `skills/stateful-command-policy/`
+hooks, MCP, built-in Bash preflight for strict trusted `stateful sandbox run ...`
+and `stateful sandbox process find ...` commands, `lazy_edit_resume` for strict
+replay of queued line-based OMP edits, `lazy_write_resume` for queued full OMP
+writes with a stale-target guard, and approval entries that deny arbitrary raw
+Bash while setting Python/JavaScript/JS/Ruby/Julia eval tools to false.
+External write/create/write-dir/socket/signal scope asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. The OMP installer also writes `rules/stateful-required.md` and `skills/stateful-command-policy/`
 (`SKILL.md`, `omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
 `subagent-write-recovery.md`) under that isolated agent directory: the
 always-apply rule owns model-facing activation, the
@@ -266,35 +266,27 @@ explicit `--write-target <file>` / `--create-target <file>` values and target au
 OMP built-in Bash may run only strict trusted `stateful sandbox run ...` and
 `stateful sandbox process find ...` commands after Stateful preflight.
 Arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution is
-denied at host approval and hook levels. Generated custom tools remain
-compatibility helpers: `sandbox_bash` invokes the trusted stateful binary for
-read-only, write-targets, build, git, and github-pr profiles; `process_find`
-invokes `stateful sandbox process find` directly; `ext_ro_bash` starts
-purpose-and-command-only external reads without OMP UI confirmation. `ext_rw_bash`
-asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. It starts the trusted
-stateful binary with `sandbox run --fs external --purpose ...` for external
-writes that declare at least one write target, create target, or write dir. The
-grant prompt shows purpose, declared scope, examples, max uses, and expiry rather
-than raw command text, and matching calls reuse the grant until it expires or
-reaches its use limit. When auto-approval is enabled, no prompt is shown. All
-generated OMP sandbox command tools run in the background by default. With
-`async` omitted or `true`, they return a `runId` immediately and store live
-stdout/stderr/status in the OMP extension. Agents use `sandbox_job_poll` to
-monitor output deltas and collect final exit status before final handoff. Set
-`async: false` for awaited foreground behavior with final stdout/stderr/status
-in the tool result.
+denied at host approval and hook levels. Command execution and process
+inspection are not generated tool calls. External write/create/write-dir,
+socket, or signal scope asks for a scoped OMP UI grant by default;
+`stateful.autoApprove: true` skips only that Stateful-owned prompt while sandbox
+scope validation, hooks, reservation/claim checks, and grant limits still apply.
+The grant prompt shows purpose, declared scope, examples, max uses, and expiry
+rather than raw command text, and matching calls reuse the grant until it
+expires or reaches its use limit. When auto-approval is enabled, no prompt is
+shown.
 The external sandbox profile requires
 purpose and command; read-only/no-declared-scope operations may
 omit targets, while supplied external write scopes are validated as absolute
 paths outside the repo. On macOS, external profile runs also allow
 trust/identity Mach lookups for `trustd` and DirectoryService so Go TLS clients
-such as `gh` can verify certificates. It starts through the sandbox after Codex
-approval, `ext_ro_bash` invocation, or `ext_rw_bash` scoped-grant approval; `stateful.autoApprove: true` or per-call `auto_approve: true` skips only that Stateful-owned prompt and does not bypass reservation or claim requirements when repo-relative write scope is supplied.
+such as `gh` can verify certificates. In OMP, it starts through built-in Bash
+after Stateful preflight and any required scoped OMP UI grant; `stateful.autoApprove: true` skips only that Stateful-owned prompt and does not bypass reservation or claim requirements when repo-relative write scope is supplied.
 Local git operations use `<absolute-stateful-binary> sandbox run --fs git
 --network disabled --command 'git <args>'`; use `--network enabled` only for
 remote git operations. GitHub pull request list/view/status/create commands use
 `<absolute-stateful-binary> sandbox run --fs github-pr --network enabled --command
-'gh pr <list|view|status|create> ...'`; in OMP, call `sandbox_bash`. Use the
+'gh pr <list|view|status|create> ...'`; in OMP, use built-in Bash with the same trusted command. Use the
 GitHub connector instead when that connector is explicitly allowlisted for the repo.
 
 ## Decision Output
@@ -610,22 +602,17 @@ are validated before the sandbox starts. On macOS, that external profile also
 permits `trustd` and DirectoryService Mach lookups needed by Go TLS certificate
 verification.
 `stateful
-install --agent omp --yes` registers `sandbox_bash` for read-only,
-write-targets, build, git, and github-pr sandbox profiles, `process_find` for
-process inspection, and `ext_ro_bash` for read-only external commands.
-`process_find` accepts `names`, `contains`, `pids`, `parent_pids`,
-`process_groups`, `timeout_seconds`, and `async`. `ext_rw_bash` asks for a
-scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call
-`auto_approve: true` flag skips only that Stateful-owned prompt while sandbox
-scope validation, hooks, reservation/claim checks, and grant limits still apply.
-All generated OMP sandbox command tools run in the background by default: when
-`async` is omitted or `true`, the call returns a `runId` immediately and stores
-live stdout/stderr/status in the OMP extension. Agents use `sandbox_job_poll` to
-monitor output deltas and collect final exit status before final handoff.
-`async: false` waits for completion and returns final stdout/stderr/status in
-tool details. `ext_ro_bash` does not ask OMP UI confirmation; `ext_rw_bash` uses the
-scoped grant before starting the trusted stateful binary with the external profile. When auto-approval is enabled, no prompt is shown. Raw OMP Bash and
-Python/JavaScript/JS/Ruby/Julia eval-tool sandbox invocations are denied.
+install --agent omp --yes` enables built-in Bash only for strict trusted
+`stateful sandbox run ...` and `stateful sandbox process find ...` commands
+after Stateful preflight. Command execution and process inspection are not
+generated tool calls. External write/create/write-dir/socket/signal scope asks
+for a scoped OMP UI grant by default; `stateful.autoApprove: true` skips only
+that Stateful-owned prompt while sandbox scope validation, hooks,
+reservation/claim checks, and grant limits still apply. The grant prompt shows
+purpose, declared scope, examples, max uses, and expiry rather than raw command
+text, and matching calls reuse the grant until it expires or reaches its use
+limit. When auto-approval is enabled, no prompt is shown. Raw arbitrary OMP Bash
+and Python/JavaScript/JS/Ruby/Julia eval-tool sandbox invocations are denied.
 OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
 extension events to `stateful hook omp session-start`, `pre-tool-use`,
 `post-tool-use`, and `stop`; OMP does not expose a stateful
@@ -742,9 +729,8 @@ and `eval.jl: false`; it removes
 Stateful hooks. OMP built-in Bash may run only strict trusted
 `stateful sandbox run ...` and `stateful sandbox process find ...` commands
 after Stateful preflight; arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia
-eval-tool execution is still denied at host approval and hook levels. Generated
-`sandbox_bash`, `process_find`, `ext_ro_bash`, and `ext_rw_bash` remain
-compatibility helpers; `stateful.autoApprove: true` or per-call `auto_approve: true`
+eval-tool execution is still denied at host approval and hook levels. Command
+execution and process inspection are not generated tool calls; `stateful.autoApprove: true`
 skips only the Stateful-owned external grant prompt while sandbox scope
 validation, hooks, reservation/claim checks, and grant limits still apply. `stateful enable`
 opts the current repo into enforcement. Repo-local packaging and managed hooks

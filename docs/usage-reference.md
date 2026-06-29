@@ -83,19 +83,21 @@ The installer also writes `rules/stateful-required.md` and
 that isolated agent directory. The always-apply rule owns activation; the
 `stateful-command-policy` manual owns the detailed Stateful procedure.
 
-Generated OMP tools:
+Installed OMP support:
 
-- `sandbox_bash` for non-external `stateful sandbox run` profiles: `read-only`,
-  `write-targets`, `build`, `git`, and `github-pr`
-- `process_find` for process inspection; parameters are `names`, `contains`,
-  `pids`, `parent_pids`, `process_groups`, `fields`, `timeout_seconds`, and `async`
-- `ext_ro_bash` for read-only `--fs external` purpose-and-command operations
-  without OMP UI confirmation
-- `ext_rw_bash` asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` or the per-call `auto_approve: true` flag skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply.
-  The approval prompt omits raw command text and grants matching calls keyed by
-  purpose plus write/create/write-dir/socket/signal/network scope until expiry
-  or max uses; defaults are 5 uses and 600 seconds. When auto-approval is
-  enabled, no prompt is shown.
+- Built-in Bash for strict trusted `stateful sandbox run ...` commands with the
+  narrowest valid sandbox profile and any required Stateful reservation/claim
+  preflight.
+- Built-in Bash for strict trusted `stateful sandbox process find ...` process
+  inspection commands.
+- External write/create/write-dir/socket/signal scope asks for a scoped OMP UI
+  grant by default; `stateful.autoApprove: true` skips only that
+  Stateful-owned prompt while sandbox scope validation, hooks,
+  reservation/claim checks, and grant limits still apply. The approval prompt
+  omits raw command text and grants matching calls keyed by purpose plus
+  write/create/write-dir/socket/signal/network scope until expiry or max uses;
+  defaults are 5 uses and 600 seconds. When auto-approval is enabled, no prompt
+  is shown.
 - `lazy_edit_resume` for strict replay of blocked, line-based OMP `edit` patches.
   The live extension stores the original patch after `missing_reservation`,
   `missing_claim`, or claim-conflict denials; after the agent fixes the missing
@@ -343,8 +345,8 @@ stateful sandbox process find --name stateful-bench
 stateful sandbox process find --contains denovo_codex_agent
 ```
 
-In OMP, call the generated `process_find` tool directly instead of routing
-process inspection through `sandbox_bash` or raw Bash. By default, result JSON
+In OMP, use built-in Bash with a single trusted
+`stateful sandbox process find ...` command after Stateful preflight. Result JSON
 includes safe process metadata fields: `pid`, `ppid`, `pgid`, `user`, `uid`,
 `stat`, `start`, `etime`, `time`, `pcpu`, `pmem`, `rss`, `vsz`, `nice`, `pri`,
 `tty`, and `comm`. Command strings, argv, and environment data are never exposed

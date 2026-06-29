@@ -9,7 +9,7 @@ If the denial says `missing_reservation`, `missing_claim`, `Target is outside ac
 1. Re-read the target if it exists.
 2. Add the missing exact file or directory scopes to the task reservation with `state_reservation_declare(purpose=<task purpose>, files_planned=[...])`.
 3. Acquire exact same-session claims with `state_claim_acquire(paths=[...])`.
-4. Use native edit tools for repo edits, or `sandbox run --fs write-targets` / OMP `sandbox_bash` with matching targets for command-shaped writes.
+4. Use native edit tools for repo edits, or `sandbox run --fs write-targets` / OMP built-in Bash with a strict trusted `stateful sandbox run --fs write-targets ...` command and matching targets for command-shaped writes.
 
 Use file claims for file writes, deletes, renames, and moves. Directory claims only authorize directory writes.
 
@@ -33,16 +33,16 @@ If raw Bash or eval-tool execution is blocked:
 - Use MCP/native inspection first.
 - Use native edit tools after reservation and claims for repo edits.
 - Codex fallback command paths: read-only sandbox for read-only shell inspection, `stateful sandbox process find` for process checks, write-targets sandbox for command-shaped writes, and git profile for git.
-- OMP fallback command paths: `process_find`, `sandbox_bash`, `ext_ro_bash`, and `ext_rw_bash`.
+- OMP fallback command paths: built-in Bash with strict trusted `stateful sandbox run ...` or `stateful sandbox process find ...` commands after Stateful preflight.
 
-Do not wrap `stateful sandbox run` in raw Bash/eval in OMP; hooks deny the outer tool before command text matters.
+Do not wrap `stateful sandbox run` in arbitrary Bash/eval in OMP; only the built-in Bash strict trusted Stateful command path is allowed.
 
 ## External Work
 
 Use external only when the command is outside the repo or needs external OS capabilities.
 
 - Codex: `sandbox run --fs external --purpose ... --command ...`.
-- OMP: `ext_ro_bash` for read-only commands; `ext_rw_bash` for writes/socket/signal scope.
+- OMP: built-in Bash with strict trusted `stateful sandbox run --fs external ...`; write/create/write-dir/socket/signal scope prompts unless `stateful.autoApprove: true`.
 - Add absolute external targets, directories, sockets, or signal permission only when needed.
 - Repo-relative external write scopes require matching Stateful reservation and same-session claims.
 
