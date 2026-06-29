@@ -209,6 +209,8 @@ pub enum SandboxCommand {
         network: SandboxNetworkPolicy,
         #[arg(long)]
         purpose: Option<String>,
+        #[arg(long)]
+        reservation_id: Option<String>,
         #[arg(long = "write-target")]
         write_targets: Vec<String>,
         #[arg(long = "create-target")]
@@ -284,6 +286,8 @@ pub enum ReservationCommand {
         #[arg(long)]
         request_id: String,
         #[arg(long)]
+        reservation_id: Option<String>,
+        #[arg(long)]
         action: String,
         #[arg(long)]
         path: String,
@@ -295,6 +299,8 @@ pub enum ReservationCommand {
         session_id: Option<String>,
         #[arg(long)]
         workspace_id: Option<String>,
+        #[arg(long)]
+        reservation_id: Option<String>,
         #[arg(long)]
         wait_id: String,
     },
@@ -583,6 +589,7 @@ pub fn run() -> anyhow::Result<()> {
             fs,
             network,
             purpose,
+            reservation_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -601,6 +608,7 @@ pub fn run() -> anyhow::Result<()> {
                     fs,
                     network,
                     purpose,
+                    reservation_id,
                     write_targets,
                     create_targets,
                     write_dirs,
@@ -802,6 +810,7 @@ pub fn run() -> anyhow::Result<()> {
             session_id,
             workspace_id,
             request_id,
+            reservation_id,
             action,
             path,
             purpose,
@@ -815,6 +824,7 @@ pub fn run() -> anyhow::Result<()> {
                     session_id,
                     workspace_id,
                     request_id,
+                    reservation_id,
                     action,
                     path,
                     purpose,
@@ -829,6 +839,7 @@ pub fn run() -> anyhow::Result<()> {
             session_id,
             workspace_id,
             wait_id,
+            reservation_id,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let (session_id, workspace_id) =
@@ -839,6 +850,7 @@ pub fn run() -> anyhow::Result<()> {
                     session_id,
                     workspace_id,
                     wait_id,
+                    reservation_id,
                     identity: GlobalPaths::from_env()
                         .ok()
                         .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),

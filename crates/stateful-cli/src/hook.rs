@@ -516,7 +516,7 @@ fn authorize_omp_targets(
 
     let Some(runtime) = runtime else {
         let reason = format!(
-            "{} writes require a reachable stateful server, task reservation exact file scope, and a same-session file claim",
+            "{} writes require a reachable stateful server, task reservation exact file scope, and a same-reservation file claim",
             input.tool_name
         );
         return Ok(OmpHookOutcome::Block { reason });
@@ -541,6 +541,9 @@ fn authorize_omp_targets(
         if let Some(new_path) = &target.new_path {
             payload["old_path"] = json!(target.path);
             payload["new_path"] = json!(new_path);
+        }
+        if let Some(reservation_id) = input.reservation_id() {
+            payload["reservation_id"] = json!(reservation_id);
         }
         let mut body = protocol_envelope(ProtocolEnvelopeArgs {
             runtime,
@@ -2352,7 +2355,7 @@ fn authorize_targets(
     let Some(runtime) = runtime else {
         return Ok(HookOutcome::Deny {
             reason: format!(
-                "{} writes require a reachable stateful server, task reservation exact file scope, and a same-session file claim",
+                "{} writes require a reachable stateful server, task reservation exact file scope, and a same-reservation file claim",
                 input.tool_name
             ),
         });
@@ -2381,6 +2384,9 @@ fn authorize_targets(
         if let Some(new_path) = &target.new_path {
             payload["old_path"] = json!(target.path);
             payload["new_path"] = json!(new_path);
+        }
+        if let Some(reservation_id) = input.reservation_id() {
+            payload["reservation_id"] = json!(reservation_id);
         }
         let body = protocol_envelope(ProtocolEnvelopeArgs {
             runtime,
@@ -2487,7 +2493,7 @@ fn shadow_write_paths(targets: &[PatchTarget]) -> impl Iterator<Item = &str> {
 
 fn authorization_unavailable_reason(error: &dyn std::fmt::Display) -> String {
     format!(
-        "server_unavailable: stateful authorization is unavailable while contacting /v1/authorize: {error}. Writes fail closed. Run `stateful server status`, restart or rejoin the stateful server, then retry after task-level reservation covers the target and acquiring a same-session file claim."
+        "server_unavailable: stateful authorization is unavailable while contacting /v1/authorize: {error}. Writes fail closed. Run `stateful server status`, restart or rejoin the stateful server, then retry after task-level reservation covers the target and acquiring a same-reservation file claim."
     )
 }
 
@@ -2812,6 +2818,8 @@ fn normalize_path(path: PathBuf) -> PathBuf {
 pub struct OmpPreToolUseInput {
     session_id: String,
     #[serde(default)]
+    reservation_id: Option<String>,
+    #[serde(default)]
     parent_session_id: Option<String>,
     #[serde(default)]
     omp_agent_id: Option<String>,
@@ -2842,6 +2850,14 @@ impl OmpPreToolUseInput {
 
     fn command(&self) -> Option<&str> {
         self.tool_input.get("command")?.as_str()
+    }
+
+    fn reservation_id(&self) -> Option<&str> {
+        self.reservation_id
+            .as_deref()
+            .or_else(|| self.tool_input.get("reservation_id").and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|reservation_id| !reservation_id.is_empty())
     }
 }
 
@@ -2885,6 +2901,8 @@ impl OmpSessionEventInput {
 struct PreToolUseInput {
     #[serde(flatten)]
     runtime: RuntimeHookInput,
+    #[serde(default)]
+    reservation_id: Option<String>,
     tool_name: String,
     #[serde(default)]
     tool_input: serde_json::Value,
@@ -2921,6 +2939,14 @@ impl PreToolUseInput {
     fn command(&self) -> Option<&str> {
         self.tool_input.get("command")?.as_str()
     }
+    fn reservation_id(&self) -> Option<&str> {
+        self.reservation_id
+            .as_deref()
+            .or_else(|| self.tool_input.get("reservation_id").and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|reservation_id| !reservation_id.is_empty())
+    }
+
 
     fn patch_text(&self) -> Option<&str> {
         string_payload_field(

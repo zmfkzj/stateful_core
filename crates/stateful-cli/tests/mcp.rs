@@ -307,6 +307,64 @@ fn mcp_session_register_refreshes_stale_current_session_alias() {
 }
 
 #[test]
+fn mcp_session_bound_tools_prefer_live_omp_session_alias_over_stale_stateful_env() {
+    let temp_root = temp_root("stateful-mcp-stale-omp-env");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file_for_session(
+        &repo_root,
+        "stale-session",
+        &CurrentSession::new("stale-session", "w-stale"),
+    )
+    .expect("stale env session-bound file should write");
+    write_current_session_file_for_session(
+        &repo_root,
+        "live-session",
+        &CurrentSession::new("live-session", "w-live"),
+    )
+    .expect("live session-bound file should write");
+    write_current_session_file(&repo_root, &CurrentSession::new("live-session", "w-live"))
+        .expect("live current session alias should write");
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let response = run_mcp_jsonrpc_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[("STATEFUL_SESSION_ID", "stale-session")],
+        r#"{
+          "jsonrpc":"2.0",
+          "id":19,
+          "method":"tools/call",
+          "params":{
+            "name":"state_reservation_declare",
+            "arguments":{
+              "files_planned":["src/lib.rs"],
+              "purpose":"exercise live omp session"
+            }
+          }
+        }"#,
+    );
+
+    let request = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("reservation declare request should arrive");
+    assert!(request.contains("POST /v1/reservation/declare HTTP/1.1"));
+    let body = request_json_body(&request);
+    assert_eq!(body["session"]["session_id"], "live-session");
+    assert_eq!(body["workspace"]["workspace_id"], "w-live");
+
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 19);
+    assert_eq!(json["result"]["isError"], false);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn mcp_stale_file_write_call_returns_removed_guidance() {
     for tool_name in ["state_file_write", "state.file.write"] {
         let temp_root = temp_root(&format!("stateful-mcp-stale-file-write-{tool_name}"));
@@ -2358,6 +2416,52 @@ fn mcp_lease_acquire_defaults_to_stateful_session_bound_file_over_legacy() {
     let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
     assert_eq!(json["jsonrpc"], "2.0");
     assert_eq!(json["id"], 9);
+    assert_eq!(json["result"]["isError"], false);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_claim_acquire_passes_reservation_id_without_requiring_session_argument() {
+    let temp_root = temp_root("stateful-mcp-claim-reservation-id");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file_for_session(
+        &repo_root,
+        "s-current",
+        &CurrentSession::new("s-current", "w1"),
+    )
+    .expect("session-bound current session should write");
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let response = run_mcp_jsonrpc_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[("STATEFUL_SESSION_ID", "s-current")],
+        r#"{
+          "jsonrpc":"2.0",
+          "id":51,
+          "method":"tools/call",
+          "params":{
+            "name":"state_claim_acquire",
+            "arguments":{"reservation_id":"reservation-a","paths":["src/auth.ts"]}
+          }
+        }"#,
+    );
+
+    let request = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("claim request should arrive");
+    assert!(request.contains("POST /v1/claim/acquire HTTP/1.1"));
+    let body = request_json_body(&request);
+    assert_eq!(body["session_id"], "s-current");
+    assert_eq!(body["workspace_id"], "w1");
+    assert_eq!(body["reservation_id"], "reservation-a");
+    assert_eq!(body["paths"], serde_json::json!(["src/auth.ts"]));
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
     assert_eq!(json["result"]["isError"], false);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");

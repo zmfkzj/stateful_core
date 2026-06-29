@@ -65,6 +65,7 @@ pub struct SandboxRunRequest {
     pub fs: SandboxFsProfile,
     pub network: SandboxNetworkPolicy,
     pub purpose: Option<String>,
+    pub reservation_id: Option<String>,
     pub write_targets: Vec<String>,
     pub create_targets: Vec<String>,
     pub write_dirs: Vec<String>,
@@ -348,6 +349,7 @@ pub fn run_sandbox_in_repo(
                     workspace_id: &current_session.workspace_id,
                     network: request.network,
                     fs_profile: sandbox_fs_profile_name(request.fs),
+                    reservation_id: request.reservation_id.as_deref(),
                 };
 
                 for path in external_scope
@@ -443,6 +445,7 @@ pub fn run_sandbox_in_repo(
                 workspace_id: &current_session.workspace_id,
                 network: request.network,
                 fs_profile: sandbox_fs_profile_name(request.fs),
+                reservation_id: request.reservation_id.as_deref(),
             };
 
             for path in write_targets.iter().chain(create_targets.iter()) {
@@ -624,6 +627,7 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
     let mut fs = SandboxFsProfile::ReadOnly;
     let mut network = SandboxNetworkPolicy::Disabled;
     let mut purpose = None;
+    let mut reservation_id = None;
     let mut write_targets = Vec::new();
     let mut create_targets = Vec::new();
     let mut write_dirs = Vec::new();
@@ -655,6 +659,13 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
                 }
                 index += 1;
                 purpose = Some(parse_sandbox_run_arg_value(&words, index, "--purpose")?);
+            }
+            "--reservation-id" => {
+                if reservation_id.is_some() {
+                    return Err("stateful sandbox run accepts at most one --reservation-id".to_string());
+                }
+                index += 1;
+                reservation_id = Some(parse_sandbox_run_arg_value(&words, index, "--reservation-id")?);
             }
             "--write-target" => {
                 index += 1;
@@ -721,6 +732,7 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
             fs,
             network,
             purpose,
+            reservation_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -3273,6 +3285,7 @@ pub(crate) struct SandboxAuthorizeContext<'a> {
     pub(crate) workspace_id: &'a str,
     pub(crate) network: SandboxNetworkPolicy,
     pub(crate) fs_profile: &'static str,
+    pub(crate) reservation_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3302,6 +3315,9 @@ pub(crate) fn authorize_sandbox_write(
         && let Some(observation) = base_observation_for_sandbox_target(context.repo_root, path)
     {
         payload["base_observations"] = serde_json::json!([observation]);
+    }
+    if let Some(reservation_id) = context.reservation_id.map(str::trim).filter(|id| !id.is_empty()) {
+        payload["reservation_id"] = serde_json::json!(reservation_id);
     }
     let body = protocol_envelope(ProtocolEnvelopeArgs {
         runtime: context.runtime,
@@ -4489,6 +4505,7 @@ mod tests {
             fs: SandboxFsProfile::ReadOnly,
             network: SandboxNetworkPolicy::Disabled,
             purpose: None,
+            reservation_id: None,
             write_targets: Vec::new(),
             create_targets: Vec::new(),
             write_dirs: Vec::new(),
@@ -4516,6 +4533,7 @@ mod tests {
             fs: SandboxFsProfile::ReadOnly,
             network: SandboxNetworkPolicy::Disabled,
             purpose: None,
+            reservation_id: None,
             write_targets: Vec::new(),
             create_targets: Vec::new(),
             write_dirs: Vec::new(),
@@ -4557,6 +4575,7 @@ mod tests {
                 fs: SandboxFsProfile::ReadOnly,
                 network: SandboxNetworkPolicy::Disabled,
                 purpose: None,
+                reservation_id: None,
                 write_targets: Vec::new(),
                 create_targets: Vec::new(),
                 write_dirs: Vec::new(),
@@ -4586,6 +4605,7 @@ mod tests {
             fs: SandboxFsProfile::ReadOnly,
             network: SandboxNetworkPolicy::Disabled,
             purpose: None,
+            reservation_id: None,
             write_targets: Vec::new(),
             create_targets: Vec::new(),
             write_dirs: Vec::new(),
@@ -5374,6 +5394,7 @@ mod tests {
             fs: SandboxFsProfile::External,
             network: SandboxNetworkPolicy::Enabled,
             purpose: None,
+            reservation_id: None,
             write_targets: vec!["/tmp/stateful-outside.txt".to_string()],
             create_targets: Vec::new(),
             write_dirs: Vec::new(),

@@ -981,6 +981,7 @@ fn claim_reservation_via_http_posts_expected_payload() {
             session_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             wait_id: "wait-1".to_string(),
+            reservation_id: None,
             identity: None,
         },
     )
@@ -1027,6 +1028,7 @@ fn request_reservation_via_http_posts_expected_payload() {
             session_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             request_id: "request-1".to_string(),
+            reservation_id: None,
             action: "write_file".to_string(),
             path: "src/auth.ts".to_string(),
             purpose: "Queue auth file changes.".to_string(),

@@ -34,6 +34,7 @@ pub struct ReservationClaimArgs {
     pub session_id: String,
     pub workspace_id: String,
     pub wait_id: String,
+    pub reservation_id: Option<String>,
     pub identity: Option<RepoIdentity>,
 }
 
@@ -42,6 +43,7 @@ pub struct ReservationRequestArgs {
     pub session_id: String,
     pub workspace_id: String,
     pub request_id: String,
+    pub reservation_id: Option<String>,
     pub action: String,
     pub path: String,
     pub purpose: String,
@@ -345,6 +347,15 @@ pub fn read_current_session_file_for_mcp(
             Err(error) if is_not_found_error(&error) => {}
             Err(error) => return Err(error),
         }
+    }
+
+    match read_verified_legacy_current_session_file(
+        repo_root,
+        LegacySessionFallback::RequireSessionBoundFile,
+    ) {
+        Ok(session) => return Ok(session),
+        Err(error) if is_not_found_error(&error) => {}
+        Err(error) => return Err(error),
     }
 
     if let Some(session_id) = current_env_session_id(STATEFUL_SESSION_ID_ENV)? {
@@ -751,8 +762,15 @@ pub fn reservation_claim_protocol_body(
         session_id,
         workspace_id,
         wait_id,
+        reservation_id,
         identity,
     } = args;
+    let mut payload = serde_json::json!({
+        "wait_id": wait_id
+    });
+    if let Some(reservation_id) = reservation_id {
+        payload["reservation_id"] = serde_json::json!(reservation_id);
+    }
     protocol_envelope(ProtocolEnvelopeArgs {
         runtime,
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -763,9 +781,7 @@ pub fn reservation_claim_protocol_body(
         event: "reservation_claim",
         source_ref,
         source_tool_name: None,
-        payload: serde_json::json!({
-            "wait_id": wait_id
-        }),
+        payload,
     })
 }
 
@@ -779,11 +795,21 @@ pub fn reservation_request_protocol_body(
         session_id,
         workspace_id,
         request_id,
+        reservation_id,
         action,
         path,
         purpose,
         identity,
     } = args;
+    let mut payload = serde_json::json!({
+        "request_id": request_id,
+        "action": action,
+        "path": path,
+        "purpose": purpose
+    });
+    if let Some(reservation_id) = reservation_id {
+        payload["reservation_id"] = serde_json::json!(reservation_id);
+    }
     protocol_envelope(ProtocolEnvelopeArgs {
         runtime,
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -794,12 +820,7 @@ pub fn reservation_request_protocol_body(
         event: "reservation_request",
         source_ref,
         source_tool_name: None,
-        payload: serde_json::json!({
-            "request_id": request_id,
-            "action": action,
-            "path": path,
-            "purpose": purpose
-        }),
+        payload,
     })
 }
 
