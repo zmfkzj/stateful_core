@@ -2135,11 +2135,16 @@ function configTextAutoApprove(text) {{
 }}
 
 function statefulConfigFileAutoApprove() {{
-  try {{
-    return configTextAutoApprove(readFileSync(OMP_AGENT_CONFIG, "utf8"));
-  }} catch (_) {{
-    return false;
+  const configPaths = [
+    OMP_AGENT_CONFIG,
+    process.env.HOME ? resolve(process.env.HOME, ".omp/profiles/stateful/agent/config.yml") : "",
+  ].filter(Boolean);
+  for (const configPath of configPaths) {{
+    try {{
+      if (configTextAutoApprove(readFileSync(configPath, "utf8"))) return true;
+    }} catch (_) {{}}
   }}
+  return false;
 }}
 
 function statefulPromptAutoApproveConfig(ctx) {{
