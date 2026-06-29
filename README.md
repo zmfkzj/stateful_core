@@ -194,11 +194,12 @@ session stops being fresh.
 When another active claim blocks a write, the writer can queue for that resource.
 When the resource is released or expires, the server reserves it for the next
 eligible waiter and sends a resume notification. In OMP, blocked line-based
-`edit` patches and captured full `write` payloads are kept as live-session lazy
-operations, so an agent can acquire the missing reservation or claim and call
-`lazy_edit_resume` for strict line-based patch replay or `lazy_write_resume` for
-captured write replay. Write replay fails if the target changed since the
-operation was queued.
+`edit` patches, captured full `write` payloads, and external Bash commands
+waiting on a scoped grant are kept as live-session lazy operations. Agents call
+`lazy_edit_resume` for strict line-based patch replay, `lazy_write_resume` for
+captured write replay, or `lazy_bash_resume` to rerun a blocked external Bash
+command after approving its grant. Write replay fails if the target changed
+since the operation was queued.
 
 Detailed queue states, claim expiry behavior, and promotion rules are documented
 in [State model](docs/state-model.md),
@@ -224,15 +225,14 @@ In OMP, built-in Bash may run only strict trusted `stateful sandbox run ...`
 and `stateful sandbox process find ...` commands. Bare `stateful` is trusted
 only after session-start preflight hash-verifies the first PATH `stateful`
 binary against the installed Stateful binary; otherwise use the installed
-absolute binary path. Command execution and process inspection are not generated
-tool calls.
-External write/create/write-dir/socket/signal scope still asks for a Stateful
-OMP UI grant by default; `stateful.autoApprove: true` skips only that
-Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim
-checks, and grant limits still apply.
-When auto-approval is enabled, no prompt is shown. Use `lazy_edit_resume` for
-strict replay of blocked line-based OMP `edit` patches and `lazy_write_resume`
-for captured full OMP `write` replay with a stale-target guard.
+absolute binary path. External write/create/write-dir/socket/signal scope still
+asks for a Stateful OMP UI grant by default; `stateful.autoApprove: true` skips
+only that Stateful-owned prompt while sandbox scope validation, hooks,
+reservation/claim checks, and grant limits still apply. When auto-approval is
+enabled, no prompt is shown. Use `lazy_edit_resume` for strict replay of blocked
+line-based OMP `edit` patches, `lazy_write_resume` for captured full OMP `write`
+replay with a stale-target guard, and `lazy_bash_resume` to rerun a queued
+external Bash command after the scoped grant is approved.
 
 See [Usage reference](docs/usage-reference.md) for detailed CLI, hook, sandbox,
 LAN sharing, generated-file, and release notes.

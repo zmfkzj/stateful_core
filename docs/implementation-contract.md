@@ -28,7 +28,8 @@ The prototype supports user-level installation with repo allowlist gating.
 hooks, MCP, built-in Bash preflight for strict trusted `stateful sandbox run ...`
 and `stateful sandbox process find ...` commands, `lazy_edit_resume` for strict
 replay of queued line-based OMP edits, `lazy_write_resume` for queued full OMP
-writes with a stale-target guard, and approval entries that deny arbitrary raw
+writes with a stale-target guard, `lazy_bash_resume` for queued external Bash
+commands waiting on scoped grants, and approval entries that deny arbitrary raw
 Bash while setting Python/JavaScript/JS/Ruby/Julia eval tools to false.
 External write/create/write-dir/socket/signal scope asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. The OMP installer also writes `rules/stateful-required.md` and `skills/stateful-command-policy/`
 (`SKILL.md`, `omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
@@ -243,6 +244,10 @@ operations; block operations or changed files require regenerating the patch.
 `lazy_write_resume` re-authorizes the original write after the same scope repair
 or claimable reservation, verifies the target still matches the queued state,
 and writes the captured full content; changed targets require retrying the write.
+`lazy_bash_resume` stores a trusted external `stateful sandbox run ...` command
+when the original OMP Bash call cannot display the scoped grant prompt, asks for
+the same grant during resume, re-authorizes the original Bash tool call, and
+reruns the stored command.
 For Bash, command text alone never authorizes tool use.
 `/v1/authorize` accepts optional `base_observations` for OCC-style freshness
 checks. When supplied, each observation is compared against the current

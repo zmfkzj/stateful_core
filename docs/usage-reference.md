@@ -98,6 +98,11 @@ Installed OMP support:
   write/create/write-dir/socket/signal/network scope until expiry or max uses;
   defaults are 5 uses and 600 seconds. When auto-approval is enabled, no prompt
   is shown.
+- `lazy_bash_resume` for a blocked external Bash command that could not prompt
+  for its scoped grant on the original tool call. The live extension stores the
+  trusted `stateful sandbox run --fs external ...` command, asks for the same
+  grant during resume, re-authorizes the original Bash tool call, and reruns the
+  stored command.
 - `lazy_edit_resume` for strict replay of blocked, line-based OMP `edit` patches.
   The live extension stores the original patch after `missing_reservation`,
   `missing_claim`, or claim-conflict denials; after the agent fixes the missing

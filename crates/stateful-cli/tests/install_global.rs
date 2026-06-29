@@ -240,6 +240,11 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("pi.registerTool"));
     assert!(extension.contains("name: \"lazy_edit_resume\""));
     assert!(extension.contains("name: \"lazy_write_resume\""));
+    assert!(extension.contains("name: \"lazy_bash_resume\""));
+    assert!(extension.contains("lazyBashOperations"));
+    assert!(extension.contains("rememberLazyBashOperation(event, ctx, decision)"));
+    assert!(extension.contains("Queued lazy bash operation_id"));
+    assert!(extension.contains("Resume a blocked OMP Bash command after approving an external sandbox grant."));
     assert!(!extension.contains("name: \"sandbox_bash\""));
     assert!(!extension.contains("name: \"ext_ro_bash\""));
     assert!(!extension.contains("name: \"ext_rw_bash\""));

@@ -16,16 +16,17 @@ OMP installs the integration into the live OMP profile agent directory, defaulti
 - the Stateful extension,
 - `rules/stateful-required.md`,
 - `skills/stateful-command-policy/SKILL.md` plus support files,
-- `lazy_edit_resume` and `lazy_write_resume` tools.
+- `lazy_edit_resume`, `lazy_write_resume`, and `lazy_bash_resume` tools.
 
 The installer merges an existing `config.yml` and rejects invalid YAML. Without `stateful install --agent omp --update`, existing OMP scalar config values are preserved and only missing Stateful keys are inserted. With `--update`, targeted OMP scalar values are overwritten to delegate safety to Stateful hooks while raw Bash/eval denials, Bash passthrough preflight, and sandbox confirmations remain hook-enforced.
 
 ## Generated Tool Behavior
 
-- The generated tools are only the lazy resume helpers: `lazy_edit_resume` and `lazy_write_resume`.
+- The generated tools are the lazy resume helpers: `lazy_edit_resume`, `lazy_write_resume`, and `lazy_bash_resume`.
 - The OMP extension subscribes to Stateful SSE notifications after `session-start`. When a queued reservation is claimable, it injects a next-turn message with the `wait_id`, action/path, and purpose. Agents must still reread the target and call `state_reservation_claim` or rely on an authorized lazy-claim write boundary.
 - Blocked OMP `edit` calls with safe repo-relative line targets can be stored as live-session lazy edit operations. Blocked OMP `write` calls can be stored as live-session lazy write operations with captured full write content. Wait-queue denials use the `wait_id`; `missing_reservation` and `missing_claim` denials use a generated operation id. Resume line-based edits with `lazy_edit_resume`; resume captured writes with `lazy_write_resume`, which fails if the target changed since the operation was queued.
-- Command execution and process inspection are not generated tool calls in installed OMP. Use built-in Bash with strict trusted `stateful sandbox run ...` or `stateful sandbox process find ...` commands instead.
+- External OMP Bash commands that cannot display the scoped external grant prompt can be stored as live-session lazy bash operations. Resume them with `lazy_bash_resume`, which asks for the same grant, re-authorizes the original Bash tool call, and reruns the stored trusted `stateful sandbox run --fs external ...` command.
+- Built-in Bash remains the command execution path for strict trusted `stateful sandbox run ...` and `stateful sandbox process find ...` commands; generated Bash resume exists only for grant-prompt recovery.
 
 ## DeNovo OMP Runs
 

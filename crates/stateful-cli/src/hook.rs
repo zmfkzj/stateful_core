@@ -392,6 +392,7 @@ fn is_omp_safe_without_repo_write_authorization(tool_name: &str) -> bool {
         "irc",
         "lazy_edit_resume",
         "lazy_write_resume",
+        "lazy_bash_resume",
         "job",
         "read",
         "report_tool_issue",

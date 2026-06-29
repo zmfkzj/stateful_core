@@ -1783,6 +1783,8 @@ const lazyEditOperations = new Map();
 let lazyEditOperationCounter = 0;
 const lazyWriteOperations = new Map();
 let lazyWriteOperationCounter = 0;
+const lazyBashOperations = new Map();
+let lazyBashOperationCounter = 0;
 
 function extractWaitId(reason) {{
   const match = String(reason || "").match(/wait_id ([A-Za-z0-9_-]+)/);
@@ -1813,6 +1815,11 @@ function nextLazyEditOperationId() {{
 function nextLazyWriteOperationId() {{
   lazyWriteOperationCounter += 1;
   return "lazy-write-" + Date.now().toString(36) + "-" + lazyWriteOperationCounter.toString(36);
+}}
+
+function nextLazyBashOperationId() {{
+  lazyBashOperationCounter += 1;
+  return "lazy-bash-" + Date.now().toString(36) + "-" + lazyBashOperationCounter.toString(36);
 }}
 
 function editPatchTargets(input) {{
@@ -1881,6 +1888,29 @@ function rememberLazyWriteOperation(event, ctx, decision) {{
     targets,
     bases: readOperationBases(ctx.cwd, targets),
     blocked_reason: decision?.reason || "",
+  }});
+  return operationId;
+}}
+
+function normalizedStatefulCommandWords(words) {{
+  const normalized = [...words];
+  if (normalized[0] === "stateful") normalized[0] = STATEFUL;
+  return normalized;
+}}
+
+function rememberLazyBashOperation(event, ctx, decision) {{
+  if (event?.toolName !== "bash" && event?.toolName !== "functions.bash") return "";
+  if (!decision?.externalGrantParams || !Array.isArray(decision?.words)) return "";
+  const operationId = nextLazyBashOperationId();
+  lazyBashOperations.set(operationId, {{
+    operation_id: operationId,
+    session_id: sessionId(event, ctx),
+    cwd: ctx.cwd,
+    tool_name: event.toolName,
+    tool_input: event.input || {{}},
+    command: String(event?.input?.command || ""),
+    command_words: normalizedStatefulCommandWords(decision.words),
+    grant_params: decision.externalGrantParams,
   }});
   return operationId;
 }}
@@ -2021,6 +2051,14 @@ function lazyToolResult(status, text, details) {{
     content: [{{ type: "text", text: emptyToolOutputText(text) }}],
     details,
   }};
+}}
+
+function bashResumeText(result) {{
+  if (result.error) return result.error.message || String(result.error);
+  const stdout = String(result.stdout || "");
+  const stderr = String(result.stderr || "");
+  const text = stdout + stderr;
+  return text.trim().length ? text : "Command exited with code " + result.status;
 }}
 
 
@@ -2282,9 +2320,12 @@ function statefulBashPassthroughDecision(command) {{
     if (!isTrustedStatefulCommand(words[0])) {{
       return {{ allow: false, reason: "OMP raw Bash is denied; use the trusted stateful sandbox command" }};
     }}
-    if (words[1] === "sandbox" && words[2] === "run") return parseStatefulSandboxRunWords(words);
-    if (words[1] === "sandbox" && words[2] === "process" && words[3] === "find") return parseStatefulProcessFindWords(words);
-    return {{ allow: false, reason: "Bash commands must use stateful sandbox run or stateful sandbox process find" }};
+    let decision;
+    if (words[1] === "sandbox" && words[2] === "run") decision = parseStatefulSandboxRunWords(words);
+    else if (words[1] === "sandbox" && words[2] === "process" && words[3] === "find") decision = parseStatefulProcessFindWords(words);
+    else decision = {{ allow: false, reason: "Bash commands must use stateful sandbox run or stateful sandbox process find" }};
+    if (decision.allow) decision.words = words;
+    return decision;
   }} catch (error) {{
     return {{ allow: false, reason: error instanceof Error ? error.message : String(error) }};
   }}
@@ -2304,7 +2345,11 @@ export default function statefulOmpExtension(pi) {{
         return;
       }}
       if (typeof ctx?.ui?.confirm !== "function") {{
-        return {{ block: true, reason: "Built-in Bash external sandbox command requires OMP UI confirmation; use stateful.autoApprove to skip this prompt." }};
+        const operationId = rememberLazyBashOperation(event, ctx, decision);
+        const suffix = operationId
+          ? "\n\nQueued lazy bash operation_id: " + operationId + "\nNext: approve the external sandbox grant, then call lazy_bash_resume with this operation_id."
+          : "";
+        return {{ block: true, reason: "Built-in Bash external sandbox command requires OMP UI confirmation; use stateful.autoApprove to skip this prompt." + suffix }};
       }}
       const signal = undefined;
       const approved = await ensureExternalBashGrant(ctx, params, signal);
@@ -2399,6 +2444,59 @@ export default function statefulOmpExtension(pi) {{
         }});
       }}
       return lazyToolResult(result.status, result.message, {{ operation_id: operationId, targets: operation.targets }});
+    }},
+  }});
+  pi.registerTool({{
+    name: "lazy_bash_resume",
+    label: "Lazy Bash Resume",
+    description: "Resume a blocked OMP Bash command after approving an external sandbox grant.",
+    parameters: {{
+      type: "object",
+      properties: {{
+        operation_id: {{ type: "string", description: "Queued lazy bash operation id printed in the block message." }},
+      }},
+      required: ["operation_id"],
+    }},
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+      const operationId = String(params?.operation_id || "").trim();
+      const operation = lazyBashOperations.get(operationId);
+      if (!operation) {{
+        return lazyToolResult("failed", "lazy bash operation not found in this live OMP extension session", {{ operation_id: operationId }});
+      }}
+      if (typeof ctx?.ui?.confirm !== "function" && !shouldAutoApproveStatefulPrompt(ctx, operation.grant_params)) {{
+        return lazyToolResult("failed", "lazy bash resume requires OMP UI confirmation or stateful.autoApprove", {{ operation_id: operationId }});
+      }}
+      const approved = shouldAutoApproveStatefulPrompt(ctx, operation.grant_params)
+        ? approveExternalBashGrantWithoutPrompt(operation.grant_params)
+        : await ensureExternalBashGrant(ctx, operation.grant_params, signal);
+      if (!approved) {{
+        return lazyToolResult("failed", "user denied stateful external sandbox grant", {{ operation_id: operationId }});
+      }}
+      const authorization = runStatefulHook("pre-tool-use", {{
+        session_id: operation.session_id,
+        cwd: operation.cwd || ctx.cwd,
+        yolo: true,
+        tool_name: operation.tool_name,
+        tool_input: operation.tool_input,
+      }});
+      if (authorization.decision !== "allow") {{
+        return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy bash resume", {{ operation_id: operationId, authorization }});
+      }}
+      const words = operation.command_words || [];
+      const result = spawnSync(words[0], words.slice(1), {{
+        cwd: operation.cwd || ctx.cwd,
+        encoding: "utf8",
+      }});
+      if (result.status === 0) {{
+        lazyBashOperations.delete(operationId);
+        runStatefulHook("post-tool-use", {{
+          session_id: operation.session_id,
+          cwd: operation.cwd || ctx.cwd,
+          tool_name: operation.tool_name,
+          tool_input: operation.tool_input,
+        }});
+      }}
+      return lazyToolResult(result.status === 0 ? "applied" : "failed", bashResumeText(result), {{ operation_id: operationId, exit_code: result.status }});
     }},
   }});
   pi.on("session_start", async (event, ctx) => {{
