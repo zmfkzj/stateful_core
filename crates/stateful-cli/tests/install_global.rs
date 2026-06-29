@@ -229,15 +229,14 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
     assert!(extension.contains("event?.sessionId || ctx?.sessionManager?.session?.id"));
     assert!(extension.contains("pi.registerTool"));
-    assert!(extension.contains("name: \"ext_ro_bash\""));
-    assert!(extension.contains("name: \"ext_rw_bash\""));
+    assert!(!extension.contains("name: \"sandbox_bash\""));
+    assert!(!extension.contains("name: \"ext_ro_bash\""));
+    assert!(!extension.contains("name: \"ext_rw_bash\""));
+    assert!(!extension.contains("name: \"process_find\""));
+    assert!(!extension.contains("name: \"sandbox_job_poll\""));
     assert!(!extension.contains("name: \"external_bash\""));
-    assert!(extension.contains("name: \"sandbox_bash\""));
-    assert!(extension.contains("name: \"process_find\""));
     assert!(extension.contains("name: \"lazy_edit_resume\""));
     assert!(extension.contains("name: \"lazy_write_resume\""));
-    assert!(extension.contains("name: \"sandbox_job_poll\""));
-    assert!(extension.contains("Poll a background sandbox job by runId"));
     assert!(extension.contains("applyOmpLinePatch"));
     assert!(extension.contains("lazyEditOperations"));
     assert!(extension.contains("let lazyEditOperationCounter = 0"));
@@ -251,24 +250,6 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("!target.includes(\":\")"));
     assert!(extension.contains("validateOmpLinePatchBases"));
     assert!(extension.contains("line === \"*** Begin Patch\""));
-    assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
-    assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));
-    assert!(extension.contains("function processFindArgs(params)"));
-    assert!(extension.contains("const args = [\"sandbox\", \"process\", \"find\"];"));
-    assert!(extension.contains("fields: { type: \"array\", items: { type: \"string\" }"));
-    assert!(extension.contains("for (const field of stringList(params.fields))"));
-    assert!(extension.contains("args.push(\"--field\", field)"));
-    let selector_check = extension
-        .find("if (args.length === 3)")
-        .expect("process_find should require a selector");
-    let field_loop = extension
-        .find("for (const field of stringList(params.fields))")
-        .expect("process_find should forward selected output fields");
-    assert!(
-        selector_check < field_loop,
-        "fields should not count as process selectors"
-    );
-    assert!(!extension.contains("process_find --fs external"));
     assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
     assert!(extension.contains(
         "import { existsSync, mkdirSync, readFileSync, writeFileSync } from \"node:fs\""
@@ -284,79 +265,6 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
             "args.push(\"--command\", expandSkillInternalUrlsInCommand(params.command));"
         )
     );
-    assert!(extension.contains(
-        "function runSandboxToolProcess(params, args, ctx, label, signal, onStdout, onStderr)"
-    ));
-    assert!(extension.contains("process.env.STATEFUL_OMP_SANDBOX === \"off\""));
-    assert!(extension.contains(
-        "function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout, onStderr)"
-    ));
-    assert!(!extension.contains("function runSandboxTool(params"));
-    assert!(extension.contains("spawn(STATEFUL, args"));
-    assert!(extension.contains(
-        "async: { type: \"boolean\", description: \"Run in the background when true or omitted; set false to wait for completion.\" }"
-    ));
-    assert!(extension.contains("timeoutTimer = setTimeout"));
-    assert!(extension.contains("\"timed out after \" + timeoutSeconds + \"s\""));
-    assert!(
-        extension
-            .contains("function deliverSandboxBackgroundMessage(pi, jobId, label, text, details)")
-    );
-    assert!(extension.contains("stateful_sandbox_bash_output"));
-    assert!(extension.contains("stateful_sandbox_bash_result"));
-    assert!(extension.contains(
-        "function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, signal, onUpdate)"
-    ));
-    assert!(extension.contains("Background job "));
-    assert!(extension.contains("params.async === false"));
-    assert!(
-        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params || {}, args, ctx, \"process_find\", signal, onUpdate)")
-    );
-    assert!(
-        extension.contains("return await runSandboxAwaitedTool(params || {}, args, ctx, \"process_find\", signal, onUpdate)")
-    );
-    assert!(
-        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, \"sandbox_bash\", signal, onUpdate)")
-    );
-    assert!(
-        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, \"ext_ro_bash\", signal, onUpdate)")
-    );
-    assert!(
-        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, \"ext_rw_bash\", signal, onUpdate)")
-    );
-    assert!(extension.contains(
-        "return await runSandboxAwaitedTool(params, args, ctx, \"sandbox_bash\", signal, onUpdate)"
-    ));
-    assert!(extension.contains("const backgroundSandboxToolCallIds = new Set();"));
-    assert!(extension.contains("function isBackgroundSandboxToolResult(event)"));
-    assert!(extension.contains("if (isBackgroundSandboxToolResult(event)) return;"));
-    assert!(extension.contains("postBackgroundSandboxToolUse(ctx, label, params)"));
-    assert!(extension.contains("async execute(_toolCallId, params, signal, onUpdate, ctx)"));
-    assert!(extension.contains("args.push(\"--stream-events\");"));
-    assert!(extension.contains("pi.sendMessage"));
-    assert!(extension.contains("display: true"));
-    assert!(extension.contains("triggerTurn: true"));
-    assert!(extension.contains("const activeSandboxJobs = new Map();"));
-    assert!(extension.contains("function sandboxJobSnapshot(job)"));
-    assert!(extension.contains("function pollSandboxJob(params)"));
-    assert!(extension.contains("stdoutPollOffset"));
-    assert!(extension.contains("stderrPollOffset"));
-    assert!(extension.contains("startedAt: job.startedAt"));
-    assert!(extension.contains("commandLabel: job.commandLabel"));
-    assert!(extension.contains("exitCode: job.exitCode"));
-    assert!(extension.contains("error: job.error"));
-    assert!(extension.contains("status: \"running\""));
-    assert!(extension.contains("job.status = failed ? \"failed\" : \"done\""));
-    assert!(extension.contains("status: \"failed\""));
-    assert!(extension.contains("status: \"not_found\""));
-    assert!(extension.contains("activeSandboxJobs.set(runId, job)"));
-    assert!(extension.contains("job.stdout += chunk"));
-    assert!(extension.contains("job.stderr = details.stderr || \"\""));
-    assert!(extension.contains("job.stderr += chunk"));
-    assert!(extension.contains("job.stderr = truncateSandboxToolText(job.stderr, label)"));
-    assert!(extension.contains("stream: \"stderr\""));
-    assert!(extension.contains("result?.isError || details.exitCode !== 0 || details.error"));
-    assert!(extension.contains("job.finishedAt = new Date().toISOString()"));
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?session_id="));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));
@@ -381,21 +289,14 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(!extension.contains("\"Command:\""));
     assert!(!extension.contains("\"Sandbox invocation:\""));
     assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", \"external\""));
-    assert!(extension.contains("without OMP UI confirmation"));
-    assert!(
-        extension.contains(
-            "At least one write_targets, create_targets, or write_dirs entry is required"
-        )
-    );
-    assert!(extension.contains("ext_ro_bash does not accept write, socket, or signal scope"));
-    assert!(extension.contains("ext_rw_bash requires at least one write_targets"));
-    assert!(extension.contains("required: [\"purpose\", \"command\"]"));
+    assert!(extension.contains(
+        "Built-in Bash external sandbox command requires OMP UI confirmation"
+    ));
     assert!(extension.contains("process.env.STATEFUL_SESSION_ID = id"));
     assert!(extension.contains("pre-tool-use"));
     assert!(extension.contains("decision: \"block\""));
     assert!(extension.contains("if (decision.decision === \"prompt\" && !shouldAutoApproveStatefulPrompt(ctx, event.input || {}))"));
     assert!(extension.contains("ctx?.ui?.confirm"));
-    assert!(extension.contains("auto_approve: { type: \"boolean\""));
     assert!(extension.contains("function shouldAutoApproveStatefulPrompt(ctx, params)"));
     assert!(extension.contains("ctx?.config?.stateful?.autoApprove"));
     assert!(extension.contains("params?.auto_approve === true"));

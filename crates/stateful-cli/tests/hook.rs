@@ -2950,81 +2950,38 @@ fn omp_raw_bash_authorizes_trusted_write_target_sandbox_run() {
 }
 
 #[test]
-fn omp_sandbox_bash_tool_is_allowed_for_internal_sandbox_runner() {
-    let input = serde_json::json!({
-        "session_id": "omp-parent",
-        "cwd": "/repo",
-        "yolo": false,
-        "tool_name": "sandbox_bash",
-        "tool_input": {
-            "fs": "write-targets",
-            "write_targets": ["docs/a.md"],
-            "command": "printf ok > docs/a.md"
-        }
-    })
-    .to_string();
+fn omp_removed_generated_command_tools_are_not_allowlisted() {
+    for tool_name in [
+        "sandbox_bash",
+        "ext_ro_bash",
+        "ext_rw_bash",
+        "process_find",
+        "sandbox_job_poll",
+    ] {
+        let input = serde_json::json!({
+            "session_id": "omp-parent",
+            "cwd": "/repo",
+            "yolo": false,
+            "tool_name": tool_name,
+            "tool_input": {
+                "command": "pwd",
+                "purpose": "test removed generated tool",
+                "fs": "read-only"
+            }
+        })
+        .to_string();
 
-    assert_eq!(
-        handle_omp_pre_tool_use_with_runtime(
+        let OmpHookOutcome::Block { reason } = handle_omp_pre_tool_use_with_runtime(
             &input,
             None,
             Some(Path::new("/repo")),
-            Some(Path::new("/repo"))
-        )
-        .unwrap(),
-        OmpHookOutcome::Allow
-    );
-}
-
-#[test]
-fn omp_process_find_tool_is_allowed_for_internal_runner() {
-    let input = serde_json::json!({
-        "session_id": "omp-parent",
-        "cwd": "/repo",
-        "yolo": false,
-        "tool_name": "process_find",
-        "tool_input": {
-            "contains": ["stateful-bench"]
-        }
-    })
-    .to_string();
-
-    assert_eq!(
-        handle_omp_pre_tool_use_with_runtime(
-            &input,
-            None,
             Some(Path::new("/repo")),
-            Some(Path::new("/repo"))
         )
-        .unwrap(),
-        OmpHookOutcome::Allow
-    );
-}
-
-#[test]
-fn omp_sandbox_job_poll_tool_is_allowed_for_internal_runner() {
-    let input = serde_json::json!({
-        "session_id": "omp-parent",
-        "cwd": "/repo",
-        "yolo": false,
-        "tool_name": "sandbox_job_poll",
-        "tool_input": {
-            "run_id": "sandbox_bash-1",
-            "wait_ms": 1000
-        }
-    })
-    .to_string();
-
-    assert_eq!(
-        handle_omp_pre_tool_use_with_runtime(
-            &input,
-            None,
-            Some(Path::new("/repo")),
-            Some(Path::new("/repo"))
-        )
-        .unwrap(),
-        OmpHookOutcome::Allow
-    );
+        .unwrap() else {
+            panic!("{tool_name} should no longer be allowlisted");
+        };
+        assert!(reason.contains("not classified") || reason.contains("unclassified"));
+    }
 }
 
 #[test]
@@ -3053,46 +3010,6 @@ fn omp_raw_bash_allows_trusted_external_sandbox_run_for_extension_preflight() {
     );
 }
 
-#[test]
-fn omp_external_tool_wrappers_are_allowed_for_internal_runners() {
-    for (tool_name, tool_input) in [
-        (
-            "ext_ro_bash",
-            serde_json::json!({
-                "purpose": "inspect external artifact",
-                "command": "test -r /tmp/stateful-outside.txt"
-            }),
-        ),
-        (
-            "ext_rw_bash",
-            serde_json::json!({
-                "purpose": "write external artifact",
-                "write_targets": ["/tmp/stateful-outside.txt"],
-                "command": "printf ok > /tmp/stateful-outside.txt"
-            }),
-        ),
-    ] {
-        let input = serde_json::json!({
-            "session_id": "omp-parent",
-            "cwd": "/repo",
-            "yolo": false,
-            "tool_name": tool_name,
-            "tool_input": tool_input
-        })
-        .to_string();
-
-        assert_eq!(
-            handle_omp_pre_tool_use_with_runtime(
-                &input,
-                None,
-                Some(Path::new("/repo")),
-                Some(Path::new("/repo"))
-            )
-            .unwrap(),
-            OmpHookOutcome::Allow
-        );
-    }
-}
 
 #[test]
 fn omp_repo_internal_raw_bash_rejects_shell_writes_and_unsafe_find_actions() {
