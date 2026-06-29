@@ -1350,9 +1350,8 @@ fn acquired_claim_cannot_reuse_stale_claimed_wait_id_after_scope_expires() {
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after epoch")
         .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-stale-claimed-wait-{unique}"
-    ));
+    let temp_root =
+        std::env::temp_dir().join(format!("stateful-store-stale-claimed-wait-{unique}"));
     fs::create_dir_all(&temp_root).expect("temp root should be creatable");
     let db_path = temp_root.join("state.db");
     let store = Store::open(&db_path).expect("file store should open");

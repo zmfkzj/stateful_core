@@ -745,13 +745,14 @@ async fn lease_acquire(
                     None => None,
                 };
                 let acquire_result = match reservation_id.as_deref() {
-                    Some(reservation_id) => store.acquire_claim_for_reservation_with_observation_and_event(
-                        reservation_id,
-                        &session_id,
-                        &workspace_id,
-                        &path,
-                        observation,
-                    ),
+                    Some(reservation_id) => store
+                        .acquire_claim_for_reservation_with_observation_and_event(
+                            reservation_id,
+                            &session_id,
+                            &workspace_id,
+                            &path,
+                            observation,
+                        ),
                     None => store.acquire_claim_with_observation_and_event(
                         &session_id,
                         &workspace_id,
@@ -808,12 +809,13 @@ async fn lease_acquire(
                             .collect::<Vec<_>>(),
                     };
                 let acquire_result = match reservation_id.as_deref() {
-                    Some(reservation_id) => store.acquire_claims_for_reservation_with_observations_and_events(
-                        reservation_id,
-                        &session_id,
-                        &workspace_id,
-                        claims,
-                    ),
+                    Some(reservation_id) => store
+                        .acquire_claims_for_reservation_with_observations_and_events(
+                            reservation_id,
+                            &session_id,
+                            &workspace_id,
+                            claims,
+                        ),
                     None => store.acquire_claims_with_observations_and_events(
                         &session_id,
                         &workspace_id,

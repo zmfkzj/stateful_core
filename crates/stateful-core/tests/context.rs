@@ -108,7 +108,6 @@ fn detailed_context_info_reservation_keeps_purpose() {
     assert!(text.contains("purpose: Warm cache cleanup"));
 }
 
-
 #[test]
 fn structured_items_render_purpose_and_required_actions() {
     let package = ContextPackage::from_items(vec![

@@ -189,11 +189,12 @@ impl<'a> PolicyService<'a> {
 
         let mut lazy_claimed_reservation = None;
         if let Some(workspace_id) = &input.workspace_id {
-            let current_session_reservation = if let Some(reservation_id) = input.reservation_id.as_deref() {
-                self.supplied_session_reservation(&input, workspace_id, reservation_id)?
-            } else {
-                self.current_session_reservation(&input, workspace_id)?
-            };
+            let current_session_reservation =
+                if let Some(reservation_id) = input.reservation_id.as_deref() {
+                    self.supplied_session_reservation(&input, workspace_id, reservation_id)?
+                } else {
+                    self.current_session_reservation(&input, workspace_id)?
+                };
             if let Some(reservation) = current_session_reservation {
                 if self.allows_lazy_claim_on_authorize(&input)
                     && matches!(input.action.as_str(), "write_file" | "write_directory")

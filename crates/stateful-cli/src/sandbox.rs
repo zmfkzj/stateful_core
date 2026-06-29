@@ -662,10 +662,16 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
             }
             "--reservation-id" => {
                 if reservation_id.is_some() {
-                    return Err("stateful sandbox run accepts at most one --reservation-id".to_string());
+                    return Err(
+                        "stateful sandbox run accepts at most one --reservation-id".to_string()
+                    );
                 }
                 index += 1;
-                reservation_id = Some(parse_sandbox_run_arg_value(&words, index, "--reservation-id")?);
+                reservation_id = Some(parse_sandbox_run_arg_value(
+                    &words,
+                    index,
+                    "--reservation-id",
+                )?);
             }
             "--write-target" => {
                 index += 1;
@@ -3316,7 +3322,11 @@ pub(crate) fn authorize_sandbox_write(
     {
         payload["base_observations"] = serde_json::json!([observation]);
     }
-    if let Some(reservation_id) = context.reservation_id.map(str::trim).filter(|id| !id.is_empty()) {
+    if let Some(reservation_id) = context
+        .reservation_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
         payload["reservation_id"] = serde_json::json!(reservation_id);
     }
     let body = protocol_envelope(ProtocolEnvelopeArgs {
