@@ -1319,6 +1319,34 @@ fn acquire_claim_requires_matching_active_reservation() {
 }
 
 #[test]
+fn acquired_claim_persists_reservation_id() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    let reservation = Event::reservation_declared(
+        "s1",
+        "w1",
+        "Acquire auth file.",
+        ["src/auth.ts"],
+    )
+    .with_event_id("reservation-a");
+    store.append(reservation).expect("reservation should append");
+
+    store
+        .acquire_claim_for_reservation("reservation-a", "s1", "w1", "src/auth.ts")
+        .expect("claim should acquire under reservation");
+
+    assert!(
+        store
+            .active_exact_file_lease_by_reservation("w1", "src/auth.ts", "reservation-a")
+            .expect("reservation claim should load")
+    );
+    assert!(
+        !store
+            .active_exact_file_lease_by_reservation("w1", "src/auth.ts", "reservation-b")
+            .expect("other reservation should not match")
+    );
+}
+
+#[test]
 fn acquire_claim_rejects_direct_tmp_resource_even_with_matching_reservation() {
     for path in ["tmp", "tmp/"] {
         let store = Store::open_in_memory().expect("in-memory store should open");
