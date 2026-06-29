@@ -519,7 +519,7 @@ impl Store {
                 };
                 let next_action = if current_session_scope {
                     format!(
-                        "Before writing {resource}, keep an exact same-session file claim active."
+                        "Before writing {resource}, keep an exact same-reservation file claim active."
                     )
                 } else {
                     format!(
@@ -768,7 +768,7 @@ impl Store {
                     CurrentSeverity::Info,
                     format!("This session has an active write claim on {resource}."),
                     format!(
-                        "You can write {resource} while this same-session claim remains fresh."
+                        "You can write {resource} while this same-reservation claim remains fresh."
                     ),
                 )
             } else {
@@ -1504,7 +1504,13 @@ impl Store {
                        AND status = 'active'
                        AND (?5 IS NULL OR reservation_id = ?5)
                 )",
-                params![session_id, workspace_id, relative_path, lease_action, reservation_id],
+                params![
+                    session_id,
+                    workspace_id,
+                    relative_path,
+                    lease_action,
+                    reservation_id
+                ],
                 |row| row.get::<_, bool>(0),
             )
             .map_err(StoreError::from)
@@ -1931,7 +1937,11 @@ impl Store {
                            OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
                        )
                 )",
-                params![workspace_id.as_ref(), reservation_id.as_ref(), directory_path],
+                params![
+                    workspace_id.as_ref(),
+                    reservation_id.as_ref(),
+                    directory_path
+                ],
                 |row| row.get::<_, bool>(0),
             )
             .map_err(StoreError::from)
@@ -2013,7 +2023,11 @@ impl Store {
                            AND substr(?3, 1, length(relative_path) + 1) = relative_path || '/')
                        )
                 )",
-                params![workspace_id.as_ref(), reservation_id.as_ref(), relative_path],
+                params![
+                    workspace_id.as_ref(),
+                    reservation_id.as_ref(),
+                    relative_path
+                ],
                 |row| row.get::<_, bool>(0),
             )
             .map_err(StoreError::from)
@@ -2037,7 +2051,11 @@ impl Store {
                        AND action = 'write_file'
                        AND relative_path = ?3
                 )",
-                params![workspace_id.as_ref(), reservation_id.as_ref(), relative_path],
+                params![
+                    workspace_id.as_ref(),
+                    reservation_id.as_ref(),
+                    relative_path
+                ],
                 |row| row.get::<_, bool>(0),
             )
             .map_err(StoreError::from)
@@ -2120,7 +2138,11 @@ impl Store {
                     AND relative_path = ?3
                  ORDER BY rowid DESC
                  LIMIT 1",
-                params![workspace_id.as_ref(), reservation_id.as_ref(), relative_path],
+                params![
+                    workspace_id.as_ref(),
+                    reservation_id.as_ref(),
+                    relative_path
+                ],
                 |row| {
                     let observed_exists = row.get::<_, Option<bool>>(0)?;
                     let observed_content_hash = row.get::<_, Option<String>>(1)?;
@@ -3970,7 +3992,11 @@ impl Store {
             || (table == "claims"
                 && matches!(
                     column,
-                    "reservation_id" | "purpose" | "action" | "observed_exists" | "observed_content_hash"
+                    "reservation_id"
+                        | "purpose"
+                        | "action"
+                        | "observed_exists"
+                        | "observed_content_hash"
                 ))
             || (table == "outbox"
                 && matches!(column, "workspace_id" | "event_type" | "payload_json"))

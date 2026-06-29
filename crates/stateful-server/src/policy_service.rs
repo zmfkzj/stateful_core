@@ -125,7 +125,7 @@ fn missing_rename_or_move_paths() -> AuthorizationOutcome {
         decision: Decision::deny(
             "missing_rename_paths",
             "Rename or move authorization requires non-empty old_path and new_path.",
-            "Provide both old_path and new_path, add exact scopes for both paths to the task reservation, and acquire matching claims before writing.",
+            "Provide both old_path and new_path, add exact scopes for both paths to the task reservation, and acquire matching same-reservation claims before writing.",
         ),
         wait: None,
         reservation: None,
@@ -213,8 +213,8 @@ impl<'a> PolicyService<'a> {
                     return Ok(AuthorizationOutcome {
                         decision: Decision::deny(
                             "reservation_claim_required",
-                            "Write target has an active reservation for this session, but it has not been claimed.",
-                            "Reread the target, then call state.reservation.claim for the reservation before writing.",
+                            "Write target is inside active reservation scope, but the reservation has not been claimed.",
+                            "Reread the target, then call state.reservation.claim for the reservation to create the same-reservation claim before writing.",
                         ),
                         wait: None,
                         reservation: Some(reservation),
@@ -625,7 +625,11 @@ impl<'a> PolicyService<'a> {
                     .map_err(|error| error.to_string()),
                 "write_file" | "delete_file" => self
                     .store
-                    .active_exact_file_lease_by_reservation(workspace_id, &input.path, reservation_id)
+                    .active_exact_file_lease_by_reservation(
+                        workspace_id,
+                        &input.path,
+                        reservation_id,
+                    )
                     .map_err(|error| error.to_string()),
                 "rename_file" | "move_file" => {
                     let Some((old_path, new_path)) = self.rename_or_move_paths(input) else {
@@ -633,13 +637,21 @@ impl<'a> PolicyService<'a> {
                     };
                     let old_lease = self
                         .store
-                        .active_exact_file_lease_by_reservation(workspace_id, old_path, reservation_id)
+                        .active_exact_file_lease_by_reservation(
+                            workspace_id,
+                            old_path,
+                            reservation_id,
+                        )
                         .map_err(|error| error.to_string())?;
                     if !old_lease {
                         return Ok(false);
                     }
                     self.store
-                        .active_exact_file_lease_by_reservation(workspace_id, new_path, reservation_id)
+                        .active_exact_file_lease_by_reservation(
+                            workspace_id,
+                            new_path,
+                            reservation_id,
+                        )
                         .map_err(|error| error.to_string())
                 }
                 _ => Ok(false),

@@ -939,7 +939,7 @@ async fn blocked_activity_phase_denies_authorized_write() {
 }
 
 #[tokio::test]
-async fn declared_reservation_without_same_session_lease_denies_matching_authorize_request() {
+async fn declared_reservation_without_same_reservation_claim_denies_matching_authorize_request() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     let declare = app
@@ -980,7 +980,7 @@ async fn declared_reservation_without_same_session_lease_denies_matching_authori
 }
 
 #[tokio::test]
-async fn same_session_different_reservation_claim_does_not_authorize_write() {
+async fn claim_from_different_reservation_does_not_authorize_write() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     let declare_a = app
@@ -1058,10 +1058,12 @@ async fn same_session_different_reservation_claim_does_not_authorize_write() {
     let json = response_json(authorize, 2048).await;
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "missing_claim");
-    assert!(json["required_next_action"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("same-reservation"));
+    assert!(
+        json["required_next_action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("same-reservation")
+    );
 
     let duplicate_reservation_claim = app
         .oneshot(json_request(
@@ -1608,7 +1610,7 @@ async fn hook_native_write_denies_when_file_changed_since_claim_acquired() {
 }
 
 #[tokio::test]
-async fn post_write_refresh_updates_claim_observation_for_next_same_session_write() {
+async fn post_write_refresh_updates_claim_observation_for_next_write() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock should be after epoch")
@@ -1770,7 +1772,7 @@ async fn cli_sandbox_write_file_requires_exact_file_intent_despite_directory_lea
 }
 
 #[tokio::test]
-async fn write_file_requires_file_lease_even_when_same_session_has_directory_lease_same_path() {
+async fn write_file_requires_same_reservation_file_claim_even_when_directory_claim_has_same_path() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     let declare_directory = app
@@ -3053,7 +3055,7 @@ async fn reservation_request_reserves_available_target_but_still_requires_claim(
 }
 
 #[tokio::test]
-async fn lease_acquire_with_same_session_reservation_returns_claim_guidance() {
+async fn claim_acquire_with_active_reservation_returns_reservation_claim_guidance() {
     let store = Store::open_in_memory().expect("store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
 
@@ -3922,7 +3924,10 @@ async fn activity_finalize_reclaims_claims_and_notifications_poll_returns_resume
         "Queue requested write after blocker clears."
     );
     assert_eq!(json["notifications"][0]["payload"]["wait_id"], wait_id);
-    assert_eq!(json["notifications"][0]["payload"]["reservation_id"], wait_id);
+    assert_eq!(
+        json["notifications"][0]["payload"]["reservation_id"],
+        wait_id
+    );
 
     let second_poll = app
         .oneshot(json_request(
@@ -4286,7 +4291,7 @@ async fn resume_next_returns_active_reservation_for_session() {
 }
 
 #[tokio::test]
-async fn active_claim_by_same_session_allows_matching_authorize() {
+async fn active_claim_allows_matching_authorize_without_explicit_reservation_id() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     ensure_test_reservation_via_http(&app, "s1", "w1", "src/auth.ts").await;
@@ -4376,7 +4381,7 @@ async fn repo_write_authorization_requires_lease_and_updates_rendered_state_unti
     assert_eq!(json["reason_code"], "missing_claim");
     assert!(
         json.get("wait").is_none() && json.get("reservation").is_none(),
-        "same-session missing claim should deny automatically without approval queue state: {json}"
+        "missing same-reservation claim should deny automatically without approval queue state: {json}"
     );
 
     let claim = app
@@ -4432,7 +4437,7 @@ async fn repo_write_authorization_requires_lease_and_updates_rendered_state_unti
                     .as_array()
                     .is_some_and(|refs| refs.iter().any(|value| value == "CurrentSessionScope"))
         }),
-        "render should show same-session claim before write completes: {items:?}"
+        "render should show same-reservation claim before write completes: {items:?}"
     );
 
     let release = app
@@ -4470,7 +4475,7 @@ async fn repo_write_authorization_requires_lease_and_updates_rendered_state_unti
                 && item["resource"] == "src/auth.ts"
                 && item["session_id"] == "s1"
         }),
-        "render should remove same-session claim after release: {items:?}"
+        "render should remove claim after release: {items:?}"
     );
     assert!(
         items.iter().any(|item| {
@@ -4998,7 +5003,7 @@ async fn write_file_action_denies_when_ancestor_directory_has_other_session_rese
 }
 
 #[tokio::test]
-async fn write_file_action_requires_claim_when_same_session_has_ancestor_directory_reservation() {
+async fn write_file_action_requires_claim_when_ancestor_directory_reservation_is_claimable() {
     let store = Store::open_in_memory().expect("store should open");
     store
         .enqueue_waiter(

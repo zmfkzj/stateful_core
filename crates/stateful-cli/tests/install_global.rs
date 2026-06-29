@@ -144,7 +144,7 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     assert!(first_config.contains("[mcp_servers.stateful]"));
     assert!(first_config.contains("command = \"/opt/stateful/bin/stateful\""));
     assert!(first_config.contains(
-        "env_vars = [\"CODEX_THREAD_ID\", \"STATEFUL_CODEX_RUN_ID\", \"STATEFUL_SESSION_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
+        "env_vars = [\"CODEX_THREAD_ID\", \"STATEFUL_CODEX_RUN_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
     ));
     assert!(first_config.contains(
         "approval_policy = { granular = { sandbox_approval = false, rules = true, mcp_elicitations = false, request_permissions = false, skill_approval = false } }"
@@ -223,6 +223,22 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
             .contains("\"mcpServers\"")
     );
     let extension = fs::read_to_string(&omp_extension).expect("omp extension should read");
+    assert!(extension.contains("STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS"));
+    assert!(extension.contains("function benchmarkSourceBlockReason(event)"));
+    assert!(extension.contains("function benchmarkSourcePatternMatches(text, pattern)"));
+    let benchmark_block = extension
+        .find("const benchmarkBlockReason = benchmarkSourceBlockReason(event);")
+        .expect("benchmark guard should run in pre-tool hook");
+    let stateful_pre_tool = extension
+        .find("const decision = runStatefulHook(\"pre-tool-use\"")
+        .expect("stateful pre-tool hook should still run");
+    assert!(
+        benchmark_block < stateful_pre_tool,
+        "benchmark guard should block before Stateful reservation handling"
+    );
+    assert!(extension.contains(
+        "if (benchmarkBlockReason) return { block: true, reason: benchmarkBlockReason };"
+    ));
     assert!(!extension.contains("@sinclair/typebox"));
     assert!(!extension.contains("Type.Object"));
     assert!(extension.contains("export default function statefulOmpExtension"));
@@ -244,7 +260,11 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("lazyBashOperations"));
     assert!(extension.contains("rememberLazyBashOperation(event, ctx, decision)"));
     assert!(extension.contains("Queued lazy bash operation_id"));
-    assert!(extension.contains("Resume a blocked OMP Bash command after approving an external sandbox grant."));
+    assert!(
+        extension.contains(
+            "Resume a blocked OMP Bash command after approving an external sandbox grant."
+        )
+    );
     assert!(!extension.contains("name: \"sandbox_bash\""));
     assert!(!extension.contains("name: \"ext_ro_bash\""));
     assert!(!extension.contains("name: \"ext_rw_bash\""));
@@ -274,7 +294,10 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
         )
     );
     assert!(extension.contains("import { fileURLToPath } from \"node:url\""));
-    assert!(extension.contains("const OMP_AGENT_CONFIG = resolve(EXTENSION_DIR, \"..\", \"config.yml\")"));
+    assert!(
+        extension
+            .contains("const OMP_AGENT_CONFIG = resolve(EXTENSION_DIR, \"..\", \"config.yml\")")
+    );
     assert!(extension.contains("process.env.HOME"));
     assert!(extension.contains(".omp/profiles/stateful/agent/config.yml"));
     assert!(extension.contains("function startReservationStream(pi, stream)"));

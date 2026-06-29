@@ -168,11 +168,11 @@ bind the active session. In OMP, `session-start` uses explicit event/ctx ids
 header to set it. Hook messages tell the agent when an explicit
 coordination step is needed.
 
-Manual CLI use outside an active agent session can declare scope and inspect the
-current state:
+Manual CLI use outside an active agent session can declare scope, keep the
+returned reservation id, and inspect the current state:
 
 ```bash
-stateful reservation declare --purpose "Update README content requested by the user." README.md
+reservation_id=$(stateful reservation declare --purpose "Update README content requested by the user." README.md | jq -r '.reservation_id')
 stateful current
 ```
 
@@ -181,25 +181,27 @@ instead of routing `stateful reservation declare` or `stateful mcp call` through
 shell. The usual write flow is:
 
 ```text
-read current state -> declare task reservation with known file set -> acquire exact claims for reserved paths -> reread targets -> write
+read current state -> declare task reservation with known file set -> keep reservation_id -> acquire exact same-reservation claims for reserved paths -> reread targets -> write with the same reservation_id
 ```
 
 Reservation and claim are separate on purpose. A reservation groups the task's
-known file and directory scopes under one purpose, and can be expanded when the
-task discovers another target. MCP claim acquisition uses `paths: string[]` so
-callers can acquire a batch from that reservation in one request. Each resulting
-claim still owns one exact file or directory resource and expires when the
-session stops being fresh.
+known file and directory scopes under one purpose and one `reservation_id`, and
+can be expanded when the task discovers another target. MCP claim acquisition
+uses `reservation_id` plus `paths: string[]` so callers can acquire a batch from
+that reservation in one request. Each resulting claim still owns one exact file
+or directory resource and expires when the session stops being fresh.
 
 When another active claim blocks a write, the writer can queue for that resource.
 When the resource is released or expires, the server reserves it for the next
-eligible waiter and sends a resume notification. In OMP, blocked line-based
-`edit` patches, captured full `write` payloads, and external Bash commands
-waiting on a scoped grant are kept as live-session lazy operations. Agents call
-`lazy_edit_resume` for strict line-based patch replay, `lazy_write_resume` for
-captured write replay, or `lazy_bash_resume` to rerun a blocked external Bash
-command after approving its grant. Write replay fails if the target changed
-since the operation was queued.
+eligible waiter and sends a resume notification. During queued-reservation
+compatibility, wait records expose the same id as both `wait_id` and
+`reservation_id`; use that id for the eventual claim and write. In OMP, blocked
+line-based `edit` patches, captured full `write` payloads, and external Bash
+commands waiting on a scoped grant are kept as live-session lazy operations.
+Agents call `lazy_edit_resume` for strict line-based patch replay,
+`lazy_write_resume` for captured write replay, or `lazy_bash_resume` to rerun a
+blocked external Bash command after approving its grant. Write replay fails if
+the target changed since the operation was queued.
 
 Detailed queue states, claim expiry behavior, and promotion rules are documented
 in [State model](docs/state-model.md),
@@ -213,9 +215,9 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 
 | Need | Use |
 | --- | --- |
-| Repo file edit | Native edit/write tools after task-level reservation and exact same-session file claim |
+| Repo file edit | Native edit/write tools after task-level reservation and exact same-reservation file claim |
 | Build or test command | `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` |
-| Command-shaped repo write | `stateful sandbox run --fs write-targets --write-target <file> --command <cmd>` |
+| Command-shaped repo write | `stateful sandbox run --fs write-targets --reservation-id <reservation_id> --write-target <file> --command <cmd>` |
 | Local git operation | `stateful sandbox run --fs git --network disabled --command 'git <args>'` |
 | Remote git operation | Git sandbox profile with `--network enabled` |
 | GitHub PR list/view/status/create | `stateful sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` |

@@ -792,7 +792,7 @@ pub fn run() -> anyhow::Result<()> {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let (session_id, workspace_id) =
                 resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
-            declare_reservation_via_http(
+            let response = declare_reservation_via_http(
                 &runtime,
                 ReservationDeclareArgs {
                     session_id,
@@ -804,7 +804,7 @@ pub fn run() -> anyhow::Result<()> {
                         .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
                 },
             )?;
-            println!("declared stateful reservation");
+            print_http_response(response)?;
         }
         Command::Reservation(ReservationCommand::Request {
             session_id,

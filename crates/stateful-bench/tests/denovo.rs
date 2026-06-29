@@ -740,6 +740,112 @@ print(module.git_diff(workspace))
 }
 
 #[test]
+fn denovo_codex_agent_installs_target_proxy_for_docker_omp_runs() {
+    let adapter_script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/denovo_codex_agent.py");
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(
+            r#"
+import importlib.util
+import json
+import pathlib
+import sys
+import socket
+
+script = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("denovo_codex_agent", script)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+patterns = json.loads(module.benchmark_source_block_patterns_for_env("rushousley_pyasn1-alt-modules_pr92"))
+url_patterns = module.benchmark_source_leak_url_patterns("rushousley_pyasn1-alt-modules_pr92")
+proxy = module.start_target_upstream_deny_proxy("rushousley_pyasn1-alt-modules_pr92")
+assert proxy is not None
+try:
+    port = int(proxy.url.rsplit(":", 1)[1])
+    with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
+        sock.sendall(b"CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n")
+        connect_status = sock.recv(1024).decode("iso-8859-1").splitlines()[0]
+    with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
+        sock.sendall(b"GET http://raw.githubusercontent.com/rushousley/pyasn1-alt-modules/main/README.md HTTP/1.1\r\nHost: raw.githubusercontent.com\r\n\r\n")
+        raw_status = sock.recv(1024).decode("iso-8859-1").splitlines()[0]
+finally:
+    proxy.close()
+print(json.dumps({
+    "docker": module.target_upstream_proxy_required("stateful-denovo-omp-agent:local"),
+    "local": module.target_upstream_proxy_required(None),
+    "patterns": patterns,
+    "connect_hosts": list(module.BENCHMARK_SOURCE_LEAK_CONNECT_HOSTS),
+    "command_upstream": module.benchmark_source_leak_command_pattern("git fetch upstream main", ()),
+    "command_target_url": module.benchmark_source_leak_command_pattern(
+        "git clone https://github.com/rushousley/pyasn1-alt-modules.git",
+        url_patterns,
+    ),
+    "connect_status": connect_status,
+    "raw_status": raw_status,
+}))
+"#,
+        )
+        .arg(adapter_script)
+        .output()
+        .expect("python should run target proxy check");
+
+    assert!(
+        output.status.success(),
+        "target proxy check should run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let decision: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("proxy decision should be json");
+    assert_eq!(decision["docker"], serde_json::Value::Bool(true));
+    assert_eq!(decision["local"], serde_json::Value::Bool(false));
+    let patterns = decision["patterns"]
+        .as_array()
+        .expect("proxy patterns should be an array");
+    assert!(
+        patterns
+            .iter()
+            .any(|pattern| pattern.as_str().is_some_and(|pattern| pattern
+                .contains("raw.githubusercontent.com/rushousley/pyasn1-alt-modules")))
+    );
+    assert!(
+        patterns
+            .iter()
+            .any(|pattern| pattern.as_str() == Some("upstream/"))
+    );
+    let connect_hosts = decision["connect_hosts"]
+        .as_array()
+        .expect("connect hosts should be an array");
+    assert!(
+        connect_hosts
+            .iter()
+            .any(|host| host.as_str() == Some("github.com"))
+    );
+    assert!(
+        connect_hosts
+            .iter()
+            .any(|host| host.as_str() == Some("api.github.com"))
+    );
+    assert!(
+        decision["connect_status"]
+            .as_str()
+            .is_some_and(|status| status.contains("403")),
+        "CONNECT to a target host should be denied"
+    );
+    assert!(
+        decision["raw_status"]
+            .as_str()
+            .is_some_and(|status| status.contains("403")),
+        "absolute-form HTTP target source URLs should be denied"
+    );
+    assert_eq!(decision["command_upstream"], "git fetch");
+    assert_eq!(decision["command_target_url"], "git clone");
+}
+
+#[test]
 fn denovo_condition_run_routes_codex_cli_to_adapter_and_writes_metadata() {
     let root = temp_root("stateful-bench-denovo-codex-cli-adapter");
     let aweagent = root.join("AweAgent");

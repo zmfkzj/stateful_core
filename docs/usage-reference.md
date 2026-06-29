@@ -181,35 +181,41 @@ In active Codex or OMP sessions, prefer MCP tools over shelling out to
 `stateful reservation ...` or `stateful mcp call ...`; lifecycle hooks bind the active
 runtime session as the Stateful session id.
 
-Manual CLI use outside active hooks can pass session and workspace explicitly:
+Manual CLI use outside active hooks can pass session and workspace explicitly.
+Capture the returned `reservation_id` and pass it through later write
+authorization steps:
 
 ```bash
-stateful reservation declare \
+reservation_id=$(stateful reservation declare \
   --session-id demo \
   --workspace-id <workspace> \
   --purpose "Update README content requested by the user." \
-  README.md
+  README.md | jq -r '.reservation_id')
 ```
 
 Reservation commands:
 
 ```bash
 stateful reservation declare --purpose <purpose> <paths...>
-stateful reservation request --request-id <id> --action write_file|write_directory --path <path> --purpose <purpose>
-stateful reservation claim --wait-id <id>
+stateful reservation request --reservation-id <reservation_id> --request-id <id> --action write_file|write_directory --path <path> --purpose <purpose>
+stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>
 stateful reservation cancel --request-id <id>
 ```
 
 Notes:
 
-- `declare` requires at least one non-empty path and a non-empty purpose.
-- Declarations add to the session's active scope in that workspace.
+- `declare` requires at least one non-empty path and a non-empty purpose, and
+  returns `reservation_id`.
+- Declarations add to the session's active scope under that `reservation_id`.
 - Re-declaring the same path updates the purpose used for future claim
   acquisition.
-- MCP `state_claim_acquire` uses `paths: string[]` to acquire one or more exact
-  file or directory resources from active reservation scope.
+- MCP `state_claim_acquire` uses `reservation_id` plus `paths: string[]` to
+  acquire one or more exact file or directory resources from that reservation.
+- Writes must carry the same `reservation_id` through native edit/write
+  integration or `stateful sandbox run --reservation-id <reservation_id>`.
 - `request` creates or returns an idempotent queued or claimable (`reserved`)
-  write request.
+  write request. During queued-reservation compatibility, wait records expose
+  the same id as both `wait_id` and `reservation_id`.
 - `claim` uses the stored reservation purpose; clients do not pass a new claim
   purpose.
 - Native edit hooks and sandbox `write-targets` authorization may lazy-claim a
@@ -271,8 +277,9 @@ session-aware MCP tools run. In Codex,
 
 `PreToolUse` authorizes supported tool actions. Server-side authorization records
 an implicit session heartbeat for the checked session. `PostToolUse` records
-activity or heartbeats; Codex `PostToolUse` also releases same-session repo-write
-claims after completed native edit and `write-targets` transactions. `Stop` posts
+activity or heartbeats; Codex `PostToolUse` also releases authorizing
+same-reservation repo-write claims after completed native edit and
+`write-targets` transactions. `Stop` posts
 `state_activity_finalize`, finalizing activity and releasing the session's
 claims.
 
@@ -298,19 +305,22 @@ The v1 authorization API supports:
 - `rename_file`
 - `move_file`
 
-Task-level reservation authorizes writes only when its file set includes the exact file or directory resource. Directory scope authorizes only `write_directory` for the exact directory resource. File writes, deletes, renames, and moves require exact file scopes for the affected paths; directory scope does not authorize them.
+Task-level reservation authorizes writes only when its file set includes the exact file or directory resource and the write supplies that `reservation_id`. Directory scope authorizes only `write_directory` for the exact directory resource. File writes, deletes, renames, and moves require exact file scopes for the affected paths; directory scope does not authorize them.
 
-Writes without matching active reservation are denied. Active claims held by another
-session block conflicting writes. A blocked writer can queue with
+Writes without matching active reservation are denied. A write is allowed only
+when the `reservation_id` has active scope for the target and an active claim
+under the same `reservation_id` covers the target. Conflicting claims outside
+the authorizing reservation block writes. A blocked writer can queue with
 `queue_on_conflict`; after promotion, the reservation notification and resume
 payload carry the stored request purpose, and the session with the claimable
 reservation must reread the target.
 
 Repo file edits should use native edit tools with hook-visible targets after
-task-level reservation covers the target and a successful same-session file claim. Hooks extract
-the native tool target, call `/v1/authorize` with the operation-specific action,
-allow the edit only after an allow decision, and release the authorizing claim
-after the completed write transaction.
+task-level reservation covers the target and a successful same-reservation file
+claim. Hooks extract the native tool target, call `/v1/authorize` with the
+operation-specific action and `reservation_id`, allow the edit only after an
+allow decision, and release the authorizing claim after the completed write
+transaction.
 
 ## Sandbox Profiles
 
@@ -321,7 +331,7 @@ sandbox profile that matches the command.
 | --- | --- |
 | `read-only` | Shell-based read-only repo inspection when native read/search tools are insufficient. Network must be disabled. |
 | `build` | Build/test/package commands that write disposable artifacts under `/tmp/stateful/<session>/<scratch-purpose>/`. |
-| `write-targets` | Command-shaped repo writes after matching reservation and same-session file or directory claim. |
+| `write-targets` | Command-shaped repo writes after matching reservation and same-reservation file or directory claim; pass the same id with `--reservation-id <reservation_id>`. |
 | `git` | Local or remote `git ...` operations. Use `--network enabled` only for remote git operations. |
 | `github-pr` | Non-interactive `gh pr list|view|status|create` commands. |
 | `external` | Repo-external shell operations with a purpose; add explicit external write/create/dir scope only when needed. |
@@ -329,8 +339,9 @@ sandbox profile that matches the command.
 Examples:
 
 ```bash
+reservation_id=$(stateful reservation declare --purpose "Update README content requested by the user." README.md | jq -r '.reservation_id')
 stateful sandbox run --fs build --network enabled --write-dir test-run --command 'cargo test --workspace'
-stateful sandbox run --fs write-targets --write-target README.md --command 'python3 update_readme.py'
+stateful sandbox run --fs write-targets --reservation-id "$reservation_id" --write-target README.md --command 'python3 update_readme.py'
 stateful sandbox run --fs git --network disabled --command 'git status --short'
 stateful sandbox run --fs github-pr --network enabled --command 'gh pr status'
 stateful sandbox run --fs external --purpose "inspect external tool version" --command 'some-external-tool --version'
@@ -384,16 +395,18 @@ next action instead of rendering ambient context.
 - `state_notifications_poll` / `state.notifications.poll`
 - `state_resume_next` / `state.resume.next`
 
-`state_claim_acquire` takes `paths: string[]`; each path must match active exact
-file or directory reservation scope, and the server creates one exact resource
-claim per entry. Legacy server requests with `path` are still accepted for
-compatibility. `state_claim_release` remains single-resource and takes
-`path: string`.
+`state_claim_acquire` takes `reservation_id` and `paths: string[]`; each path
+must match active exact file or directory reservation scope under that
+reservation, and the server creates one exact resource claim per entry. Legacy
+server requests with `path` are still accepted for compatibility.
+
+`state_claim_release` remains single-resource and takes `path: string`.
 
 `state_file_write` / `state.file.write` and `state_bash_write` /
 `state.bash.write` were removed. Use native edit tools with hook-visible targets
-for file edits after task-level reservation and exact claim, and use `stateful sandbox run --fs
-write-targets ...` for command-shaped writes.
+for file edits after task-level reservation and exact same-reservation claim,
+and use `stateful sandbox run --fs write-targets --reservation-id <reservation_id> ...`
+for command-shaped writes.
 
 The `/v1/authorize` endpoint and the reservation declare/request/claim/cancel
 endpoints require the `stateful.v1` request envelope with `payload`. Flat legacy

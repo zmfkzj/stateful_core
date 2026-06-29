@@ -1097,7 +1097,7 @@ fn global_codex_config_block(
 {features_section}[mcp_servers.stateful]
 command = {}
 args = ["mcp", "serve"]
-env_vars = ["CODEX_THREAD_ID", "STATEFUL_CODEX_RUN_ID", "STATEFUL_SESSION_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
+env_vars = ["CODEX_THREAD_ID", "STATEFUL_CODEX_RUN_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
 startup_timeout_sec = 20
 default_tools_approval_mode = "approve"
 
@@ -1444,6 +1444,7 @@ import {{ fileURLToPath }} from "node:url";
 const STATEFUL = {binary_json};
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const OMP_AGENT_CONFIG = resolve(EXTENSION_DIR, "..", "config.yml");
+const BENCHMARK_SOURCE_BLOCK_ENV = "STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS";
  
 let verifiedBareStatefulPath = null;
 
@@ -1595,6 +1596,26 @@ function sessionId(event, ctx) {{
   return id;
 }}
 
+function reservationIdFromValue(value) {{
+  if (typeof value !== "string") return undefined;
+  const id = value.trim();
+  return id.length > 0 ? id : undefined;
+}}
+
+function reservationId(event, decision) {{
+  return firstString(
+    reservationIdFromValue(event?.reservation_id),
+    reservationIdFromValue(event?.reservationId),
+    reservationIdFromValue(event?.input?.reservation_id),
+    reservationIdFromValue(event?.input?.reservationId),
+    reservationIdFromValue(decision?.reservation_id),
+    reservationIdFromValue(decision?.wait?.reservation_id),
+    reservationIdFromValue(decision?.reservation?.reservation_id),
+    reservationIdFromValue(decision?.reservation?.wait_id),
+    reservationIdFromValue(decision?.reservation?.id)
+  );
+}}
+
 let reservationStreamAbort;
 const seenReservationWaitIds = new Set();
 
@@ -1631,17 +1652,19 @@ function reservationMessage(notification) {{
   const payload = notification?.payload || {{}};
   const target = payload.relative_path || "the reserved target";
   const waitId = payload.wait_id || "unknown";
+  const reservationId = payload.reservation_id || waitId;
   const action = payload.action || "write";
   const purpose = payload.purpose;
   const lines = [
     "Stateful reservation is ready for " + target + ".",
     "wait_id: " + waitId,
+    "reservation_id: " + reservationId,
     "action: " + action,
   ];
   if (typeof purpose === "string" && purpose.trim().length > 0) {{
     lines.push("purpose: " + purpose.trim());
   }}
-  lines.push("Next: reread the target, then call state_reservation_claim with this wait_id before retrying the write.");
+  lines.push("Next: reread the target, then call state_reservation_claim with this reservation_id before retrying the write.");
   return lines.join("\n");
 }}
 
@@ -1690,6 +1713,7 @@ async function checkReservationResume(pi, stream, signal) {{
         kind: "reservation_granted",
         payload: {{
           wait_id: body.reservation.wait_id,
+          reservation_id: body.reservation.reservation_id || body.reservation.wait_id,
           relative_path: body.reservation.relative_path,
           action: body.reservation.action,
           purpose: body.reservation.purpose,
@@ -1811,6 +1835,10 @@ function structuredLazyWriteOperationId(decision) {{
     || extractWaitId(decision?.message);
 }}
 
+function structuredLazyReservationId(event, decision) {{
+  return reservationId(event, decision) || "";
+}}
+
 function nextLazyEditOperationId() {{
   lazyEditOperationCounter += 1;
   return "lazy-edit-" + Date.now().toString(36) + "-" + lazyEditOperationCounter.toString(36);
@@ -1862,6 +1890,7 @@ function rememberLazyEditOperation(event, ctx, decision) {{
   lazyEditOperations.set(operationId, {{
     operation_id: operationId,
     session_id: sessionId(event, ctx),
+    reservation_id: structuredLazyReservationId(event, decision),
     cwd: ctx.cwd,
     tool_name: event.toolName,
     tool_input: event.input || {{}},
@@ -1886,6 +1915,7 @@ function rememberLazyWriteOperation(event, ctx, decision) {{
   lazyWriteOperations.set(operationId, {{
     operation_id: operationId,
     session_id: sessionId(event, ctx),
+    reservation_id: structuredLazyReservationId(event, decision),
     cwd: ctx.cwd,
     tool_name: event.toolName,
     tool_input: event.input || {{}},
@@ -2111,6 +2141,7 @@ function externalGrantDescriptor(params) {{
   }};
 }}
 
+
 function externalGrantKey(params) {{
   return JSON.stringify(externalGrantDescriptor(params));
 }}
@@ -2125,6 +2156,39 @@ function pruneExternalBashGrants(now) {{
 
 function configBool(value) {{
   return value === true || value === "true" || value === "1" || value === "yes" || value === "on";
+}}
+
+function benchmarkSourceBlockPatterns() {{
+  const raw = process.env[BENCHMARK_SOURCE_BLOCK_ENV];
+  if (!raw) return [];
+  try {{
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {{
+      return parsed.map((item) => String(item || "").trim()).filter(Boolean);
+    }}
+  }} catch (_) {{}}
+  return String(raw).split(/[\r\n,]+/).map((item) => item.trim()).filter(Boolean);
+}}
+
+function benchmarkSourcePatternMatches(text, pattern) {{
+  const lowerPattern = pattern.toLowerCase();
+  if (lowerPattern === "upstream" || lowerPattern === "upstream/") {{
+    return /(^|[^a-z0-9_-])upstream(?:\\/|[^a-z0-9_-]|$)/.test(text);
+  }}
+  return text.includes(lowerPattern);
+}}
+
+
+function benchmarkSourceBlockReason(event) {{
+  const patterns = benchmarkSourceBlockPatterns();
+  if (patterns.length === 0) return "";
+  const text = (String(event?.toolName || "") + "\n" + JSON.stringify(event?.input || {{}})).toLowerCase();
+  for (const pattern of patterns) {{
+    if (benchmarkSourcePatternMatches(text, pattern)) {{
+      return "DeNovo benchmark blocked target upstream source access before tool execution: " + pattern;
+    }}
+  }}
+  return "";
 }}
 
 function configTextAutoApprove(text) {{
@@ -2409,6 +2473,7 @@ export default function statefulOmpExtension(pi) {{
       }}
       const authorization = runStatefulHook("pre-tool-use", {{
         session_id: operation.session_id,
+        reservation_id: operation.reservation_id || undefined,
         cwd: operation.cwd || ctx.cwd,
         yolo: true,
         tool_name: operation.tool_name,
@@ -2454,6 +2519,7 @@ export default function statefulOmpExtension(pi) {{
       }}
       const authorization = runStatefulHook("pre-tool-use", {{
         session_id: operation.session_id,
+        reservation_id: operation.reservation_id || undefined,
         cwd: operation.cwd || ctx.cwd,
         yolo: true,
         tool_name: operation.tool_name,
@@ -2542,8 +2608,11 @@ export default function statefulOmpExtension(pi) {{
     startReservationStream(pi, result?.notifications_stream);
   }});
   pi.on("tool_call", async (event, ctx) => {{
+    const benchmarkBlockReason = benchmarkSourceBlockReason(event);
+    if (benchmarkBlockReason) return {{ block: true, reason: benchmarkBlockReason }};
     const decision = runStatefulHook("pre-tool-use", {{
       session_id: sessionId(event, ctx),
+      reservation_id: reservationId(event),
       cwd: ctx.cwd,
       yolo: isYolo(event, ctx),
       tool_name: event.toolName,

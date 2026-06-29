@@ -355,6 +355,9 @@ Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
   harvested workspace or explicit target upstream access in session artifacts:
   `.read.log` URL headers, `read`/`browser` URL or path tool-call arguments, or
   shell command tool-call arguments containing forbidden target-upstream commands.
+  OMP runs now also pre-block configured target-source patterns before tool use,
+  and Docker OMP runs deny matching GitHub/raw/patch/API HTTP and `CONNECT`
+  traffic through the adapter proxy.
 - A `stateful:on` Docker run that emits `SessionRegistered` but no nested
   `SessionHeartbeat` or `ActivityFinalized` is not lifecycle-valid. Report it as
   a runtime/lifecycle failure, not as a model-quality score.
@@ -364,8 +367,9 @@ Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
   instance so the next run starts from a clean runtime container set.
 
 OMP `stateful:on`/`off` both use isolated OMP home/profile state. Neither
-inherits host Codex config, session, rules, or skills. Only `stateful:on`
-receives stateful OMP install/config.
+inherits host Codex config, session, rules, or skills. `stateful:on` receives the
+stateful OMP install/config; `stateful:off` receives only the benchmark source
+guard extension so source-control blocks remain active without Stateful hooks.
 
 Add `--agent-docker-image <image>` to run the OMP CLI inside a dedicated
 container instead of the host OMP binary. In this mode, `--omp-bin` names the
@@ -455,8 +459,8 @@ If `results.jsonl` shows `finish_reason: "benchmark-contamination"`, inspect
 an `upstream/` checkout remained in the final workspace, and
 `kind: "upstream-source-access"` means session artifacts showed explicit target
 upstream access through `.read.log` URL headers, `read`/`browser` URL or path
-tool-call arguments, or forbidden target-upstream commands in shell command tool
-calls.
+tool-call arguments, forbidden target-upstream commands in shell command tool
+calls, or traffic denied by the Docker OMP source-access proxy.
 
 After all three trials complete, collect each trial separately and report the
 mean:

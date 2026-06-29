@@ -1321,14 +1321,12 @@ fn acquire_claim_requires_matching_active_reservation() {
 #[test]
 fn acquired_claim_persists_reservation_id() {
     let store = Store::open_in_memory().expect("in-memory store should open");
-    let reservation = Event::reservation_declared(
-        "s1",
-        "w1",
-        "Acquire auth file.",
-        ["src/auth.ts"],
-    )
-    .with_event_id("reservation-a");
-    store.append(reservation).expect("reservation should append");
+    let reservation =
+        Event::reservation_declared("s1", "w1", "Acquire auth file.", ["src/auth.ts"])
+            .with_event_id("reservation-a");
+    store
+        .append(reservation)
+        .expect("reservation should append");
 
     store
         .acquire_claim_for_reservation("reservation-a", "s1", "w1", "src/auth.ts")
@@ -1464,7 +1462,7 @@ fn same_session_can_acquire_exact_file_lease_under_directory_lease() {
 
     store
         .acquire_claim("s1", "w1", "src/auth.ts")
-        .expect("same-session exact file claim should acquire under directory claim");
+        .expect("exact file claim should acquire under a directory claim in the same session");
 
     assert!(
         store
@@ -1833,7 +1831,7 @@ fn active_claim_conflict_for_directory_matches_subtree_paths() {
     assert_eq!(
         store
             .active_claim_conflict_owner_for_directory("w1", "target/", "s2")
-            .expect("same-session directory claim should not conflict"),
+            .expect("same owner directory claim should not conflict"),
         None
     );
     assert_eq!(
@@ -1896,7 +1894,7 @@ fn active_claim_conflict_for_path_matches_ancestor_directory_paths() {
     assert_eq!(
         store
             .active_claim_conflict_owner_for_path("w1", "target/debug/out.txt", "s2")
-            .expect("same-session directory claim should not conflict"),
+            .expect("same owner directory claim should not conflict"),
         None
     );
     assert_eq!(

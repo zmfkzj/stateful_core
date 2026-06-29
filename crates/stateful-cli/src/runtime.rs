@@ -649,7 +649,7 @@ pub fn get_json(runtime: &ServerRuntime, path: &str) -> anyhow::Result<HttpRespo
 pub fn declare_reservation_via_http(
     runtime: &ServerRuntime,
     args: ReservationDeclareArgs,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<HttpResponse> {
     let body = reservation_declare_protocol_body(runtime, args, "cli", "stateful-cli");
 
     let response = post_json(runtime, "/v1/reservation/declare", &body)?;
@@ -662,7 +662,7 @@ pub fn declare_reservation_via_http(
         );
     }
 
-    Ok(())
+    Ok(response)
 }
 
 pub fn claim_reservation_via_http(

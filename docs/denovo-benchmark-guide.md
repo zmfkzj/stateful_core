@@ -30,6 +30,10 @@ solving the instance. The adapter invalidates runs when the final workspace
 contains `upstream/` or session artifacts show explicit target upstream access:
 `.read.log` URL headers, `read`/`browser` URL or path tool-call arguments, or
 shell command tool-call arguments containing forbidden target-upstream commands.
+OMP-backed runs also install a pre-tool source-pattern guard for both
+`stateful:on` and `stateful:off`; Docker OMP runs add an HTTP proxy that denies
+target GitHub/raw/patch/API hosts, including `CONNECT`, before the command reaches
+the model runtime.
 
 Evaluation runs in a fresh container session:
 

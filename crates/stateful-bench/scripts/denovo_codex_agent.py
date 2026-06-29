@@ -79,6 +79,7 @@ OMP_AGENT_DOCKER_ENV_ALLOWLIST = {
     "OPENAI_BASE_URL",
     "OPENROUTER_API_KEY",
     "SSL_CERT_FILE",
+    "STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS",
     "STATEFUL_SERVER_TOKEN",
     "STATEFUL_SERVER_URL",
 }
@@ -145,6 +146,9 @@ BENCHMARK_SOURCE_LEAK_HOST_PATTERNS = (
     "raw.githubusercontent.com",
     "patch-diff.githubusercontent.com",
     "api.github.com/repos",
+)
+BENCHMARK_SOURCE_LEAK_CONNECT_HOSTS = tuple(
+    sorted({pattern.split("/", 1)[0] for pattern in BENCHMARK_SOURCE_LEAK_HOST_PATTERNS})
 )
 
 
@@ -1080,6 +1084,76 @@ def seed_omp_auth_credentials(env: dict[str, str]) -> None:
         )
 
 
+def denovo_source_guard_extension_source() -> str:
+    return """const BENCHMARK_SOURCE_BLOCK_ENV = "STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS";
+
+function benchmarkSourceBlockPatterns() {
+  const raw = process.env[BENCHMARK_SOURCE_BLOCK_ENV];
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => String(item || "").trim()).filter(Boolean);
+    }
+  } catch (_) {}
+  return String(raw).split(/[\\r\\n,]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function benchmarkSourcePatternMatches(text, pattern) {
+  const lowerPattern = pattern.toLowerCase();
+  if (lowerPattern === "upstream" || lowerPattern === "upstream/") {
+    return /(^|[^a-z0-9_-])upstream(?:\\/|[^a-z0-9_-]|$)/.test(text);
+  }
+  return text.includes(lowerPattern);
+}
+
+function benchmarkSourceBlockReason(event) {
+  const patterns = benchmarkSourceBlockPatterns();
+  if (patterns.length === 0) return "";
+  const text = (String(event?.toolName || "") + "\\n" + JSON.stringify(event?.input || {})).toLowerCase();
+  for (const pattern of patterns) {
+    if (benchmarkSourcePatternMatches(text, pattern)) {
+      return "DeNovo benchmark blocked target upstream source access before tool execution: " + pattern;
+    }
+  }
+  return "";
+}
+
+export default function denovoBenchmarkSourceGuard(pi) {
+  pi.on("tool_call", async (event) => {
+    const benchmarkBlockReason = benchmarkSourceBlockReason(event);
+    if (benchmarkBlockReason) return { block: true, reason: benchmarkBlockReason };
+  });
+}
+"""
+
+
+def install_non_stateful_omp_source_guard(env: dict[str, str]) -> None:
+    agent_dir = Path(env["PI_CODING_AGENT_DIR"])
+    extension_path = agent_dir / "extensions" / "denovo-benchmark-source-guard.js"
+    extension_path.parent.mkdir(parents=True, exist_ok=True)
+    extension_path.write_text(denovo_source_guard_extension_source(), encoding="utf-8")
+
+    config_path = agent_dir / "config.yml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = f"  - {extension_path}"
+    contents = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    if any(line.strip() == entry.strip() for line in contents.splitlines()):
+        return
+    lines = contents.splitlines()
+    for offset, line in enumerate(lines):
+        if line.strip() == "extensions:":
+            lines.insert(offset + 1, entry)
+            config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return
+    if contents and not contents.endswith("\n"):
+        contents += "\n"
+    contents += "extensions:\n"
+    contents += entry
+    contents += "\n"
+    config_path.write_text(contents, encoding="utf-8")
+
+
 def prepare_omp_environment(
     env: dict[str, str],
     enable_stateful: bool,
@@ -1139,6 +1213,9 @@ def prepare_omp_environment(
             message = (completed.stderr or completed.stdout).strip()
             raise StatefulRepoEnableError(message or f"omp agents unpack exited {completed.returncode}")
     if not enable_stateful:
+        install_non_stateful_omp_source_guard(env)
+        if runtime_omp_home is not None:
+            rewrite_omp_config_for_runtime_home(env, runtime_omp_home)
         return
     command = [stateful_binary, "install", "--agent", "omp", "--yes"]
     if runtime_stateful_binary and runtime_stateful_binary != stateful_binary:
@@ -1728,6 +1805,14 @@ def benchmark_source_leak_command_pattern(
     return None
 
 
+def target_upstream_proxy_required(agent_docker_image: str | None) -> bool:
+    return agent_docker_image is not None
+
+
+def benchmark_source_block_patterns_for_env(instance_id: str) -> str:
+    return json.dumps([*benchmark_source_leak_url_patterns(instance_id), "upstream", "upstream/"])
+
+
 def benchmark_source_leak_url_pattern(text: str, patterns: tuple[str, ...]) -> str | None:
     candidate = text.strip()
     if candidate.lower().startswith("url:"):
@@ -1786,7 +1871,7 @@ class _TargetUpstreamProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_CONNECT(self) -> None:
         host, _, raw_port = self.path.rpartition(":")
         host = host.lower()
-        if host in {"raw.githubusercontent.com", "patch-diff.githubusercontent.com"}:
+        if host in BENCHMARK_SOURCE_LEAK_CONNECT_HOSTS:
             self._deny()
             return
         upstream = socket.create_connection((host, int(raw_port or "443")), timeout=self.timeout)
@@ -2508,7 +2593,10 @@ async def run_one_instance_async(
                 agent_docker_image=args.agent_docker_image,
             )
             seed_omp_auth_credentials(env)
-            if args.agent_docker_image and args.agent_mode != "stateful":
+            env["STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS"] = (
+                benchmark_source_block_patterns_for_env(inst.id)
+            )
+            if target_upstream_proxy_required(args.agent_docker_image):
                 target_upstream_proxy = start_target_upstream_deny_proxy(inst.id)
                 if target_upstream_proxy is not None:
                     install_target_upstream_proxy_env(env, target_upstream_proxy)
