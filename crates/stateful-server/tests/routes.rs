@@ -1435,6 +1435,10 @@ async fn hook_native_write_denies_when_file_changed_since_claim_acquired() {
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "stale_claim_observation");
 
+    assert_eq!(
+        json["required_next_action"],
+        "Reread target, reacquire claim, retry same edit."
+    );
     std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
@@ -1936,8 +1940,10 @@ async fn authorize_denies_when_target_changed_since_base_observation() {
     let json = response_json(response, 2048).await;
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "stale_target_observation");
-    let required_next_action = json["required_next_action"].as_str().unwrap_or_default();
-    assert!(required_next_action.contains("Reread"));
+    assert_eq!(
+        json["required_next_action"],
+        "Reread target, retry same edit with fresh base observation."
+    );
 
     std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }

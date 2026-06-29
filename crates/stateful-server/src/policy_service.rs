@@ -999,7 +999,7 @@ fn stale_observation_decision(message: &str) -> Decision {
     Decision::deny(
         "stale_target_observation",
         message,
-        "Reread the target and retry with a fresh base_observations entry before writing.",
+        "Reread target, retry same edit with fresh base observation.",
     )
 }
 
@@ -1007,7 +1007,7 @@ fn stale_claim_observation_decision(message: &str) -> Decision {
     Decision::deny(
         "stale_claim_observation",
         message,
-        "Reread the target, release and reacquire the claim, then retry before writing.",
+        "Reread target, reacquire claim, retry same edit.",
     )
 }
 

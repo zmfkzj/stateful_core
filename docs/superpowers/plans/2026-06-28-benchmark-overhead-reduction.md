@@ -954,7 +954,7 @@ Do not alter non-empty stdout/stderr formatting.
 Run:
 
 ```bash
-cargo test -p stateful-cli generated_omp_extension_compacts_empty_tool_output
+cargo test -p stateful-cli omp_extension_compacts_empty_tool_output
 ```
 
 Expected: PASS.
