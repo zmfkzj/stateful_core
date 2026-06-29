@@ -273,6 +273,8 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
             "import { basename, delimiter, dirname, extname, resolve } from \"node:path\""
         )
     );
+    assert!(extension.contains("import { fileURLToPath } from \"node:url\""));
+    assert!(extension.contains("const OMP_AGENT_CONFIG = resolve(EXTENSION_DIR, \"..\", \"config.yml\")"));
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?session_id="));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));
@@ -310,6 +312,8 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("function shouldAutoApproveStatefulPrompt(ctx, _params)"));
     assert!(extension.contains("ctx?.config?.stateful?.autoApprove"));
     assert!(extension.contains("ctx?.config?.[\"stateful.autoApprove\"]"));
+    assert!(extension.contains("function configTextAutoApprove(text)"));
+    assert!(extension.contains("statefulConfigFileAutoApprove()"));
     assert!(extension.contains("value === \"true\""));
     assert!(!extension.contains("params?.auto_approve === true"));
     assert!(extension.contains("function recordExternalBashGrant(params, now)"));

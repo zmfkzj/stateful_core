@@ -1439,8 +1439,12 @@ fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Resu
 import {{ createHash }} from "node:crypto";
 import {{ closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync }} from "node:fs";
 import {{ basename, delimiter, dirname, extname, resolve }} from "node:path";
+import {{ fileURLToPath }} from "node:url";
 
 const STATEFUL = {binary_json};
+const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
+const OMP_AGENT_CONFIG = resolve(EXTENSION_DIR, "..", "config.yml");
+ 
 let verifiedBareStatefulPath = null;
 
 function statefulBinaryDigest(path) {{
@@ -2123,13 +2127,29 @@ function configBool(value) {{
   return value === true || value === "true" || value === "1" || value === "yes" || value === "on";
 }}
 
+function configTextAutoApprove(text) {{
+  const value = "(?:true|\\\"true\\\"|'true'|1|\\\"1\\\"|'1'|yes|\\\"yes\\\"|'yes'|on|\\\"on\\\"|'on')";
+  const body = String(text || "");
+  return new RegExp("(^|\\n)\\s*stateful\\.autoApprove\\s*:\\s*" + value + "\\s*(?:#.*)?(?:\\n|$)", "i").test(body)
+    || new RegExp("(^|\\n)stateful\\s*:\\s*\\n(?:[ \\t]+[^\\n]*\\n)*?[ \\t]+autoApprove\\s*:\\s*" + value + "\\s*(?:#.*)?(?:\\n|$)", "i").test(body);
+}}
+
+function statefulConfigFileAutoApprove() {{
+  try {{
+    return configTextAutoApprove(readFileSync(OMP_AGENT_CONFIG, "utf8"));
+  }} catch (_) {{
+    return false;
+  }}
+}}
+
 function statefulPromptAutoApproveConfig(ctx) {{
   return configBool(ctx?.config?.stateful?.autoApprove)
     || configBool(ctx?.config?.stateful?.auto_approve)
     || configBool(ctx?.config?.["stateful.autoApprove"])
     || configBool(ctx?.config?.["stateful.auto_approve"])
     || configBool(ctx?.stateful?.autoApprove)
-    || configBool(ctx?.stateful?.auto_approve);
+    || configBool(ctx?.stateful?.auto_approve)
+    || statefulConfigFileAutoApprove();
 }}
 
 function shouldAutoApproveStatefulPrompt(ctx, _params) {{
