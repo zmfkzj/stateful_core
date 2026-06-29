@@ -1396,6 +1396,30 @@ pub fn run_programbench_eval(options: ProgramBenchEvalOptions) -> Result<()> {
     Ok(())
 }
 
+fn inherit_parent_stateful_runtime_env(
+    target_env: &mut BTreeMap<String, String>,
+    source_env: &BTreeMap<String, String>,
+) {
+    let (Some(server_url), Some(server_token)) = (
+        source_env.get("STATEFUL_SERVER_URL"),
+        source_env.get("STATEFUL_SERVER_TOKEN"),
+    ) else {
+        return;
+    };
+    if server_url.is_empty() || server_token.is_empty() {
+        return;
+    }
+    target_env.insert("STATEFUL_SERVER_URL".to_string(), server_url.clone());
+    target_env.insert("STATEFUL_SERVER_TOKEN".to_string(), server_token.clone());
+}
+
+fn parent_stateful_runtime_env() -> BTreeMap<String, String> {
+    let mut command_env = BTreeMap::new();
+    let process_env = env::vars().collect::<BTreeMap<_, _>>();
+    inherit_parent_stateful_runtime_env(&mut command_env, &process_env);
+    command_env
+}
+
 pub fn build_programbench_agent_command(
     options: ProgramBenchInstanceRunOptions,
 ) -> Result<ProgramBenchRecipeCommand> {
@@ -1443,10 +1467,16 @@ pub fn build_programbench_agent_command(
         args.push(model);
     }
 
+    let env = if options.condition.stateful {
+        parent_stateful_runtime_env()
+    } else {
+        BTreeMap::new()
+    };
+
     Ok(ProgramBenchRecipeCommand {
         program: path_arg(&default_programbench_agent_script(options.agent)),
         args,
-        env: BTreeMap::new(),
+        env,
     })
 }
 
@@ -1623,4 +1653,42 @@ fn default_programbench_agent_script(agent: ProgramBenchAgentKind) -> PathBuf {
 
 fn path_arg(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn inherit_parent_stateful_runtime_env_requires_url_and_token() {
+        let mut target = BTreeMap::new();
+        inherit_parent_stateful_runtime_env(
+            &mut target,
+            &env_map(&[("STATEFUL_SERVER_URL", "http://127.0.0.1:43873")]),
+        );
+        assert!(target.is_empty());
+
+        inherit_parent_stateful_runtime_env(
+            &mut target,
+            &env_map(&[
+                ("STATEFUL_SERVER_URL", "http://127.0.0.1:43873"),
+                ("STATEFUL_SERVER_TOKEN", "parent-token"),
+            ]),
+        );
+        assert_eq!(
+            target.get("STATEFUL_SERVER_URL").map(String::as_str),
+            Some("http://127.0.0.1:43873")
+        );
+        assert_eq!(
+            target.get("STATEFUL_SERVER_TOKEN").map(String::as_str),
+            Some("parent-token")
+        );
+    }
 }
