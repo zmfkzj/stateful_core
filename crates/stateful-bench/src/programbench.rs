@@ -1396,6 +1396,12 @@ pub fn run_programbench_eval(options: ProgramBenchEvalOptions) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct ParentStatefulRuntimeFile {
+    base_url: String,
+    token: String,
+}
+
 fn inherit_parent_stateful_runtime_env(
     target_env: &mut BTreeMap<String, String>,
     source_env: &BTreeMap<String, String>,
@@ -1413,10 +1419,53 @@ fn inherit_parent_stateful_runtime_env(
     target_env.insert("STATEFUL_SERVER_TOKEN".to_string(), server_token.clone());
 }
 
+fn inherit_parent_stateful_runtime_env_from_file(
+    target_env: &mut BTreeMap<String, String>,
+    path: &Path,
+) -> Result<()> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read Stateful runtime file {}", path.display()))?;
+    let runtime: ParentStatefulRuntimeFile = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse Stateful runtime file {}", path.display()))?;
+    let source_env = BTreeMap::from([
+        ("STATEFUL_SERVER_URL".to_string(), runtime.base_url),
+        ("STATEFUL_SERVER_TOKEN".to_string(), runtime.token),
+    ]);
+    inherit_parent_stateful_runtime_env(target_env, &source_env);
+    Ok(())
+}
+
+fn parent_stateful_runtime_path(source_env: &BTreeMap<String, String>) -> Option<PathBuf> {
+    if let Some(stateful_home) = source_env
+        .get("STATEFUL_HOME")
+        .filter(|value| !value.is_empty())
+    {
+        return Some(
+            PathBuf::from(stateful_home)
+                .join("runtime")
+                .join("server.json"),
+        );
+    }
+    source_env
+        .get("HOME")
+        .filter(|value| !value.is_empty())
+        .map(|home| {
+            PathBuf::from(home)
+                .join(".stateful_core")
+                .join("runtime")
+                .join("server.json")
+        })
+}
+
 fn parent_stateful_runtime_env() -> BTreeMap<String, String> {
     let mut command_env = BTreeMap::new();
     let process_env = env::vars().collect::<BTreeMap<_, _>>();
     inherit_parent_stateful_runtime_env(&mut command_env, &process_env);
+    if command_env.is_empty() {
+        if let Some(runtime_path) = parent_stateful_runtime_path(&process_env) {
+            let _ = inherit_parent_stateful_runtime_env_from_file(&mut command_env, &runtime_path);
+        }
+    }
     command_env
 }
 
@@ -1690,5 +1739,44 @@ mod tests {
             target.get("STATEFUL_SERVER_TOKEN").map(String::as_str),
             Some("parent-token")
         );
+    }
+
+    #[test]
+    fn inherit_parent_stateful_runtime_env_reads_runtime_file() {
+        let root = env::temp_dir().join(format!(
+            "stateful-bench-runtime-env-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("temp dir should be created");
+        let runtime_path = root.join("server.json");
+        fs::write(
+            &runtime_path,
+            r#"{
+                "base_url": "http://127.0.0.1:43873",
+                "token": "file-token",
+                "pid": 123,
+                "workspace_id": "workspace",
+                "protocol_version": "stateful.v1",
+                "started_at": "2026-06-29T00:00:00Z"
+            }"#,
+        )
+        .expect("runtime file should be written");
+
+        let mut target = BTreeMap::new();
+        inherit_parent_stateful_runtime_env_from_file(&mut target, &runtime_path)
+            .expect("runtime file should be read");
+
+        assert_eq!(
+            target.get("STATEFUL_SERVER_URL").map(String::as_str),
+            Some("http://127.0.0.1:43873")
+        );
+        assert_eq!(
+            target.get("STATEFUL_SERVER_TOKEN").map(String::as_str),
+            Some("file-token")
+        );
+        fs::remove_dir_all(root).ok();
     }
 }
