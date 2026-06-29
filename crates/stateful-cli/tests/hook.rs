@@ -3153,8 +3153,13 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
             panic!("raw OMP eval tool should block");
         };
         assert!(reason.contains(&format!("OMP eval tool {tool_name} is denied")));
-        assert!(reason.contains("sandbox_bash"));
-        assert!(reason.contains("process_find"));
+        assert!(reason.contains("built-in Bash"));
+        assert!(reason.contains("stateful sandbox run"));
+        assert!(reason.contains("stateful sandbox process find"));
+        assert!(!reason.contains("sandbox_bash"));
+        assert!(!reason.contains("process_find"));
+        assert!(!reason.contains("ext_ro_bash"));
+        assert!(!reason.contains("ext_rw_bash"));
     }
 
     let raw_python_input = serde_json::json!({
@@ -3175,8 +3180,13 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
         panic!("raw OMP python should block");
     };
     assert!(reason.contains("OMP eval tool functions.python is denied"));
-    assert!(reason.contains("sandbox_bash"));
-    assert!(reason.contains("process_find"));
+    assert!(reason.contains("built-in Bash"));
+    assert!(reason.contains("stateful sandbox run"));
+    assert!(reason.contains("stateful sandbox process find"));
+    assert!(!reason.contains("sandbox_bash"));
+    assert!(!reason.contains("process_find"));
+    assert!(!reason.contains("ext_ro_bash"));
+    assert!(!reason.contains("ext_rw_bash"));
 
     let stateful = trusted_stateful_path();
     let sandboxed_python_input = serde_json::json!({
@@ -3199,8 +3209,13 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
         panic!("sandbox-run through raw OMP python should still block");
     };
     assert!(reason.contains("OMP eval tool python is denied"));
-    assert!(reason.contains("sandbox_bash"));
-    assert!(reason.contains("process_find"));
+    assert!(reason.contains("built-in Bash"));
+    assert!(reason.contains("stateful sandbox run"));
+    assert!(reason.contains("stateful sandbox process find"));
+    assert!(!reason.contains("sandbox_bash"));
+    assert!(!reason.contains("process_find"));
+    assert!(!reason.contains("ext_ro_bash"));
+    assert!(!reason.contains("ext_rw_bash"));
 
     let repo_external_python_input = serde_json::json!({
         "session_id": "omp-parent",
@@ -3220,7 +3235,13 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
         panic!("repo-external OMP python should block");
     };
     assert!(reason.contains("OMP eval tool python is denied"));
-    assert!(reason.contains("ext_ro_bash"));
+    assert!(reason.contains("built-in Bash"));
+    assert!(reason.contains("stateful sandbox run"));
+    assert!(reason.contains("stateful sandbox process find"));
+    assert!(!reason.contains("sandbox_bash"));
+    assert!(!reason.contains("process_find"));
+    assert!(!reason.contains("ext_ro_bash"));
+    assert!(!reason.contains("ext_rw_bash"));
 }
 
 #[test]
