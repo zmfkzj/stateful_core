@@ -895,7 +895,12 @@ import types
 def fake_run(command, **kwargs):
     return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
 
+
+def fake_omp(command, *, cwd, env, timeout_seconds):
+    return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+
 mod.subprocess.run = fake_run
+mod.run_omp_command = fake_omp
 args = types.SimpleNamespace(
     docker_bin="docker",
     container_id="programbench-container",
@@ -988,7 +993,20 @@ def fake_run(command, **kwargs):
     })
     return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
 
+def fake_omp(command, *, cwd, env, timeout_seconds):
+    calls.append({
+        "command": command,
+        "timeout": timeout_seconds,
+        "cwd": str(cwd),
+        "env_home": env.get("HOME"),
+        "env_stateful_home": env.get("STATEFUL_HOME"),
+        "env_agent_dir": env.get("PI_CODING_AGENT_DIR"),
+    })
+    return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+
+
 mod.subprocess.run = fake_run
+mod.run_omp_command = fake_omp
 args = types.SimpleNamespace(
     docker_bin="docker",
     container_id="programbench-container",
@@ -1093,6 +1111,183 @@ print(json.dumps({
 }
 
 #[test]
+fn programbench_omp_adapter_timeout_preserves_cleanup_denial() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import subprocess
+
+calls = []
+
+class FakeProcess:
+    returncode = None
+
+    def communicate(self, timeout=None):
+        raise subprocess.TimeoutExpired(
+            ["omp"],
+            timeout,
+            output="partial stdout",
+            stderr="partial stderr",
+        )
+
+    def kill(self):
+        raise PermissionError(1, "Operation not permitted")
+
+def fake_popen(command, **kwargs):
+    calls.append({"command": command, "timeout": kwargs.get("timeout")})
+    return FakeProcess()
+
+mod.subprocess.Popen = fake_popen
+
+try:
+    mod.run_omp_command(
+        ["omp"],
+        cwd="/tmp/programbench-airlock",
+        env={"HOME": "/tmp/programbench-airlock"},
+        timeout_seconds=7,
+    )
+except subprocess.TimeoutExpired as exc:
+    print(json.dumps({
+        "output": exc.output,
+        "stderr": exc.stderr,
+        "cleanup_error": getattr(exc, "cleanup_error", None),
+    }))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("timeout should be JSON");
+
+    assert_eq!(observed["output"], "partial stdout");
+    assert_eq!(observed["stderr"], "partial stderr");
+    assert_eq!(
+        observed["cleanup_error"],
+        "[Errno 1] Operation not permitted"
+    );
+}
+
+#[test]
+fn programbench_omp_adapter_timeout_does_not_duplicate_cleanup_output() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import subprocess
+
+class FakeProcess:
+    returncode = None
+    calls = 0
+
+    def communicate(self, timeout=None):
+        self.calls += 1
+        if self.calls == 1:
+            raise subprocess.TimeoutExpired(
+                ["omp"],
+                timeout,
+                output="partial stdout",
+                stderr="partial stderr",
+            )
+        return ("partial stdout", "partial stderr")
+
+    def kill(self):
+        return None
+
+def fake_popen(command, **kwargs):
+    return FakeProcess()
+
+mod.subprocess.Popen = fake_popen
+
+try:
+    mod.run_omp_command(
+        ["omp"],
+        cwd="/tmp/programbench-airlock",
+        env={"HOME": "/tmp/programbench-airlock"},
+        timeout_seconds=7,
+    )
+except subprocess.TimeoutExpired as exc:
+    print(json.dumps({
+        "output": exc.output,
+        "stderr": exc.stderr,
+        "cleanup_error": getattr(exc, "cleanup_error", None),
+    }))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("timeout should be JSON");
+
+    assert_eq!(observed["output"], "partial stdout");
+    assert_eq!(observed["stderr"], "partial stderr");
+    assert_eq!(observed["cleanup_error"], serde_json::Value::Null);
+}
+
+#[test]
+fn programbench_adapter_metadata_records_timeout_cleanup_error() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import subprocess
+import tempfile
+import types
+from pathlib import Path
+
+def fake_prompt(args):
+    return "prompt"
+
+def fake_archive(args, instance_dir):
+    return instance_dir / "submission.tar.gz"
+
+def fake_run_agent(args, prompt):
+    exc = subprocess.TimeoutExpired(
+        ["omp"],
+        args.timeout_seconds,
+        output="partial stdout",
+        stderr="partial stderr",
+    )
+    exc.cleanup_error = "[Errno 1] Operation not permitted"
+    raise exc
+
+mod.prompt_for_args = fake_prompt
+mod.archive_workspace = fake_archive
+
+with tempfile.TemporaryDirectory() as root:
+    args = types.SimpleNamespace(
+        condition_dir=root,
+        instance_id="instance",
+        condition_id="stateful-on_subagent-off",
+        timeout_seconds=7,
+    )
+    exit_code = mod.run_main(
+        args,
+        agent_name="omp-cli",
+        exited_error_prefix="omp",
+        token_usage_from_output=lambda stdout: {},
+        run_agent_func=fake_run_agent,
+    )
+    instance_dir = Path(root) / "instance"
+    metadata = json.loads((instance_dir / "instance.json").read_text())
+    print(json.dumps({
+        "exit_code": exit_code,
+        "metadata_exit_code": metadata["exit_code"],
+        "error": metadata["error"],
+        "cleanup_error": metadata.get("cleanup_error"),
+        "stdout": (instance_dir / "agent.stdout.log").read_text(),
+        "stderr": (instance_dir / "agent.stderr.log").read_text(),
+    }))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("metadata should be JSON");
+
+    assert_eq!(observed["exit_code"], 124);
+    assert_eq!(observed["metadata_exit_code"], 124);
+    assert_eq!(observed["error"], "omp timed out after 7s");
+    assert_eq!(
+        observed["cleanup_error"],
+        "[Errno 1] Operation not permitted"
+    );
+    assert_eq!(observed["stdout"], "partial stdout");
+    assert_eq!(observed["stderr"], "partial stderr");
+}
+
+#[test]
 fn programbench_omp_adapter_passes_parent_stateful_runtime_to_agent() {
     let output = run_python_adapter(
         &programbench_omp_agent_path(),
@@ -1113,7 +1308,17 @@ def fake_run(command, **kwargs):
         })
     return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
 
+def fake_omp(command, *, cwd, env, timeout_seconds):
+    agent_env.update({
+        "stateful_server_url": env.get("STATEFUL_SERVER_URL"),
+        "stateful_server_token": env.get("STATEFUL_SERVER_TOKEN"),
+        "stateful_home": env.get("STATEFUL_HOME"),
+    })
+    return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+
+
 mod.subprocess.run = fake_run
+mod.run_omp_command = fake_omp
 os.environ["STATEFUL_SERVER_URL"] = "http://127.0.0.1:43873"
 os.environ["STATEFUL_SERVER_TOKEN"] = "parent-token"
 

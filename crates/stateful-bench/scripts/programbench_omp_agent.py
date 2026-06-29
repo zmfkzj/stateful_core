@@ -22,6 +22,7 @@ from programbench_codex_agent import (  # noqa: E402
     enable_stateful_repo,
     install_stateful_for_agent,
     iter_json_events,
+    output_text,
     prompt_for_args,
     resolve_host_binary,
     run_main,
@@ -118,6 +119,36 @@ def inherit_parent_stateful_runtime(target_env: dict[str, str], source_env: dict
         target_env["STATEFUL_SERVER_TOKEN"] = server_token
 
 
+def run_omp_command(command, *, cwd: str, env: dict[str, str], timeout_seconds: int):
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        env=env,
+        text=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        return subprocess.CompletedProcess(command, process.returncode, stdout=stdout, stderr=stderr)
+    except subprocess.TimeoutExpired as exc:
+        cleanup_error = None
+        try:
+            process.kill()
+        except Exception as kill_exc:  # noqa: BLE001 - sandbox may deny signals; preserve the timeout as primary.
+            cleanup_error = str(kill_exc)
+        else:
+            try:
+                stdout, stderr = process.communicate()
+                exc.output = output_text(stdout) or output_text(exc.output)
+                exc.stderr = output_text(stderr) or output_text(exc.stderr)
+            except Exception as wait_exc:  # noqa: BLE001 - cleanup failure is secondary to timeout.
+                cleanup_error = str(wait_exc)
+        if cleanup_error is not None:
+            exc.cleanup_error = cleanup_error
+        raise
+
+
 def run_agent(args, prompt):
     with tempfile.TemporaryDirectory(prefix="programbench-airlock-") as airlock:
         env = airlock_env(airlock)
@@ -151,13 +182,11 @@ def run_agent(args, prompt):
                 command.extend(["--model", args.model])
             command.extend(["-p", prompt])
             try:
-                return subprocess.run(
+                return run_omp_command(
                     command,
-                    capture_output=True,
                     cwd=airlock,
                     env=env,
-                    text=True,
-                    timeout=args.timeout_seconds,
+                    timeout_seconds=args.timeout_seconds,
                 )
             finally:
                 if hasattr(args, "condition_dir"):

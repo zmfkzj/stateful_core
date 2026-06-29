@@ -645,6 +645,8 @@ pub struct ProgramBenchInstanceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_used: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<ProgramBenchTokenUsage>,
@@ -1225,8 +1227,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
-from programbench_codex_agent import PROGRAMBENCH_SYSTEM_PROMPT, archive_workspace, empty_token_usage, token_usage_from_value
+from programbench_codex_agent import PROGRAMBENCH_SYSTEM_PROMPT, archive_workspace, empty_token_usage, output_text, token_usage_from_value
 
 
 def iter_json_events(output: str):
@@ -1251,17 +1254,30 @@ def omp_token_usage_from_output(output: str) -> dict[str, int]:
     return total
 ```
 
-Then copy the Codex `main()` structure, replacing `--codex-bin` with `--omp-bin`, `agent` with `omp-cli`, `codex exited` with `omp exited`, token parser with `omp_token_usage_from_output`, and `run_agent` with:
+Then copy the Codex `main()` structure, replacing `--codex-bin` with `--omp-bin`, `agent` with `omp-cli`, `codex exited` with `omp exited`, token parser with `omp_token_usage_from_output`, and using a dedicated OMP runner that preserves timeout metadata. Invoke OMP with `--cwd` set to the temporary host airlock rather than `/workspace` inside the container. For `stateful:on` OMP runs, copy `STATEFUL_SERVER_URL` and `STATEFUL_SERVER_TOKEN` from the parent environment into the agent environment when both are present. The copied `main()` must preserve `subprocess.TimeoutExpired` as the primary result: exit code `124`, error text `omp timed out after {args.timeout_seconds}s`, captured partial stdout/stderr logs, and optional `cleanup_error` metadata if killing or draining the timed-out process fails.
 
 ```python
-def run_agent(args: argparse.Namespace, prompt: str) -> subprocess.CompletedProcess[str]:
-    command = [args.omp_bin, "--cwd", "/workspace"]
-    if args.stateful:
-        command.extend(["--profile", "stateful"])
-    if args.model:
-        command.extend(["--model", args.model])
-    command.extend(["--prompt", prompt])
-    return subprocess.run(command, text=True, capture_output=True, timeout=args.timeout_seconds)
+def run_omp_command(command, *, cwd: str, env: dict[str, str], timeout_seconds: int):
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env, text=True)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        return subprocess.CompletedProcess(command, process.returncode, stdout=stdout, stderr=stderr)
+    except subprocess.TimeoutExpired as exc:
+        cleanup_error = None
+        try:
+            process.kill()
+        except Exception as kill_exc:
+            cleanup_error = str(kill_exc)
+        else:
+            try:
+                stdout, stderr = process.communicate()
+                exc.output = output_text(stdout) or output_text(exc.output)
+                exc.stderr = output_text(stderr) or output_text(exc.stderr)
+            except Exception as wait_exc:
+                cleanup_error = str(wait_exc)
+        if cleanup_error is not None:
+            exc.cleanup_error = cleanup_error
+        raise
 ```
 
 - [ ] **Step 4: Run tests green**

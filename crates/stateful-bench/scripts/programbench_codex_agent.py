@@ -443,6 +443,7 @@ def run_main(
     stderr = ""
     exit_code = 1
     error = None
+    cleanup_error = None
 
     try:
         result = run_agent_func(args, prompt_for_args(args))
@@ -456,6 +457,7 @@ def run_main(
         stderr = output_text(exc.stderr)
         exit_code = 124
         error = f"{exited_error_prefix} timed out after {args.timeout_seconds}s"
+        cleanup_error = getattr(exc, "cleanup_error", None)
     except Exception as exc:  # noqa: BLE001 - adapter must record unexpected runner failures.
         exit_code = 1
         error = str(exc)
@@ -486,6 +488,8 @@ def run_main(
     }
     if archive_error is not None:
         metadata["archive_error"] = archive_error
+    if cleanup_error is not None:
+        metadata["cleanup_error"] = cleanup_error
     subagent_used = observed_subagent_used(stdout, stderr)
     if subagent_used is not None:
         metadata["subagent_used"] = subagent_used

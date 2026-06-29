@@ -305,4 +305,4 @@ Update:
 
 - `programbench eval` runs `programbench submit package` by default after successful eval so `_stats/score.json` exists for machine-readable reports. A `--no-package` flag may skip it for debug runs.
 - Use separate Codex and OMP adapter scripts for the first implementation. This matches DeNovo, keeps CLI-specific setup isolated, and avoids a shared abstraction before the duplicated shape is proven.
-- Use host-driven Docker orchestration for the first implementation: `stateful-bench` starts the ProgramBench container, injects agent config, executes the selected agent inside it, and archives `/workspace` to `submission.tar.gz`. A prepared all-in-one image can be added later if host-driven setup becomes the bottleneck.
+- Use host-driven Docker orchestration for the first implementation: `stateful-bench` starts the ProgramBench container, copies its `/workspace` into a temporary host airlock, runs the selected host CLI adapter there, and archives the airlock to `submission.tar.gz`. A prepared all-in-one image can be added later if host-driven setup becomes the bottleneck.
