@@ -896,11 +896,10 @@ fn declare_reservation_via_http_posts_expected_payload() {
         let (mut stream, _) = listener.accept().expect("connection should arrive");
         let request = read_http_request(&mut stream);
         tx.send(request).expect("request should send to test");
-        stream
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Length: 55\r\n\r\n{\"status\":\"ok\",\"reservation_id\":\"reservation-123\"}",
-            )
-            .expect("response should write");
+        write_http_response(
+            &mut stream,
+            r#"{"status":"ok","reservation_id":"reservation-123"}"#,
+        );
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
