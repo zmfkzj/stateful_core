@@ -309,6 +309,8 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("ctx?.ui?.confirm"));
     assert!(extension.contains("function shouldAutoApproveStatefulPrompt(ctx, _params)"));
     assert!(extension.contains("ctx?.config?.stateful?.autoApprove"));
+    assert!(extension.contains("ctx?.config?.[\"stateful.autoApprove\"]"));
+    assert!(extension.contains("value === \"true\""));
     assert!(!extension.contains("params?.auto_approve === true"));
     assert!(extension.contains("function recordExternalBashGrant(params, now)"));
     assert!(extension.contains("function approveExternalBashGrantWithoutPrompt(params)"));

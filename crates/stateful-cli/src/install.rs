@@ -2119,8 +2119,17 @@ function pruneExternalBashGrants(now) {{
   }}
 }}
 
+function configBool(value) {{
+  return value === true || value === "true" || value === "1" || value === "yes" || value === "on";
+}}
+
 function statefulPromptAutoApproveConfig(ctx) {{
-  return ctx?.config?.stateful?.autoApprove === true;
+  return configBool(ctx?.config?.stateful?.autoApprove)
+    || configBool(ctx?.config?.stateful?.auto_approve)
+    || configBool(ctx?.config?.["stateful.autoApprove"])
+    || configBool(ctx?.config?.["stateful.auto_approve"])
+    || configBool(ctx?.stateful?.autoApprove)
+    || configBool(ctx?.stateful?.auto_approve);
 }}
 
 function shouldAutoApproveStatefulPrompt(ctx, _params) {{
