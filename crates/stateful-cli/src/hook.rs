@@ -350,11 +350,11 @@ fn omp_pre_tool_action(
             Ok(OmpPreToolAction::Allow)
         }
         _ if is_stateful_control_plane_tool(&input.tool_name) => Ok(OmpPreToolAction::Allow),
-        _ if is_user_allowed_tool(global_paths, repo_root, &input.tool_name) => {
+        _ if is_user_allowed_tool(global_paths, repo_root, tool_name) => {
             Ok(OmpPreToolAction::Allow)
         }
         _ => {
-            record_unclassified_tool(global_paths, repo_root, &input.tool_name);
+            record_unclassified_tool(global_paths, repo_root, tool_name);
             Ok(OmpPreToolAction::Block {
                 reason: format!(
                     "unclassified OMP tool {} may write or execute and requires explicit stateful classification",

@@ -2644,6 +2644,31 @@ fn omp_unclassified_tools_are_manageable_with_stateful_tools_allowlist() {
     let list = tool_list_for_repo(&paths, &repo_root).expect("tool list should load");
     assert!(list.unclassified_tools.is_empty());
 
+    let glob_input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": repo_root,
+        "yolo": false,
+        "tool_name": "functions.glob",
+        "tool_input": {"pattern": "**/*.rs"}
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "pre-tool-use"],
+        &glob_input,
+    );
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
+    assert_eq!(stdout["decision"], "allow");
+    let list = tool_list_for_repo(&paths, &repo_root).expect("tool list should load");
+    assert!(list.unclassified_tools.is_empty());
+
     let input = serde_json::json!({
         "session_id": "omp-parent",
         "cwd": repo_root,
