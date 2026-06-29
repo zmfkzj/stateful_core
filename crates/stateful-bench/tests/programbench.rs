@@ -52,6 +52,7 @@ fn programbench_metadata_schema_uses_required_instance_fields() {
         submission_path: "submission.tar.gz".to_string(),
         exit_code: None,
         error: None,
+        archive_error: Some("archive failed".to_string()),
         subagent_used: None,
         token_usage: Some(token_usage),
     };
@@ -1171,6 +1172,14 @@ with tempfile.TemporaryDirectory() as root:
     (airlock / ".omp" / "profiles" / "stateful" / "agent" / "agent.db").write_text("secret", encoding="utf-8")
     (airlock / ".stateful_core").mkdir()
     (airlock / ".stateful_core" / "runtime.json").write_text("stateful", encoding="utf-8")
+    (airlock / ".git").mkdir()
+    (airlock / ".git" / "config").write_text("git", encoding="utf-8")
+    (airlock / "Library" / "Caches" / "com.apple.python").mkdir(parents=True)
+    (airlock / "Library" / "Caches" / "com.apple.python" / "cmatrix.pyc").write_bytes(b"pyc")
+    (airlock / "src" / "__pycache__").mkdir(parents=True)
+    (airlock / "src" / "__pycache__" / "cmatrix.cpython-39.pyc").write_bytes(b"pyc")
+    (airlock / ".pytest_cache").mkdir()
+    (airlock / ".pytest_cache" / "README.md").write_text("cache", encoding="utf-8")
     (airlock / "compile.sh").write_text("cc main.c -o executable\n", encoding="utf-8")
     (airlock / "main.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
     instance_dir.mkdir()
@@ -1185,13 +1194,132 @@ print(json.dumps(names))
     assert!(names.iter().any(|name| name.ends_with("compile.sh")));
     assert!(names.iter().any(|name| name.ends_with("main.c")));
     assert!(
-        names.iter().all(|name| !name.contains(".omp")),
-        "archive must not contain OMP credentials: {names:?}"
+        names.iter().all(|name| {
+            !name.contains(".git")
+                && !name.contains(".omp")
+                && !name.contains(".stateful")
+                && !name.contains("Library/Caches")
+                && !name.contains("__pycache__")
+                && !name.ends_with(".pyc")
+                && !name.contains(".pytest_cache")
+        }),
+        "archive must not contain agent/runtime/cache files: {names:?}"
     );
-    assert!(
-        names.iter().all(|name| !name.contains(".stateful")),
-        "archive must not contain stateful runtime files: {names:?}"
+}
+
+#[test]
+fn programbench_archive_failure_removes_partial_submission() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import os
+import tempfile
+from pathlib import Path
+
+with tempfile.TemporaryDirectory() as root:
+    root = Path(root)
+    airlock = root / "airlock"
+    instance_dir = root / "instance"
+    airlock.mkdir()
+    instance_dir.mkdir()
+    (airlock / "compile.sh").write_text("cc main.c -o executable\n", encoding="utf-8")
+    blocked = airlock / "secret.txt"
+    blocked.write_text("secret", encoding="utf-8")
+    os.chmod(blocked, 0)
+    try:
+        try:
+            mod.archive_airlock_workspace(str(airlock), instance_dir)
+        except PermissionError:
+            pass
+        observed = (instance_dir / "submission.tar.gz").exists()
+    finally:
+        os.chmod(blocked, 0o600)
+print(json.dumps({"partial_exists": observed}))
+"#,
     );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("archive observation should be JSON");
+
+    assert_eq!(observed["partial_exists"], false);
+}
+
+#[test]
+fn programbench_adapter_records_archive_error_without_losing_agent_logs() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import subprocess
+import tempfile
+import types
+from pathlib import Path
+
+def fake_agent(args, prompt):
+    args.archive_error = "permission denied reading executable"
+    args.submission_path = str(Path(args.condition_dir) / args.instance_id / "submission.tar.gz")
+    return subprocess.CompletedProcess(["codex"], 0, stdout="agent stdout\n", stderr="agent stderr\n")
+
+with tempfile.TemporaryDirectory() as condition_dir:
+    args = types.SimpleNamespace(
+        condition_dir=condition_dir,
+        instance_id="owner__repo.abc123",
+        condition_id="stateful-off_subagent-off",
+        container_id="programbench-container",
+        docker_bin="docker",
+        timeout_seconds=123,
+        subagent=False,
+        stateful=False,
+        benchmark_max_turns=500,
+    )
+    exit_code = mod.run_main(
+        args,
+        agent_name="codex-cli",
+        exited_error_prefix="codex",
+        token_usage_from_output=mod.codex_token_usage_from_output,
+        run_agent_func=fake_agent,
+    )
+    instance_dir = Path(condition_dir) / "owner__repo.abc123"
+    metadata = json.loads((instance_dir / "instance.json").read_text())
+    observed = {
+        "exit_code": exit_code,
+        "stdout": (instance_dir / "agent.stdout.log").read_text(),
+        "stderr": (instance_dir / "agent.stderr.log").read_text(),
+        "archive_error": metadata.get("archive_error"),
+        "error": metadata.get("error"),
+    }
+print(json.dumps(observed))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("adapter observation should be JSON");
+
+    assert_eq!(observed["exit_code"], 0);
+    assert_eq!(observed["stdout"], "agent stdout\n");
+    assert_eq!(observed["stderr"], "agent stderr\n");
+    assert_eq!(
+        observed["archive_error"],
+        "permission denied reading executable"
+    );
+    assert_eq!(observed["error"], serde_json::Value::Null);
+}
+
+#[test]
+fn programbench_report_markdown_labels_partial_score_and_resolved_count() {
+    let report = condition_report(
+        "stateful-off_subagent-off",
+        false,
+        false,
+        0.6304347826086957,
+        497_867,
+        1,
+        1,
+    );
+    let markdown = report
+        .render(ReportFormat::Markdown)
+        .expect("condition markdown should render");
+
+    assert!(markdown.contains("Partial score"));
+    assert!(markdown.contains("Resolved"));
+    assert!(markdown.contains("| stateful-off_subagent-off | off | off | 2 | 2 | 0.630 | 0/2 |"));
 }
 
 #[test]
@@ -1296,6 +1424,25 @@ print(json.dumps(usage))
     let usage: serde_json::Value = serde_json::from_str(&output).expect("omp usage should be JSON");
 
     assert_eq!(usage["input_tokens"], 50);
+    assert_eq!(usage["input_plus_output_tokens"], 55);
+    assert_eq!(usage["uncached_input_plus_output_tokens"], 35);
+}
+
+#[test]
+fn programbench_omp_adapter_parses_current_usage_event_shape() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+usage = mod.omp_token_usage_from_output('{"type":"message_end","message":{"usage":{"input":50,"output":5,"cacheRead":20,"reasoning":2,"totalTokens":75}}}\n')
+print(json.dumps(usage))
+"#,
+    );
+    let usage: serde_json::Value = serde_json::from_str(&output).expect("omp usage should be JSON");
+
+    assert_eq!(usage["input_tokens"], 50);
+    assert_eq!(usage["cached_input_tokens"], 20);
+    assert_eq!(usage["output_tokens"], 5);
+    assert_eq!(usage["reasoning_output_tokens"], 2);
     assert_eq!(usage["input_plus_output_tokens"], 55);
     assert_eq!(usage["uncached_input_plus_output_tokens"], 35);
 }
@@ -1536,6 +1683,12 @@ fn programbench_compare_reports_score_time_and_token_deltas() {
             "stateful-on_subagent-on".to_string(),
         ]
     );
+    let markdown = comparison
+        .render(ReportFormat::Markdown)
+        .expect("comparison markdown should render");
+    assert!(markdown.contains("Partial score"));
+    assert!(markdown.contains("Resolved"));
+    assert!(markdown.contains("| stateful-on_subagent-off | on | off | 2 | 0.750 | 0/2 |"));
 }
 
 #[test]
@@ -1736,6 +1889,7 @@ fn instance_metadata(
         submission_path: format!("{instance_id}/submission.tar.gz"),
         exit_code: Some(if error.is_some() { 1 } else { 0 }),
         error: error.map(str::to_string),
+        archive_error: None,
         subagent_used,
         token_usage: Some(token_usage),
     }

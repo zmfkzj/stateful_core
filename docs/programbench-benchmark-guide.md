@@ -18,8 +18,9 @@ there, and archive that airlock as the ProgramBench submission.
 For OMP runs, the adapter mirrors DeNovoSWE auth seeding: it copies only the
 `openai-codex` OAuth provider credential from `OMP_AUTH_SOURCE_AGENT_DIR`,
 `~/.omp/profiles/stateful/agent`, or `~/.omp/agent` into the isolated airlock
-profile. Submission archives exclude agent/runtime directories such as `.omp`,
-`.codex`, `.stateful*`, `.config`, and `.cache`.
+profile. Submission archives exclude agent/runtime/cache directories such as
+`.omp`, `.codex`, `.stateful*`, `.config`, `.cache`, `.git`,
+`Library/Caches`, `__pycache__`, `.pytest_cache`, and Python bytecode files.
 
 Install the official `programbench` CLI with one of:
 
@@ -110,6 +111,10 @@ programbench eval` runs `programbench eval`, `programbench info`, and
 `programbench submit package` by default.
 
 Reports read `_stats/score.json` and label the score source.
+
+Report tables call this value `Partial score` because it is not the same as
+solving the instance. Use `Resolved`/`resolved_count` for solved-instance
+comparisons, especially when running a single diagnostic instance.
 
 ## Efficiency Metrics
 

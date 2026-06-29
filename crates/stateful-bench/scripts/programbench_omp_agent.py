@@ -46,7 +46,7 @@ def omp_token_usage_from_output(output: str):
 
     total = empty_token_usage()
     for event in iter_json_events(output):
-        for path in (("usage",), ("payload", "usage")):
+        for path in (("usage",), ("message", "usage"), ("payload", "usage")):
             usage = usage_at(event, path)
             if usage is not None:
                 add_token_usage(total, usage)
@@ -150,9 +150,12 @@ def run_agent(args, prompt):
                 )
             finally:
                 if hasattr(args, "condition_dir"):
-                    args.submission_path = str(
-                        archive_airlock_workspace(airlock, Path(args.condition_dir) / args.instance_id)
-                    )
+                    instance_dir = Path(args.condition_dir) / args.instance_id
+                    try:
+                        args.submission_path = str(archive_airlock_workspace(airlock, instance_dir))
+                    except Exception as exc:  # noqa: BLE001 - preserve OMP logs before reporting archive failure.
+                        args.submission_path = str(instance_dir / "submission.tar.gz")
+                        args.archive_error = str(exc)
         finally:
             if args.stateful:
                 stop_stateful_server(args, airlock)

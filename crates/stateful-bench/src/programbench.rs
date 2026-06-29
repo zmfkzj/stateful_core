@@ -218,6 +218,8 @@ pub struct ProgramBenchInstanceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_used: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<ProgramBenchTokenUsage>,
@@ -623,14 +625,15 @@ pub fn compare_programbench_reports(
 
 pub fn render_programbench_report_markdown(report: &ProgramBenchConditionReport) -> String {
     format!(
-        "# ProgramBench Report\n\n| Condition | Stateful | Subagent | Instances | Evaluated | Average score | Resolved rate | Running time ms | Input+output tokens | Uncached input+output tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+        "# ProgramBench Report\n\n| Condition | Stateful | Subagent | Instances | Evaluated | Partial score | Resolved | Running time ms | Input+output tokens | Uncached input+output tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n| {} | {} | {} | {} | {} | {} | {}/{} | {} | {} | {} |\n",
         report.condition_id,
         axis_label(report.condition.stateful),
         axis_label(report.condition.subagent),
         report.instances,
         report.evaluated_instances,
         optional_float(report.average_score),
-        optional_float(report.resolved_rate),
+        report.resolved_count,
+        report.evaluated_instances,
         report.running_time_ms,
         report.token_input_plus_output_tokens,
         report.token_uncached_input_plus_output_tokens,
@@ -639,16 +642,18 @@ pub fn render_programbench_report_markdown(report: &ProgramBenchConditionReport)
 
 pub fn render_programbench_comparison_markdown(report: &ProgramBenchComparisonReport) -> String {
     let mut output = String::from(
-        "# ProgramBench Comparison\n\n| Condition | Stateful | Subagent | Instances | Average score | Running time ms | Input+output tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: |\n",
+        "# ProgramBench Comparison\n\n| Condition | Stateful | Subagent | Instances | Partial score | Resolved | Running time ms | Input+output tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |\n",
     );
     for condition_report in &report.reports {
         output.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {}/{} | {} | {} |\n",
             condition_report.condition_id,
             axis_label(condition_report.condition.stateful),
             axis_label(condition_report.condition.subagent),
             condition_report.instances,
             optional_float(condition_report.average_score),
+            condition_report.resolved_count,
+            condition_report.evaluated_instances,
             condition_report.running_time_ms,
             condition_report.token_input_plus_output_tokens,
         ));

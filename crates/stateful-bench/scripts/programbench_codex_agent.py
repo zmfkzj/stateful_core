@@ -63,11 +63,11 @@ def token_usage_from_value(value):
     if not isinstance(value, dict):
         return None
 
-    input_tokens = int_field(value.get("input_tokens"))
-    cached_input_tokens = int_field(value.get("cached_input_tokens"))
-    output_tokens = int_field(value.get("output_tokens"))
-    reasoning_output_tokens = int_field(value.get("reasoning_output_tokens"))
-    total_tokens = int_field(value.get("total_tokens"))
+    input_tokens = int_field(value.get("input_tokens")) or int_field(value.get("input"))
+    cached_input_tokens = int_field(value.get("cached_input_tokens")) or int_field(value.get("cacheRead"))
+    output_tokens = int_field(value.get("output_tokens")) or int_field(value.get("output"))
+    reasoning_output_tokens = int_field(value.get("reasoning_output_tokens")) or int_field(value.get("reasoning"))
+    total_tokens = int_field(value.get("total_tokens")) or int_field(value.get("totalTokens"))
     token_count = int_field(value.get("token_count"))
 
     input_details = value.get("input_tokens_details")
@@ -129,10 +129,21 @@ ARCHIVE_EXCLUDED_TOP_LEVEL = {
     ".cache",
     ".codex",
     ".config",
+    ".git",
     ".omp",
+    ".pytest_cache",
     ".stateful",
     ".stateful_core",
     ".stateful-tmp",
+}
+
+ARCHIVE_EXCLUDED_PARTS = {
+    "__pycache__",
+}
+
+ARCHIVE_EXCLUDED_SUFFIXES = {
+    ".pyc",
+    ".pyo",
 }
 
 
@@ -140,18 +151,32 @@ def archive_member_allowed(path: Path) -> bool:
     if not path.parts:
         return True
     first = path.parts[0]
-    return first not in ARCHIVE_EXCLUDED_TOP_LEVEL and not first.startswith(".stateful")
+    if first in ARCHIVE_EXCLUDED_TOP_LEVEL or first.startswith(".stateful"):
+        return False
+    if len(path.parts) >= 2 and path.parts[0] == "Library" and path.parts[1] == "Caches":
+        return False
+    if any(part in ARCHIVE_EXCLUDED_PARTS for part in path.parts):
+        return False
+    return path.suffix not in ARCHIVE_EXCLUDED_SUFFIXES
 
 
 def archive_airlock_workspace(airlock: str, instance_dir: Path) -> Path:
     submission_path = instance_dir / "submission.tar.gz"
     root = Path(airlock)
-    with tarfile.open(submission_path, "w:gz") as archive:
-        for path in sorted(root.rglob("*")):
-            relative = path.relative_to(root)
-            if not archive_member_allowed(relative):
-                continue
-            archive.add(path, arcname=f"./{relative}", recursive=False)
+    try:
+        with tarfile.open(submission_path, "w:gz") as archive:
+            for path in sorted(root.rglob("*")):
+                relative = path.relative_to(root)
+                if not archive_member_allowed(relative):
+                    continue
+                if path.is_file() and not os.access(path, os.R_OK):
+                    if relative == Path("executable"):
+                        continue
+                    raise PermissionError(path)
+                archive.add(path, arcname=f"./{relative}", recursive=False)
+    except Exception:
+        submission_path.unlink(missing_ok=True)
+        raise
     return submission_path
 
 
@@ -314,9 +339,12 @@ def run_agent(args, prompt):
                 )
             finally:
                 if hasattr(args, "condition_dir"):
-                    args.submission_path = str(
-                        archive_airlock_workspace(airlock, Path(args.condition_dir) / args.instance_id)
-                    )
+                    instance_dir = Path(args.condition_dir) / args.instance_id
+                    try:
+                        args.submission_path = str(archive_airlock_workspace(airlock, instance_dir))
+                    except Exception as exc:  # noqa: BLE001 - preserve agent logs before reporting archive failure.
+                        args.submission_path = str(instance_dir / "submission.tar.gz")
+                        args.archive_error = str(exc)
         finally:
             if args.stateful:
                 stop_stateful_server(args, airlock)
@@ -435,13 +463,14 @@ def run_main(
     (instance_dir / "agent.stdout.log").write_text(stdout, encoding="utf-8")
     (instance_dir / "agent.stderr.log").write_text(stderr, encoding="utf-8")
 
+    archive_error = getattr(args, "archive_error", None)
     submission_path = instance_dir / "submission.tar.gz"
     try:
         submission_path = archive_workspace(args, instance_dir)
     except Exception as exc:  # noqa: BLE001 - archive failures belong in metadata.
+        archive_error = str(exc)
         if error is None:
             error = f"archive failed: {exc}"
-
     finished_at_ms = now_ms()
     metadata = {
         "instance_id": args.instance_id,
@@ -455,6 +484,8 @@ def run_main(
         "error": error,
         "token_usage": token_usage_from_output(stdout),
     }
+    if archive_error is not None:
+        metadata["archive_error"] = archive_error
     subagent_used = observed_subagent_used(stdout, stderr)
     if subagent_used is not None:
         metadata["subagent_used"] = subagent_used
