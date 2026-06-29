@@ -1177,6 +1177,23 @@ impl Store {
         workspace_id: impl AsRef<str>,
         relative_path: impl AsRef<str>,
     ) -> StoreResult<()> {
+        self.acquire_claim_for_reservation_with_observation_and_event(
+            reservation_id,
+            session_id,
+            workspace_id,
+            relative_path,
+            None,
+        )
+    }
+
+    pub fn acquire_claim_for_reservation_with_observation_and_event(
+        &self,
+        reservation_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        observation: Option<ClaimObservation>,
+    ) -> StoreResult<()> {
         let reservation_id = reservation_id.as_ref().to_string();
         let session_id = session_id.as_ref().to_string();
         let workspace_id = workspace_id.as_ref().to_string();
@@ -1187,7 +1204,7 @@ impl Store {
                 &session_id,
                 &workspace_id,
                 &relative_path,
-                None,
+                observation,
             );
         }
 
@@ -1199,7 +1216,7 @@ impl Store {
                 &session_id,
                 &workspace_id,
                 &relative_path,
-                None,
+                observation,
             )?;
             self.conn.execute_batch("COMMIT")?;
             Ok(())
@@ -1263,6 +1280,7 @@ impl Store {
         let workspace_id = workspace_id.as_ref().to_string();
         if !self.conn.is_autocommit() {
             return self.acquire_claims_with_observations_and_events_inner(
+                None,
                 &session_id,
                 &workspace_id,
                 claims,
@@ -1273,6 +1291,46 @@ impl Store {
 
         let result = (|| -> StoreResult<ClaimBatchAcquireResult> {
             let result = self.acquire_claims_with_observations_and_events_inner(
+                None,
+                &session_id,
+                &workspace_id,
+                claims,
+            )?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(result)
+        })();
+
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+
+        result
+    }
+
+    pub fn acquire_claims_for_reservation_with_observations_and_events(
+        &self,
+        reservation_id: impl AsRef<str>,
+        session_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        claims: Vec<(String, Option<ClaimObservation>)>,
+    ) -> StoreResult<ClaimBatchAcquireResult> {
+        let reservation_id = reservation_id.as_ref().to_string();
+        let session_id = session_id.as_ref().to_string();
+        let workspace_id = workspace_id.as_ref().to_string();
+        if !self.conn.is_autocommit() {
+            return self.acquire_claims_with_observations_and_events_inner(
+                Some(&reservation_id),
+                &session_id,
+                &workspace_id,
+                claims,
+            );
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> StoreResult<ClaimBatchAcquireResult> {
+            let result = self.acquire_claims_with_observations_and_events_inner(
+                Some(&reservation_id),
                 &session_id,
                 &workspace_id,
                 claims,
@@ -1290,6 +1348,7 @@ impl Store {
 
     fn acquire_claims_with_observations_and_events_inner(
         &self,
+        reservation_id: Option<&str>,
         session_id: &str,
         workspace_id: &str,
         claims: Vec<(String, Option<ClaimObservation>)>,
@@ -1301,7 +1360,7 @@ impl Store {
 
         for (relative_path, observation) in claims {
             match self.acquire_claim_with_observation_and_event_inner(
-                None,
+                reservation_id,
                 session_id,
                 workspace_id,
                 &relative_path,
@@ -1848,6 +1907,33 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    pub fn active_claim_covers_directory_by_reservation(
+        &self,
+        workspace_id: impl AsRef<str>,
+        directory_path: impl AsRef<str>,
+        reservation_id: impl AsRef<str>,
+    ) -> StoreResult<bool> {
+        self.expire_stale()?;
+        let directory_path = normalize_relative_path(directory_path.as_ref());
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM claims
+                    WHERE workspace_id = ?1
+                       AND reservation_id = ?2
+                       AND status = 'active'
+                       AND action = 'write_directory'
+                       AND (
+                           relative_path = ?3
+                           OR substr(?3, 1, length(relative_path) + 1) = relative_path || '/'
+                       )
+                )",
+                params![workspace_id.as_ref(), reservation_id.as_ref(), directory_path],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StoreError::from)
+    }
+
     pub fn active_claim_conflict_owner_for_path(
         &self,
         workspace_id: impl AsRef<str>,
@@ -1998,6 +2084,40 @@ impl Store {
                  ORDER BY rowid DESC
                  LIMIT 1",
                 params![workspace_id.as_ref(), session_id.as_ref(), relative_path],
+                |row| {
+                    let observed_exists = row.get::<_, Option<bool>>(0)?;
+                    let observed_content_hash = row.get::<_, Option<String>>(1)?;
+                    Ok(observed_exists.map(|exists| ClaimObservation {
+                        exists,
+                        content_hash: observed_content_hash,
+                    }))
+                },
+            )
+            .optional()
+            .map(|row| row.flatten())
+            .map_err(StoreError::from)
+    }
+
+    pub fn active_exact_file_claim_observation_by_reservation(
+        &self,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        reservation_id: impl AsRef<str>,
+    ) -> StoreResult<Option<ClaimObservation>> {
+        self.expire_stale()?;
+        let relative_path = normalize_relative_path(relative_path.as_ref());
+        self.conn
+            .query_row(
+                "SELECT observed_exists, observed_content_hash
+                 FROM claims
+                 WHERE workspace_id = ?1
+                    AND reservation_id = ?2
+                    AND status = 'active'
+                    AND action = 'write_file'
+                    AND relative_path = ?3
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                params![workspace_id.as_ref(), reservation_id.as_ref(), relative_path],
                 |row| {
                     let observed_exists = row.get::<_, Option<bool>>(0)?;
                     let observed_content_hash = row.get::<_, Option<String>>(1)?;
@@ -3203,6 +3323,80 @@ impl Store {
         Ok(state)
     }
 
+    pub fn policy_state_for_reservation(
+        &self,
+        reservation_id: &str,
+        workspace_id: &str,
+    ) -> StoreResult<PolicyState> {
+        self.expire_stale()?;
+        let reservation = self
+            .conn
+            .query_row(
+                "SELECT session_id, scopes_json
+                 FROM reservations
+                 WHERE reservation_id = ?1
+                    AND workspace_id = ?2
+                    AND status = 'active'
+                 ORDER BY declared_at DESC, rowid DESC
+                 LIMIT 1",
+                params![reservation_id, workspace_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+
+        let (session_id, scopes) = if let Some((session_id, scopes_json)) = reservation {
+            let scopes = serde_json::from_str(&scopes_json).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
+            (session_id, scopes)
+        } else {
+            let wait_record = self
+                .conn
+                .query_row(
+                    "SELECT session_id, relative_path, action
+                     FROM wait_queue
+                     WHERE wait_id = ?1
+                        AND workspace_id = ?2
+                        AND status IN ('reserved', 'claimed')
+                     ORDER BY rowid DESC
+                     LIMIT 1",
+                    params![reservation_id, workspace_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((session_id, relative_path, action)) = wait_record else {
+                return Ok(PolicyState::default());
+            };
+            let scope = if action == "write_directory" {
+                ReservationScope::directory(relative_path)
+            } else {
+                ReservationScope::file(relative_path)
+            };
+            (session_id, vec![scope])
+        };
+
+        if scopes.is_empty() {
+            return Ok(PolicyState::default());
+        }
+
+        let mut state = PolicyState::default().with_active_reservation_scopes(scopes);
+        if let Some(phase) = self.active_session_phase(&session_id, workspace_id)? {
+            state = state.with_activity_phase(phase);
+        }
+
+        Ok(state)
+    }
+
     pub fn active_exact_file_intent_by_session(
         &self,
         workspace_id: impl AsRef<str>,
@@ -3223,6 +3417,61 @@ impl Store {
         }
 
         Ok(false)
+    }
+
+    pub fn active_exact_file_intent_by_reservation(
+        &self,
+        workspace_id: impl AsRef<str>,
+        relative_path: impl AsRef<str>,
+        reservation_id: impl AsRef<str>,
+    ) -> StoreResult<bool> {
+        self.expire_stale()?;
+        let workspace_id = workspace_id.as_ref();
+        let reservation_id = reservation_id.as_ref();
+        let relative_path = normalize_relative_path(relative_path.as_ref());
+        let scopes_json = self
+            .conn
+            .query_row(
+                "SELECT scopes_json
+                 FROM reservations
+                 WHERE reservation_id = ?1
+                    AND workspace_id = ?2
+                    AND status = 'active'
+                 ORDER BY declared_at DESC, rowid DESC
+                 LIMIT 1",
+                params![reservation_id, workspace_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        if let Some(scopes_json) = scopes_json {
+            let scopes: Vec<ReservationScope> =
+                serde_json::from_str(&scopes_json).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?;
+            return Ok(scopes.iter().any(
+                |scope| matches!(scope, ReservationScope::File(path) if path == &relative_path),
+            ));
+        }
+
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM wait_queue
+                    WHERE wait_id = ?1
+                       AND workspace_id = ?2
+                       AND status IN ('reserved', 'claimed')
+                       AND action = 'write_file'
+                       AND relative_path = ?3
+                )",
+                params![reservation_id, workspace_id, relative_path],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StoreError::from)
     }
 
     pub fn expire_stale(&self) -> StoreResult<()> {

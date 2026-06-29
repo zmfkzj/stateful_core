@@ -980,6 +980,151 @@ async fn declared_reservation_without_same_session_lease_denies_matching_authori
 }
 
 #[tokio::test]
+async fn same_session_different_reservation_claim_does_not_authorize_write() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare_a = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/reservation/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "Reservation A.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("reservation A should complete");
+    assert_eq!(declare_a.status(), StatusCode::OK);
+    let reservation_a = response_json(declare_a, 2048).await["reservation_id"]
+        .as_str()
+        .expect("reservation A id should be returned")
+        .to_string();
+
+    let declare_b = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/reservation/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "Reservation B.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("reservation B should complete");
+    assert_eq!(declare_b.status(), StatusCode::OK);
+    let reservation_b = response_json(declare_b, 2048).await["reservation_id"]
+        .as_str()
+        .expect("reservation B id should be returned")
+        .to_string();
+
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "reservation_id": reservation_a,
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("claim should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts",
+            "reservation_id": reservation_b
+        }),
+    );
+    body["source"]["kind"] = serde_json::json!("hook");
+    body["source"]["event"] = serde_json::json!("pre_tool_use");
+    body["source"]["tool_name"] = serde_json::json!("apply_patch");
+
+    let authorize = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(authorize.status(), StatusCode::OK);
+    let json = response_json(authorize, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_claim");
+    assert!(json["required_next_action"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("same-reservation"));
+}
+
+#[tokio::test]
+async fn same_reservation_claim_authorizes_write() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/reservation/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "Update auth file.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("reservation should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+    let reservation_id = response_json(declare, 2048).await["reservation_id"]
+        .as_str()
+        .expect("reservation id should be returned")
+        .to_string();
+
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "reservation_id": reservation_id.clone(),
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("claim should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts",
+            "reservation_id": reservation_id
+        }),
+    );
+    body["source"]["kind"] = serde_json::json!("hook");
+    body["source"]["event"] = serde_json::json!("pre_tool_use");
+    body["source"]["tool_name"] = serde_json::json!("apply_patch");
+
+    let authorize = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(authorize.status(), StatusCode::OK);
+    let json = response_json(authorize, 2048).await;
+    assert_eq!(json["decision"], "allow");
+    assert_eq!(json["reason_code"], "authorized");
+}
+
+#[tokio::test]
 async fn missing_claim_cannot_be_bypassed_by_changing_session_id() {
     let app = build_router(ServerConfig::new("secret-token"));
 
@@ -1029,8 +1174,8 @@ async fn missing_claim_cannot_be_bypassed_by_changing_session_id() {
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "missing_claim");
     let required_next_action = json["required_next_action"].as_str().unwrap_or_default();
-    assert!(required_next_action.contains("same-session file claims"));
-    assert!(required_next_action.contains("Do not change session_id"));
+    assert!(required_next_action.contains("same-reservation file claims"));
+    assert!(required_next_action.contains("Do not change reservation_id"));
 }
 
 #[tokio::test]
@@ -1203,13 +1348,13 @@ async fn hook_file_write_without_tool_name_still_requires_exact_file_lease() {
         json["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("exact active same-session file claims")
+            .contains("exact active same-reservation file claims")
     );
     assert!(
         json["required_next_action"]
             .as_str()
             .unwrap_or_default()
-            .contains("matching same-session file claims")
+            .contains("matching same-reservation file claims")
     );
 }
 
@@ -1292,7 +1437,7 @@ async fn hook_native_write_requires_exact_file_lease_even_when_directory_lease_c
         json["required_next_action"]
             .as_str()
             .unwrap_or_default()
-            .contains("same-session file claims")
+            .contains("same-reservation file claims")
     );
 }
 
