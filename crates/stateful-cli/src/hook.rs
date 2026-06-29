@@ -2861,7 +2861,11 @@ impl OmpPreToolUseInput {
     fn reservation_id(&self) -> Option<&str> {
         self.reservation_id
             .as_deref()
-            .or_else(|| self.tool_input.get("reservation_id").and_then(serde_json::Value::as_str))
+            .or_else(|| {
+                self.tool_input
+                    .get("reservation_id")
+                    .and_then(serde_json::Value::as_str)
+            })
             .map(str::trim)
             .filter(|reservation_id| !reservation_id.is_empty())
     }
@@ -2948,11 +2952,14 @@ impl PreToolUseInput {
     fn reservation_id(&self) -> Option<&str> {
         self.reservation_id
             .as_deref()
-            .or_else(|| self.tool_input.get("reservation_id").and_then(serde_json::Value::as_str))
+            .or_else(|| {
+                self.tool_input
+                    .get("reservation_id")
+                    .and_then(serde_json::Value::as_str)
+            })
             .map(str::trim)
             .filter(|reservation_id| !reservation_id.is_empty())
     }
-
 
     fn patch_text(&self) -> Option<&str> {
         string_payload_field(
