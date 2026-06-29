@@ -45,7 +45,7 @@ For OMP entries below, strict trusted bare `stateful` means session-start prefli
 - External profile requires `--purpose` and `--command`.
 - Read-only external commands may omit write/create/directory/socket/signal scope.
 - Absolute external scopes must resolve outside the repo.
-- Repo-relative external write scopes require matching Stateful reservation and same-session claims.
+- Repo-relative external write scopes require matching Stateful reservation and same-reservation claims.
 - On macOS, read-only Go-based GitHub API commands such as `gh api` belong in external read-only because the Seatbelt profile permits the system identity/trust Mach lookups Go TLS needs.
 
 ## Avoid In Bash Or Eval Tools

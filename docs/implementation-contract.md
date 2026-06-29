@@ -155,8 +155,8 @@ reservation for hook and sandbox authorization sources after the client rereads
 and retries the write boundary; read-only conflict checks must not claim reservations.
 `/v1/claim/acquire` records the target existence and content hash when `root` is
 supplied; hook-originated native file writes compare that observation before
-authorization. `/v1/claim/refresh-observation` refreshes the same-session exact
-file claim observation while a claim remains active. Completed native edit and
+authorization. `/v1/claim/refresh-observation` refreshes the exact reservation
+claim observation while a claim remains active. Completed native edit and
 `write-targets` hook flows release their authorizing claim instead of carrying
 it forward, so later writes must reread and acquire a fresh claim or claim a
 claimable reservation. `/v1/reservation/request`
@@ -219,17 +219,16 @@ The shipped `/v1/reservation/request` scheduling API accepts only `write_file` a
 from `/v1/authorize` does not queue `rename_file` or `move_file`, because those
 actions affect multiple paths and need the target all-or-nothing scheduler.
 
-Native edit tools with hook-visible targets, such as Codex `apply_patch`,
-`Edit`, and `Write` or OMP `edit` and `write`, expose targets to hooks. After a
-task-level reservation covers the target and a successful same-session file
-claim is active, hooks call `/v1/authorize` with the operation-specific action
-before allowing the edit,
+Native edit tools such as Codex `apply_patch`, `Edit`, and `Write` or OMP
+`edit` and `write` expose targets to hooks. After a task-level reservation covers
+the target and a successful same-reservation file claim is active, hooks call
+`/v1/authorize` with the operation-specific action before allowing the edit,
 including `write_file`, `delete_file`, and `move_file` with source `path` /
 `old_path` and destination `new_path`. PreToolUse authorization sends current
 `base_observations` for each affected target when the hook can read the
 workspace file state. PostToolUse observes completed native edits and sandbox
-`write-targets` transactions, records the result, and releases the same-session
-claims that authorized the completed write boundary. Released claims leave the
+`write-targets` transactions, records the result, and releases the
+same-reservation claims that authorized the completed write boundary. Released claims leave the
 live context render and do not authorize a later write; the session must reread
 and reacquire a claim, or lazy-claim a claimable reservation, before retrying.
 OMP `edit` denials are captured by the generated extension as live-session lazy
@@ -339,7 +338,7 @@ MCP/CLI flows then explicitly claim with `state_reservation_claim` or
 purpose and clients do not provide a claim purpose. Hook and sandbox
 authorization sources may lazy-claim the claimable reservation at the retried
 write boundary. Claiming creates active reservation scope and active
-same-session claims. The default claimable reservation TTL is 120 seconds; the
+same-reservation claims. The default claimable reservation TTL is 120 seconds; the
 default claim TTL is 300 seconds and is refreshed by heartbeat.
 
 The target multi-resource model is atomic all-or-nothing: a multi-resource

@@ -277,7 +277,7 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   command-shaped inspection uses `--fs read-only --network disabled`; Codex
   process inspection uses `<absolute-stateful-binary> sandbox process find <selector>`. Command-shaped repo
   writes use `--fs write-targets` with explicit `--write-target <file>` /
-  `--create-target <file>` values and repo reservation plus same-session claims. Local
+  `--create-target <file>` values and repo reservation plus same-reservation claims. Local
   Git uses `--fs git --network disabled`, GitHub PR operations use
   `--fs github-pr --network enabled`, and external operations use `--fs external`
   through the trusted stateful command path. A purpose and command are sufficient for
@@ -291,7 +291,7 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 `PostToolUse`:
 
 - observe files, commands, and results from supported tool calls
-- release same-session repo-write claims after completed native edit and
+- release same-reservation repo-write claims after completed native edit and
   `write-targets` transactions
 - refresh heartbeat timestamps and claim TTLs only for remaining active claims
   still covered by active reservation
@@ -358,7 +358,7 @@ classification, so `functions.bash` is Bash,
 
 - Native edit tools such as Codex `apply_patch`, `Edit`, and `Write` or OMP
   `edit` and `write`: enforce by inspecting hook-exposed targets after
-  task-level reservation covers the target and a successful same-session file
+  task-level reservation covers the target and a successful same-reservation file
   claim is active. The completed write transaction releases the claim that
   authorized it.
 - Command execution: Codex raw Bash is denied with sandbox guidance. OMP built-in
@@ -584,7 +584,7 @@ Initial policy:
   instruction
 - current shipped hook path records file target observations on exact file claim
   acquire, denies hook-originated writes when the claimed file changes before
-  authorization, and refreshes that observation after same-session supported file
+  authorization, and refreshes that observation after same-reservation supported file
   tools complete
 - unrelated reads and searches: allow
 - reads, searches, diffs, and sandboxed tests after human writes: allow
@@ -630,8 +630,8 @@ follow the denial's direct next action rather than rendering ambient context.
 The current server route renders store-backed live context from active reservations,
 active claims, and queued or claimable (`reserved`) wait records. The response
 includes summary counts, structured `items`, and prompt-ready `prompt_text`.
-Released claims are absent from this live render. A later same-session write
-must acquire a fresh claim or claim a claimable reservation before authorization
+Released claims are absent from this live render. A later write in that session
+must acquire a fresh same-reservation claim or claim a claimable reservation before authorization
 can succeed.
 
 The shipped `/v1/context/render` route returns structured data and prompt-ready

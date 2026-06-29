@@ -4,7 +4,7 @@ Native Codex or OMP subagents must recover write authorization in their own acti
 
 ## Recovery Flow
 
-When a subagent hits `apply_patch writes require ... same-session file claim`, `Target is outside active reservation scope`, `missing_reservation`, `missing_claim`, `claim_conflict`, or `state_reservation_declare cannot resolve current stateful session`:
+When a subagent hits `apply_patch writes require ... same-reservation file claim`, `Target is outside active reservation scope`, `missing_reservation`, `missing_claim`, `claim_conflict`, or `state_reservation_declare cannot resolve current stateful session`:
 
 1. Stop retrying command variants; denials are the API.
 2. Re-read the exact target if it exists.

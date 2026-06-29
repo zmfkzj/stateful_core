@@ -8,7 +8,7 @@ If the denial says `missing_reservation`, `missing_claim`, `Target is outside ac
 
 1. Re-read the target if it exists.
 2. Add the missing exact file or directory scopes to the task reservation with `state_reservation_declare(purpose=<task purpose>, files_planned=[...])`.
-3. Acquire exact same-session claims with `state_claim_acquire(paths=[...])`.
+3. Acquire exact same-reservation claims with `state_claim_acquire(paths=[...])`.
 4. Use native edit tools for repo edits, or `sandbox run --fs write-targets` / OMP built-in Bash with a strict trusted `stateful sandbox run --fs write-targets ...` command and matching targets for command-shaped writes.
 
 Use file claims for file writes, deletes, renames, and moves. Directory claims only authorize directory writes.
@@ -44,7 +44,7 @@ Use external only when the command is outside the repo or needs external OS capa
 - Codex: `sandbox run --fs external --purpose ... --command ...`.
 - OMP: built-in Bash with strict trusted `stateful sandbox run --fs external ...`; write/create/write-dir/socket/signal scope prompts unless `stateful.autoApprove: true`.
 - Add absolute external targets, directories, sockets, or signal permission only when needed.
-- Repo-relative external write scopes require matching Stateful reservation and same-session claims.
+- Repo-relative external write scopes require matching Stateful reservation and same-reservation claims.
 
 ## Other Denials
 

@@ -189,10 +189,10 @@ impl<'a> PolicyService<'a> {
 
         let mut lazy_claimed_reservation = None;
         if let Some(workspace_id) = &input.workspace_id {
-            let current_session_reservation = if input.reservation_id.is_none() {
-                self.current_session_reservation(&input, workspace_id)?
+            let current_session_reservation = if let Some(reservation_id) = input.reservation_id.as_deref() {
+                self.supplied_session_reservation(&input, workspace_id, reservation_id)?
             } else {
-                None
+                self.current_session_reservation(&input, workspace_id)?
             };
             if let Some(reservation) = current_session_reservation {
                 if self.allows_lazy_claim_on_authorize(&input)
@@ -792,6 +792,39 @@ impl<'a> PolicyService<'a> {
             }
         }
         Ok(None)
+    }
+
+    fn supplied_session_reservation(
+        &self,
+        input: &AuthorizeWriteInput,
+        workspace_id: &str,
+        reservation_id: &str,
+    ) -> Result<Option<WaitRecord>, String> {
+        let Some(reservation) = self
+            .store
+            .reservation_by_id(reservation_id)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+
+        if reservation.session_id != input.session_id
+            || reservation.workspace_id != workspace_id
+            || reservation.action != input.action
+        {
+            return Ok(None);
+        }
+
+        let reserved_path = normalize_relative_path(&reservation.relative_path);
+        let covers_target = if input.action == "write_directory" {
+            reserved_path == normalize_relative_path(&input.path)
+        } else {
+            self.affected_paths(input)
+                .iter()
+                .any(|path| reserved_path == normalize_relative_path(path))
+        };
+
+        Ok(covers_target.then_some(reservation))
     }
 
     fn current_session_reservation(

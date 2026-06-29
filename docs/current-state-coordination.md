@@ -176,7 +176,7 @@ reservation must reread the target. Manual MCP/CLI flows then call
 the claim uses the stored reservation purpose, and clients do not provide a new
 claim purpose. Native edit hooks and sandbox `write-targets` authorization can
 lazy-claim the claimable reservation when the write is retried. Claiming creates
-active reservation scope and the active same-session claim. The default
+active reservation scope and the active same-reservation claim. The default
 claimable reservation TTL is 120 seconds. If a claimable reservation expires
 without being claimed, the server may promote the next eligible FIFO waiter.
 
@@ -374,7 +374,7 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 - observe supported tool results
 - update files touched, phase, test results, and last result
-- release same-session repo-write claims after completed native edit and
+- release same-reservation repo-write claims after completed native edit and
   `write-targets` transactions
 - refresh heartbeat timestamps and claim timestamps only for remaining active
   claims still covered by active reservation
@@ -491,7 +491,7 @@ namespaced runtime tool names -> classify by leaf
   tools; functions.read / functions.search as native read/search)
 native read/search/diff tools -> preferred path for ordinary read work
 native edit tools with hook-visible targets -> enforce by inspecting targets
-  after task-level reservation covers the target and a same-session claim; release the claim after the
+  after task-level reservation covers the target and a same-reservation claim; release the claim after the
   completed write transaction
 Codex Bash read-only inspection that genuinely needs a shell -> require a strict
   trusted wrapper:
@@ -515,7 +515,7 @@ ordinary read work,
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
 --command <cmd>` for Codex shell-based read-only inspection,
 `<absolute-stateful-binary> sandbox run --fs write-targets --write-target <file> ... --command <cmd>`
-for Codex command-shaped repo writes after reservation and same-session claim,
+for Codex command-shaped repo writes after reservation and same-reservation claim,
 OMP built-in Bash with strict trusted `stateful sandbox run ...` commands for
 sandbox runs and repo-external work. External write/create/write-dir,
 socket, or signal scope asks for a scoped OMP UI grant by default;
@@ -532,7 +532,7 @@ authorize `rg`, `git diff`, test runners, stateful operational commands, or any
 other Bash command. Test commands should run through the trusted
 `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
 --command <cmd>` wrapper. Repo writes require task-level reservation covering
-the target plus a matching same-session claim and must use native edit tools or
+the target plus a matching same-reservation claim and must use native edit tools or
 `--fs write-targets` with explicit targets.
 
 Minimum sandboxed test shape:
@@ -544,7 +544,7 @@ stateful sandbox run --fs build --network enabled --write-dir test-run --command
 The build profile writes disposable artifacts under
 `/tmp/stateful/<session>/<scratch-purpose>/`. Source-tree edits use native edit tools
 with hook-visible targets, such as Codex `apply_patch` or Edit, after exact
-reservation declaration and a successful same-session file claim; the completed write
+reservation declaration and a successful same-reservation file claim; the completed write
 transaction releases the authorizing claim. Command-shaped source writes must
 use exact `--write-target <file>` or `--create-target <file>` entries.
 
@@ -902,7 +902,7 @@ fail because no active task reservation remains.
 
 The shipped hook path records target existence and content hash when an exact
 file claim is acquired with `root`, denies hook-originated native file writes
-when that file changes before authorization, and releases the same-session claim
+when that file changes before authorization, and releases the same-reservation claim
 after a completed native edit or `write-targets` transaction. This is a
 per-claim freshness check, not a filesystem watcher or IDE human-save observer.
 

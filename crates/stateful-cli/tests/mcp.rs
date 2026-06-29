@@ -399,7 +399,7 @@ fn mcp_stale_file_write_call_returns_removed_guidance() {
                 .as_str()
                 .unwrap_or_default()
                 .contains(
-                    "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after task-level reservation covers the target and a successful same-session file claim"
+                    "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after task-level reservation covers the target and a successful same-reservation file claim"
                 ),
             "{tool_name}"
         );

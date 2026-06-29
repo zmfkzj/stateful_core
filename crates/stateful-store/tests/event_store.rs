@@ -1345,6 +1345,62 @@ fn acquired_claim_persists_reservation_id() {
 }
 
 #[test]
+fn acquired_claim_cannot_reuse_stale_claimed_wait_id_after_scope_expires() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-stale-claimed-wait-{unique}"
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let wait = store
+        .enqueue_waiter(
+            "s1",
+            "w1",
+            "src/auth.ts",
+            "write_file",
+            "Queue auth update.",
+            Some("s0"),
+        )
+        .expect("waiter should enqueue");
+    store
+        .promote_next_waiter("w1", "src/auth.ts")
+        .expect("waiter should promote");
+    store
+        .claim_reservation_with_intent_and_lease(
+            &wait.wait_id,
+            "s1",
+            "w1",
+            Event::reservation_declared("s1", "w1", "Claim auth update.", ["src/auth.ts"]),
+            "src/auth.ts",
+            None,
+        )
+        .expect("reservation should claim");
+    drop(store);
+
+    let conn = Connection::open(&db_path).expect("db should reopen");
+    conn.execute("UPDATE claims SET expires_at = '1970-01-01T00:00:00Z'", [])
+        .expect("claim should be made stale");
+    conn.execute(
+        "UPDATE reservations SET expires_at = '1970-01-01T00:00:00Z'",
+        [],
+    )
+    .expect("reservation should be made stale");
+    drop(conn);
+
+    let store = Store::open(&db_path).expect("file store should reopen");
+    let error = store
+        .acquire_claim_for_reservation(&wait.wait_id, "s1", "w1", "src/auth.ts")
+        .expect_err("expired claimed wait id should not authorize a fresh claim");
+    assert!(matches!(error, StoreError::MissingReservation));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn acquire_claim_rejects_direct_tmp_resource_even_with_matching_reservation() {
     for path in ["tmp", "tmp/"] {
         let store = Store::open_in_memory().expect("in-memory store should open");

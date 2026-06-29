@@ -645,7 +645,7 @@ impl Store {
                  WHERE wait_id = ?1
                     AND session_id = ?2
                     AND workspace_id = ?3
-                    AND status IN ('reserved', 'claimed')",
+                    AND status = 'reserved'",
                 params![reservation_id, session_id, workspace_id],
                 |row| {
                     Ok((
@@ -3049,7 +3049,9 @@ impl Store {
             params![wait_id],
         )?;
 
-        self.append_inner(event)?;
+        let mut event = event.clone();
+        event.event_id = wait_id.to_string();
+        self.append_inner(&event)?;
         self.acquire_claim_with_observation_and_event_inner(
             Some(wait_id),
             session_id,
@@ -3386,7 +3388,7 @@ impl Store {
                      FROM wait_queue
                      WHERE wait_id = ?1
                         AND workspace_id = ?2
-                        AND status IN ('reserved', 'claimed')
+                       AND status = 'reserved'
                      ORDER BY rowid DESC
                      LIMIT 1",
                     params![reservation_id, workspace_id],

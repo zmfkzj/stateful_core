@@ -1197,7 +1197,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 fn stateful_command_policy_reminder() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- Use `state_context_render` only for planning/manual inspection when active coordination may affect the plan; if you already inspected this turn for the same resource, reuse that result.\n- Before using Bash or eval tools, use the `stateful-command-policy` skill.\n- Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands.\n- Use `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as the read-only shell fallback when native tools are unavailable or insufficient.\n- Use `{binary} sandbox process find <selector>` for structured process lookup instead of raw `ps` or `pgrep`.\n- Use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>` only after task-level reservation covers the target and the same-session file claim is active.\n- Use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` for builds/tests with disposable artifacts.\n- Use `{binary} sandbox run --fs git --network disabled --command 'git <args>'` for local git operations; enable network only for remote git operations.\n- Use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` for GitHub PR inspection or creation.",
+        "Stateful command policy reminder:\n- Use `state_context_render` only for planning/manual inspection when active coordination may affect the plan; if you already inspected this turn for the same resource, reuse that result.\n- Before using Bash or eval tools, use the `stateful-command-policy` skill.\n- Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands.\n- Use `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as the read-only shell fallback when native tools are unavailable or insufficient.\n- Use `{binary} sandbox process find <selector>` for structured process lookup instead of raw `ps` or `pgrep`.\n- Use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>` only after task-level reservation covers the target and the same-reservation file claim is active.\n- Use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` for builds/tests with disposable artifacts.\n- Use `{binary} sandbox run --fs git --network disabled --command 'git <args>'` for local git operations; enable network only for remote git operations.\n- Use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` for GitHub PR inspection or creation.",
     )
 }
 
@@ -1803,7 +1803,7 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 fn bash_policy_guidance() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Use the `stateful-command-policy` skill before Bash or eval tools; use `state_context_render` only for planning/manual inspection when active coordination may affect the plan. Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands. Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first and `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as fallback. For structured process lookup, use `{binary} sandbox process find <selector>` in Codex or built-in Bash with `{binary} sandbox process find <selector>` in OMP instead of raw `ps` or `pgrep`. For command-shaped writes, ensure task-level reservation covers the target, acquire the same-session claim, then use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>`. For builds/tests, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`. For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; enable network only for remote git operations. For GitHub PRs, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`.",
+        "Use the `stateful-command-policy` skill before Bash or eval tools; use `state_context_render` only for planning/manual inspection when active coordination may affect the plan. Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands. Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first and `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as fallback. For structured process lookup, use `{binary} sandbox process find <selector>` in Codex or built-in Bash with `{binary} sandbox process find <selector>` in OMP instead of raw `ps` or `pgrep`. For command-shaped writes, ensure task-level reservation covers the target, acquire the same-reservation claim, then use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>`. For builds/tests, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`. For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; enable network only for remote git operations. For GitHub PRs, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`.",
     )
 }
 
@@ -2498,7 +2498,13 @@ fn authorization_unavailable_reason(error: &dyn std::fmt::Display) -> String {
 }
 
 fn authorization_denial_reason(decision: AuthorizeDecision) -> String {
+    let reservation_id = decision.reservation_id();
     let mut reason = decision.required_next_action.unwrap_or(decision.message);
+    if let Some(reservation_id) = reservation_id {
+        if !reason.contains(&reservation_id) {
+            reason.push_str(&format!(" reservation_id {reservation_id}."));
+        }
+    }
     let Some(wait) = decision.wait else {
         return reason;
     };
@@ -2966,17 +2972,39 @@ struct AuthorizeDecision {
     required_next_action: Option<String>,
     #[serde(default)]
     wait: Option<AuthorizeWait>,
+    #[serde(default)]
+    reservation: Option<AuthorizeReservation>,
+}
+
+impl AuthorizeDecision {
+    fn reservation_id(&self) -> Option<String> {
+        self.wait
+            .as_ref()
+            .and_then(|wait| wait.reservation_id.clone())
+            .or_else(|| {
+                self.reservation
+                    .as_ref()
+                    .map(|reservation| reservation.reservation_id.clone())
+            })
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct AuthorizeWait {
     wait_id: String,
     #[serde(default)]
+    reservation_id: Option<String>,
+    #[serde(default)]
     path: Option<String>,
     #[serde(default)]
     queue_position: Option<u64>,
     #[serde(default)]
     blocking_session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthorizeReservation {
+    reservation_id: String,
 }
 
 #[derive(Debug, Deserialize)]

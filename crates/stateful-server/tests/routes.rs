@@ -2394,6 +2394,58 @@ async fn authorize_lazily_claims_reserved_intent_and_lease() {
 }
 
 #[tokio::test]
+async fn authorize_lazily_claims_supplied_reserved_reservation_id() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let request = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/reservation/request",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "request_id": "request-auth-with-id",
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "purpose": "Reserve auth changes before claiming."
+            }),
+        ))
+        .await
+        .expect("reservation request should complete");
+    assert_eq!(request.status(), StatusCode::OK);
+    let json = response_json(request, 2048).await;
+    assert_eq!(json["request_state"], "reserved");
+    let wait_id = json["reservation"]["wait_id"]
+        .as_str()
+        .expect("reserved request should include wait_id")
+        .to_string();
+
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts",
+            "reservation_id": wait_id.clone()
+        }),
+    );
+    body["source"]["kind"] = serde_json::json!("hook");
+
+    let authorize = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(authorize.status(), StatusCode::OK);
+
+    let json = response_json(authorize, 2048).await;
+    assert_eq!(json["decision"], "allow", "{json}");
+    assert_eq!(json["reason_code"], "authorized");
+    assert_eq!(json["reservation"]["wait_id"], wait_id);
+    assert_eq!(json["reservation"]["status"], "claimed");
+}
+
+#[tokio::test]
 async fn queued_conflict_reserves_first_waiter_after_lease_release() {
     let store = Store::open_in_memory().expect("store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));

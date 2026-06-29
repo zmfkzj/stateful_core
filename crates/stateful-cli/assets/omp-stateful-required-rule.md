@@ -12,7 +12,7 @@ Before any of these actions, read and follow `skill://stateful-command-policy`:
 
 - running shell, eval, build, test, git, GitHub PR, benchmark, generator, formatter, or repo-external commands;
 - creating, editing, deleting, moving, renaming, or overwriting repository files;
-- responding to `missing_reservation`, `missing_claim`, `claim_conflict`, same-session claim denial, or any Stateful hook denial;
+- responding to `missing_reservation`, `missing_claim`, `claim_conflict`, same-reservation claim denial, or any Stateful hook denial;
 - authorizing OMP yolo/write approval, external sandbox approval, or subagent write recovery.
 
 ## Non-negotiable defaults

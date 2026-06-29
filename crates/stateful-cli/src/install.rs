@@ -1819,6 +1819,11 @@ function extractWaitId(reason) {{
   return match ? match[1] : "";
 }}
 
+function extractReservationId(reason) {{
+  const match = String(reason || "").match(/reservation_id[: ]+([A-Za-z0-9_-]+)/);
+  return match ? match[1] : "";
+}}
+
 function structuredLazyEditOperationId(decision) {{
   return decision?.wait?.wait_id
     || decision?.reservation?.wait_id
@@ -1836,7 +1841,10 @@ function structuredLazyWriteOperationId(decision) {{
 }}
 
 function structuredLazyReservationId(event, decision) {{
-  return reservationId(event, decision) || "";
+  return reservationId(event, decision)
+    || extractReservationId(decision?.reason)
+    || extractReservationId(decision?.message)
+    || "";
 }}
 
 function nextLazyEditOperationId() {{

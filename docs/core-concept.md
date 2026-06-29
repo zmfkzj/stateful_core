@@ -129,7 +129,7 @@ before turn stops       -> require final status
 
 For v1, supported write actions are blocked unless the session has an active
 task reservation whose file or directory set covers the target, plus a fresh
-same-session claim on the exact resource being written. Abstract task, test,
+same-reservation claim on the exact resource being written. Abstract task, test,
 port, or migration resources can provide context but do not permit writes by
 themselves. Codex lifecycle hooks and the OMP extension provide the enforcement
 surface. This is a coordination guardrail, not a complete sandbox or security
@@ -138,7 +138,7 @@ boundary.
 V1 only authorizes writes through tool paths with reliable target extraction.
 Repo file edits use hook-visible native edit tools such as Codex `apply_patch`,
 `Edit`, and `Write`, or OMP `edit` and `write`, after task-level reservation and
-a successful same-session file claim; the claim is released after the completed
+a successful same-reservation file claim; the claim is released after the completed
 write transaction. Bash command text alone is never a repo-internal
 authorization source. Runtime tool names are classified by their leaf segment,
 so `functions.bash` follows Bash rules, `functions.python` follows Python
@@ -168,7 +168,7 @@ in OMP, run that command through built-in Bash after Stateful preflight. Process
 inspection uses `stateful sandbox process find <selector>`; in OMP, run that
 command through built-in Bash, not a generated process tool. Command-shaped repo
 writes must use `stateful sandbox run --fs write-targets` with explicit
-repo-relative target flags after reservation and same-session claim; in OMP, use
+repo-relative target flags after reservation and same-reservation claim; in OMP, use
 built-in Bash with the same trusted command. Repo-external operations use
 `stateful sandbox run --fs external` with purpose and command; external writes
 must declare write/create/dir scope and ask for a scoped OMP UI grant by default

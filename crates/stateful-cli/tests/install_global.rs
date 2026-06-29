@@ -279,6 +279,9 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("reservation or claim is ready"));
     assert!(extension.contains("structuredLazyEditOperationId(decision)"));
     assert!(extension.contains("structuredLazyWriteOperationId(decision)"));
+    assert!(extension.contains("function extractReservationId(reason)"));
+    assert!(extension.contains("extractReservationId(decision?.reason)"));
+    assert!(extension.contains("extractReservationId(decision?.message)"));
     assert!(extension.contains("Queued lazy write operation_id"));
     assert!(extension.contains("!target.includes(\":\")"));
     assert!(extension.contains("validateOmpLinePatchBases"));
