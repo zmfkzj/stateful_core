@@ -50,6 +50,17 @@ from codex_pair_agent import (  # noqa: E402
 OFFICIAL_BENCHMARK_PROTOCOL = "denovo_swe_single_rollout"
 RESUME_POLICY_CONTEXT_OR_TOKEN_ONLY = "context_or_token_failure_only"
 DEFAULT_SUBAGENT_MIN_COUNT = 3
+CODEX_EMPTY_STOP_EXIT_CODE = 2
+
+
+def cli_runtime_failure(returncode: int, cli_runtime: str) -> tuple[str, str]:
+    if returncode == CODEX_EMPTY_STOP_EXIT_CODE:
+        return (
+            f"{cli_runtime}-empty-stop",
+            f"{cli_runtime} returned an empty stop after retry cap",
+        )
+    return (f"{cli_runtime}-error", f"{cli_runtime} exited {returncode}")
+
 DEFAULT_MIN_FREE_DISK_GB = 20.0
 BYTES_PER_GIB = 1024**3
 DEFAULT_OMP_AGENT_DOCKER_STATEFUL_BINARY = "/usr/local/bin/stateful"
@@ -2642,12 +2653,13 @@ async def run_one_instance_async(
             finish_command_record(orchestration_trace)
             cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
             stateful_repo_cleanup = None
+            finish_reason, error = cli_runtime_failure(returncode, args.cli_runtime)
             return InstanceResult(
                 inst.id,
                 False,
                 None,
-                f"{args.cli_runtime}-error",
-                f"{args.cli_runtime} exited {returncode}",
+                finish_reason,
+                error,
                 None,
                 subagent_used=subagent_usage["subagent_used"],
                 subagent_usage=subagent_usage,

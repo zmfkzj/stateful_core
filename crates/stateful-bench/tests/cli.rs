@@ -5130,6 +5130,152 @@ print(json.dumps({{
 }
 
 #[test]
+fn codex_pair_agent_detects_empty_successful_stop() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("codex_pair_agent_empty_stop_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+empty = '{{"type":"message","role":"assistant","content":[]}}\n{{"type":"turn.completed","usage":{{}}}}\n'
+payload_empty = '{{"type":"response.completed","payload":{{"role":"assistant","content":[]}}}}\n'
+non_empty = '{{"type":"message","role":"assistant","content":[{{"type":"text","text":"done"}}]}}\n'
+print(json.dumps({{
+    "empty": module.codex_output_is_empty_stop(empty, ""),
+    "payload_empty": module.codex_output_is_empty_stop(payload_empty, ""),
+    "non_empty": module.codex_output_is_empty_stop(non_empty, ""),
+}}, sort_keys=True))
+"#,
+        agent_path = codex_pair_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["empty"], true);
+    assert_eq!(output["payload_empty"], true);
+    assert_eq!(output["non_empty"], false);
+}
+
+#[test]
+fn codex_pair_agent_retries_empty_stop_once() {
+    let script = format!(
+        r#"
+import importlib.util
+import io
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("codex_pair_agent_retry_empty_stop_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+responses = [
+    subprocess.CompletedProcess(["codex"], 0, '{{"type":"session_meta","payload":{{"id":"s1"}}}}\n{{"type":"message","role":"assistant","content":[]}}\n{{"type":"turn.completed","usage":{{}}}}\n', ''),
+    subprocess.CompletedProcess(["codex"], 0, '{{"type":"message","role":"assistant","content":[{{"type":"text","text":"done"}}]}}\n', ''),
+]
+prompts = []
+
+def runner(command, input, text, cwd, check, env, stdout, stderr):
+    prompts.append(input)
+    return responses.pop(0)
+
+captured_stdout = io.StringIO()
+original_stdout = sys.stdout
+sys.stdout = captured_stdout
+try:
+    code = module.run_codex_with_resume(["codex", "exec", "-"], "original", Path("."), {{}}, 1, runner=runner)
+finally:
+    sys.stdout = original_stdout
+
+print(json.dumps({{
+    "code": code,
+    "attempts": len(prompts),
+    "retry_prompt": prompts[1] if len(prompts) > 1 else "",
+    "stdout": captured_stdout.getvalue(),
+}}, sort_keys=True))
+"#,
+        agent_path = codex_pair_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["code"], 0);
+    assert_eq!(output["attempts"], 2);
+    assert!(
+        output["retry_prompt"]
+            .as_str()
+            .expect("retry prompt should be text")
+            .contains("Previous response was empty")
+    );
+    assert!(
+        !output["stdout"]
+            .as_str()
+            .expect("stdout should be text")
+            .contains("\"content\":[]")
+    );
+}
+
+#[test]
+fn codex_pair_agent_returns_empty_stop_code_after_retry_cap() {
+    let script = format!(
+        r#"
+import importlib.util
+import io
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("codex_pair_agent_empty_stop_cap_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+responses = [
+    subprocess.CompletedProcess(["codex"], 0, '{{"type":"session_meta","payload":{{"id":"s1"}}}}\n{{"type":"message","role":"assistant","content":[]}}\n{{"type":"turn.completed","usage":{{}}}}\n', ''),
+    subprocess.CompletedProcess(["codex"], 0, '{{"type":"message","role":"assistant","content":[]}}\n{{"type":"turn.completed","usage":{{}}}}\n', ''),
+    subprocess.CompletedProcess(["codex"], 0, '{{"type":"message","role":"assistant","content":[]}}\n{{"type":"turn.completed","usage":{{}}}}\n', ''),
+]
+prompts = []
+
+def runner(command, input, text, cwd, check, env, stdout, stderr):
+    prompts.append(input)
+    return responses.pop(0)
+
+captured_stdout = io.StringIO()
+original_stdout = sys.stdout
+sys.stdout = captured_stdout
+try:
+    code = module.run_codex_with_resume(["codex", "exec", "-"], "original", Path("."), {{}}, 2, runner=runner)
+finally:
+    sys.stdout = original_stdout
+print(json.dumps({{
+    "attempts": len(prompts),
+    "code": code,
+    "stdout": captured_stdout.getvalue(),
+}}, sort_keys=True))
+"#,
+        agent_path = codex_pair_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["code"], 2);
+    assert_eq!(output["attempts"], 2);
+    assert!(
+        !output["stdout"]
+            .as_str()
+            .expect("stdout should be text")
+            .contains("\"content\":[]")
+    );
+}
+
+#[test]
 fn codex_pair_agent_seeds_and_cleans_nested_auth() {
     let temp_dir = target_temp_dir("stateful-bench-codex-pair-agent-auth");
     let script = format!(
@@ -5599,6 +5745,46 @@ print(json.dumps({{"code": code}}))
     let output = run_python_json(&script);
 
     assert_eq!(output["code"], 403);
+}
+
+#[test]
+fn denovo_codex_agent_labels_empty_stop_after_retry_cap() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_empty_stop_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+empty = module.cli_runtime_failure(module.CODEX_EMPTY_STOP_EXIT_CODE, "codex")
+omp_empty = module.cli_runtime_failure(module.CODEX_EMPTY_STOP_EXIT_CODE, "omp")
+error = module.cli_runtime_failure(99, "omp")
+print(json.dumps({{
+    "empty": empty,
+    "omp_empty": omp_empty,
+    "error": error,
+}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["empty"][0], "codex-empty-stop");
+    assert_eq!(
+        output["empty"][1],
+        "codex returned an empty stop after retry cap"
+    );
+    assert_eq!(output["omp_empty"][0], "omp-empty-stop");
+    assert_eq!(
+        output["omp_empty"][1],
+        "omp returned an empty stop after retry cap"
+    );
+    assert_eq!(output["error"][0], "omp-error");
+    assert_eq!(output["error"][1], "omp exited 99");
 }
 
 fn codex_pair_agent_path_json() -> String {

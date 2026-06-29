@@ -18,6 +18,7 @@ from pathlib import Path
 DEFAULT_BENCHMARK_MODEL = "gpt-5.4-mini"
 DEFAULT_BENCHMARK_REASONING_EFFORT = "low"
 DEFAULT_NATIVE_SUBAGENT_MIN_COUNT = 3
+EMPTY_STOP_RETRY_CAP = 1
 STATEFUL_INTEGRATION_FULL = "hooks-mcp-skill"
 STATEFUL_INTEGRATION_HOOKS_ONLY = "hooks-only"
 STATEFUL_INTEGRATION_NONE = "none"
@@ -52,6 +53,10 @@ Continue the same benchmark task from the current workspace state. Re-read the
 task file and relevant source files if needed, then finish the task while
 preserving the benchmark constraints already given in this session.
 """
+EMPTY_STOP_PROMPT = """\
+Previous response was empty. Continue with the requested code change. Do not summarize.
+"""
+
 
 
 def native_subagent_prompt_instruction(
@@ -98,12 +103,14 @@ class CodexRunResult:
         stderr: str,
         session_id: str | None,
         resumeable_token_failure: bool,
+        empty_stop: bool,
     ) -> None:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
         self.session_id = session_id
         self.resumeable_token_failure = resumeable_token_failure
+        self.empty_stop = empty_stop
 
 
 def toml_string(value: str) -> str:
@@ -463,6 +470,7 @@ def run_codex_once(
         stderr=stderr,
         session_id=codex_session_id_from_output(stdout),
         resumeable_token_failure=codex_output_has_resumeable_token_failure(stdout, stderr),
+        empty_stop=completed.returncode == 0 and codex_output_is_empty_stop(stdout, stderr),
     )
 
 
@@ -477,7 +485,8 @@ def run_codex_with_resume(
 ) -> int:
     pending_resume_failures: list[CodexRunResult] = []
     session_id: str | None = None
-    attempts = 0
+    resume_attempts = 0
+    empty_stop_attempts = 0
     current_command = command
     current_prompt = prompt
 
@@ -495,8 +504,8 @@ def run_codex_with_resume(
             result_observer(result)
 
         if result.resumeable_token_failure:
-            if session_id and attempts < max_resumes:
-                attempts += 1
+            if session_id and resume_attempts < max_resumes:
+                resume_attempts += 1
                 pending_resume_failures.append(result)
                 current_command = codex_resume_command(command, session_id)
                 current_prompt = RESUME_PROMPT
@@ -505,9 +514,18 @@ def run_codex_with_resume(
             emit_codex_result(result, suppress_resumeable_failures=False)
             return result.returncode if result.returncode != 0 else 1
 
+        if result.empty_stop:
+            if session_id and empty_stop_attempts < EMPTY_STOP_RETRY_CAP:
+                empty_stop_attempts += 1
+                current_command = codex_resume_command(command, session_id)
+                current_prompt = EMPTY_STOP_PROMPT
+                continue
+            emit_codex_results(pending_resume_failures, suppress_resumeable_failures=True)
+            return 2
+
         if result.returncode == 0:
             emit_codex_results(pending_resume_failures, suppress_resumeable_failures=True)
-            for attempt in range(1, attempts + 1):
+            for attempt in range(1, resume_attempts + 1):
                 print_resume_event(session_id=session_id, attempt=attempt)
             emit_codex_result(result, suppress_resumeable_failures=False)
             return 0
@@ -579,6 +597,49 @@ def codex_session_id_from_event(event: object) -> str | None:
         if isinstance(session, dict) and isinstance(session.get("id"), str):
             return session["id"]
     return None
+
+
+def codex_output_is_empty_stop(stdout: str, stderr: str) -> bool:
+    if stderr.strip():
+        return False
+    saw_terminal = False
+    saw_assistant = False
+    for event in iter_json_events(stdout):
+        if codex_event_has_meaningful_assistant_content(event):
+            return False
+        event_type = str(event.get("type", "")).lower() if isinstance(event, dict) else ""
+        if event_type in {"turn.completed", "turn.done", "response.completed"} or event_type.endswith(
+            ".completed"
+        ):
+            saw_terminal = True
+        if isinstance(event, dict):
+            payload = event.get("payload")
+            if str(event.get("role", "")).lower() == "assistant" or (
+                isinstance(payload, dict) and str(payload.get("role", "")).lower() == "assistant"
+            ):
+                saw_assistant = True
+    return saw_terminal and saw_assistant
+
+
+def codex_event_has_meaningful_assistant_content(event: object) -> bool:
+    if not isinstance(event, dict):
+        return False
+    candidates = []
+    if str(event.get("role", "")).lower() == "assistant":
+        candidates.append(event.get("content"))
+    payload = event.get("payload")
+    if isinstance(payload, dict) and str(payload.get("role", "")).lower() == "assistant":
+        candidates.append(payload.get("content"))
+    for content in candidates:
+        if isinstance(content, str) and content.strip():
+            return True
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, str) and item.strip():
+                    return True
+                if isinstance(item, dict) and str(item.get("text", "")).strip():
+                    return True
+    return False
 
 
 def codex_output_has_resumeable_token_failure(stdout: str, stderr: str) -> bool:
