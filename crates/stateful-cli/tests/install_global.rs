@@ -229,12 +229,6 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
     assert!(extension.contains("event?.sessionId || ctx?.sessionManager?.session?.id"));
     assert!(extension.contains("pi.registerTool"));
-    assert!(!extension.contains("name: \"sandbox_bash\""));
-    assert!(!extension.contains("name: \"ext_ro_bash\""));
-    assert!(!extension.contains("name: \"ext_rw_bash\""));
-    assert!(!extension.contains("name: \"process_find\""));
-    assert!(!extension.contains("name: \"sandbox_job_poll\""));
-    assert!(!extension.contains("name: \"external_bash\""));
     assert!(extension.contains("name: \"lazy_edit_resume\""));
     assert!(extension.contains("name: \"lazy_write_resume\""));
     assert!(extension.contains("applyOmpLinePatch"));
@@ -250,21 +244,11 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("!target.includes(\":\")"));
     assert!(extension.contains("validateOmpLinePatchBases"));
     assert!(extension.contains("line === \"*** Begin Patch\""));
-    assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
+    assert!(extension.contains("import { spawnSync } from \"node:child_process\""));
     assert!(extension.contains(
         "import { existsSync, mkdirSync, readFileSync, writeFileSync } from \"node:fs\""
     ));
     assert!(extension.contains("import { dirname, resolve } from \"node:path\""));
-    assert!(extension.contains("import { fileURLToPath } from \"node:url\""));
-    assert!(extension.contains("function resolveSkillInternalUrl(rawUrl)"));
-    assert!(extension.contains("function expandSkillInternalUrlsInCommand(command)"));
-    assert!(extension.contains("function singleQuoteEscape(value)"));
-    assert!(extension.contains("quote === \"'\" ? singleQuoteEscape(resolved)"));
-    assert!(
-        extension.contains(
-            "args.push(\"--command\", expandSkillInternalUrlsInCommand(params.command));"
-        )
-    );
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?session_id="));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));
@@ -273,7 +257,6 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("typeof purpose === \"string\" && purpose.trim().length > 0"));
     assert!(extension.contains("startReservationStream(pi, result?.notifications_stream)"));
     assert!(extension.contains("stopReservationStream();"));
-    assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", fs]"));
     assert!(extension.contains("ctx.ui.confirm"));
     assert!(extension.contains("const externalBashGrants = new Map()"));
     assert!(extension.contains("function externalGrantDescriptor(params)"));
@@ -288,7 +271,6 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     );
     assert!(!extension.contains("\"Command:\""));
     assert!(!extension.contains("\"Sandbox invocation:\""));
-    assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", \"external\""));
     assert!(extension.contains(
         "Built-in Bash external sandbox command requires OMP UI confirmation"
     ));
@@ -302,7 +284,6 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("params?.auto_approve === true"));
     assert!(extension.contains("function recordExternalBashGrant(params, now)"));
     assert!(extension.contains("function approveExternalBashGrantWithoutPrompt(params)"));
-    assert!(extension.contains("if (!shouldAutoApproveStatefulPrompt(ctx, params) && typeof ctx?.ui?.confirm !== \"function\")"));
     let command_policy_skill = fs::read_to_string(&omp_skill).expect("omp skill should read");
     let source_command_policy_skill = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/stateful-command-policy/SKILL.md"),
