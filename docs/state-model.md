@@ -53,9 +53,10 @@ session
 
 For v1, Codex hooks must treat the current Codex hook `thread_id` as
 authoritative when present, falling back to `session_id` for older payloads. The
-OMP extension must prefer the actual OMP session id from `event.sessionId` or
-`ctx.sessionManager.session.id`, store it in `process.env.STATEFUL_SESSION_ID`,
-and persist current-session files during `stateful hook omp session-start`. MCP
+OMP extension must store `process.env.STATEFUL_SESSION_ID` from explicit OMP
+event/ctx ids (`event.sessionId`, `event.session_id`, session fields), falling
+back to the `ctx.sessionManager.getSessionFile()` header/stem and then
+`getLeafId()` during `stateful hook omp session-start`. MCP
 reservation declaration may omit `session_id`; in that case the adapter uses the
 current session recorded by lifecycle hooks so that MCP-declared reservation and write
 authorization evaluate against the same session.

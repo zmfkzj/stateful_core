@@ -37,11 +37,11 @@ always-apply rule owns model-facing activation, the
 `stateful-command-policy` manual owns detailed procedure, and hooks remain the
 boundary. `stateful enable` opts the
 current repo into enforcement.
-For OMP, the extension prefers the actual OMP runtime session id from
-`event.sessionId` or `ctx.sessionManager.session.id`, stores it in
-`process.env.STATEFUL_SESSION_ID`, and `stateful hook omp session-start`
-persists current-session files so session-aware MCP tools resolve the same
-session.
+For OMP, the extension stores `process.env.STATEFUL_SESSION_ID` from explicit
+event/ctx ids (`event.sessionId`, `event.session_id`, session fields), falling
+back to the `ctx.sessionManager.getSessionFile()` header/stem and then
+`getLeafId()`; `stateful hook omp session-start` persists current-session files
+so session-aware MCP tools resolve the same session.
 
 Hook adapters should invoke the compiled `stateful` binary instead of embedding
 policy or adapter logic in separate scripts. Hook configuration may reference

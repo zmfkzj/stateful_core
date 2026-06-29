@@ -257,11 +257,12 @@ Write/execute paths still require the normal stateful authorization flow.
 ## Hooks And Sessions
 
 `SessionStart` registers the active session and writes the current-session file
-used by CLI and MCP calls. In OMP, `stateful hook omp session-start` prefers the
-actual OMP session id from `event.sessionId` or `ctx.sessionManager.session.id`,
-stores that id in `process.env.STATEFUL_SESSION_ID`, and persists current-session
-files before session-aware MCP tools run. In Codex, `UserPromptSubmit` renders
-current-state context.
+used by CLI and MCP calls. In OMP, `stateful hook omp session-start` stores
+`process.env.STATEFUL_SESSION_ID` from explicit event/ctx ids
+(`event.sessionId`, `event.session_id`, session fields), falling back to the
+`ctx.sessionManager.getSessionFile()` header/stem and then `getLeafId()` before
+session-aware MCP tools run. In Codex,
+`UserPromptSubmit` renders current-state context.
 
 `PreToolUse` authorizes supported tool actions. Server-side authorization records
 an implicit session heartbeat for the checked session. `PostToolUse` records
@@ -426,8 +427,10 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
   capabilities.
 - `STATEFUL_SESSION_ID` selects the session-bound current-session file at
   `.stateful_core/runtime/sessions/<session_id>.json` for MCP tools and other
-  session-bound callers. The OMP extension sets it from `event.sessionId` /
-  `ctx.sessionManager.session.id`; Codex MCP resolution prefers
+  session-bound callers. The OMP extension sets it from explicit event/ctx ids
+  (`event.sessionId`, `event.session_id`, session fields), or from the
+  `ctx.sessionManager.getSessionFile()` header/stem and then `getLeafId()`
+  when those are absent; Codex MCP resolution prefers
   `CODEX_THREAD_ID` when present.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
   authorize Bash. Bash authorization goes through a trusted

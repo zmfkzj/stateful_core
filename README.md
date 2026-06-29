@@ -163,7 +163,9 @@ stateful doctor
 ## Day-To-Day Coordination
 
 In normal `stateful codex` or OMP `stateful` profile use, lifecycle hooks and MCP
-bind the active session. Hook messages tell the agent when an explicit
+bind the active session. In OMP, `session-start` uses explicit event/ctx ids
+(`event.sessionId`, `event.session_id`) or the `ctx.sessionManager` session-file
+header to set it. Hook messages tell the agent when an explicit
 coordination step is needed.
 
 Manual CLI use outside an active agent session can declare scope and inspect the

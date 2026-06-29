@@ -229,7 +229,12 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
     assert!(extension.contains("function detectSessionId(event, ctx)"));
     assert!(extension.contains("event?.sessionId"));
-    assert!(extension.contains("ctx?.sessionManager?.session?.id"));
+    assert!(!extension.contains("ctx?.sessionManager?.session?.id"));
+    assert!(extension.contains("event?.session_id"));
+    assert!(extension.contains("sessionManager?.getSessionFile?.()"));
+    assert!(extension.contains("sessionManager?.getLeafId?.()"));
+    assert!(extension.contains("function sessionIdFromString(value, prefix = \"omp\")"));
+    assert!(extension.contains("function sessionIdFromSessionFile(sessionFile)"));
     assert!(!extension.contains("|| \"omp-session\""));
     assert!(!extension.contains("process.env.STATEFUL_SESSION_ID ||"));
     assert!(extension.contains("pi.registerTool"));
@@ -256,9 +261,13 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("import { spawnSync } from \"node:child_process\""));
     assert!(extension.contains("import { createHash } from \"node:crypto\""));
     assert!(extension.contains(
-        "import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from \"node:fs\""
+        "import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from \"node:fs\""
     ));
-    assert!(extension.contains("import { delimiter, dirname, resolve } from \"node:path\""));
+    assert!(
+        extension.contains(
+            "import { basename, delimiter, dirname, extname, resolve } from \"node:path\""
+        )
+    );
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?session_id="));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));

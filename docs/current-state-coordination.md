@@ -304,12 +304,14 @@ share the Codex lifecycle model: `SessionStart`, `UserPromptSubmit`,
 `PreToolUse`, `PostToolUse`, and `Stop`. The isolated OMP `stateful` profile
 uses OMP extension entry points for `SessionStart`, `PreToolUse`,
 `PostToolUse`, and `Stop`; OMP does not expose `UserPromptSubmit`. OMP
-`session-start` prefers the actual runtime id from `event.sessionId` or
-`ctx.sessionManager.session.id`, stores it in `process.env.STATEFUL_SESSION_ID`,
-and persists the same current-session files used by session-aware CLI and MCP
-callers. With that state in place, `state_session_register` ->
-`state_reservation_declare` -> `state_claim_acquire` resolves the active OMP session
-without a caller-supplied environment override. Plugin packaging is deferred to
+`session-start` stores `STATEFUL_SESSION_ID` from explicit event/ctx ids
+(`event.sessionId`, `event.session_id`, session fields), falling back to the
+`ctx.sessionManager.getSessionFile()` header/stem and then `getLeafId()`, and
+persists the same current-session files used by
+session-aware CLI and MCP callers. With that state in place,
+`state_session_register` -> `state_reservation_declare` ->
+`state_claim_acquire` resolves the active OMP session without a caller-supplied
+environment override. Plugin packaging is deferred to
 team beta for distribution and update UX, while managed hooks remain the
 long-term organization-enforcement path.
 

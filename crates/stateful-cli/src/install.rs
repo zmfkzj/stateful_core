@@ -1437,8 +1437,8 @@ fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Resu
     let contents = format!(
         r#"import {{ spawnSync }} from "node:child_process";
 import {{ createHash }} from "node:crypto";
-import {{ existsSync, mkdirSync, readFileSync, statSync, writeFileSync }} from "node:fs";
-import {{ delimiter, dirname, resolve }} from "node:path";
+import {{ closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync }} from "node:fs";
+import {{ basename, delimiter, dirname, extname, resolve }} from "node:path";
 
 const STATEFUL = {binary_json};
 let verifiedBareStatefulPath = null;
@@ -1529,13 +1529,55 @@ function firstString(...values) {{
   return undefined;
 }}
 
+function sessionIdFromString(value, prefix = "omp") {{
+  if (typeof value !== "string") return undefined;
+  const id = value.trim();
+  if (!id) return undefined;
+  if (/^[A-Za-z0-9_-]+$/.test(id)) return id;
+  return prefix + "-" + createHash("sha256").update(id).digest("hex").slice(0, 32);
+}}
+
+function readFirstLine(path) {{
+  const fd = openSync(path, "r");
+  try {{
+    const buffer = Buffer.alloc(4096);
+    const bytes = readSync(fd, buffer, 0, buffer.length, 0);
+    return buffer.toString("utf8", 0, bytes).split(/\r?\n/, 1)[0];
+  }} finally {{
+    closeSync(fd);
+  }}
+}}
+
+function sessionIdFromSessionFile(sessionFile) {{
+  const path = firstString(sessionFile);
+  if (!path) return undefined;
+  try {{
+    const id = sessionIdFromString(JSON.parse(readFirstLine(path))?.id);
+    if (id) return id;
+  }} catch (_) {{}}
+  return sessionIdFromString(basename(path, extname(path))) || sessionIdFromString(path);
+}}
+
+function sessionIdFromSessionManager(sessionManager) {{
+  return firstString(
+    sessionIdFromSessionFile(sessionManager?.getSessionFile?.()),
+    sessionIdFromString(sessionManager?.getLeafId?.(), "omp-leaf")
+  );
+}}
+
 function detectSessionId(event, ctx) {{
   return firstString(
-    event?.sessionId,
-    event?.session?.id,
-    ctx?.sessionId,
-    ctx?.session?.id,
-    ctx?.sessionManager?.session?.id
+    sessionIdFromString(event?.sessionId),
+    sessionIdFromString(event?.session_id),
+    sessionIdFromString(event?.session?.id),
+    sessionIdFromString(event?.session?.sessionId),
+    sessionIdFromString(event?.session?.session_id),
+    sessionIdFromString(ctx?.sessionId),
+    sessionIdFromString(ctx?.session_id),
+    sessionIdFromString(ctx?.session?.id),
+    sessionIdFromString(ctx?.session?.sessionId),
+    sessionIdFromString(ctx?.session?.session_id),
+    sessionIdFromSessionManager(ctx?.sessionManager)
   );
 }}
 
@@ -2583,8 +2625,32 @@ mod tests {
             .expect("extension should be written");
         let contents = fs::read_to_string(&extension_path).expect("extension should be readable");
 
-        assert!(contents.contains("function emptyToolOutputText"));
-        assert!(contents.contains("return \"No output.\";"));
+        let helper_start = contents
+            .find("function emptyToolOutputText")
+            .expect("empty output helper should be generated");
+        let helper_end = contents[helper_start..]
+            .find("\n\nfunction lazyToolResult")
+            .map(|offset| helper_start + offset)
+            .expect("empty output helper should end before lazyToolResult");
+        let script = format!(
+            "{}\nconsole.log(JSON.stringify([emptyToolOutputText(''), emptyToolOutputText('  '), emptyToolOutputText('kept')]))",
+            &contents[helper_start..helper_end]
+        );
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .expect("node should execute generated extension helper");
+
+        assert!(
+            output.status.success(),
+            "node failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("stdout should be utf8"),
+            "[\"No output.\",\"No output.\",\"kept\"]\n"
+        );
 
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
     }
