@@ -1093,6 +1093,60 @@ print(json.dumps({
 }
 
 #[test]
+fn programbench_omp_adapter_passes_parent_stateful_runtime_to_agent() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import os
+import subprocess
+import types
+
+agent_env = {}
+
+def fake_run(command, **kwargs):
+    if command and command[0] == "omp":
+        env = kwargs.get("env", {})
+        agent_env.update({
+            "stateful_server_url": env.get("STATEFUL_SERVER_URL"),
+            "stateful_server_token": env.get("STATEFUL_SERVER_TOKEN"),
+            "stateful_home": env.get("STATEFUL_HOME"),
+        })
+    return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+
+mod.subprocess.run = fake_run
+os.environ["STATEFUL_SERVER_URL"] = "http://127.0.0.1:43873"
+os.environ["STATEFUL_SERVER_TOKEN"] = "parent-token"
+
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    omp_bin="omp",
+    stateful_binary="/usr/local/bin/stateful",
+    model="gpt-5.4-mini",
+    benchmark_max_turns=123,
+    timeout_seconds=456,
+    stateful=True,
+    subagent=False,
+    subagent_min_count=3,
+)
+mod.run_agent(args, mod.prompt_for_args(args))
+print(json.dumps(agent_env))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("captured OMP env should be JSON");
+
+    assert_eq!(observed["stateful_server_url"], "http://127.0.0.1:43873");
+    assert_eq!(observed["stateful_server_token"], "parent-token");
+    assert!(
+        observed["stateful_home"]
+            .as_str()
+            .expect("stateful home should be set")
+            .contains("programbench-airlock-")
+    );
+}
+
+#[test]
 fn programbench_omp_adapter_seeds_openai_codex_auth_credentials() {
     let output = run_python_adapter(
         &programbench_omp_agent_path(),

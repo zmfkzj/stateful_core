@@ -109,9 +109,20 @@ def seed_omp_auth_credentials(env: dict[str, str]) -> None:
         )
 
 
+
+def inherit_parent_stateful_runtime(target_env: dict[str, str], source_env: dict[str, str]) -> None:
+    server_url = source_env.get("STATEFUL_SERVER_URL")
+    server_token = source_env.get("STATEFUL_SERVER_TOKEN")
+    if server_url and server_token:
+        target_env["STATEFUL_SERVER_URL"] = server_url
+        target_env["STATEFUL_SERVER_TOKEN"] = server_token
+
+
 def run_agent(args, prompt):
     with tempfile.TemporaryDirectory(prefix="programbench-airlock-") as airlock:
         env = airlock_env(airlock)
+        if args.stateful:
+            inherit_parent_stateful_runtime(env, os.environ)
         env["PI_CODING_AGENT_DIR"] = str(Path(airlock) / ".omp" / "profiles" / "stateful" / "agent")
         auth_source_agent = omp_auth_source_agent_dir(os.environ)
         if auth_source_agent:
