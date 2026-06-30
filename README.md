@@ -166,9 +166,13 @@ stateful doctor
 
 In normal `stateful codex` or OMP `stateful` profile use, lifecycle hooks bind
 the active `agent_id` and `workspace_id` for state operations. OMP's supported
-agent-facing path is explicit identity injection by the extension/native tools;
-there is no current-session file repair or environment-variable fallback path
-for agents to maintain. Hook messages tell the agent when an explicit
+agent-facing path is identity injection by the extension/native tools: it uses
+adapter-provided agent/session identity when OMP exposes it. If the active
+agent id cannot be obtained, Stateful actions fail closed instead of inventing a
+process, environment, or current-session-file identity. Codex hooks map Codex's
+hook `session_id` parameter to Stateful `agent_id`. There is no
+environment-variable fallback path for agents to maintain. Hook messages tell
+the agent when an explicit
 coordination step is needed.
 
 Manual CLI use outside an active agent session can declare scope, keep the

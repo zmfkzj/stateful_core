@@ -3051,6 +3051,7 @@ struct PreToolUseInput {
 
 #[derive(Debug, Deserialize)]
 struct RuntimeHookInput {
+    #[serde(alias = "session_id")]
     agent_id: String,
 }
 
@@ -3216,6 +3217,19 @@ mod tests {
         };
 
         assert_eq!(input.stateful_agent_id(), "codex-agent-1");
+    }
+
+    #[test]
+    fn runtime_hook_input_uses_codex_session_id_parameter() {
+        let input: RuntimeHookInput = serde_json::from_value(serde_json::json!({
+            "session_id": "019f1a3f-0e81-7250-8597-24dd8ef18fb4"
+        }))
+        .expect("Codex session_id parameter should deserialize as active agent id");
+
+        assert_eq!(
+            input.stateful_agent_id(),
+            "019f1a3f-0e81-7250-8597-24dd8ef18fb4"
+        );
     }
 
     #[test]

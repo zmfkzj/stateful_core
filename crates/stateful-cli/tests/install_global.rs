@@ -238,13 +238,24 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(!extension.contains("Type.Object"));
     assert!(extension.contains("export default function statefulOmpExtension"));
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
+    assert!(extension.contains("function detectAdapterAgentId(event, ctx)"));
+    assert!(extension.contains("function detectOmpSessionAgentId(event, ctx)"));
     assert!(extension.contains("function detectAgentId(event, ctx)"));
     assert!(extension.contains("event?.agentId"));
     assert!(extension.contains("event?.agent_id"));
     assert!(extension.contains("ctx?.agentId"));
     assert!(extension.contains("ctx?.agent_id"));
+    assert!(extension.contains("event?.sessionId"));
+    assert!(extension.contains("ctx?.runtime?.session?.id"));
+    assert!(!extension.contains("function processAgentId()"));
+    assert!(!extension.contains("omp-pid-"));
     assert!(extension.contains("function agentId(event, ctx)"));
-    assert!(extension.contains("Stateful requires adapter-provided agent_id"));
+    assert!(extension.contains("Stateful requires OMP-provided agent/session identity"));
+    assert!(
+        extension.contains(
+            "if (!activeAgentId) return { block: true, reason: missingAgentIdReason() };"
+        )
+    );
     assert!(extension.contains("function detectWorkspaceId(event, ctx)"));
     assert!(extension.contains("function commandWithActiveSandboxIdentity(words, event, ctx)"));
     assert!(extension.contains("stateful sandbox run --agent-id must match the active agent_id"));

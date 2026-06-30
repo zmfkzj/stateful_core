@@ -54,10 +54,12 @@ agent_id + workspace_id
 
 For v1, agent-facing coordination identity is the active `agent_id` scoped by
 `workspace_id`. Codex hooks and the OMP extension/native tools inject that
-identity into hook and state operations. Agents do not repair current-session
-files, choose session environment variables, or fall back to runtime session
-aliases. Reservation declaration may omit low-level storage identifiers when the
-runtime integration provides the active `agent_id` and `workspace_id`; write
+identity into hook and state operations. The OMP bridge uses adapter-provided
+agent/session identity and fails closed when no active agent id is available.
+Agents do not repair current-session files, choose session environment
+variables, use process ids, or fall back to runtime session aliases.
+Reservation declaration may omit low-level storage identifiers when the runtime
+integration provides the active `agent_id` and `workspace_id`; write
 authorization uses the `reservation_id` attached to that identity.
 
 ## Activity Record

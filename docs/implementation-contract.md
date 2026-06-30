@@ -46,9 +46,12 @@ activation, the `stateful-command-policy` manual owns detailed procedure, and
 hooks remain the boundary. `stateful enable` opts the current repo into
 enforcement.
 For OMP, the extension/native tool bridge injects the active `agent_id` and
-`workspace_id` into hook and state operations. Agent-facing identity does not
-depend on current-session files, session environment variables, or runtime file
-repair.
+`workspace_id` into hook and state operations. The bridge uses OMP-provided
+agent/session identity and fails closed when no active agent id is available.
+Agent-facing identity does not depend on current-session files, session
+environment variables, process ids, or runtime file repair.
+Codex hooks use Codex's hook `session_id` parameter as the Stateful `agent_id`;
+this is a hook payload parameter, not an environment-variable fallback.
 
 Hook adapters should invoke the compiled `stateful` binary instead of embedding
 policy or adapter logic in separate scripts. Hook configuration may reference

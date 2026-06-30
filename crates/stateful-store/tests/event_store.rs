@@ -613,6 +613,22 @@ fn migration_removes_legacy_session_id_columns_after_agent_copy() {
         let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
         conn.execute_batch(
             "
+            CREATE TABLE agents (
+                session_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            INSERT INTO agents (
+                session_id,
+                workspace_id,
+                updated_at
+            ) VALUES (
+                'old-agent',
+                'legacy-workspace',
+                '2026-05-31T00:00:00Z'
+            );
+
             CREATE TABLE events (
                 event_id TEXT PRIMARY KEY,
                 event_type TEXT NOT NULL,
@@ -704,6 +720,14 @@ fn migration_removes_legacy_session_id_columns_after_agent_copy() {
     drop(store);
 
     let conn = rusqlite::Connection::open(&db_path).expect("migrated db should open");
+
+    let agent_columns = query_columns(&conn, "agents");
+    assert!(agent_columns.iter().any(|column| column == "agent_id"));
+    assert!(!agent_columns.iter().any(|column| column == "session_id"));
+    assert_eq!(
+        query_ids(&conn, "SELECT agent_id FROM agents"),
+        vec!["new-agent", "old-agent"]
+    );
 
     let event_columns = query_columns(&conn, "events");
     assert!(event_columns.iter().any(|column| column == "agent_id"));

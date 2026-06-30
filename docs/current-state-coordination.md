@@ -309,9 +309,11 @@ share the Codex lifecycle model: `SessionStart`, `UserPromptSubmit`,
 uses OMP extension entry points for `SessionStart`, `PreToolUse`,
 `PostToolUse`, and `Stop`; OMP does not expose `UserPromptSubmit`. OMP
 `session-start` injects the active `agent_id` and `workspace_id` into Stateful
-hook and tool operations. OMP native tools use that explicit identity; agents do
-not repair or select current-session files, environment variables, or runtime
-session aliases. With that state in place, `state_session_register` ->
+hook and tool operations. The extension uses OMP-provided agent/session identity;
+if OMP does not expose an active agent id, Stateful actions fail closed. OMP
+native tools use that injected identity; agents do not repair or select
+current-session files, environment variables, or runtime session aliases.
+With that state in place, `state_session_register` ->
 `state_reservation_declare` -> `state_claim_acquire` resolves the active OMP
 agent identity without a caller-supplied environment override. OMP native `edit`
 and `write` pre-tool authorization can

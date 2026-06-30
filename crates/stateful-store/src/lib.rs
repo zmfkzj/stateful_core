@@ -4083,10 +4083,16 @@ impl Store {
             .conn
             .prepare(&format!("PRAGMA index_list({quoted_table})"))?;
         let indexes = statement
-            .query_map([], |row| row.get::<_, String>(1))?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(3)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        for index in indexes {
+        for (index, origin) in indexes {
+            if origin != "c" {
+                continue;
+            }
+
             let quoted_index = Self::quote_sql_identifier(&index);
             let mut index_statement = self
                 .conn

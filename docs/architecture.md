@@ -166,9 +166,11 @@ Codex global hooks, repo-local compatibility hooks, and managed Codex hooks
 share the Codex lifecycle model. The isolated OMP `stateful` profile uses OMP
 extension entry points and does not expose `UserPromptSubmit`. Its
 `session-start` hook injects the active `agent_id` and `workspace_id` into
-Stateful hook and tool operations. OMP does not maintain an agent-facing
-current-session file fallback; native tools receive the active identity from the
-extension and state operations scope conflicts by `workspace_id`. Later managed
+Stateful hook and tool operations. The extension uses OMP-provided agent/session
+identity; if OMP does not expose an active agent id, Stateful actions fail
+closed. OMP does not maintain an agent-facing current-session file fallback;
+native tools receive the active identity from the extension and state operations
+scope conflicts by `workspace_id`. Later managed
 Codex hooks should move the same
 thin hook adapters to administrator-controlled paths and configure them from
 `requirements.toml`.

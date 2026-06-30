@@ -744,6 +744,9 @@ fn omp_extension_uses_strict_agent_id_identity() {
     assert!(extension.contains("agent_id"));
     assert!(!extension.contains("process.env.STATEFUL_SESSION_ID"));
     assert!(!extension.contains("sessionIdFromSessionManager"));
+    assert!(!extension.contains("function processAgentId"));
+    assert!(!extension.contains("omp-pid-"));
+    assert!(extension.contains("missingAgentIdReason"));
 
     fs::remove_dir_all(&temp).expect("temp root should remove");
 }

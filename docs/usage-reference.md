@@ -266,9 +266,11 @@ Write/execute paths still require the normal stateful authorization flow.
 
 `SessionStart` registers the active `agent_id` and `workspace_id` for hook and
 state operations. In OMP, the extension/native tool bridge injects those
-identifiers explicitly; agents do not maintain current-session files or select
-coordination identity through environment variables. In Codex, `UserPromptSubmit`
-renders current-state context.
+identifiers explicitly, using OMP-provided agent/session identity and failing
+closed when no active agent id is available; agents do not maintain
+current-session files or select coordination identity through environment
+variables. In Codex, hooks receive Codex's `session_id` parameter and map it to
+Stateful `agent_id`; `UserPromptSubmit` renders current-state context.
 
 `PreToolUse` authorizes supported tool actions. Server-side authorization records
 an implicit agent heartbeat for the checked agent. `PostToolUse` records
@@ -440,10 +442,11 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
 - `STATEFUL_SERVER_URL` and `STATEFUL_SERVER_TOKEN` override runtime discovery
   when both are set. The referenced server must expose the current runtime
   capabilities.
-- Legacy agent-facing identity environment variables were removed. Active Codex and OMP
-  integrations inject `agent_id` and `workspace_id` into hooks and native tools;
-  agents should not set environment variables or repair runtime session files to
-  select coordination identity.
+- Legacy agent-facing identity environment variables were removed. Active Codex and
+  OMP integrations inject `agent_id` and `workspace_id` into hooks and native
+  tools; OMP fails closed when adapter identity is unavailable. Agents should
+  not set environment variables, use process ids, or repair runtime session
+  files to select coordination identity.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
   authorize Bash. Bash authorization goes through a trusted
   `<absolute-stateful-binary> sandbox run` wrapper command.
