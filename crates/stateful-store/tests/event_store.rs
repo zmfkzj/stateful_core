@@ -151,6 +151,73 @@ fn outbox_entry_persists_full_sync_evidence() {
 }
 
 #[test]
+fn migration_adds_sync_status_before_outbox_index_for_legacy_outbox() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-legacy-outbox-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
+        conn.execute_batch(
+            "
+            CREATE TABLE outbox (
+                outbox_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL
+            );
+
+            INSERT INTO outbox (
+                outbox_id,
+                agent_id,
+                sequence
+            ) VALUES (
+                'legacy-outbox-1',
+                'legacy-agent',
+                1
+            );
+            ",
+        )
+        .expect("legacy outbox table should be created");
+    }
+
+    let store = Store::open(&db_path).expect("store should migrate old outbox");
+
+    assert!(
+        store
+            .has_index("idx_outbox_agent_sequence_sync_status")
+            .expect("index check should run")
+    );
+    let legacy = store
+        .outbox_entry("legacy-outbox-1")
+        .expect("legacy outbox entry lookup should succeed")
+        .expect("legacy outbox entry should remain");
+    assert_eq!(legacy.workspace_id, "");
+    assert_eq!(legacy.event_type, "");
+    assert_eq!(legacy.payload, json!({}));
+    assert_eq!(legacy.sync_status, stateful_store::SyncStatus::Pending);
+
+    store
+        .append_outbox(
+            OutboxEntry::synced("outbox-2", "legacy-agent", 2)
+                .with_workspace_id("w1")
+                .with_event_type("HeartbeatObserved")
+                .with_payload(json!({"n":2})),
+        )
+        .expect("outbox append should succeed after migration");
+    assert_eq!(store.outbox_count().expect("outbox count should load"), 2);
+
+    drop(store);
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn reservation_declared_materializes_active_policy_state() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 

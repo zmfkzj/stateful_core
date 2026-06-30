@@ -454,6 +454,13 @@ The shipped schema may retain legacy or target-model index names such as
 `claims.absolute_path`; current v1 authorization and event queries must not rely
 on target-model columns until those columns are populated.
 
+SQLite outbox setup and migration must add or backfill required legacy columns
+before creating the canonical `outbox(agent_id, sequence, sync_status)` index.
+Legacy outbox tables missing `workspace_id`, `event_type`, `payload_json`, or
+`sync_status` must be migrated before startup relies on indexed outbox reads.
+Missing `sync_status` values are backfilled as `TEXT NOT NULL DEFAULT 'pending'`
+so pre-migration rows remain eligible for sync.
+
 `AgentHeartbeat` materialization refreshes the agent timestamp, active claim
 expiry, active activity expiry, and active reservation expiry. Reservation refresh is
 capped at 60 minutes from `declared_at`.

@@ -3887,9 +3887,6 @@ impl Store {
                 payload_json TEXT NOT NULL DEFAULT '{}',
                 sync_status TEXT NOT NULL
             );
-
-            CREATE INDEX IF NOT EXISTS idx_outbox_agent_sequence_sync_status
-                ON outbox(agent_id, sequence, sync_status);
             ",
         )?;
 
@@ -3992,6 +3989,15 @@ impl Store {
             "outbox",
             "payload_json",
             "ALTER TABLE outbox ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}';",
+        )?;
+        self.add_column_if_missing(
+            "outbox",
+            "sync_status",
+            "ALTER TABLE outbox ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'pending';",
+        )?;
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_outbox_agent_sequence_sync_status
+                ON outbox(agent_id, sequence, sync_status);",
         )?;
         self.add_column_if_missing(
             "notifications",
@@ -4240,7 +4246,10 @@ impl Store {
                         | "observed_content_hash"
                 ))
             || (table == "outbox"
-                && matches!(column, "workspace_id" | "event_type" | "payload_json"))
+                && matches!(
+                    column,
+                    "workspace_id" | "event_type" | "payload_json" | "sync_status"
+                ))
             || (table == "wait_queue"
                 && matches!(
                     column,

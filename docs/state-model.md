@@ -679,6 +679,10 @@ last_sync_attempt_at
 sync_error
 ```
 
+`sync_status` defaults to `pending`. Legacy local outbox records without a
+recorded `sync_status` are treated as pending so they remain eligible for
+ordered sync rather than being skipped.
+
 `outbox_id` is the idempotency key for sync. The state server must treat repeated
 sync attempts for the same `outbox_id` as the same event. Pending entries should
 sync in `sequence` order per agent. Failed entries remain available for retry
