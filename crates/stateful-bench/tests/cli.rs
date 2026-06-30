@@ -2434,6 +2434,7 @@ expected_stateful_config_home = expected_stateful_home / ".config"
 expected_stateful_cache_home = expected_stateful_home / ".cache"
 
 
+no_state_config = (no_state_agent / "config.yml").read_text()
 stateful_config = (stateful_agent / "config.yml").read_text()
 
 print(json.dumps({{
@@ -2444,6 +2445,7 @@ print(json.dumps({{
     "no_state_has_codex_run": "STATEFUL_CODEX_RUN_ID" in no_state_env,
     "no_state_has_session": "STATEFUL_SESSION_ID" in no_state_env,
     "no_state_config_exists": (no_state_agent / "config.yml").exists(),
+    "no_state_config": no_state_config,
     "no_state_xdg_config_home": no_state_env["XDG_CONFIG_HOME"],
     "no_state_xdg_cache_home": no_state_env["XDG_CACHE_HOME"],
     "stateful_home": stateful_env["HOME"],
@@ -2533,8 +2535,15 @@ print(json.dumps({{
     );
     assert_eq!(output["explicit_stateful_has_codex_run"], false);
     assert!(output["explicit_stateful_codex_run_id"].is_null());
-    assert_eq!(output["no_state_config_exists"], false);
+    assert_eq!(output["no_state_config_exists"], true);
     assert_eq!(output["stateful_config_exists"], true);
+    let no_state_config = output["no_state_config"]
+        .as_str()
+        .expect("no-state config should be text");
+    assert!(
+        no_state_config.contains("denovo-benchmark-source-guard.js"),
+        "no-state OMP config should contain the benchmark source guard: {no_state_config}"
+    );
     let stateful_config = output["stateful_config"]
         .as_str()
         .expect("stateful config should be text");
