@@ -2342,11 +2342,11 @@ print(json.dumps({{
     let config = output["stateful_config"]
         .as_str()
         .expect("stateful config should be text");
-    assert!(config.contains("[mcp_servers.stateful]"));
-    assert!(config.contains("command = \"/tmp/stateful\""));
-    assert!(config.contains(
-        "env_vars = [\"CODEX_THREAD_ID\", \"STATEFUL_CODEX_RUN_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\", \"STATEFUL_SESSION_ID\"]"
-    ));
+    assert!(!config.contains("[mcp_servers.stateful]"));
+    assert!(!config.contains("args = [\"mcp\", \"serve\"]"));
+    assert!(!config.contains("STATEFUL_SESSION_ID"));
+    assert!(!config.contains("CODEX_THREAD_ID"));
+    assert!(!config.contains("STATEFUL_CODEX_RUN_ID"));
     assert!(config.contains("[[hooks.SessionStart]]"));
     assert_eq!(output["stateful_has_session"], true);
     assert_eq!(output["stateful_has_thread"], false);
@@ -4775,7 +4775,7 @@ print(json.dumps(env, sort_keys=True))
 }
 
 #[test]
-fn codex_pair_agent_writes_stateful_mcp_config_and_skill_for_nested_stateful_run() {
+fn codex_pair_agent_writes_stateful_hooks_and_skill_for_nested_stateful_run() {
     let temp_dir = target_temp_dir("stateful-bench-codex-pair-agent-stateful-config");
     let script = format!(
         r#"
@@ -4848,12 +4848,11 @@ print(json.dumps({{
     assert!(!config.contains("websocket = true"));
     assert!(!config.contains("websocker = true"));
     assert!(!config.contains("stale-stateful"));
-    assert!(config.contains("[mcp_servers.stateful]"));
-    assert!(config.contains("command = \"/tmp/stateful\""));
-    assert!(config.contains("args = [\"mcp\", \"serve\"]"));
-    assert!(config.contains(
-        "env_vars = [\"CODEX_THREAD_ID\", \"STATEFUL_CODEX_RUN_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\", \"STATEFUL_SESSION_ID\"]"
-    ));
+    assert!(!config.contains("[mcp_servers.stateful]"));
+    assert!(!config.contains("args = [\"mcp\", \"serve\"]"));
+    assert!(!config.contains("STATEFUL_SESSION_ID"));
+    assert!(!config.contains("CODEX_THREAD_ID"));
+    assert!(!config.contains("STATEFUL_CODEX_RUN_ID"));
     assert!(config.contains("[[hooks.SessionStart]]"));
     assert!(config.contains("[[hooks.PreToolUse]]"));
     assert!(config.contains("[[hooks.Stop]]"));

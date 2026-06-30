@@ -54,7 +54,7 @@ extension = extension_path.read_text()
 print(json.dumps({
     "config_has_extension": str(extension_path) in config,
     "extension_blocks_env": "STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS" in extension,
-    "extension_uses_stateful": "runStatefulHook" in extension or "mcpServers" in extension,
+    "extension_uses_stateful": "runStatefulHook" in extension,
 }))
 "#,
         )

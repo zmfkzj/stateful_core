@@ -19,7 +19,7 @@ DEFAULT_BENCHMARK_MODEL = "gpt-5.4-mini"
 DEFAULT_BENCHMARK_REASONING_EFFORT = "low"
 DEFAULT_NATIVE_SUBAGENT_MIN_COUNT = 3
 EMPTY_STOP_RETRY_CAP = 1
-STATEFUL_INTEGRATION_FULL = "hooks-mcp-skill"
+STATEFUL_INTEGRATION_FULL = "hooks-skill"
 STATEFUL_INTEGRATION_HOOKS_ONLY = "hooks-only"
 STATEFUL_INTEGRATION_NONE = "none"
 NESTED_CODEX_HOME_ROOT_ENV = "STATEFUL_NESTED_CODEX_HOME_ROOT"
@@ -211,20 +211,9 @@ def stateful_hook_overrides(stateful_binary: str) -> list[str]:
 
 def stateful_codex_config(
     stateful_binary: str,
-    include_mcp: bool = True,
     base_config: str | None = None,
 ) -> str:
     hook_prefix = f"{shlex.quote(stateful_binary)} hook codex"
-    mcp_config = ""
-    if include_mcp:
-        mcp_config = f"""
-[mcp_servers.stateful]
-command = {toml_string(stateful_binary)}
-args = ["mcp", "serve"]
-env_vars = ["CODEX_THREAD_ID", "STATEFUL_CODEX_RUN_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN", "STATEFUL_SESSION_ID"]
-startup_timeout_sec = 20
-default_tools_approval_mode = "approve"
-"""
     base_config_text = ""
     provider_config = codex_provider_config_fragment(base_config)
     if provider_config:
@@ -236,7 +225,6 @@ default_tools_approval_mode = "approve"
 [features]
 hooks = true
 
-{mcp_config}
 [[hooks.SessionStart]]
 matcher = "startup|resume|clear|compact"
 
@@ -312,7 +300,6 @@ def write_text_file(path: Path, contents: str) -> None:
 def write_stateful_codex_integration(
     env: dict[str, str],
     stateful_binary: str,
-    include_mcp: bool = True,
     include_skill: bool = True,
     base_config: str | None = None,
 ) -> None:
@@ -321,7 +308,6 @@ def write_stateful_codex_integration(
         codex_home / "config.toml",
         stateful_codex_config(
             stateful_binary,
-            include_mcp=include_mcp,
             base_config=base_config,
         ),
     )
@@ -867,7 +853,6 @@ def prepare_codex_environment(
         write_stateful_codex_integration(
             env,
             stateful_binary,
-            include_mcp=stateful_integration == STATEFUL_INTEGRATION_FULL,
             include_skill=stateful_integration == STATEFUL_INTEGRATION_FULL,
             base_config=base_config_toml,
         )

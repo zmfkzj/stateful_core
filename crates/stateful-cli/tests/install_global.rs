@@ -141,19 +141,15 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
 
     let first_config = fs::read_to_string(&fixture.codex_config).expect("codex config should read");
     assert!(first_config.contains("# stateful-core-global-install"));
-    assert!(first_config.contains("[mcp_servers.stateful]"));
-    assert!(first_config.contains("command = \"/opt/stateful/bin/stateful\""));
-    assert!(first_config.contains(
-        "env_vars = [\"CODEX_THREAD_ID\", \"STATEFUL_CODEX_RUN_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
-    ));
+    assert!(!first_config.contains("[mcp_servers.stateful]"));
+    assert!(!first_config.contains("args = [\"mcp\", \"serve\"]"));
+    assert!(!first_config.contains("STATEFUL_SESSION_ID"));
+    assert!(!first_config.contains("CODEX_THREAD_ID"));
+    assert!(!first_config.contains("STATEFUL_CODEX_RUN_ID"));
+    assert!(first_config.contains("command = \"'/opt/stateful/bin/stateful' hook codex session-start\""));
     assert!(first_config.contains(
         "approval_policy = { granular = { sandbox_approval = false, rules = true, mcp_elicitations = false, request_permissions = false, skill_approval = false } }"
     ));
-    assert!(first_config.contains("default_tools_approval_mode = \"approve\""));
-    assert!(
-        !first_config.contains("[mcp_servers.stateful.tools.state_current_read]"),
-        "stateful MCP tools should inherit the default approve mode"
-    );
     assert!(
         !first_config.contains(
             "[mcp_servers.stateful.tools.state_claim_acquire]\napproval_mode = \"approve\""
@@ -172,8 +168,8 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     let second_config =
         fs::read_to_string(&fixture.codex_config).expect("codex config should reread");
     assert_eq!(count(&second_config, "# stateful-core-global-install"), 1);
-    assert_eq!(count(&second_config, "[mcp_servers.stateful]"), 1);
-    assert_eq!(count(&second_config, "default_tools_approval_mode"), 1);
+    assert_eq!(count(&second_config, "[mcp_servers.stateful]"), 0);
+    assert_eq!(count(&second_config, "default_tools_approval_mode"), 0);
     assert_eq!(count(&second_config, "approval_policy = { granular"), 1);
     assert!(!second_config.contains("[mcp_servers.stateful.tools."));
     assert_eq!(count(&second_config, "[features]"), 1);
@@ -181,14 +177,13 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
 }
 
 #[test]
-fn install_omp_yes_creates_extension_and_mcp_config() {
+fn install_omp_yes_creates_extension_without_mcp_config() {
     let fixture = TestFixture::new("omp-install");
 
     let plan = apply_omp_install(fixture.omp_options(true)).expect("omp install should apply");
 
     let omp_agent_dir = fixture.omp_agent_dir();
     let omp_config = omp_agent_dir.join("config.yml");
-    let omp_mcp = omp_agent_dir.join("mcp.json");
     let omp_extension = omp_agent_dir
         .join("extensions")
         .join("stateful-omp-extension.js");
@@ -202,7 +197,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
         .join("SKILL.md");
 
     assert!(omp_config.is_file());
-    assert!(omp_mcp.is_file());
+    assert!(!omp_agent_dir.join("mcp.json").exists());
     assert!(omp_extension.is_file());
     assert!(omp_skill.is_file());
     assert!(!omp_dispatching_skill.exists());
@@ -217,11 +212,6 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
         "tools:\n  approvalMode: yolo\nstateful:\n  autoApprove: false\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: true\n",
     ));
     assert!(!config.contains("approval:"));
-    assert!(
-        fs::read_to_string(&omp_mcp)
-            .expect("omp mcp should read")
-            .contains("\"mcpServers\"")
-    );
     let extension = fs::read_to_string(&omp_extension).expect("omp extension should read");
     assert!(extension.contains("STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS"));
     assert!(extension.contains("function benchmarkSourceBlockReason(event)"));
@@ -386,7 +376,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     }
     assert!(!omp_dispatching_skill.exists());
     assert!(!plan.files.contains(&omp_dispatching_skill));
-    assert!(plan.files.iter().any(|path| path.ends_with("mcp.json")));
+    assert!(!plan.files.iter().any(|path| path.ends_with("mcp.json")));
 }
 
 #[test]
@@ -418,7 +408,7 @@ fn install_omp_yes_can_target_user_omp_profile_separate_from_stateful_home() {
         .join("agent");
 
     assert!(omp_agent_dir.join("config.yml").is_file());
-    assert!(omp_agent_dir.join("mcp.json").is_file());
+    assert!(!omp_agent_dir.join("mcp.json").exists());
     assert!(
         omp_agent_dir
             .join("extensions")
@@ -439,7 +429,6 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
 
     let omp_agent_dir = fixture.omp_agent_dir();
     let omp_config = omp_agent_dir.join("config.yml");
-    let omp_mcp = omp_agent_dir.join("mcp.json");
     let omp_extension = omp_agent_dir
         .join("extensions")
         .join("stateful-omp-extension.js");
@@ -455,11 +444,6 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
     assert_eq!(count(&config, "\n  rb: false"), 1);
     assert_eq!(count(&config, "\n  jl: false"), 1);
     assert_eq!(count(&config, "\n  enabled: true"), 1);
-    assert!(
-        fs::read_to_string(&omp_mcp)
-            .expect("omp mcp should read")
-            .contains("\"mcpServers\"")
-    );
     assert!(
         fs::read_to_string(&omp_extension)
             .expect("omp extension should read")
@@ -763,7 +747,7 @@ fn install_yes_preserves_quoted_project_tables() {
     assert!(merged.contains("[projects.\"/workspace/project\"]"));
     assert!(merged.contains("trust_level = \"trusted\""));
     assert!(merged.contains("[tools]\ncustom = true"));
-    assert!(merged.contains("[mcp_servers.stateful]"));
+    assert!(!merged.contains("[mcp_servers.stateful]"));
 }
 
 #[test]
@@ -901,11 +885,10 @@ fn install_yes_shell_quotes_dangerous_binary_path() {
     apply_codex_install(options).expect("install should quote dangerous shell chars");
 
     let config = fs::read_to_string(&fixture.codex_config).expect("codex config should read");
-    assert!(config.contains(r##"command = "/opt/stateful dir/$(touch x)`cmd`/foo'bar/stateful""##));
     assert!(config.contains(
         r##"command = "'/opt/stateful dir/$(touch x)`cmd`/foo'\\''bar/stateful' hook codex pre-tool-use""##
     ));
-    assert_eq!(count(&config, "[mcp_servers.stateful]"), 1);
+    assert_eq!(count(&config, "[mcp_servers.stateful]"), 0);
 }
 
 #[test]

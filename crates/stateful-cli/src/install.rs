@@ -12,7 +12,6 @@ use std::{
 };
 
 use anyhow::Context;
-use serde_json::json;
 
 use crate::{GlobalPaths, RepoRegistry};
 
@@ -190,7 +189,6 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
     let extension_path = agent_dir
         .join("extensions")
         .join("stateful-omp-extension.js");
-    let mcp_path = agent_dir.join("mcp.json");
     let command_policy_skill_path = omp_command_policy_skill_path(&agent_dir);
     let rule_path = omp_required_rule_path(&agent_dir);
     plan.summary = format!(
@@ -200,7 +198,6 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
     );
     plan.files.push(config_path);
     plan.files.push(extension_path);
-    plan.files.push(mcp_path);
     plan.files.push(command_policy_skill_path);
     plan.files
         .extend(omp_command_policy_support_file_paths(&agent_dir));
@@ -227,7 +224,6 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
     let extension_path = agent_dir
         .join("extensions")
         .join("stateful-omp-extension.js");
-    let mcp_path = agent_dir.join("mcp.json");
     fs::create_dir_all(
         extension_path
             .parent()
@@ -236,12 +232,8 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    if let Some(parent) = mcp_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     write_omp_config(&config_path, &extension_path, options.update)?;
     write_omp_extension(&extension_path, &options.binary_path)?;
-    write_omp_mcp_config(&mcp_path, &options.binary_path)?;
     write_omp_command_policy_skill(&agent_dir)?;
     write_omp_command_policy_support_files(&agent_dir)?;
     write_omp_required_rule(&agent_dir)?;
@@ -1094,14 +1086,7 @@ fn global_codex_config_block(
         r#"{GLOBAL_CODEX_BLOCK_START}
 {STATEFUL_APPROVAL_POLICY}
 
-{features_section}[mcp_servers.stateful]
-command = {}
-args = ["mcp", "serve"]
-env_vars = ["CODEX_THREAD_ID", "STATEFUL_CODEX_RUN_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
-startup_timeout_sec = 20
-default_tools_approval_mode = "approve"
-
-[[hooks.SessionStart]]
+{features_section}[[hooks.SessionStart]]
 matcher = "startup|resume|clear|compact"
 
 [[hooks.SessionStart.hooks]]
@@ -1140,7 +1125,6 @@ command = {}
 statusMessage = "Finalizing stateful activity"
 {GLOBAL_CODEX_BLOCK_END}
 "#,
-        toml_string(binary_path),
         toml_string(&format!("{hook_prefix} session-start")),
         toml_string(&format!("{hook_prefix} user-prompt-submit")),
         toml_string(&format!("{hook_prefix} pre-tool-use")),
@@ -2683,18 +2667,6 @@ export default function statefulOmpExtension(pi) {{
     write_or_replace_text_file_with_mode(extension_path, &contents, private_file_mode())
 }
 
-fn write_omp_mcp_config(mcp_path: &Path, binary_path: &str) -> anyhow::Result<()> {
-    let contents = serde_json::to_string_pretty(&json!({
-        "mcpServers": {
-            "stateful": {
-                "type": "stdio",
-                "command": binary_path,
-                "args": ["mcp", "serve"]
-            }
-        }
-    }))?;
-    write_or_replace_text_file_with_mode(mcp_path, &format!("{contents}\n"), private_file_mode())
-}
 
 fn shell_quote_posix(value: &str) -> anyhow::Result<String> {
     validate_no_control_chars(value)?;
