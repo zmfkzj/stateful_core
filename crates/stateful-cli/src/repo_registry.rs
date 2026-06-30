@@ -19,7 +19,26 @@ const DEFAULT_CODEX_ALLOWED_TOOLS: &[&str] = &[
     "multi_agent_v1send_input",
 ];
 
-const DEFAULT_OMP_ALLOWED_TOOLS: &[&str] = &["task", "yield", "lsp", "glob"];
+const DEFAULT_OMP_ALLOWED_TOOLS: &[&str] = &[
+    "task",
+    "yield",
+    "lsp",
+    "glob",
+    "ask",
+    "ast_grep",
+    "browser",
+    "find",
+    "generate_image",
+    "grep",
+    "irc",
+    "job",
+    "read",
+    "report_tool_issue",
+    "search",
+    "search_tool_bm25",
+    "todo",
+    "web_search",
+];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RepoRegistry {
