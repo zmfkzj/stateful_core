@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    ffi::OsStr,
     fs,
     io::{self, Read},
     path::{Component, Path, PathBuf},
@@ -325,22 +326,23 @@ fn omp_pre_tool_action(
             }
             Ok(OmpPreToolAction::Targets(targets))
         }
-        tool_name
-            if tool_name.eq_ignore_ascii_case("ext_ro_bash")
-                || tool_name.eq_ignore_ascii_case("ext_rw_bash")
-                || tool_name.eq_ignore_ascii_case("sandbox_bash") =>
-        {
-            Ok(OmpPreToolAction::Allow)
+        tool_name if tool_name.eq_ignore_ascii_case("bash") => {
+            if let Some(action) = input.command().and_then(omp_sandbox_run_action) {
+                return Ok(action);
+            }
+            if let Some(action) = input.command().and_then(omp_process_find_action) {
+                return Ok(action);
+            }
+            Ok(OmpPreToolAction::Block {
+                reason: format!(
+                    "OMP raw {} is denied; only trusted stateful sandbox run or stateful sandbox process find commands are allowed through built-in Bash",
+                    input.tool_name
+                ),
+            })
         }
-        tool_name if tool_name.eq_ignore_ascii_case("bash") => Ok(OmpPreToolAction::Block {
-            reason: format!(
-                "OMP raw {} is denied; use sandbox_bash for stateful sandbox run profiles except --fs external, ext_ro_bash for read-only external operations, or ext_rw_bash for external writes",
-                input.tool_name
-            ),
-        }),
         tool_name if is_omp_eval_tool(tool_name) => Ok(OmpPreToolAction::Block {
             reason: format!(
-                "OMP eval tool {} is denied; use sandbox_bash for stateful sandbox run profiles except --fs external, ext_ro_bash for read-only external operations, or ext_rw_bash for external writes",
+                "OMP eval tool {} is denied; use built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands",
                 input.tool_name
             ),
         }),
@@ -348,11 +350,11 @@ fn omp_pre_tool_action(
             Ok(OmpPreToolAction::Allow)
         }
         _ if is_stateful_control_plane_tool(&input.tool_name) => Ok(OmpPreToolAction::Allow),
-        _ if is_user_allowed_tool(global_paths, repo_root, &input.tool_name) => {
+        _ if is_user_allowed_tool(global_paths, repo_root, tool_name) => {
             Ok(OmpPreToolAction::Allow)
         }
         _ => {
-            record_unclassified_tool(global_paths, repo_root, &input.tool_name);
+            record_unclassified_tool(global_paths, repo_root, tool_name);
             Ok(OmpPreToolAction::Block {
                 reason: format!(
                     "unclassified OMP tool {} may write or execute and requires explicit stateful classification",
@@ -389,6 +391,8 @@ fn is_omp_safe_without_repo_write_authorization(tool_name: &str) -> bool {
         "grep",
         "irc",
         "lazy_edit_resume",
+        "lazy_write_resume",
+        "lazy_bash_resume",
         "job",
         "read",
         "report_tool_issue",
@@ -407,8 +411,7 @@ fn omp_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {
     let invocation = parse_sandbox_run_bash_invocation(command).ok()?;
     if !is_trusted_stateful_executable(&invocation.executable) {
         return Some(OmpPreToolAction::Block {
-            reason: "stateful sandbox run requires the trusted absolute stateful binary"
-                .to_string(),
+            reason: "stateful sandbox run requires a trusted stateful binary".to_string(),
         });
     }
     if let Err(error) = validate_sandbox_run_request_shape(&invocation.request) {
@@ -434,8 +437,21 @@ fn omp_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {
         return Some(OmpPreToolAction::Targets(targets));
     }
     if invocation.request.fs == SandboxFsProfile::External {
+        return Some(OmpPreToolAction::Allow);
+    }
+    Some(OmpPreToolAction::Allow)
+}
+
+fn omp_process_find_action(command: &str) -> Option<OmpPreToolAction> {
+    let invocation = parse_sandbox_process_find_bash_invocation(command).ok()?;
+    if !is_trusted_stateful_executable(&invocation.executable) {
         return Some(OmpPreToolAction::Block {
-            reason: "OMP raw Bash cannot run stateful sandbox run --fs external; use ext_ro_bash for read-only external operations or ext_rw_bash for external writes".to_string(),
+            reason: "stateful sandbox process find requires a trusted stateful binary".to_string(),
+        });
+    }
+    if let Err(error) = validate_process_find_request(&invocation.request) {
+        return Some(OmpPreToolAction::Block {
+            reason: error.to_string(),
         });
     }
     Some(OmpPreToolAction::Allow)
@@ -500,7 +516,7 @@ fn authorize_omp_targets(
 
     let Some(runtime) = runtime else {
         let reason = format!(
-            "{} writes require a reachable stateful server, task reservation exact file scope, and a same-session file claim",
+            "{} writes require a reachable stateful server, task reservation exact file scope, and a same-reservation file claim",
             input.tool_name
         );
         return Ok(OmpHookOutcome::Block { reason });
@@ -510,66 +526,242 @@ fn authorize_omp_targets(
         .workspace_id
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, identity));
-    for target in targets {
-        let purpose = omp_hook_authorize_purpose(input, runtime, &target, &workspace_id)
-            .unwrap_or_else(|| format!("Queue OMP {} for {}.", input.tool_name, target.path));
-        let mut payload = json!({
-            "action": target.action,
-            "path": target.path,
-        });
-        if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
-            payload["base_observations"] = json!([observation]);
-        }
-        payload["queue_on_conflict"] = json!(true);
-        payload["purpose"] = json!(purpose);
-        if let Some(new_path) = &target.new_path {
-            payload["old_path"] = json!(target.path);
-            payload["new_path"] = json!(new_path);
-        }
-        let mut body = protocol_envelope(ProtocolEnvelopeArgs {
-            runtime,
-            request_id: uuid::Uuid::new_v4().to_string(),
-            session_id: input.session_id.clone(),
-            workspace_id: workspace_id.clone(),
-            identity: identity.cloned(),
-            source_kind: "hook",
-            event: "omp_pre_tool_use",
-            source_ref: "hook:omp_pre_tool_use",
-            source_tool_name: Some(input.tool_name.as_str()),
-            payload,
-        });
-        body["metadata"] = input.audit_metadata();
+    let mut reservation_id = input.reservation_id().map(str::to_string);
+    let mut auto_declared = false;
+    let mut auto_claimed_paths = BTreeSet::new();
 
-        let response = match post_json(runtime, "/v1/authorize", &body) {
-            Ok(response) => response,
-            Err(error) => {
-                let reason = authorization_unavailable_reason(&error);
+    'authorize: loop {
+        for target in &targets {
+            let purpose = omp_hook_authorize_purpose(input, runtime, target, &workspace_id)
+                .unwrap_or_else(|| format!("Queue OMP {} for {}.", input.tool_name, target.path));
+            let decision = match post_omp_authorize_target(
+                input,
+                runtime,
+                repo_root,
+                identity,
+                target,
+                &workspace_id,
+                reservation_id.as_deref(),
+                &purpose,
+            ) {
+                Ok(decision) => decision,
+                Err(outcome) => {
+                    release_omp_auto_claims(runtime, input, &workspace_id, &auto_claimed_paths);
+                    return Ok(outcome);
+                }
+            };
+            if decision.decision != "allow" {
+                if !auto_declared
+                    && reservation_id.is_none()
+                    && should_auto_declare_omp_tool_reservation(input, &decision, &targets)
+                {
+                    reservation_id = Some(
+                        match declare_and_claim_omp_pre_tool_reservation(
+                            input,
+                            runtime,
+                            identity,
+                            &workspace_id,
+                            &targets,
+                            &purpose,
+                        ) {
+                            Ok(reservation_id) => reservation_id,
+                            Err(outcome) => return Ok(outcome),
+                        },
+                    );
+                    auto_claimed_paths = targets.iter().map(|target| target.path.clone()).collect();
+                    auto_declared = true;
+                    continue 'authorize;
+                }
+
+                let reason = if let Some(repo_root) = repo_root {
+                    if repeated_denial_seen(
+                        repo_root,
+                        &input.session_id,
+                        &target.path,
+                        &decision.reason_code,
+                    ) {
+                        repeated_denial_reason(&target.path)
+                    } else {
+                        authorization_denial_reason(decision)
+                    }
+                } else {
+                    authorization_denial_reason(decision)
+                };
+                release_omp_auto_claims(runtime, input, &workspace_id, &auto_claimed_paths);
                 return Ok(OmpHookOutcome::Block { reason });
             }
-        };
+        }
 
-        if !(200..300).contains(&response.status_code) {
-            let reason = format!(
+        return Ok(OmpHookOutcome::Allow);
+    }
+}
+
+fn release_omp_auto_claims(
+    runtime: &ServerRuntime,
+    input: &OmpPreToolUseInput,
+    workspace_id: &str,
+    paths: &BTreeSet<String>,
+) {
+    if !paths.is_empty() {
+        release_pre_tool_authorized_claims(runtime, &input.session_id, workspace_id, paths);
+    }
+}
+
+fn post_omp_authorize_target(
+    input: &OmpPreToolUseInput,
+    runtime: &ServerRuntime,
+    repo_root: Option<&Path>,
+    identity: Option<&RepoIdentity>,
+    target: &PatchTarget,
+    workspace_id: &str,
+    reservation_id: Option<&str>,
+    purpose: &str,
+) -> Result<AuthorizeDecision, OmpHookOutcome> {
+    let mut payload = json!({
+        "action": target.action,
+        "path": target.path,
+    });
+    if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
+        payload["base_observations"] = json!([observation]);
+    }
+    payload["queue_on_conflict"] = json!(true);
+    payload["purpose"] = json!(purpose);
+    if let Some(new_path) = &target.new_path {
+        payload["old_path"] = json!(target.path);
+        payload["new_path"] = json!(new_path);
+    }
+    if let Some(reservation_id) = reservation_id {
+        payload["reservation_id"] = json!(reservation_id);
+    }
+    let mut body = protocol_envelope(ProtocolEnvelopeArgs {
+        runtime,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        session_id: input.session_id.clone(),
+        workspace_id: workspace_id.to_string(),
+        identity: identity.cloned(),
+        source_kind: "hook",
+        event: "omp_pre_tool_use",
+        source_ref: "hook:omp_pre_tool_use",
+        source_tool_name: Some(input.tool_name.as_str()),
+        payload,
+    });
+    body["metadata"] = input.audit_metadata();
+
+    let response =
+        post_json(runtime, "/v1/authorize", &body).map_err(|error| OmpHookOutcome::Block {
+            reason: authorization_unavailable_reason(&error),
+        })?;
+
+    if !(200..300).contains(&response.status_code) {
+        return Err(OmpHookOutcome::Block {
+            reason: format!(
                 "stateful authorization failed with HTTP {}: {}",
                 response.status_code, response.body
-            );
-            return Ok(OmpHookOutcome::Block { reason });
-        }
-
-        let decision: AuthorizeDecision = match serde_json::from_str(&response.body) {
-            Ok(decision) => decision,
-            Err(error) => {
-                let reason = authorization_unavailable_reason(&error);
-                return Ok(OmpHookOutcome::Block { reason });
-            }
-        };
-        if decision.decision != "allow" {
-            let reason = authorization_denial_reason(decision);
-            return Ok(OmpHookOutcome::Block { reason });
-        }
+            ),
+        });
     }
 
-    Ok(OmpHookOutcome::Allow)
+    serde_json::from_str(&response.body).map_err(|error| OmpHookOutcome::Block {
+        reason: authorization_unavailable_reason(&error),
+    })
+}
+
+fn should_auto_declare_omp_tool_reservation(
+    input: &OmpPreToolUseInput,
+    decision: &AuthorizeDecision,
+    targets: &[PatchTarget],
+) -> bool {
+    matches!(
+        runtime_tool_name_leaf(&input.tool_name),
+        tool_name if tool_name.eq_ignore_ascii_case("edit")
+            || tool_name.eq_ignore_ascii_case("write")
+    ) && matches!(
+        decision.reason_code.as_str(),
+        "missing_reservation" | "scope_mismatch"
+    ) && targets.iter().all(|target| target.action == "write_file")
+}
+
+fn declare_and_claim_omp_pre_tool_reservation(
+    input: &OmpPreToolUseInput,
+    runtime: &ServerRuntime,
+    identity: Option<&RepoIdentity>,
+    workspace_id: &str,
+    targets: &[PatchTarget],
+    purpose: &str,
+) -> Result<String, OmpHookOutcome> {
+    let files_planned = targets
+        .iter()
+        .map(|target| target.path.clone())
+        .collect::<Vec<_>>();
+    let mut body = protocol_envelope(ProtocolEnvelopeArgs {
+        runtime,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        session_id: input.session_id.clone(),
+        workspace_id: workspace_id.to_string(),
+        identity: identity.cloned(),
+        source_kind: "hook",
+        event: "reservation_declare",
+        source_ref: "hook:omp_pre_tool_use",
+        source_tool_name: Some(input.tool_name.as_str()),
+        payload: json!({
+            "purpose": purpose,
+            "files_planned": files_planned,
+        }),
+    });
+    body["metadata"] = input.audit_metadata();
+
+    let response = post_json(runtime, "/v1/reservation/declare", &body).map_err(|error| {
+        OmpHookOutcome::Block {
+            reason: authorization_unavailable_reason(&error),
+        }
+    })?;
+    if !(200..300).contains(&response.status_code) {
+        return Err(OmpHookOutcome::Block {
+            reason: format!(
+                "stateful reservation declaration failed with HTTP {}: {}",
+                response.status_code, response.body
+            ),
+        });
+    }
+
+    let body: serde_json::Value =
+        serde_json::from_str(&response.body).map_err(|error| OmpHookOutcome::Block {
+            reason: authorization_unavailable_reason(&error),
+        })?;
+    let reservation_id = body
+        .get("reservation_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|reservation_id| !reservation_id.is_empty())
+        .ok_or_else(|| OmpHookOutcome::Block {
+            reason: "stateful reservation declaration response did not include reservation_id"
+                .to_string(),
+        })?;
+
+    let response = post_json(
+        runtime,
+        "/v1/claim/acquire",
+        &json!({
+            "session_id": input.session_id.clone(),
+            "workspace_id": workspace_id,
+            "reservation_id": reservation_id.clone(),
+            "paths": files_planned,
+            "root": identity.map(|identity| identity.root.as_str()).unwrap_or(""),
+        }),
+    )
+    .map_err(|error| OmpHookOutcome::Block {
+        reason: authorization_unavailable_reason(&error),
+    })?;
+    if !(200..300).contains(&response.status_code) {
+        return Err(OmpHookOutcome::Block {
+            reason: format!(
+                "stateful claim acquire failed with HTTP {}: {}",
+                response.status_code, response.body
+            ),
+        });
+    }
+
+    Ok(reservation_id)
 }
 
 fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {
@@ -1031,20 +1223,28 @@ fn render_context_prompt_text(
     session_id: &str,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<String> {
-    Ok(render_context_response(runtime, session_id, identity)?.prompt_text)
+    Ok(render_context_response(runtime, session_id, identity, None)?.prompt_text)
 }
 
-fn render_context_response(
+fn context_render_request_body(
     runtime: &ServerRuntime,
     session_id: &str,
     identity: Option<&RepoIdentity>,
-) -> anyhow::Result<ContextRenderResponse> {
+    resource: Option<&str>,
+) -> serde_json::Value {
     let workspace_id = effective_workspace_id(runtime, identity);
     let mut body = json!({
         "session_id": session_id,
         "workspace_id": workspace_id,
         "mode": "brief"
     });
+    if let Some(resource) = resource
+        .map(str::trim)
+        .filter(|resource| !resource.is_empty())
+        && let Some(object) = body.as_object_mut()
+    {
+        object.insert("resource".to_string(), json!(resource));
+    }
     if let Some(identity) = identity
         && let Some(object) = body.as_object_mut()
     {
@@ -1053,6 +1253,16 @@ fn render_context_response(
         object.insert("root".to_string(), json!(&identity.root));
         object.insert("branch".to_string(), json!(&identity.branch));
     }
+    body
+}
+
+fn render_context_response(
+    runtime: &ServerRuntime,
+    session_id: &str,
+    identity: Option<&RepoIdentity>,
+    resource: Option<&str>,
+) -> anyhow::Result<ContextRenderResponse> {
+    let body = context_render_request_body(runtime, session_id, identity, resource);
     let response = post_json(runtime, "/v1/context/render", &body)?;
 
     if !(200..300).contains(&response.status_code) {
@@ -1087,6 +1297,54 @@ fn user_prompt_context_marker_path(repo_root: &Path, session_id: &str) -> PathBu
         .join(format!("{session_id}.sent"))
 }
 
+fn repeated_denial_marker_path(
+    repo_root: &Path,
+    session_id: &str,
+    path: &str,
+    reason_code: &str,
+) -> PathBuf {
+    let session_key = marker_component(session_id);
+    let reason_key = marker_component(reason_code);
+    let path_key = marker_component(path);
+    repo_root
+        .join(".stateful_core")
+        .join("runtime")
+        .join("denials")
+        .join(session_key)
+        .join(format!("{reason_key}-{path_key}.seen"))
+}
+
+fn marker_component(value: &str) -> String {
+    if value.is_empty() {
+        return "_".to_owned();
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.as_bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn repeated_denial_seen(repo_root: &Path, session_id: &str, path: &str, reason_code: &str) -> bool {
+    let marker = repeated_denial_marker_path(repo_root, session_id, path, reason_code);
+    let seen = marker.exists();
+    if !seen {
+        if let Some(parent) = marker.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(marker, b"seen");
+    }
+    seen
+}
+
+fn repeated_denial_reason(path: &str) -> String {
+    format!(
+        "Repeated denial for {path}. Stop retrying this path. Use one writer: parent/main agent owns the edit; subagents report findings only."
+    )
+}
+
 fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
     let reminder = stateful_command_policy_reminder();
     if prompt_text.trim().is_empty() {
@@ -1099,7 +1357,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 fn stateful_command_policy_reminder() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- First inspect current state with canonical Stateful MCP tool names such as `state_current_read` or `state_context_render` so you know who is active, what you already hold, and what may conflict.\n- Before using Bash or eval tools, use the `stateful-command-policy` skill.\n- Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use `sandbox_bash` for stateful sandbox run profiles except `--fs external`, `ext_ro_bash` for read-only external operations, and `ext_rw_bash` for external writes.\n- Use `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as the read-only shell fallback when native tools are unavailable or insufficient.\n- Use `{binary} sandbox process find <selector>` for structured process lookup instead of raw `ps` or `pgrep`.\n- Use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>` only after task-level reservation covers the target and the same-session file claim is active.\n- Use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` for builds/tests with disposable artifacts.\n- Use `{binary} sandbox run --fs git --network disabled --command 'git <args>'` for local git operations; enable network only for remote git operations.\n- Use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` for GitHub PR inspection or creation.",
+        "Stateful command policy reminder:\n- Use `state_context_render` only for planning/manual inspection when active coordination may affect the plan; if you already inspected this turn for the same resource, reuse that result.\n- Before using Bash or eval tools, use the `stateful-command-policy` skill.\n- Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands.\n- Use `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as the read-only shell fallback when native tools are unavailable or insufficient.\n- Use `{binary} sandbox process find <selector>` for structured process lookup instead of raw `ps` or `pgrep`.\n- Use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>` only after task-level reservation covers the target and the same-reservation file claim is active.\n- Use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` for builds/tests with disposable artifacts.\n- Use `{binary} sandbox run --fs git --network disabled --command 'git <args>'` for local git operations; enable network only for remote git operations.\n- Use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` for GitHub PR inspection or creation.",
     )
 }
 
@@ -1277,15 +1535,7 @@ fn handle_pre_tool_use_with_runtime(
 
     let tool_name = runtime_tool_name_leaf(&input.tool_name);
     match tool_name {
-        tool_name if tool_name.eq_ignore_ascii_case("bash") => {
-            let outcome = authorize_bash(&input)?;
-            Ok(with_file_tool_live_context(
-                outcome,
-                &input,
-                runtime,
-                identity.as_ref(),
-            ))
-        }
+        tool_name if tool_name.eq_ignore_ascii_case("bash") => authorize_bash(&input),
         tool_name if tool_name.eq_ignore_ascii_case("apply_patch") => {
             authorize_apply_patch(&input, runtime, repo_root, cwd, identity.as_ref())
         }
@@ -1590,9 +1840,7 @@ fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
     };
 
     if !is_trusted_stateful_executable(&invocation.executable) {
-        return bash_policy_deny(
-            "stateful sandbox run requires the trusted absolute stateful binary",
-        );
+        return bash_policy_deny("stateful sandbox run requires a trusted stateful binary");
     }
     if invocation.request.fs == SandboxFsProfile::External
         && !sandbox_external_profile_has_prompt_prefix(command)
@@ -1628,7 +1876,7 @@ fn authorize_sandbox_process_find_bash(command: &str) -> HookOutcome {
 
     if !is_trusted_stateful_executable(&invocation.executable) {
         return bash_policy_deny(
-            "stateful sandbox process find requires the trusted absolute stateful binary",
+            "stateful sandbox process find requires a trusted stateful binary",
         );
     }
     if let Err(error) = validate_process_find_request(&invocation.request) {
@@ -1647,7 +1895,7 @@ fn authorize_nested_codex_benchmark_sandbox_bash(command: &str) -> HookOutcome {
 
     if !is_trusted_stateful_executable(&invocation.executable) {
         return bash_policy_deny(
-            "stateful sandbox run-nested-codex-benchmark requires the trusted absolute stateful binary",
+            "stateful sandbox run-nested-codex-benchmark requires a trusted stateful binary",
         );
     }
     if invocation.purpose.trim().is_empty() {
@@ -1700,9 +1948,7 @@ fn authorize_stateful_control_bash(command: &str) -> HookOutcome {
     };
 
     if !is_trusted_stateful_executable(&invocation.executable) {
-        return bash_policy_deny(
-            "stateful control commands require the trusted absolute stateful binary",
-        );
+        return bash_policy_deny("stateful control commands require a trusted stateful binary");
     }
 
     HookOutcome::Allow
@@ -1717,7 +1963,7 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 fn bash_policy_guidance() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Inspect current state first with `state_current_read` or `state_context_render`, then use the `stateful-command-policy` skill before Bash or eval tools. Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use `sandbox_bash` for stateful sandbox run profiles except `--fs external`, `ext_ro_bash` for read-only external operations, and `ext_rw_bash` for external writes. Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first and `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as fallback. For structured process lookup, use `{binary} sandbox process find <selector>` instead of raw `ps` or `pgrep`. For command-shaped writes, ensure task-level reservation covers the target, acquire the same-session claim, then use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>`. For builds/tests, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`. For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; enable network only for remote git operations. For GitHub PRs, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`.",
+        "Use the `stateful-command-policy` skill before Bash or eval tools; use `state_context_render` only for planning/manual inspection when active coordination may affect the plan. Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands. Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first and `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as fallback. For structured process lookup, use `{binary} sandbox process find <selector>` in Codex or built-in Bash with `{binary} sandbox process find <selector>` in OMP instead of raw `ps` or `pgrep`. For command-shaped writes, ensure task-level reservation covers the target, acquire the same-reservation claim, then use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>`. For builds/tests, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`. For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; enable network only for remote git operations. For GitHub PRs, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`.",
     )
 }
 
@@ -2015,6 +2261,19 @@ fn hook_path_is_under_target(path: &str) -> bool {
 }
 
 fn is_trusted_stateful_executable(executable: &str) -> bool {
+    let Ok(current) = std::env::current_exe() else {
+        return false;
+    };
+    let current = current.canonicalize().unwrap_or(current);
+
+    if is_verified_bare_stateful_executable(
+        executable,
+        &current,
+        std::env::var_os("PATH").as_deref(),
+    ) {
+        return true;
+    }
+
     let path = Path::new(executable);
     if !path.is_absolute() {
         return false;
@@ -2022,11 +2281,60 @@ fn is_trusted_stateful_executable(executable: &str) -> bool {
     let Ok(candidate) = path.canonicalize() else {
         return false;
     };
-    let Ok(current) = std::env::current_exe() else {
+    candidate == current
+}
+
+fn is_verified_bare_stateful_executable(
+    executable: &str,
+    current: &Path,
+    path_env: Option<&OsStr>,
+) -> bool {
+    if executable != "stateful" {
+        return false;
+    }
+    let Some(path_env) = path_env else {
         return false;
     };
-    let current = current.canonicalize().unwrap_or(current);
-    candidate == current
+
+    for directory in std::env::split_paths(path_env) {
+        let candidate = directory.join("stateful");
+        if !is_executable_file(&candidate) {
+            continue;
+        }
+        if !candidate.is_absolute() {
+            return false;
+        }
+        return files_have_same_bytes(current, &candidate);
+    }
+    false
+}
+
+fn files_have_same_bytes(left: &Path, right: &Path) -> bool {
+    let Ok(left) = fs::read(left) else {
+        return false;
+    };
+    let Ok(right) = fs::read(right) else {
+        return false;
+    };
+    left == right
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn authorize_apply_patch(
@@ -2056,51 +2364,7 @@ fn authorize_apply_patch(
             reason: "apply_patch target is outside the enabled repo".to_string(),
         });
     };
-    let outcome = authorize_targets(input, runtime, repo_root, targets, identity)?;
-    Ok(with_file_tool_live_context(
-        outcome, input, runtime, identity,
-    ))
-}
-
-fn with_file_tool_live_context(
-    outcome: HookOutcome,
-    input: &PreToolUseInput,
-    runtime: Option<&ServerRuntime>,
-    identity: Option<&RepoIdentity>,
-) -> HookOutcome {
-    let Some(runtime) = runtime else {
-        return outcome;
-    };
-    let Ok(context_response) =
-        render_context_response(runtime, input.stateful_session_id(), identity)
-    else {
-        return outcome;
-    };
-    if context_response.prompt_text.trim().is_empty() {
-        return outcome;
-    }
-
-    match outcome {
-        HookOutcome::Allow if context_response_has_actionable_items(&context_response) => {
-            HookOutcome::AllowWithContext {
-                message: context_response.prompt_text,
-            }
-        }
-        HookOutcome::Allow => HookOutcome::Allow,
-        HookOutcome::AllowWithContext { .. } => outcome,
-        HookOutcome::Deny { reason } => HookOutcome::Deny {
-            reason: format!("{reason}\n\n{}", context_response.prompt_text),
-        },
-    }
-}
-
-fn context_response_has_actionable_items(response: &ContextRenderResponse) -> bool {
-    response.items.iter().any(|item| {
-        matches!(
-            item.severity,
-            ContextRenderSeverity::Block | ContextRenderSeverity::Warn
-        )
-    })
+    authorize_targets(input, runtime, repo_root, targets, identity)
 }
 
 fn authorize_file_change_tool(
@@ -2154,16 +2418,13 @@ fn authorize_file_write_tool(
         });
     };
 
-    let outcome = authorize_targets(
+    authorize_targets(
         input,
         runtime,
         repo_root,
         vec![PatchTarget::write(&target)],
         identity,
-    )?;
-    Ok(with_file_tool_live_context(
-        outcome, input, runtime, identity,
-    ))
+    )
 }
 
 fn normalize_targets(
@@ -2254,7 +2515,7 @@ fn authorize_targets(
     let Some(runtime) = runtime else {
         return Ok(HookOutcome::Deny {
             reason: format!(
-                "{} writes require a reachable stateful server, task reservation exact file scope, and a same-session file claim",
+                "{} writes require a reachable stateful server, task reservation exact file scope, and a same-reservation file claim",
                 input.tool_name
             ),
         });
@@ -2283,6 +2544,9 @@ fn authorize_targets(
         if let Some(new_path) = &target.new_path {
             payload["old_path"] = json!(target.path);
             payload["new_path"] = json!(new_path);
+        }
+        if let Some(reservation_id) = input.reservation_id() {
+            payload["reservation_id"] = json!(reservation_id);
         }
         let body = protocol_envelope(ProtocolEnvelopeArgs {
             runtime,
@@ -2337,9 +2601,17 @@ fn authorize_targets(
         };
         if decision.decision != "allow" {
             release_pre_tool_authorized_claims(runtime, &session_id, &workspace_id, &allowed_paths);
-            return Ok(HookOutcome::Deny {
-                reason: authorization_denial_reason(decision),
-            });
+            let reason = if let Some(repo_root) = repo_root {
+                if repeated_denial_seen(repo_root, &session_id, &target.path, &decision.reason_code)
+                {
+                    repeated_denial_reason(&target.path)
+                } else {
+                    authorization_denial_reason(decision)
+                }
+            } else {
+                authorization_denial_reason(decision)
+            };
+            return Ok(HookOutcome::Deny { reason });
         }
         allowed_paths.insert(target.path.clone());
         if let Some(new_path) = &target.new_path {
@@ -2381,12 +2653,18 @@ fn shadow_write_paths(targets: &[PatchTarget]) -> impl Iterator<Item = &str> {
 
 fn authorization_unavailable_reason(error: &dyn std::fmt::Display) -> String {
     format!(
-        "server_unavailable: stateful authorization is unavailable while contacting /v1/authorize: {error}. Writes fail closed. Run `stateful server status`, restart or rejoin the stateful server, then retry after task-level reservation covers the target and acquiring a same-session file claim."
+        "server_unavailable: stateful authorization is unavailable while contacting /v1/authorize: {error}. Writes fail closed. Run `stateful server status`, restart or rejoin the stateful server, then retry after task-level reservation covers the target and acquiring a same-reservation file claim."
     )
 }
 
 fn authorization_denial_reason(decision: AuthorizeDecision) -> String {
+    let reservation_id = decision.reservation_id();
     let mut reason = decision.required_next_action.unwrap_or(decision.message);
+    if let Some(reservation_id) = reservation_id {
+        if !reason.contains(&reservation_id) {
+            reason.push_str(&format!(" reservation_id {reservation_id}."));
+        }
+    }
     let Some(wait) = decision.wait else {
         return reason;
     };
@@ -2706,6 +2984,8 @@ fn normalize_path(path: PathBuf) -> PathBuf {
 pub struct OmpPreToolUseInput {
     session_id: String,
     #[serde(default)]
+    reservation_id: Option<String>,
+    #[serde(default)]
     parent_session_id: Option<String>,
     #[serde(default)]
     omp_agent_id: Option<String>,
@@ -2721,7 +3001,6 @@ pub struct OmpPreToolUseInput {
     #[serde(default)]
     tool_input: serde_json::Value,
 }
-
 impl OmpPreToolUseInput {
     fn audit_metadata(&self) -> serde_json::Value {
         json!({
@@ -2732,6 +3011,24 @@ impl OmpPreToolUseInput {
             "commit_id": self.commit_id,
             "cwd": self.cwd,
         })
+    }
+
+    fn command(&self) -> Option<&str> {
+        self.tool_input.get("command")?.as_str()
+    }
+
+    fn reservation_id(&self) -> Option<&str> {
+        self.reservation_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|reservation_id| !reservation_id.is_empty())
+            .or_else(|| {
+                self.tool_input
+                    .get("reservation_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|reservation_id| !reservation_id.is_empty())
+            })
     }
 }
 
@@ -2775,6 +3072,8 @@ impl OmpSessionEventInput {
 struct PreToolUseInput {
     #[serde(flatten)]
     runtime: RuntimeHookInput,
+    #[serde(default)]
+    reservation_id: Option<String>,
     tool_name: String,
     #[serde(default)]
     tool_input: serde_json::Value,
@@ -2811,6 +3110,17 @@ impl PreToolUseInput {
     fn command(&self) -> Option<&str> {
         self.tool_input.get("command")?.as_str()
     }
+    fn reservation_id(&self) -> Option<&str> {
+        self.reservation_id
+            .as_deref()
+            .or_else(|| {
+                self.tool_input
+                    .get("reservation_id")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(str::trim)
+            .filter(|reservation_id| !reservation_id.is_empty())
+    }
 
     fn patch_text(&self) -> Option<&str> {
         string_payload_field(
@@ -2825,20 +3135,44 @@ struct AuthorizeDecision {
     decision: String,
     message: String,
     #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
     required_next_action: Option<String>,
     #[serde(default)]
     wait: Option<AuthorizeWait>,
+    #[serde(default)]
+    reservation: Option<AuthorizeReservation>,
+}
+
+impl AuthorizeDecision {
+    fn reservation_id(&self) -> Option<String> {
+        self.wait
+            .as_ref()
+            .and_then(|wait| wait.reservation_id.clone())
+            .or_else(|| {
+                self.reservation
+                    .as_ref()
+                    .map(|reservation| reservation.reservation_id.clone())
+            })
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct AuthorizeWait {
     wait_id: String,
     #[serde(default)]
+    reservation_id: Option<String>,
+    #[serde(default)]
     path: Option<String>,
     #[serde(default)]
     queue_position: Option<u64>,
     #[serde(default)]
     blocking_session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthorizeReservation {
+    reservation_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2867,22 +3201,7 @@ struct UserPromptSubmitInput {
 
 #[derive(Debug, Deserialize)]
 struct ContextRenderResponse {
-    #[serde(default)]
-    items: Vec<ContextRenderItem>,
     prompt_text: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContextRenderItem {
-    severity: ContextRenderSeverity,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum ContextRenderSeverity {
-    Block,
-    Warn,
-    Info,
 }
 
 impl SessionStartInput {
@@ -2943,8 +3262,63 @@ mod tests {
     }
 
     #[test]
-    fn stateful_command_policy_reminder_mentions_process_find_local_git_github_pr_and_binary_path()
-    {
+    fn bare_stateful_is_trusted_when_first_path_match_has_current_binary_bytes() {
+        let temp =
+            std::env::temp_dir().join(format!("stateful-bare-trust-match-{}", std::process::id()));
+        let bin_dir = temp.join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir should be created");
+        let current = std::env::current_exe().expect("current executable should resolve");
+        let bare = bin_dir.join("stateful");
+        fs::copy(&current, &bare).expect("bare stateful should be copied");
+
+        let path_env = std::env::join_paths([bin_dir]).expect("test PATH should join");
+
+        assert!(is_verified_bare_stateful_executable(
+            "stateful",
+            &current,
+            Some(path_env.as_os_str())
+        ));
+
+        fs::remove_dir_all(temp).expect("temp dir should be removable");
+    }
+
+    #[test]
+    fn bare_stateful_is_denied_when_first_path_match_differs() {
+        let temp = std::env::temp_dir().join(format!(
+            "stateful-bare-trust-mismatch-{}",
+            std::process::id()
+        ));
+        let bin_dir = temp.join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir should be created");
+        let current = std::env::current_exe().expect("current executable should resolve");
+        fs::write(
+            bin_dir.join("stateful"),
+            b"not the installed stateful binary",
+        )
+        .expect("fake stateful should be written");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(bin_dir.join("stateful"))
+                .expect("fake stateful metadata should read")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(bin_dir.join("stateful"), permissions)
+                .expect("fake stateful should be executable");
+        }
+
+        let path_env = std::env::join_paths([bin_dir]).expect("test PATH should join");
+
+        assert!(!is_verified_bare_stateful_executable(
+            "stateful",
+            &current,
+            Some(path_env.as_os_str())
+        ));
+
+        fs::remove_dir_all(temp).expect("temp dir should be removable");
+    }
+    #[test]
+    fn stateful_command_policy_reminder_mentions_process_lookup_git_github_pr_and_binary_path() {
         let reminder = stateful_command_policy_reminder();
         let current_exe = std::env::current_exe()
             .expect("current executable should resolve")
@@ -2956,6 +3330,10 @@ mod tests {
         assert!(
             reminder.contains("sandbox process find"),
             "reminder should mention structured process lookup: {reminder}"
+        );
+        assert!(
+            reminder.contains("built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands"),
+            "reminder should mention built-in Bash trusted Stateful commands: {reminder}"
         );
         assert!(
             reminder.contains("sandbox run --fs git --network disabled"),
@@ -2984,9 +3362,44 @@ mod tests {
             "denial guidance should mention networked git exception: {guidance}"
         );
         assert!(
+            guidance.contains("built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands"),
+            "denial guidance should mention built-in Bash trusted Stateful commands: {guidance}"
+        );
+        for removed_tool in ["process_find", "sandbox_bash", "ext_ro_bash", "ext_rw_bash"] {
+            assert!(
+                !guidance.contains(removed_tool),
+                "denial guidance should not mention removed OMP generated tool {removed_tool}: {guidance}"
+            );
+            assert!(
+                !reminder.contains(removed_tool),
+                "reminder should not mention removed OMP generated tool {removed_tool}: {reminder}"
+            );
+        }
+        assert!(
             guidance.contains(&current_exe),
             "denial guidance should show the trusted executable path: {guidance}"
         );
+    }
+
+    #[test]
+    fn context_render_request_body_includes_resource_when_target_is_known() {
+        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret", "local", 7);
+        let identity = RepoIdentity {
+            repo_id: "repo-a".to_string(),
+            worktree_id: "worktree-a".to_string(),
+            root: "/repo".to_string(),
+            branch: "main".to_string(),
+        };
+
+        let body =
+            context_render_request_body(&runtime, "session-a", Some(&identity), Some("src/lib.rs"));
+
+        assert_eq!(body["session_id"], "session-a");
+        assert_eq!(body["workspace_id"], "workspace-worktree-a");
+        assert_eq!(body["mode"], "brief");
+        assert_eq!(body["resource"], "src/lib.rs");
+        assert_eq!(body["repo_id"], "repo-a");
+        assert_eq!(body["worktree_id"], "worktree-a");
     }
 
     #[test]

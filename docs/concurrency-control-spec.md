@@ -187,7 +187,7 @@ planning and context: advisory
 write boundary: pre-tool authorization with observation checks
 ```
 
-A write authorization validates the current same-session claim and rejects stale
+A write authorization validates the current same-reservation claim and rejects stale
 claim or base-file observations when the hook can supply them. This catches the
 common lost-update case where the file changed between claim acquisition,
 reread, and write authorization.
@@ -344,7 +344,7 @@ The decision order is:
 2. Classify action and write targets.
 3. Require active, unexpired reservation for supported writes.
 4. Match targets against file or directory scope.
-5. Require active same-session claim for write-authorizing resources.
+5. Require active same-reservation claim for write-authorizing resources.
 6. Check hard workspace conflicts.
 7. Check OCC-style target freshness.
 8. Check human-write reconciliation state.
@@ -388,7 +388,7 @@ blocked -> queued -> claimable_reservation -> claimed -> active
 Queued requests are FIFO per resource. A claimable reservation (the current API
 state is `reserved`) is not write authority. The owning session must reread the
 target, claim the reservation, and then retry the write. The claim creates fresh
-active reservation scope and a same-session claim for that resource.
+active reservation scope and a same-reservation claim for that resource.
 
 This preserves ordering without letting a sleeping or stale session mutate the
 workspace later on old state.

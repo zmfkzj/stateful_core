@@ -1461,6 +1461,69 @@ print(json.dumps({{"fast": fast.returncode, "token_usage": fast.token_usage, "em
 }
 
 #[test]
+fn denovo_codex_agent_reads_token_count_events() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_token_count_test", {agent_path})
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+usage = mod.codex_token_usage_from_output(
+    '{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":10,"cached_input_tokens":3,"output_tokens":5,"reasoning_output_tokens":2,"total_tokens":15}}}}}}\n'
+)
+print(json.dumps(usage, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+    assert_eq!(output["turns"], 1);
+    assert_eq!(output["input_tokens"], 10);
+    assert_eq!(output["cached_input_tokens"], 3);
+    assert_eq!(output["output_tokens"], 5);
+    assert_eq!(output["reasoning_output_tokens"], 2);
+    assert_eq!(output["input_plus_output_tokens"], 15);
+    assert_eq!(output["uncached_input_tokens"], 7);
+    assert_eq!(output["uncached_input_plus_output_tokens"], 12);
+}
+
+#[test]
+fn denovo_codex_agent_reads_omp_message_usage_events() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_omp_usage_test", {agent_path})
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+usage = mod.omp_token_usage_from_output(
+    '{{"type":"message","message":{{"role":"assistant","usage":{{"input":100,"output":12,"cacheRead":40,"reasoningTokens":5,"totalTokens":152}}}}}}\n'
+    '{{"type":"message","message":{{"role":"assistant","usage":{{"input":10,"output":3,"cacheRead":4,"reasoningTokens":2,"totalTokens":17}}}}}}\n'
+)
+print(json.dumps(usage, sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+    assert_eq!(output["turns"], 2);
+    assert_eq!(output["input_tokens"], 154);
+    assert_eq!(output["cached_input_tokens"], 44);
+    assert_eq!(output["output_tokens"], 15);
+    assert_eq!(output["reasoning_output_tokens"], 7);
+    assert_eq!(output["input_plus_output_tokens"], 169);
+    assert_eq!(output["uncached_input_tokens"], 110);
+    assert_eq!(output["uncached_input_plus_output_tokens"], 125);
+}
+
+#[test]
 fn denovo_codex_agent_omp_timeout_wrapper_runs_command_without_stdin() {
     let script = format!(
         r#"
@@ -1479,7 +1542,7 @@ def runner(command, cwd, text, check, env, stdin, stdout, stderr, timeout):
     calls.append({{"command": command, "cwd": str(cwd), "timeout": timeout, "stdin_is_devnull": stdin == module.subprocess.DEVNULL}})
     class Result:
         returncode = 0
-        stdout = '{{"type":"done"}}\n'
+        stdout = '{{"type":"message","message":{{"role":"assistant","usage":{{"input":10,"output":5,"cacheRead":3,"reasoningTokens":2,"totalTokens":18}}}}}}\n'
         stderr = ""
     return Result()
 
@@ -1496,7 +1559,7 @@ print(json.dumps({{"returncode": summary.returncode, "token_usage": summary.toke
     );
     let output = run_python_json(&script);
     assert_eq!(output["returncode"], 0);
-    assert_eq!(output["token_usage"]["turns"], 0);
+    assert_eq!(output["token_usage"]["input_plus_output_tokens"], 18);
     assert_eq!(output["calls"][0]["command"][0], "omp");
     assert_eq!(output["calls"][0]["cwd"], "target/workspace");
     assert_eq!(output["calls"][0]["stdin_is_devnull"], true);
@@ -1541,6 +1604,58 @@ print(json.dumps({{"command": command}}))
     assert!(
         args.windows(2)
             .any(|pair| pair == ["--env", "STATEFUL_OMP_SANDBOX=off"])
+    );
+}
+
+#[test]
+fn denovo_codex_agent_seeds_omp_codex_oauth_credentials() {
+    let dir = target_temp_dir("denovo-omp-codex-oauth-seed");
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_omp_auth_seed_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+root = Path({root})
+source_home = root / "source"
+target_home = root / "target"
+source_agent = source_home / ".omp" / "profiles" / "stateful" / "agent"
+target_agent = target_home / ".omp" / "profiles" / "stateful" / "agent"
+source_agent.mkdir(parents=True, exist_ok=True)
+target_agent.mkdir(parents=True, exist_ok=True)
+
+with sqlite3.connect(source_agent / "agent.db") as db:
+    db.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, data TEXT, disabled_cause TEXT, identity_key TEXT, created_at INTEGER, updated_at INTEGER)")
+    db.execute("INSERT INTO auth_credentials (provider, credential_type, data, identity_key, created_at, updated_at) VALUES ('openai-codex', 'oauth', '{{\"access_token\":\"token\"}}', 'email:test@example.com', 1, 2)")
+    db.execute("CREATE TABLE auth_schema_version (version INTEGER)")
+    db.execute("INSERT INTO auth_schema_version VALUES (1)")
+
+env = {{
+    "HOME": str(target_home),
+    "PI_CODING_AGENT_DIR": str(target_agent),
+    "STATEFUL_HOME": str(target_home),
+    "OMP_AUTH_SOURCE_AGENT_DIR": str(source_agent),
+}}
+module.seed_omp_auth_credentials(env)
+with sqlite3.connect(target_agent / "agent.db") as db:
+    rows = db.execute("SELECT provider, credential_type, identity_key FROM auth_credentials").fetchall()
+print(json.dumps({{"rows": rows}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+        root = serde_json::to_string(&dir.display().to_string()).unwrap(),
+    );
+    let output = run_python_json(&script);
+    assert_eq!(
+        output["rows"],
+        serde_json::json!([["openai-codex", "oauth", "email:test@example.com"]])
     );
 }
 
@@ -1927,6 +2042,11 @@ print(json.dumps({{"command": command, "native_command": native_command, "comman
             .contains("Before implementation or broad repository exploration")
     );
     assert!(
+        !command_arg_after(native_command, "--append-system-prompt")
+            .expect("native system prompt should exist")
+            .contains("dispatching-parallel-agents")
+    );
+    assert!(
         command_contains(native_command, "@/tmp/instance/prompt.txt")
             || command_contains(native_command, "@/private/tmp/instance/prompt.txt")
     );
@@ -2024,6 +2144,11 @@ print(json.dumps({{
         command_arg_after(command, "--append-system-prompt")
             .expect("docker system prompt should exist")
             .contains("Before implementation or broad repository exploration")
+    );
+    assert!(
+        !command_arg_after(command, "--append-system-prompt")
+            .expect("docker system prompt should exist")
+            .contains("dispatching-parallel-agents")
     );
 
     assert!(
@@ -2309,6 +2434,7 @@ expected_stateful_config_home = expected_stateful_home / ".config"
 expected_stateful_cache_home = expected_stateful_home / ".cache"
 
 
+no_state_config = (no_state_agent / "config.yml").read_text()
 stateful_config = (stateful_agent / "config.yml").read_text()
 
 print(json.dumps({{
@@ -2319,6 +2445,7 @@ print(json.dumps({{
     "no_state_has_codex_run": "STATEFUL_CODEX_RUN_ID" in no_state_env,
     "no_state_has_session": "STATEFUL_SESSION_ID" in no_state_env,
     "no_state_config_exists": (no_state_agent / "config.yml").exists(),
+    "no_state_config": no_state_config,
     "no_state_xdg_config_home": no_state_env["XDG_CONFIG_HOME"],
     "no_state_xdg_cache_home": no_state_env["XDG_CACHE_HOME"],
     "stateful_home": stateful_env["HOME"],
@@ -2408,8 +2535,15 @@ print(json.dumps({{
     );
     assert_eq!(output["explicit_stateful_has_codex_run"], false);
     assert!(output["explicit_stateful_codex_run_id"].is_null());
-    assert_eq!(output["no_state_config_exists"], false);
+    assert_eq!(output["no_state_config_exists"], true);
     assert_eq!(output["stateful_config_exists"], true);
+    let no_state_config = output["no_state_config"]
+        .as_str()
+        .expect("no-state config should be text");
+    assert!(
+        no_state_config.contains("denovo-benchmark-source-guard.js"),
+        "no-state OMP config should contain the benchmark source guard: {no_state_config}"
+    );
     let stateful_config = output["stateful_config"]
         .as_str()
         .expect("stateful config should be text");
@@ -2531,7 +2665,7 @@ fn denovo_progress_report_aggregates_in_progress_shards_from_results_jsonl() {
     fs::write(
         shard_a_off.join("results.jsonl"),
         [
-            r#"{"instance_id":"a-1","success":true,"score":1.0,"finish_reason":"stop","subagent_used":true,"orchestration_trace":{"trace_captured":true,"reservation_events":2,"claim_events":1,"conflict_events":0}}"#,
+            r#"{"instance_id":"a-1","success":true,"score":1.0,"finish_reason":"stop","subagent_used":true,"orchestration_trace":{"trace_captured":true,"reservation_events":2,"claim_events":1,"conflict_events":0,"event_count":6,"event_types":{"SessionHeartbeat":4,"AuthorizationDenied":1,"ReservationDeclared":1},"heartbeat_events":4,"heartbeat_windows":2,"heartbeat_max_gap_ms":40000,"denial_events":1,"denial_paths":{"src/pkg.py":1},"denial_messages":{"Target existence changed since the supplied base observation.":1}}}"#,
             r#"{"instance_id":"a-2","success":false,"score":0.5,"finish_reason":"setup-error","subagent_used":false,"orchestration_trace":{"trace_captured":false,"reservation_events":0,"claim_events":0,"conflict_events":0}}"#,
         ]
         .join("\n")
@@ -2599,6 +2733,18 @@ print(json.dumps(summary, sort_keys=True))
     assert_eq!(off["orchestration_reservation_events"], 2);
     assert_eq!(off["orchestration_claim_events"], 1);
     assert_eq!(off["orchestration_conflict_events"], 0);
+    assert_eq!(off["orchestration_event_count"], 6);
+    assert_eq!(off["orchestration_event_types"]["SessionHeartbeat"], 4);
+    assert_eq!(off["orchestration_event_types"]["AuthorizationDenied"], 1);
+    assert_eq!(off["orchestration_heartbeat_events"], 4);
+    assert_eq!(off["orchestration_heartbeat_windows"], 2);
+    assert_eq!(off["orchestration_heartbeat_max_gap_ms"], 40000);
+    assert_eq!(off["orchestration_denial_events"], 1);
+    assert_eq!(off["orchestration_denial_paths"]["src/pkg.py"], 1);
+    assert_eq!(
+        off["orchestration_denial_messages"]["Target existence changed since the supplied base observation."],
+        1
+    );
     assert_eq!(off["progress_rate"], 0.75);
     assert!(
         (off["average_score"]
@@ -2638,7 +2784,7 @@ fn denovo_progress_report_prefers_cumulative_condition_report() {
     fs::create_dir_all(&result_dir).expect("fixture result dir should be created");
     fs::write(
         result_dir.join("results.jsonl"),
-        r#"{"instance_id":"transient-current","success":false,"score":0.0,"finish_reason":"setup-error"}"#,
+        r#"{"instance_id":"transient-current","success":false,"score":0.0,"finish_reason":"setup-error","orchestration_trace":{"trace_captured":true,"event_count":6,"event_types":{"SessionHeartbeat":4,"AuthorizationDenied":1,"ReservationDeclared":1},"heartbeat_events":4,"heartbeat_windows":2,"heartbeat_max_gap_ms":46000,"denial_events":1,"denial_paths":{"src/pkg.py":1},"denial_messages":{"Target existence changed since the supplied base observation.":1}}}"#,
     )
     .expect("fixture results should be written");
     fs::write(
@@ -2691,6 +2837,16 @@ print(json.dumps(summary, sort_keys=True))
     assert_eq!(condition["orchestration_reservation_events"], 5);
     assert_eq!(condition["orchestration_claim_events"], 4);
     assert_eq!(condition["orchestration_conflict_events"], 1);
+    assert_eq!(condition["orchestration_event_count"], 6);
+    assert_eq!(
+        condition["orchestration_event_types"]["SessionHeartbeat"],
+        4
+    );
+    assert_eq!(condition["orchestration_heartbeat_events"], 4);
+    assert_eq!(condition["orchestration_heartbeat_windows"], 2);
+    assert_eq!(condition["orchestration_heartbeat_max_gap_ms"], 46000);
+    assert_eq!(condition["orchestration_denial_events"], 1);
+    assert_eq!(condition["orchestration_denial_paths"]["src/pkg.py"], 1);
 
     let run = output["runs"]
         .as_array()
@@ -2701,6 +2857,79 @@ print(json.dumps(summary, sort_keys=True))
     assert_eq!(run["rows"], 3);
     assert_eq!(run["orchestration_trace_observed"], 3);
     assert_eq!(run["orchestration_trace_captured"], 2);
+
+    fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
+fn denovo_progress_report_treats_omitted_empty_trace_maps_as_empty() {
+    let temp_dir = target_temp_dir("stateful-bench-denovo-progress-report-empty-trace-maps");
+    let run_dir = temp_dir.join("runs").join("r38-denovo-shard-a");
+    let condition_dir = run_dir.join("conditions").join("stateful-off_subagent-on");
+    let result_dir = condition_dir.join("codex-cli").join("_");
+    fs::create_dir_all(&result_dir).expect("fixture result dir should be created");
+    fs::write(
+        result_dir.join("results.jsonl"),
+        r#"{"instance_id":"stale-row","success":false,"score":0.0,"finish_reason":"setup-error","orchestration_trace":{"trace_captured":true,"event_count":9,"event_types":{"SessionHeartbeat":7,"AuthorizationDenied":2},"heartbeat_events":7,"heartbeat_windows":1,"heartbeat_max_gap_ms":90000,"denial_events":2,"denial_paths":{"src/stale.py":2},"denial_messages":{"stale denial":2}}}"#,
+    )
+    .expect("fixture results should be written");
+    fs::write(
+        condition_dir.join("denovo-report.json"),
+        r#"{"condition_id":"stateful-off_subagent-on","total_instances":1,"success_count":1,"average_score":1.0,"completed_instances":1,"scored_instances":1,"error_count":0,"finish_reasons":{"stop":1},"subagent_observed_instances":1,"subagent_used_count":0,"subagent_used_rate":0.0,"orchestration_trace_observed":1,"orchestration_trace_captured":0,"orchestration_reservation_events":0,"orchestration_claim_events":0,"orchestration_conflict_events":0,"orchestration_event_count":0,"orchestration_heartbeat_events":0,"orchestration_heartbeat_windows":0,"orchestration_denial_events":0,"running_time_ms":1234}"#,
+    )
+    .expect("fixture cumulative report should be written");
+
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("denovo_progress_report_empty_trace_maps_test", {script_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+summary = module.collect_progress(
+    [Path({run_dir})],
+    expected_instances_per_condition=1,
+)
+print(json.dumps(summary, sort_keys=True))
+"#,
+        script_path = denovo_progress_report_path_json(),
+        run_dir = serde_json::to_string(&run_dir.to_string_lossy())
+            .expect("run path should encode as json"),
+    );
+    let output = run_python_json(&script);
+    let condition = output["conditions"]
+        .as_array()
+        .expect("conditions should be an array")
+        .iter()
+        .find(|condition| condition["condition_id"] == "stateful-off_subagent-on")
+        .expect("condition should be summarized");
+
+    assert_eq!(condition["rows"], 1);
+    assert_eq!(condition["orchestration_event_count"], 0);
+    assert_eq!(
+        condition["orchestration_event_types"],
+        serde_json::json!({})
+    );
+    assert_eq!(condition["orchestration_heartbeat_events"], 0);
+    assert_eq!(condition["orchestration_heartbeat_windows"], 0);
+    assert_eq!(
+        condition["orchestration_heartbeat_max_gap_ms"],
+        serde_json::Value::Null
+    );
+    assert_eq!(condition["orchestration_denial_events"], 0);
+    assert_eq!(
+        condition["orchestration_denial_paths"],
+        serde_json::json!({})
+    );
+    assert_eq!(
+        condition["orchestration_denial_messages"],
+        serde_json::json!({})
+    );
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
 }
@@ -3922,7 +4151,7 @@ print(json.dumps({{"off": off, "on": on}}, sort_keys=True))
     assert!(on.contains("MUST use native subagents"));
     assert!(on.contains("Before implementation or broad repository exploration"));
     assert!(on.contains("after any narrow setup needed"));
-    assert!(on.contains("dispatching-parallel-agents"));
+    assert!(!on.contains("dispatching-parallel-agents"));
     assert!(!on.contains("FIRST ACTION"));
     assert!(on.contains("the current native subagent tool is `task`"));
     assert!(on.contains("tasks` array containing at least 3 implementation subagents"));
@@ -4173,6 +4402,88 @@ print(json.dumps(module.instance_result_row(result), sort_keys=True))
     assert_eq!(output["orchestration_trace"]["trace_captured"], true);
     assert_eq!(output["orchestration_trace"]["reservation_events"], 2);
     assert_eq!(output["orchestration_trace"]["claim_events"], 1);
+}
+
+#[test]
+fn denovo_codex_agent_summarizes_orchestration_events_by_workspace() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_trace_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+events = [
+    {{"event_type": "ReservationDeclared", "session_id": "omp-session", "workspace_id": "workspace-a"}},
+    {{"event_type": "ClaimAcquired", "session_id": "omp-session", "workspace_id": "workspace-a"}},
+    {{"event_type": "AuthorizationDenied", "session_id": "omp-session", "workspace_id": "workspace-a"}},
+    {{"event_type": "AuthorizationDenied", "session_id": "omp-session", "workspace_id": "workspace-other"}},
+]
+print(json.dumps(module.summarize_orchestration_events(
+    events,
+    session_id="denovo-instance",
+    workspace_id="workspace-a",
+), sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["event_count"], 3);
+    assert_eq!(output["reservation_events"], 1);
+    assert_eq!(output["claim_events"], 1);
+    assert_eq!(output["conflict_events"], 1);
+}
+
+#[test]
+fn denovo_codex_agent_summarizes_heartbeat_windows_and_denial_hot_paths() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_codex_agent_trace_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+events = [
+    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:16:39Z", "session_id": "omp-session", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
+    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:16:44Z", "session_id": "omp-session", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
+    {{"event_type": "AuthorizationDenied", "timestamp": "2026-06-28T14:16:45Z", "session_id": "omp-session", "workspace_id": "workspace-a", "payload": {{"path": "src/pkg.py", "message": "Target existence changed since the supplied base observation."}}}},
+    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:17:30Z", "session_id": "omp-session", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
+    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:17:35Z", "session_id": "omp-session", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
+    {{"event_type": "ReservationDeclared", "timestamp": "2026-06-28T14:17:31Z", "session_id": "omp-session", "workspace_id": "workspace-a"}},
+    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:17:35Z", "session_id": "omp-session", "workspace_id": "workspace-other"}},
+]
+print(json.dumps(module.summarize_orchestration_events(
+    events,
+    session_id="denovo-instance",
+    workspace_id="workspace-a",
+), sort_keys=True))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["event_count"], 6);
+    assert_eq!(output["event_types"]["SessionHeartbeat"], 4);
+    assert_eq!(output["heartbeat_events"], 4);
+    assert_eq!(output["heartbeat_windows"], 2);
+    assert_eq!(output["heartbeat_max_gap_ms"], 46000);
+    assert_eq!(output["denial_events"], 1);
+    assert_eq!(output["denial_paths"]["src/pkg.py"], 1);
+    assert_eq!(
+        output["denial_messages"]["Target existence changed since the supplied base observation."],
+        1
+    );
+    assert_eq!(output["reservation_events"], 1);
+    assert_eq!(output["conflict_events"], 1);
 }
 
 #[test]
@@ -4828,6 +5139,152 @@ print(json.dumps({{
 }
 
 #[test]
+fn codex_pair_agent_detects_empty_successful_stop() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("codex_pair_agent_empty_stop_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+empty = '{{"type":"message","role":"assistant","content":[]}}\n{{"type":"turn.completed","usage":{{}}}}\n'
+payload_empty = '{{"type":"response.completed","payload":{{"role":"assistant","content":[]}}}}\n'
+non_empty = '{{"type":"message","role":"assistant","content":[{{"type":"text","text":"done"}}]}}\n'
+print(json.dumps({{
+    "empty": module.codex_output_is_empty_stop(empty, ""),
+    "payload_empty": module.codex_output_is_empty_stop(payload_empty, ""),
+    "non_empty": module.codex_output_is_empty_stop(non_empty, ""),
+}}, sort_keys=True))
+"#,
+        agent_path = codex_pair_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["empty"], true);
+    assert_eq!(output["payload_empty"], true);
+    assert_eq!(output["non_empty"], false);
+}
+
+#[test]
+fn codex_pair_agent_retries_empty_stop_once() {
+    let script = format!(
+        r#"
+import importlib.util
+import io
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("codex_pair_agent_retry_empty_stop_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+responses = [
+    subprocess.CompletedProcess(["codex"], 0, '{{"type":"session_meta","payload":{{"id":"s1"}}}}\n{{"type":"message","role":"assistant","content":[]}}\n{{"type":"turn.completed","usage":{{}}}}\n', ''),
+    subprocess.CompletedProcess(["codex"], 0, '{{"type":"message","role":"assistant","content":[{{"type":"text","text":"done"}}]}}\n', ''),
+]
+prompts = []
+
+def runner(command, input, text, cwd, check, env, stdout, stderr):
+    prompts.append(input)
+    return responses.pop(0)
+
+captured_stdout = io.StringIO()
+original_stdout = sys.stdout
+sys.stdout = captured_stdout
+try:
+    code = module.run_codex_with_resume(["codex", "exec", "-"], "original", Path("."), {{}}, 1, runner=runner)
+finally:
+    sys.stdout = original_stdout
+
+print(json.dumps({{
+    "code": code,
+    "attempts": len(prompts),
+    "retry_prompt": prompts[1] if len(prompts) > 1 else "",
+    "stdout": captured_stdout.getvalue(),
+}}, sort_keys=True))
+"#,
+        agent_path = codex_pair_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["code"], 0);
+    assert_eq!(output["attempts"], 2);
+    assert!(
+        output["retry_prompt"]
+            .as_str()
+            .expect("retry prompt should be text")
+            .contains("Previous response was empty")
+    );
+    assert!(
+        !output["stdout"]
+            .as_str()
+            .expect("stdout should be text")
+            .contains("\"content\":[]")
+    );
+}
+
+#[test]
+fn codex_pair_agent_returns_empty_stop_code_after_retry_cap() {
+    let script = format!(
+        r#"
+import importlib.util
+import io
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("codex_pair_agent_empty_stop_cap_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+responses = [
+    subprocess.CompletedProcess(["codex"], 0, '{{"type":"session_meta","payload":{{"id":"s1"}}}}\n{{"type":"message","role":"assistant","content":[]}}\n{{"type":"turn.completed","usage":{{}}}}\n', ''),
+    subprocess.CompletedProcess(["codex"], 0, '{{"type":"message","role":"assistant","content":[]}}\n{{"type":"turn.completed","usage":{{}}}}\n', ''),
+    subprocess.CompletedProcess(["codex"], 0, '{{"type":"message","role":"assistant","content":[]}}\n{{"type":"turn.completed","usage":{{}}}}\n', ''),
+]
+prompts = []
+
+def runner(command, input, text, cwd, check, env, stdout, stderr):
+    prompts.append(input)
+    return responses.pop(0)
+
+captured_stdout = io.StringIO()
+original_stdout = sys.stdout
+sys.stdout = captured_stdout
+try:
+    code = module.run_codex_with_resume(["codex", "exec", "-"], "original", Path("."), {{}}, 2, runner=runner)
+finally:
+    sys.stdout = original_stdout
+print(json.dumps({{
+    "attempts": len(prompts),
+    "code": code,
+    "stdout": captured_stdout.getvalue(),
+}}, sort_keys=True))
+"#,
+        agent_path = codex_pair_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["code"], 2);
+    assert_eq!(output["attempts"], 2);
+    assert!(
+        !output["stdout"]
+            .as_str()
+            .expect("stdout should be text")
+            .contains("\"content\":[]")
+    );
+}
+
+#[test]
 fn codex_pair_agent_seeds_and_cleans_nested_auth() {
     let temp_dir = target_temp_dir("stateful-bench-codex-pair-agent-auth");
     let script = format!(
@@ -5257,6 +5714,86 @@ print(json.dumps({{
     assert_eq!(output["source_exists_after_cleanup"], true);
 
     fs::remove_dir_all(temp_dir).expect("temp dir should clean up");
+}
+
+#[test]
+fn denovo_codex_agent_target_upstream_proxy_blocks_raw_source_url() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+import urllib.error
+import urllib.request
+
+spec = importlib.util.spec_from_file_location("denovo_target_proxy_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+proxy = module.start_target_upstream_deny_proxy("cloudtools_troposphere_pr2343")
+try:
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({{"http": proxy.url}})
+    )
+    try:
+        opener.open(
+            "http://raw.githubusercontent.com/cloudtools/troposphere/master/troposphere/apigateway.py",
+            timeout=2,
+        )
+        code = None
+    except urllib.error.HTTPError as error:
+        code = error.code
+finally:
+    proxy.close()
+
+print(json.dumps({{"code": code}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["code"], 403);
+}
+
+#[test]
+fn denovo_codex_agent_labels_empty_stop_after_retry_cap() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_empty_stop_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+empty = module.cli_runtime_failure(module.CODEX_EMPTY_STOP_EXIT_CODE, "codex")
+omp_empty = module.cli_runtime_failure(module.CODEX_EMPTY_STOP_EXIT_CODE, "omp")
+error = module.cli_runtime_failure(99, "omp")
+print(json.dumps({{
+    "empty": empty,
+    "omp_empty": omp_empty,
+    "error": error,
+}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+
+    assert_eq!(output["empty"][0], "codex-empty-stop");
+    assert_eq!(
+        output["empty"][1],
+        "codex returned an empty stop after retry cap"
+    );
+    assert_eq!(output["omp_empty"][0], "omp-empty-stop");
+    assert_eq!(
+        output["omp_empty"][1],
+        "omp returned an empty stop after retry cap"
+    );
+    assert_eq!(output["error"][0], "omp-error");
+    assert_eq!(output["error"][1], "omp exited 99");
 }
 
 fn codex_pair_agent_path_json() -> String {

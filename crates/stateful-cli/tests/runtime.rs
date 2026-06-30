@@ -896,15 +896,16 @@ fn declare_reservation_via_http_posts_expected_payload() {
         let (mut stream, _) = listener.accept().expect("connection should arrive");
         let request = read_http_request(&mut stream);
         tx.send(request).expect("request should send to test");
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}")
-            .expect("response should write");
+        write_http_response(
+            &mut stream,
+            r#"{"status":"ok","reservation_id":"reservation-123"}"#,
+        );
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
 
     let before_request = OffsetDateTime::now_utc();
-    declare_reservation_via_http(
+    let response = declare_reservation_via_http(
         &runtime,
         ReservationDeclareArgs {
             session_id: "s1".to_string(),
@@ -915,6 +916,10 @@ fn declare_reservation_via_http_posts_expected_payload() {
         },
     )
     .expect("reservation declaration should post");
+    assert_eq!(
+        response.body,
+        r#"{"status":"ok","reservation_id":"reservation-123"}"#
+    );
 
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/reservation/declare HTTP/1.1"));
@@ -981,6 +986,7 @@ fn claim_reservation_via_http_posts_expected_payload() {
             session_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             wait_id: "wait-1".to_string(),
+            reservation_id: None,
             identity: None,
         },
     )
@@ -1027,6 +1033,7 @@ fn request_reservation_via_http_posts_expected_payload() {
             session_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             request_id: "request-1".to_string(),
+            reservation_id: None,
             action: "write_file".to_string(),
             path: "src/auth.ts".to_string(),
             purpose: "Queue auth file changes.".to_string(),

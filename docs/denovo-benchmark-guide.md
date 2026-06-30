@@ -30,6 +30,10 @@ solving the instance. The adapter invalidates runs when the final workspace
 contains `upstream/` or session artifacts show explicit target upstream access:
 `.read.log` URL headers, `read`/`browser` URL or path tool-call arguments, or
 shell command tool-call arguments containing forbidden target-upstream commands.
+OMP-backed runs also install a pre-tool source-pattern guard for both
+`stateful:on` and `stateful:off`; Docker OMP runs add an HTTP proxy that denies
+target GitHub/raw/patch/API hosts, including `CONNECT`, before the command reaches
+the model runtime.
 
 Evaluation runs in a fresh container session:
 
@@ -164,10 +168,8 @@ separately from full four-axis or official-style stateful/no-state comparisons.
 For `subagent:on`, the generated DeNovo prompt explicitly requires native
 Codex/OMP subagents before implementation or broad repository exploration,
 while allowing narrow preflight to read the prompt, inspect tool availability,
-or initialize stateful coordination. It also requires reading and using the
-installed `dispatching-parallel-agents` skill before spawning native subagents
-when that skill is available. It tells OMP to use the current `task` tool or
-older multi-agent tools such as `multi_agent_v1spawn_agent`, requires every
+or initialize stateful coordination. It tells OMP to use the current `task` tool
+or older multi-agent tools such as `multi_agent_v1spawn_agent`, requires every
 counted subagent to inspect, edit, and verify a distinct implementation slice,
 and requires explicit blocker reporting if the runtime does not expose subagent
 tools. OMP runs also unpack bundled task agents into the isolated runtime home,
@@ -194,6 +196,16 @@ events for the nested OMP session. The verified run
 stateful-off/stateful-on subagent-on pair with that event sequence. Treat missing
 registration, no heartbeat, or missing finalization as lifecycle evidence
 failure, not as a model-quality result.
+
+Captured orchestration traces now keep the raw `orchestration-trace.json` for
+audit while condition and progress reports carry compact summary fields:
+`orchestration_event_types`, `orchestration_heartbeat_events`,
+`orchestration_heartbeat_windows`, `orchestration_heartbeat_max_gap_ms`,
+`orchestration_denial_events`, `orchestration_denial_paths`, and
+`orchestration_denial_messages`. Use those summary fields for paired run
+analysis; open the raw trace only when the summary points at a suspicious event
+type, path, or heartbeat gap.
+
 
 Lifecycle troubleshooting checklist:
 

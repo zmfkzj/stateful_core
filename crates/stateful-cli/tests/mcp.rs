@@ -307,6 +307,64 @@ fn mcp_session_register_refreshes_stale_current_session_alias() {
 }
 
 #[test]
+fn mcp_session_bound_tools_prefer_live_omp_session_alias_over_stale_stateful_env() {
+    let temp_root = temp_root("stateful-mcp-stale-omp-env");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file_for_session(
+        &repo_root,
+        "stale-session",
+        &CurrentSession::new("stale-session", "w-stale"),
+    )
+    .expect("stale env session-bound file should write");
+    write_current_session_file_for_session(
+        &repo_root,
+        "live-session",
+        &CurrentSession::new("live-session", "w-live"),
+    )
+    .expect("live session-bound file should write");
+    write_current_session_file(&repo_root, &CurrentSession::new("live-session", "w-live"))
+        .expect("live current session alias should write");
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let response = run_mcp_jsonrpc_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[("STATEFUL_SESSION_ID", "stale-session")],
+        r#"{
+          "jsonrpc":"2.0",
+          "id":19,
+          "method":"tools/call",
+          "params":{
+            "name":"state_reservation_declare",
+            "arguments":{
+              "files_planned":["src/lib.rs"],
+              "purpose":"exercise live omp session"
+            }
+          }
+        }"#,
+    );
+
+    let request = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("reservation declare request should arrive");
+    assert!(request.contains("POST /v1/reservation/declare HTTP/1.1"));
+    let body = request_json_body(&request);
+    assert_eq!(body["session"]["session_id"], "live-session");
+    assert_eq!(body["workspace"]["workspace_id"], "w-live");
+
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 19);
+    assert_eq!(json["result"]["isError"], false);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn mcp_stale_file_write_call_returns_removed_guidance() {
     for tool_name in ["state_file_write", "state.file.write"] {
         let temp_root = temp_root(&format!("stateful-mcp-stale-file-write-{tool_name}"));
@@ -341,7 +399,7 @@ fn mcp_stale_file_write_call_returns_removed_guidance() {
                 .as_str()
                 .unwrap_or_default()
                 .contains(
-                    "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after task-level reservation covers the target and a successful same-session file claim"
+                    "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after task-level reservation covers the target and a successful same-reservation file claim"
                 ),
             "{tool_name}"
         );
@@ -367,7 +425,8 @@ fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command(
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
         r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Target is outside active reservation scope.","required_next_action":"Declare matching reservation."}"#,
-        r#"{"status":"ok","current":{"active_reservation_count":1},"prompt_text":"Your Active Scope\n- [info] src/allowed.ts: This session has active scope for src/allowed.ts."}"#,
+        r#"{"status":"ok"}"#,
+        r#"{"status":"ok"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -397,9 +456,6 @@ fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command(
     let second = rx
         .recv_timeout(Duration::from_secs(1))
         .expect("second authorize request should arrive");
-    let context = rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("denial should render current state context");
     assert_eq!(
         request_json_body(&first)["payload"]["path"],
         "src/allowed.ts"
@@ -416,8 +472,18 @@ fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command(
         request_json_body(&second)["payload"]["purpose"],
         "Run sandbox command for write target `src/denied.ts`."
     );
-    assert!(context.contains("POST /v1/context/render HTTP/1.1"));
-    assert!(context.contains("\"session_id\":\"s-current\""));
+    let first_release = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first release request should arrive");
+    let second_release = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("second release request should arrive");
+    assert!(first_release.contains("POST /v1/claim/release HTTP/1.1"));
+    assert!(second_release.contains("POST /v1/claim/release HTTP/1.1"));
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "sandbox denial should not render current state context"
+    );
     assert_eq!(
         fs::read_to_string(repo_root.join("src/allowed.ts")).expect("allowed file should read"),
         "old\n",
@@ -427,8 +493,8 @@ fn sandbox_run_write_targets_reports_allowed_and_denied_without_running_command(
     assert!(stdout.contains("\"allowed_write_targets\":[\"src/allowed.ts\"]"));
     assert!(stdout.contains("\"path\":\"src/denied.ts\""));
     assert!(stdout.contains("\"decision\":\"deny\""));
-    assert!(stdout.contains("\"current_state\""));
-    assert!(stdout.contains("Your Active Scope"));
+    assert!(!stdout.contains("\"current_state\""));
+    assert!(!stdout.contains("Your Active Scope"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -2350,6 +2416,52 @@ fn mcp_lease_acquire_defaults_to_stateful_session_bound_file_over_legacy() {
     let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
     assert_eq!(json["jsonrpc"], "2.0");
     assert_eq!(json["id"], 9);
+    assert_eq!(json["result"]["isError"], false);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn mcp_claim_acquire_passes_reservation_id_without_requiring_session_argument() {
+    let temp_root = temp_root("stateful-mcp-claim-reservation-id");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    write_current_session_file_for_session(
+        &repo_root,
+        "s-current",
+        &CurrentSession::new("s-current", "w1"),
+    )
+    .expect("session-bound current session should write");
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let response = run_mcp_jsonrpc_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[("STATEFUL_SESSION_ID", "s-current")],
+        r#"{
+          "jsonrpc":"2.0",
+          "id":51,
+          "method":"tools/call",
+          "params":{
+            "name":"state_claim_acquire",
+            "arguments":{"reservation_id":"reservation-a","paths":["src/auth.ts"]}
+          }
+        }"#,
+    );
+
+    let request = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("claim request should arrive");
+    assert!(request.contains("POST /v1/claim/acquire HTTP/1.1"));
+    let body = request_json_body(&request);
+    assert_eq!(body["session_id"], "s-current");
+    assert_eq!(body["workspace_id"], "w1");
+    assert_eq!(body["reservation_id"], "reservation-a");
+    assert_eq!(body["paths"], serde_json::json!(["src/auth.ts"]));
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
     assert_eq!(json["result"]["isError"], false);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");

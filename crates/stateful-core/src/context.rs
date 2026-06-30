@@ -282,6 +282,9 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         RenderMode::Detailed => 20,
     };
     let mut rendered = 0usize;
+    if matches!(mode, RenderMode::Brief) {
+        render_brief_summary(&mut output, &package.items);
+    }
 
     let active_scope = package
         .items
@@ -296,6 +299,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         &active_scope,
         mode,
         max_total,
+        true,
         &mut rendered,
     );
 
@@ -314,6 +318,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         &blocking,
         mode,
         max_total,
+        true,
         &mut rendered,
     );
 
@@ -336,6 +341,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         &warnings,
         mode,
         max_total,
+        true,
         &mut rendered,
     );
 
@@ -354,6 +360,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         &nearby,
         mode,
         max_total,
+        !matches!(mode, RenderMode::Brief),
         &mut rendered,
     );
 
@@ -375,10 +382,39 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         &stale,
         mode,
         max_total,
+        !matches!(mode, RenderMode::Brief),
         &mut rendered,
     );
 
     output
+}
+
+fn render_brief_summary(output: &mut String, items: &[CurrentItem]) {
+    if items.is_empty() {
+        return;
+    }
+
+    let mut blocking = 0usize;
+    let mut warning = 0usize;
+    let mut info = 0usize;
+    let mut stale = 0usize;
+
+    for item in items {
+        if item.freshness != CurrentFreshness::Live {
+            stale += 1;
+            continue;
+        }
+
+        match item.severity {
+            CurrentSeverity::Block => blocking += 1,
+            CurrentSeverity::Warn => warning += 1,
+            CurrentSeverity::Info => info += 1,
+        }
+    }
+
+    output.push_str(&format!(
+        "Stateful summary: {blocking} blocking, {warning} warning, {info} info, {stale} stale.\n"
+    ));
 }
 
 fn is_current_session_scope_item(item: &CurrentItem) -> bool {
@@ -427,6 +463,7 @@ fn render_section(
     items: &[&CurrentItem],
     mode: RenderMode,
     max_total: usize,
+    show_info_purpose: bool,
     rendered: &mut usize,
 ) {
     if items.is_empty() || *rendered >= max_total {
@@ -449,10 +486,12 @@ fn render_section(
             item.resource,
             trim_trailing_period(&item.summary)
         ));
-        output.push_str(&format!(
-            "  purpose: {}\n",
-            trim_trailing_period(&item.purpose)
-        ));
+        if item.severity != CurrentSeverity::Info || show_info_purpose {
+            output.push_str(&format!(
+                "  purpose: {}\n",
+                trim_trailing_period(&item.purpose)
+            ));
+        }
         if item.severity != CurrentSeverity::Info {
             if let Some(next_action) = &item.next_action {
                 output.push_str(&format!("  next: {}\n", trim_trailing_period(next_action)));

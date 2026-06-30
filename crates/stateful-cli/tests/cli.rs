@@ -17,6 +17,7 @@ fn parses_sandbox_run_read_only_defaults() {
             fs,
             network,
             purpose,
+            reservation_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -29,6 +30,7 @@ fn parses_sandbox_run_read_only_defaults() {
             assert_eq!(fs, SandboxFsProfile::ReadOnly);
             assert_eq!(network, SandboxNetworkPolicy::Disabled);
             assert_eq!(purpose, None);
+            assert_eq!(reservation_id, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
@@ -104,6 +106,7 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             fs,
             network,
             purpose,
+            reservation_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -116,6 +119,7 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             assert_eq!(fs, SandboxFsProfile::WriteTargets);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(purpose, None);
+            assert_eq!(reservation_id, None);
             assert_eq!(write_targets, vec!["README.md"]);
             assert_eq!(create_targets, vec!["docs/new.md"]);
             assert_eq!(write_dirs, vec!["tmp"]);
@@ -151,6 +155,7 @@ fn parses_sandbox_run_git_profile() {
             fs,
             network,
             purpose,
+            reservation_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -163,6 +168,7 @@ fn parses_sandbox_run_git_profile() {
             assert_eq!(fs, SandboxFsProfile::Git);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(purpose, None);
+            assert_eq!(reservation_id, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
@@ -198,6 +204,7 @@ fn parses_sandbox_run_github_pr_profile() {
             fs,
             network,
             purpose,
+            reservation_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -210,6 +217,7 @@ fn parses_sandbox_run_github_pr_profile() {
             assert_eq!(fs, SandboxFsProfile::GithubPr);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(purpose, None);
+            assert_eq!(reservation_id, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
@@ -245,6 +253,7 @@ fn parses_sandbox_run_build_profile() {
             fs,
             network,
             purpose,
+            reservation_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -257,6 +266,7 @@ fn parses_sandbox_run_build_profile() {
             assert_eq!(fs, SandboxFsProfile::Build);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(purpose, None);
+            assert_eq!(reservation_id, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
@@ -421,6 +431,7 @@ fn parses_sandbox_run_external_profile() {
             fs,
             network,
             purpose,
+            reservation_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -432,6 +443,7 @@ fn parses_sandbox_run_external_profile() {
         }) => {
             assert_eq!(fs, SandboxFsProfile::External);
             assert_eq!(purpose, Some("install rebuilt binaries".to_string()));
+            assert_eq!(reservation_id, None);
             assert_eq!(write_targets, vec!["/opt/stateful/bin/stateful"]);
             assert_eq!(create_targets, vec!["/opt/stateful/bin/stateful-bench"]);
             assert_eq!(write_dirs, vec!["/opt/stateful/bin"]);
@@ -733,6 +745,21 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
             "task",
             "yield",
             "lsp",
+            "glob",
+            "ask",
+            "ast_grep",
+            "browser",
+            "find",
+            "generate_image",
+            "grep",
+            "irc",
+            "job",
+            "read",
+            "report_tool_issue",
+            "search",
+            "search_tool_bm25",
+            "todo",
+            "web_search",
             "KnownTool"
         ])
     );
@@ -914,9 +941,33 @@ fn reservation_claim_command_parses_wait_id() {
             ref session_id,
             ref workspace_id,
             ref wait_id,
+            ..
         }) if session_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
             && wait_id == "wait-1"
+    ));
+}
+
+#[test]
+fn reservation_claim_command_parses_reservation_id() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "reservation",
+        "claim",
+        "--reservation-id",
+        "reservation-a",
+        "--wait-id",
+        "wait-1",
+    ])
+    .expect("claim command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Reservation(stateful_cli::ReservationCommand::Claim {
+            ref reservation_id,
+            ref wait_id,
+            ..
+        }) if reservation_id.as_deref() == Some("reservation-a") && wait_id == "wait-1"
     ));
 }
 
@@ -947,6 +998,7 @@ fn reservation_request_command_parses_request_id_action_and_path() {
             ref session_id,
             ref workspace_id,
             ref request_id,
+            reservation_id: _,
             ref action,
             ref path,
             ref purpose,

@@ -138,6 +138,9 @@ pub fn plan_codex_install(options: &CodexInstallOptions) -> anyhow::Result<Insta
     plan.files.push(options.codex_config_path.clone());
     plan.files
         .push(global_command_policy_skill_path(&options.codex_config_path));
+    plan.files.extend(global_command_policy_support_file_paths(
+        &options.codex_config_path,
+    ));
     plan.files
         .push(global_dispatching_parallel_agents_skill_path(
             &options.codex_config_path,
@@ -161,6 +164,7 @@ pub fn apply_codex_install(options: CodexInstallOptions) -> anyhow::Result<Insta
     })?;
     write_codex_config_update(&options.codex_config_path, codex_update)?;
     write_global_command_policy_skill(&options.codex_config_path)?;
+    write_global_command_policy_support_files(&options.codex_config_path)?;
     write_global_dispatching_parallel_agents_skill(&options.codex_config_path)?;
     write_global_external_sandbox_rules(&options.codex_config_path, &options.binary_path)?;
     plan.summary = format!(
@@ -188,7 +192,6 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
         .join("stateful-omp-extension.js");
     let mcp_path = agent_dir.join("mcp.json");
     let command_policy_skill_path = omp_command_policy_skill_path(&agent_dir);
-    let dispatching_skill_path = omp_dispatching_parallel_agents_skill_path(&agent_dir);
     let rule_path = omp_required_rule_path(&agent_dir);
     plan.summary = format!(
         "{mode}: install stateful files under {} and configure the OMP stateful profile under {}",
@@ -199,7 +202,8 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
     plan.files.push(extension_path);
     plan.files.push(mcp_path);
     plan.files.push(command_policy_skill_path);
-    plan.files.push(dispatching_skill_path);
+    plan.files
+        .extend(omp_command_policy_support_file_paths(&agent_dir));
     plan.files.push(rule_path);
     Ok(plan)
 }
@@ -239,7 +243,7 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
     write_omp_extension(&extension_path, &options.binary_path)?;
     write_omp_mcp_config(&mcp_path, &options.binary_path)?;
     write_omp_command_policy_skill(&agent_dir)?;
-    write_omp_dispatching_parallel_agents_skill(&agent_dir)?;
+    write_omp_command_policy_support_files(&agent_dir)?;
     write_omp_required_rule(&agent_dir)?;
     plan.summary = format!(
         "apply: installed stateful files under {} and configured the OMP stateful profile under {}",
@@ -364,6 +368,20 @@ fn global_command_policy_skill_path(codex_config_path: &Path) -> PathBuf {
         .join("SKILL.md")
 }
 
+fn global_command_policy_skill_dir(codex_config_path: &Path) -> PathBuf {
+    containing_dir(codex_config_path)
+        .join("skills")
+        .join("stateful-command-policy")
+}
+
+fn global_command_policy_support_file_paths(codex_config_path: &Path) -> Vec<PathBuf> {
+    command_policy_support_file_paths(&global_command_policy_skill_dir(codex_config_path))
+}
+
+fn write_global_command_policy_support_files(codex_config_path: &Path) -> anyhow::Result<()> {
+    write_command_policy_support_files(&global_command_policy_skill_dir(codex_config_path))
+}
+
 fn write_omp_command_policy_skill(agent_dir: &Path) -> anyhow::Result<()> {
     let path = omp_command_policy_skill_path(agent_dir);
     let parent = containing_dir(&path);
@@ -378,6 +396,40 @@ fn omp_command_policy_skill_path(agent_dir: &Path) -> PathBuf {
         .join("skills")
         .join("stateful-command-policy")
         .join("SKILL.md")
+}
+
+fn omp_command_policy_support_file_paths(agent_dir: &Path) -> Vec<PathBuf> {
+    command_policy_support_file_paths(&omp_command_policy_skill_dir(agent_dir))
+}
+
+fn write_omp_command_policy_support_files(agent_dir: &Path) -> anyhow::Result<()> {
+    write_command_policy_support_files(&omp_command_policy_skill_dir(agent_dir))
+}
+
+fn omp_command_policy_skill_dir(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("skills").join("stateful-command-policy")
+}
+
+fn command_policy_support_file_paths(skill_dir: &Path) -> Vec<PathBuf> {
+    stateful_command_policy_support_files()
+        .iter()
+        .map(|(name, _)| skill_dir.join(name))
+        .collect()
+}
+
+fn write_command_policy_support_files(skill_dir: &Path) -> anyhow::Result<()> {
+    fs::create_dir_all(skill_dir).with_context(|| {
+        format!(
+            "failed to create Stateful command policy skill directory {}",
+            skill_dir.display()
+        )
+    })?;
+    for (name, contents) in stateful_command_policy_support_files() {
+        let path = skill_dir.join(name);
+        fs::write(&path, contents)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn write_global_dispatching_parallel_agents_skill(codex_config_path: &Path) -> anyhow::Result<()> {
@@ -395,26 +447,6 @@ fn write_global_dispatching_parallel_agents_skill(codex_config_path: &Path) -> a
 
 fn global_dispatching_parallel_agents_skill_path(codex_config_path: &Path) -> PathBuf {
     containing_dir(codex_config_path)
-        .join("skills")
-        .join("dispatching-parallel-agents")
-        .join("SKILL.md")
-}
-
-fn write_omp_dispatching_parallel_agents_skill(agent_dir: &Path) -> anyhow::Result<()> {
-    let path = omp_dispatching_parallel_agents_skill_path(agent_dir);
-    let parent = containing_dir(&path);
-    fs::create_dir_all(parent).with_context(|| {
-        format!(
-            "failed to create OMP dispatching skill directory {}",
-            parent.display()
-        )
-    })?;
-    fs::write(&path, dispatching_parallel_agents_skill())
-        .with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn omp_dispatching_parallel_agents_skill_path(agent_dir: &Path) -> PathBuf {
-    agent_dir
         .join("skills")
         .join("dispatching-parallel-agents")
         .join("SKILL.md")
@@ -1065,7 +1097,7 @@ fn global_codex_config_block(
 {features_section}[mcp_servers.stateful]
 command = {}
 args = ["mcp", "serve"]
-env_vars = ["CODEX_THREAD_ID", "STATEFUL_CODEX_RUN_ID", "STATEFUL_SESSION_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
+env_vars = ["CODEX_THREAD_ID", "STATEFUL_CODEX_RUN_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
 startup_timeout_sec = 20
 default_tools_approval_mode = "approve"
 
@@ -1252,11 +1284,18 @@ fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow
 
     ensure_omp_child_scalar(&mut lines, "tools", "approvalMode", "yolo", update_existing)?;
     remove_omp_child_mapping(&mut lines, "tools", "approval")?;
+    ensure_omp_child_scalar(
+        &mut lines,
+        "stateful",
+        "autoApprove",
+        "false",
+        update_existing,
+    )?;
     ensure_omp_child_scalar(&mut lines, "eval", "py", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "js", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "rb", "false", update_existing)?;
     ensure_omp_child_scalar(&mut lines, "eval", "jl", "false", update_existing)?;
-    ensure_omp_child_scalar(&mut lines, "bash", "enabled", "false", update_existing)?;
+    ensure_omp_child_scalar(&mut lines, "bash", "enabled", "true", true)?;
 
     Ok(finish_omp_yaml_lines(lines))
 }
@@ -1396,12 +1435,70 @@ fn finish_omp_yaml_lines(lines: Vec<String>) -> String {
 fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Result<()> {
     let binary_json = serde_json::to_string(binary_path)?;
     let contents = format!(
-        r#"import {{ spawn, spawnSync }} from "node:child_process";
-import {{ existsSync, readFileSync, writeFileSync }} from "node:fs";
-import {{ resolve }} from "node:path";
+        r#"import {{ spawnSync }} from "node:child_process";
+import {{ createHash }} from "node:crypto";
+import {{ closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync }} from "node:fs";
+import {{ basename, delimiter, dirname, extname, resolve }} from "node:path";
 import {{ fileURLToPath }} from "node:url";
 
 const STATEFUL = {binary_json};
+const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
+const OMP_AGENT_CONFIG = resolve(EXTENSION_DIR, "..", "config.yml");
+const BENCHMARK_SOURCE_BLOCK_ENV = "STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS";
+ 
+let verifiedBareStatefulPath = null;
+
+function statefulBinaryDigest(path) {{
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}}
+
+function executableFile(path) {{
+  try {{
+    const stat = statSync(path);
+    return stat.isFile() && (stat.mode & 0o111) !== 0;
+  }} catch {{
+    return false;
+  }}
+}}
+
+function firstPathStateful(cwd) {{
+  const base = cwd || process.cwd();
+  for (const entry of String(process.env.PATH || "").split(delimiter)) {{
+    const directory = entry ? resolve(base, entry) : base;
+    const candidate = resolve(directory, "stateful");
+    if (executableFile(candidate)) return candidate;
+  }}
+  return null;
+}}
+
+function verifyBareStateful(cwd) {{
+  verifiedBareStatefulPath = null;
+  const candidate = firstPathStateful(cwd);
+  if (!candidate) return false;
+  try {{
+    if (statefulBinaryDigest(candidate) !== statefulBinaryDigest(STATEFUL)) return false;
+    verifiedBareStatefulPath = candidate;
+    return true;
+  }} catch {{
+    verifiedBareStatefulPath = null;
+    return false;
+  }}
+}}
+
+function bareStatefulStillVerified() {{
+  if (!verifiedBareStatefulPath) return false;
+  try {{
+    return statefulBinaryDigest(verifiedBareStatefulPath) === statefulBinaryDigest(STATEFUL);
+  }} catch {{
+    return false;
+  }}
+}}
+
+function isTrustedStatefulCommand(word) {{
+  if (word === STATEFUL) return true;
+  if (word !== "stateful") return false;
+  return bareStatefulStillVerified();
+}}
 
 
 function runStatefulHook(event, payload) {{
@@ -1430,14 +1527,93 @@ function isYolo(event, ctx) {{
   return values.some((value) => value === true || value === "yolo" || value === "auto-approve");
 }}
 
+function firstString(...values) {{
+  for (const value of values) {{
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }}
+  return undefined;
+}}
+
+function sessionIdFromString(value, prefix = "omp") {{
+  if (typeof value !== "string") return undefined;
+  const id = value.trim();
+  if (!id) return undefined;
+  if (/^[A-Za-z0-9_-]+$/.test(id)) return id;
+  return prefix + "-" + createHash("sha256").update(id).digest("hex").slice(0, 32);
+}}
+
+function readFirstLine(path) {{
+  const fd = openSync(path, "r");
+  try {{
+    const buffer = Buffer.alloc(4096);
+    const bytes = readSync(fd, buffer, 0, buffer.length, 0);
+    return buffer.toString("utf8", 0, bytes).split(/\r?\n/, 1)[0];
+  }} finally {{
+    closeSync(fd);
+  }}
+}}
+
+function sessionIdFromSessionFile(sessionFile) {{
+  const path = firstString(sessionFile);
+  if (!path) return undefined;
+  try {{
+    const id = sessionIdFromString(JSON.parse(readFirstLine(path))?.id);
+    if (id) return id;
+  }} catch (_) {{}}
+  return sessionIdFromString(basename(path, extname(path))) || sessionIdFromString(path);
+}}
+
+function sessionIdFromSessionManager(sessionManager) {{
+  return firstString(
+    sessionIdFromSessionFile(sessionManager?.getSessionFile?.()),
+    sessionIdFromString(sessionManager?.getLeafId?.(), "omp-leaf")
+  );
+}}
+
 function detectSessionId(event, ctx) {{
-  return event?.sessionId || ctx?.sessionManager?.session?.id || process.env.STATEFUL_SESSION_ID || "omp-session";
+  return firstString(
+    sessionIdFromString(event?.sessionId),
+    sessionIdFromString(event?.session_id),
+    sessionIdFromString(event?.session?.id),
+    sessionIdFromString(event?.session?.sessionId),
+    sessionIdFromString(event?.session?.session_id),
+    sessionIdFromString(ctx?.sessionId),
+    sessionIdFromString(ctx?.session_id),
+    sessionIdFromString(ctx?.session?.id),
+    sessionIdFromString(ctx?.session?.sessionId),
+    sessionIdFromString(ctx?.session?.session_id),
+    sessionIdFromSessionManager(ctx?.sessionManager)
+  );
 }}
 
 function sessionId(event, ctx) {{
   const id = detectSessionId(event, ctx);
-  process.env.STATEFUL_SESSION_ID = id;
+  if (id) {{
+    process.env.STATEFUL_SESSION_ID = id;
+  }} else {{
+    delete process.env.STATEFUL_SESSION_ID;
+  }}
   return id;
+}}
+
+function reservationIdFromValue(value) {{
+  if (typeof value !== "string") return undefined;
+  const id = value.trim();
+  return id.length > 0 ? id : undefined;
+}}
+
+function reservationId(event, decision) {{
+  return firstString(
+    reservationIdFromValue(event?.reservation_id),
+    reservationIdFromValue(event?.reservationId),
+    reservationIdFromValue(event?.input?.reservation_id),
+    reservationIdFromValue(event?.input?.reservationId),
+    reservationIdFromValue(decision?.reservation_id),
+    reservationIdFromValue(decision?.wait?.reservation_id),
+    reservationIdFromValue(decision?.reservation?.reservation_id),
+    reservationIdFromValue(decision?.reservation?.wait_id),
+    reservationIdFromValue(decision?.reservation?.id)
+  );
 }}
 
 let reservationStreamAbort;
@@ -1476,17 +1652,19 @@ function reservationMessage(notification) {{
   const payload = notification?.payload || {{}};
   const target = payload.relative_path || "the reserved target";
   const waitId = payload.wait_id || "unknown";
+  const reservationId = payload.reservation_id || waitId;
   const action = payload.action || "write";
   const purpose = payload.purpose;
   const lines = [
     "Stateful reservation is ready for " + target + ".",
     "wait_id: " + waitId,
+    "reservation_id: " + reservationId,
     "action: " + action,
   ];
   if (typeof purpose === "string" && purpose.trim().length > 0) {{
     lines.push("purpose: " + purpose.trim());
   }}
-  lines.push("Next: reread the target, then call state_reservation_claim with this wait_id before retrying the write.");
+  lines.push("Next: reread the target, then call state_reservation_claim with this reservation_id before retrying the write.");
   return lines.join("\n");
 }}
 
@@ -1535,6 +1713,7 @@ async function checkReservationResume(pi, stream, signal) {{
         kind: "reservation_granted",
         payload: {{
           wait_id: body.reservation.wait_id,
+          reservation_id: body.reservation.reservation_id || body.reservation.wait_id,
           relative_path: body.reservation.relative_path,
           action: body.reservation.action,
           purpose: body.reservation.purpose,
@@ -1609,11 +1788,6 @@ function startReservationStream(pi, stream) {{
   run().catch(() => {{}});
 }}
 
-const MAX_SANDBOX_TOOL_OUTPUT_BYTES = 50 * 1024;
-const SANDBOX_BASH_FS_PROFILES = new Set(["read-only", "write-targets", "build", "git", "github-pr"]);
-
-let sandboxJobCounter = 0;
-const backgroundSandboxToolCallIds = new Set();
 
 const EXTERNAL_GRANT_DEFAULT_MAX_USES = 5;
 const EXTERNAL_GRANT_MAX_USES_LIMIT = 20;
@@ -1621,10 +1795,6 @@ const EXTERNAL_GRANT_DEFAULT_TTL_MS = 10 * 60 * 1000;
 const EXTERNAL_GRANT_MAX_TTL_MS = 60 * 60 * 1000;
 const externalBashGrants = new Map();
 
-function nextSandboxJobId(label) {{
-  sandboxJobCounter += 1;
-  return label.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() + "-" + Date.now().toString(36) + "-" + sandboxJobCounter.toString(36);
-}}
 
 function stringList(value) {{
   if (Array.isArray(value)) {{
@@ -1636,11 +1806,21 @@ function stringList(value) {{
   return [];
 }}
 
+
 const lazyEditOperations = new Map();
 let lazyEditOperationCounter = 0;
+const lazyWriteOperations = new Map();
+let lazyWriteOperationCounter = 0;
+const lazyBashOperations = new Map();
+let lazyBashOperationCounter = 0;
 
 function extractWaitId(reason) {{
   const match = String(reason || "").match(/wait_id ([A-Za-z0-9_-]+)/);
+  return match ? match[1] : "";
+}}
+
+function extractReservationId(reason) {{
+  const match = String(reason || "").match(/reservation_id[: ]+([A-Za-z0-9_-]+)/);
   return match ? match[1] : "";
 }}
 
@@ -1652,9 +1832,34 @@ function structuredLazyEditOperationId(decision) {{
     || extractWaitId(decision?.message);
 }}
 
+function structuredLazyWriteOperationId(decision) {{
+  return decision?.wait?.wait_id
+    || decision?.reservation?.wait_id
+    || decision?.reservation?.id
+    || extractWaitId(decision?.reason)
+    || extractWaitId(decision?.message);
+}}
+
+function structuredLazyReservationId(event, decision) {{
+  return reservationId(event, decision)
+    || extractReservationId(decision?.reason)
+    || extractReservationId(decision?.message)
+    || "";
+}}
+
 function nextLazyEditOperationId() {{
   lazyEditOperationCounter += 1;
   return "lazy-edit-" + Date.now().toString(36) + "-" + lazyEditOperationCounter.toString(36);
+}}
+
+function nextLazyWriteOperationId() {{
+  lazyWriteOperationCounter += 1;
+  return "lazy-write-" + Date.now().toString(36) + "-" + lazyWriteOperationCounter.toString(36);
+}}
+
+function nextLazyBashOperationId() {{
+  lazyBashOperationCounter += 1;
+  return "lazy-bash-" + Date.now().toString(36) + "-" + lazyBashOperationCounter.toString(36);
 }}
 
 function editPatchTargets(input) {{
@@ -1667,11 +1872,12 @@ function editPatchTargets(input) {{
   return [...new Set(targets)];
 }}
 
-function safeLazyEditTarget(target) {{
+function safeLazyOperationTarget(target) {{
   return typeof target === "string"
     && target.length > 0
     && !target.startsWith("/")
     && !target.includes("\\")
+    && !target.includes(":")
     && !target.split("/").some((part) => part === "" || part === "." || part === "..");
 }}
 
@@ -1687,17 +1893,66 @@ function readOperationBases(cwd, targets) {{
 function rememberLazyEditOperation(event, ctx, decision) {{
   if (event?.toolName !== "edit") return "";
   const targets = editPatchTargets(event.input || {{}});
-  if (targets.length === 0 || !targets.every(safeLazyEditTarget)) return "";
+  if (targets.length === 0 || !targets.every(safeLazyOperationTarget)) return "";
   const operationId = structuredLazyEditOperationId(decision) || nextLazyEditOperationId();
   lazyEditOperations.set(operationId, {{
     operation_id: operationId,
     session_id: sessionId(event, ctx),
+    reservation_id: structuredLazyReservationId(event, decision),
     cwd: ctx.cwd,
     tool_name: event.toolName,
     tool_input: event.input || {{}},
     targets,
     bases: readOperationBases(ctx.cwd, targets),
     blocked_reason: decision?.reason || "",
+  }});
+  return operationId;
+}}
+
+function writeToolTarget(input) {{
+  const target = String(input?.path || "").trim();
+  return safeLazyOperationTarget(target) ? target : "";
+}}
+
+function rememberLazyWriteOperation(event, ctx, decision) {{
+  if (event?.toolName !== "write") return "";
+  const target = writeToolTarget(event.input || {{}});
+  if (!target) return "";
+  const operationId = structuredLazyWriteOperationId(decision) || nextLazyWriteOperationId();
+  const targets = [target];
+  lazyWriteOperations.set(operationId, {{
+    operation_id: operationId,
+    session_id: sessionId(event, ctx),
+    reservation_id: structuredLazyReservationId(event, decision),
+    cwd: ctx.cwd,
+    tool_name: event.toolName,
+    tool_input: event.input || {{}},
+    targets,
+    bases: readOperationBases(ctx.cwd, targets),
+    blocked_reason: decision?.reason || "",
+  }});
+  return operationId;
+}}
+
+function normalizedStatefulCommandWords(words) {{
+  const normalized = [...words];
+  if (normalized[0] === "stateful") normalized[0] = STATEFUL;
+  return normalized;
+}}
+
+function rememberLazyBashOperation(event, ctx, decision) {{
+  if (event?.toolName !== "bash" && event?.toolName !== "functions.bash") return "";
+  if (!decision?.externalGrantParams || !Array.isArray(decision?.words)) return "";
+  const operationId = nextLazyBashOperationId();
+  lazyBashOperations.set(operationId, {{
+    operation_id: operationId,
+    session_id: sessionId(event, ctx),
+    cwd: ctx.cwd,
+    tool_name: event.toolName,
+    tool_input: event.input || {{}},
+    command: String(event?.input?.command || ""),
+    command_words: normalizedStatefulCommandWords(decision.words),
+    grant_params: decision.externalGrantParams,
   }});
   return operationId;
 }}
@@ -1817,153 +2072,39 @@ function applyOmpLinePatch(cwd, patch, bases) {{
   return {{ status: "applied", message: "lazy edit applied" }};
 }}
 
-function lazyEditToolResult(status, text, details) {{
+function applyOmpWrite(cwd, operation) {{
+  const target = operation.targets[0];
+  const stale = validateOmpLinePatchBases(cwd, new Map([[target, []]]), operation.bases);
+  if (stale) return stale;
+  const filePath = resolve(cwd, target);
+  mkdirSync(dirname(filePath), {{ recursive: true }});
+  writeFileSync(filePath, String(operation.tool_input?.content ?? ""), "utf8");
+  return {{ status: "applied", message: "lazy write applied" }};
+}}
+
+function emptyToolOutputText(text) {{
+  if (!String(text || "").trim()) return "No output.";
+  return String(text);
+}}
+
+function lazyToolResult(status, text, details) {{
   return {{
     isError: status !== "applied",
-    content: [{{ type: "text", text }}],
+    content: [{{ type: "text", text: emptyToolOutputText(text) }}],
     details,
   }};
 }}
 
-function truncateSandboxToolText(value, label) {{
-  const text = value || "";
-  if (Buffer.byteLength(text, "utf8") <= MAX_SANDBOX_TOOL_OUTPUT_BYTES) {{
-    return text;
-  }}
-  return Buffer
-    .from(text, "utf8")
-    .subarray(0, MAX_SANDBOX_TOOL_OUTPUT_BYTES)
-    .toString("utf8") + "\n\n[" + label + " output truncated to 51200 bytes]";
+function bashResumeText(result) {{
+  if (result.error) return result.error.message || String(result.error);
+  const stdout = String(result.stdout || "");
+  const stderr = String(result.stderr || "");
+  const text = stdout + stderr;
+  return text.trim().length ? text : "Command exited with code " + result.status;
 }}
 
-function shellQuote(value) {{
-  return "'" + value.replace(/'/g, "'\\''") + "'";
-}}
 
-function singleQuoteEscape(value) {{
-  return value.replace(/'/g, "'\\''");
-}}
 
-function doubleQuoteEscape(value) {{
-  return value.replace(/["\\$`]/g, "\\$&");
-}}
-
-function skillUrlTokenEnd(command, start, quote) {{
-  let index = start;
-  while (index < command.length) {{
-    const ch = command[index];
-    if (quote) {{
-      if (ch === quote) break;
-    }} else if (/\s/.test(ch) || "'\"`|&;<>".includes(ch)) {{
-      break;
-    }}
-    index += 1;
-  }}
-  return index;
-}}
-
-function resolveSkillInternalUrl(rawUrl) {{
-  let parsed;
-  try {{
-    parsed = new URL(rawUrl);
-  }} catch (_) {{
-    throw new Error("invalid skill:// URL: " + rawUrl);
-  }}
-  if (parsed.protocol !== "skill:" || !parsed.hostname || parsed.search || parsed.hash) {{
-    throw new Error("unsupported internal URL in stateful sandbox command: " + rawUrl);
-  }}
-  const relative = parsed.pathname && parsed.pathname !== "/"
-    ? decodeURIComponent(parsed.pathname.replace(/^\/+/, ""))
-    : "SKILL.md";
-  const parts = relative.split("/");
-  if (parts.some((part) => part.length === 0 || part === "." || part === ".." || part.includes("\\"))) {{
-    throw new Error("invalid skill:// path: " + rawUrl);
-  }}
-  const skillRootUrl = new URL("../skills/" + encodeURIComponent(parsed.hostname) + "/", import.meta.url);
-  const skillRoot = fileURLToPath(skillRootUrl);
-  const resolvedPath = fileURLToPath(new URL(parts.map(encodeURIComponent).join("/"), skillRootUrl));
-  if (!resolvedPath.startsWith(skillRoot) || !existsSync(resolvedPath)) {{
-    throw new Error("unknown skill:// path: " + rawUrl);
-  }}
-  return resolvedPath;
-}}
-
-function expandSkillInternalUrlsInCommand(command) {{
-  let result = "";
-  let cursor = 0;
-  let quote = null;
-  for (let index = 0; index < command.length; index += 1) {{
-    const ch = command[index];
-    if (quote) {{
-      if (ch === quote) quote = null;
-    }} else if (ch === "'" || ch === "\"") {{
-      quote = ch;
-    }}
-    if (!command.startsWith("skill://", index)) continue;
-    const end = skillUrlTokenEnd(command, index, quote);
-    const resolved = resolveSkillInternalUrl(command.slice(index, end));
-    result += command.slice(cursor, index);
-    result += quote === "'" ? singleQuoteEscape(resolved) : quote === "\"" ? doubleQuoteEscape(resolved) : shellQuote(resolved);
-    cursor = end;
-    index = end - 1;
-  }}
-  return cursor === 0 ? command : result + command.slice(cursor);
-}}
-
-function addCommonSandboxArgs(args, params, toolName) {{
-  for (const target of stringList(params.write_targets)) args.push("--write-target", target);
-  for (const target of stringList(params.create_targets)) args.push("--create-target", target);
-  for (const dir of stringList(params.write_dirs)) args.push("--write-dir", dir);
-  for (const socket of stringList(params.connect_sockets)) args.push("--connect-socket", socket);
-  if (params.allow_signal === true) args.push("--allow-signal");
-  if (params.network !== undefined) {{
-    if (params.network !== "enabled" && params.network !== "disabled") {{
-      throw new Error(toolName + " network must be 'enabled' or 'disabled'");
-    }}
-    args.push("--network", params.network);
-  }}
-  const timeoutSeconds = params.timeout_seconds ?? params.timeoutSeconds;
-  if (timeoutSeconds !== undefined) {{
-    if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1) {{
-      throw new Error(toolName + " timeout_seconds must be a positive integer");
-    }}
-    args.push("--timeout-seconds", String(timeoutSeconds));
-  }}
-}}
-
-function sandboxBashArgs(params) {{
-  if (typeof params?.fs !== "string" || params.fs.trim().length === 0) {{
-    throw new Error("sandbox_bash requires a non-empty fs profile");
-  }}
-  const fs = params.fs.trim();
-  if (fs === "external") {{
-    throw new Error("sandbox_bash does not support --fs external; use ext_ro_bash for read-only external operations or ext_rw_bash for external writes");
-  }}
-  if (!SANDBOX_BASH_FS_PROFILES.has(fs)) {{
-    throw new Error("sandbox_bash fs must be one of: read-only, write-targets, build, git, github-pr");
-  }}
-  if (typeof params?.command !== "string" || params.command.trim().length === 0) {{
-    throw new Error("sandbox_bash requires a non-empty command");
-  }}
-  const args = ["sandbox", "run", "--fs", fs];
-  args.push("--stream-events");
-  addCommonSandboxArgs(args, params, "sandbox_bash");
-  args.push("--command", expandSkillInternalUrlsInCommand(params.command));
-  return args;
-}}
-
-function ompSandboxDisabled() {{
-  return process.env.STATEFUL_OMP_SANDBOX === "off";
-}}
-
-function validateExternalPurposeAndCommand(params, toolName) {{
-  if (typeof params?.purpose !== "string" || params.purpose.trim().length === 0) {{
-    throw new Error(toolName + " requires a non-empty purpose");
-  }}
-  if (typeof params?.command !== "string" || params.command.trim().length === 0) {{
-    throw new Error(toolName + " requires a non-empty command");
-  }}
-}}
 
 function hasExternalWriteScope(params) {{
   return stringList(params.write_targets).length > 0
@@ -1971,29 +2112,6 @@ function hasExternalWriteScope(params) {{
     || stringList(params.write_dirs).length > 0;
 }}
 
-function externalReadOnlyBashArgs(params) {{
-  validateExternalPurposeAndCommand(params, "ext_ro_bash");
-  if (hasExternalWriteScope(params) || stringList(params.connect_sockets).length > 0 || params.allow_signal === true) {{
-    throw new Error("ext_ro_bash does not accept write, socket, or signal scope; use ext_rw_bash for scoped external operations");
-  }}
-  const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
-  args.push("--stream-events");
-  addCommonSandboxArgs(args, params, "ext_ro_bash");
-  args.push("--command", expandSkillInternalUrlsInCommand(params.command));
-  return args;
-}}
-
-function externalReadWriteBashArgs(params) {{
-  validateExternalPurposeAndCommand(params, "ext_rw_bash");
-  if (!hasExternalWriteScope(params)) {{
-    throw new Error("ext_rw_bash requires at least one write_targets, create_targets, or write_dirs entry");
-  }}
-  const args = ["sandbox", "run", "--fs", "external", "--purpose", params.purpose];
-  args.push("--stream-events");
-  addCommonSandboxArgs(args, params, "ext_rw_bash");
-  args.push("--command", expandSkillInternalUrlsInCommand(params.command));
-  return args;
-}}
 
 function normalizedStringList(value) {{
   return stringList(value).map((item) => item.trim()).sort();
@@ -2005,14 +2123,14 @@ function externalGrantSettings(params) {{
   let maxUses = EXTERNAL_GRANT_DEFAULT_MAX_USES;
   if (requestedMaxUses !== undefined) {{
     if (!Number.isInteger(requestedMaxUses) || requestedMaxUses < 1 || requestedMaxUses > EXTERNAL_GRANT_MAX_USES_LIMIT) {{
-      throw new Error("ext_rw_bash grant_max_uses must be an integer from 1 to " + EXTERNAL_GRANT_MAX_USES_LIMIT);
+      throw new Error("external sandbox grant grant_max_uses must be an integer from 1 to " + EXTERNAL_GRANT_MAX_USES_LIMIT);
     }}
     maxUses = requestedMaxUses;
   }}
   let ttlMs = EXTERNAL_GRANT_DEFAULT_TTL_MS;
   if (requestedTtlSeconds !== undefined) {{
     if (!Number.isInteger(requestedTtlSeconds) || requestedTtlSeconds < 1 || requestedTtlSeconds > EXTERNAL_GRANT_MAX_TTL_MS / 1000) {{
-      throw new Error("ext_rw_bash grant_expires_seconds must be an integer from 1 to " + (EXTERNAL_GRANT_MAX_TTL_MS / 1000));
+      throw new Error("external sandbox grant grant_expires_seconds must be an integer from 1 to " + (EXTERNAL_GRANT_MAX_TTL_MS / 1000));
     }}
     ttlMs = requestedTtlSeconds * 1000;
   }}
@@ -2031,6 +2149,7 @@ function externalGrantDescriptor(params) {{
   }};
 }}
 
+
 function externalGrantKey(params) {{
   return JSON.stringify(externalGrantDescriptor(params));
 }}
@@ -2041,6 +2160,101 @@ function pruneExternalBashGrants(now) {{
       externalBashGrants.delete(key);
     }}
   }}
+}}
+
+function configBool(value) {{
+  return value === true || value === "true" || value === "1" || value === "yes" || value === "on";
+}}
+
+function benchmarkSourceBlockPatterns() {{
+  const raw = process.env[BENCHMARK_SOURCE_BLOCK_ENV];
+  if (!raw) return [];
+  try {{
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {{
+      return parsed.map((item) => String(item || "").trim()).filter(Boolean);
+    }}
+  }} catch (_) {{}}
+  return String(raw).split(/[\r\n,]+/).map((item) => item.trim()).filter(Boolean);
+}}
+
+function benchmarkSourcePatternMatches(text, pattern) {{
+  const lowerPattern = pattern.toLowerCase();
+  if (lowerPattern === "upstream" || lowerPattern === "upstream/") {{
+    return /(^|[^a-z0-9_-])upstream(?:\\/|[^a-z0-9_-]|$)/.test(text);
+  }}
+  return text.includes(lowerPattern);
+}}
+
+
+function benchmarkSourceBlockReason(event) {{
+  const patterns = benchmarkSourceBlockPatterns();
+  if (patterns.length === 0) return "";
+  const text = (String(event?.toolName || "") + "\n" + JSON.stringify(event?.input || {{}})).toLowerCase();
+  for (const pattern of patterns) {{
+    if (benchmarkSourcePatternMatches(text, pattern)) {{
+      return "DeNovo benchmark blocked target upstream source access before tool execution: " + pattern;
+    }}
+  }}
+  return "";
+}}
+
+function configTextAutoApprove(text) {{
+  const value = "(?:true|\\\"true\\\"|'true'|1|\\\"1\\\"|'1'|yes|\\\"yes\\\"|'yes'|on|\\\"on\\\"|'on')";
+  const body = String(text || "");
+  return new RegExp("(^|\\n)\\s*stateful\\.autoApprove\\s*:\\s*" + value + "\\s*(?:#.*)?(?:\\n|$)", "i").test(body)
+    || new RegExp("(^|\\n)stateful\\s*:\\s*\\n(?:[ \\t]+[^\\n]*\\n)*?[ \\t]+autoApprove\\s*:\\s*" + value + "\\s*(?:#.*)?(?:\\n|$)", "i").test(body);
+}}
+
+function statefulConfigFileAutoApprove() {{
+  const configPaths = [
+    OMP_AGENT_CONFIG,
+    process.env.HOME ? resolve(process.env.HOME, ".omp/profiles/stateful/agent/config.yml") : "",
+  ].filter(Boolean);
+  for (const configPath of configPaths) {{
+    try {{
+      if (configTextAutoApprove(readFileSync(configPath, "utf8"))) return true;
+    }} catch (_) {{}}
+  }}
+  return false;
+}}
+
+function statefulPromptAutoApproveConfig(ctx) {{
+  return configBool(ctx?.config?.stateful?.autoApprove)
+    || configBool(ctx?.config?.stateful?.auto_approve)
+    || configBool(ctx?.config?.["stateful.autoApprove"])
+    || configBool(ctx?.config?.["stateful.auto_approve"])
+    || configBool(ctx?.stateful?.autoApprove)
+    || configBool(ctx?.stateful?.auto_approve)
+    || statefulConfigFileAutoApprove();
+}}
+
+function shouldAutoApproveStatefulPrompt(ctx, _params) {{
+  return statefulPromptAutoApproveConfig(ctx);
+}}
+
+function recordExternalBashGrant(params, now) {{
+  const key = externalGrantKey(params);
+  const settings = externalGrantSettings(params);
+  const approvedAt = now ?? Date.now();
+  externalBashGrants.set(key, {{
+    expiresAt: approvedAt + settings.ttlMs,
+    maxUses: settings.maxUses,
+    uses: 1,
+  }});
+}}
+
+function approveExternalBashGrantWithoutPrompt(params) {{
+  const now = Date.now();
+  pruneExternalBashGrants(now);
+  const key = externalGrantKey(params);
+  const existing = externalBashGrants.get(key);
+  if (existing && existing.expiresAt > now && existing.uses < existing.maxUses) {{
+    existing.uses += 1;
+    return true;
+  }}
+  recordExternalBashGrant(params, now);
+  return true;
 }}
 
 function externalBashApprovalMessage(params) {{
@@ -2106,478 +2320,148 @@ async function ensureExternalBashGrant(ctx, params, signal) {{
     existing.uses += 1;
     return true;
   }}
-  const settings = externalGrantSettings(params);
   const approved = await confirmExternalBashGrant(ctx, params, signal);
   if (!approved) return false;
-  const approvedAt = Date.now();
-  externalBashGrants.set(key, {{
-    expiresAt: approvedAt + settings.ttlMs,
-    maxUses: settings.maxUses,
-    uses: 1,
-  }});
+  recordExternalBashGrant(params, Date.now());
   return true;
 }}
 
-function sandboxToolResultText(exitCode, stdout, stderr, error) {{
-  if (!stderr && !error) {{
-    return stdout || "exit_code: " + exitCode;
+function splitStatefulCommandWords(command) {{
+  const words = [];
+  let current = "";
+  let quote = null;
+  for (let index = 0; index < command.length; index += 1) {{
+    const ch = command[index];
+    if (quote) {{
+      if (ch === quote) {{
+        quote = null;
+      }} else {{
+        current += ch;
+      }}
+      continue;
+    }}
+    if (ch === "'" || ch === "\"") {{
+      quote = ch;
+      continue;
+    }}
+    if (ch === "\\" || ch === "`" || ch === "\n" || ch === "\r") {{
+      throw new Error("Bash wrapper must be a single stateful sandbox command");
+    }}
+    if (ch === "$" && command[index + 1] === "(") {{
+      throw new Error("Bash wrapper must not use command substitution");
+    }}
+    if (";|&<>".includes(ch)) {{
+      throw new Error("Bash wrapper must be a single stateful sandbox command");
+    }}
+    if (/\s/.test(ch)) {{
+      if (current) {{
+        words.push(current);
+        current = "";
+      }}
+      continue;
+    }}
+    current += ch;
   }}
-  const sections = [];
-  if (stdout) sections.push(stdout);
-  const diagnostics = [];
-  diagnostics.push("exit_code: " + exitCode);
-  if (stderr) diagnostics.push("stderr:\n" + stderr);
-  if (error) diagnostics.push("error:\n" + error);
-  sections.push(diagnostics.join("\n\n"));
-  return sections.join("\n\n");
+  if (quote) throw new Error("Bash wrapper command has unterminated quotes");
+  if (current) words.push(current);
+  return words;
 }}
 
-function sandboxToolError(error) {{
-  return {{
-    isError: true,
-    content: [{{ type: "text", text: error instanceof Error ? error.message : String(error) }}],
-    details: {{ error: error instanceof Error ? error.message : String(error) }},
+function parseStatefulSandboxRunWords(words) {{
+  if (words.length < 4 || words[1] !== "sandbox" || words[2] !== "run") {{
+    return {{ allow: false, reason: "Bash commands must use stateful sandbox run" }};
+  }}
+  const params = {{
+    fs: "read-only",
+    purpose: "",
+    write_targets: [],
+    create_targets: [],
+    write_dirs: [],
+    connect_sockets: [],
+    allow_signal: false,
+    network: undefined,
+    command: "",
   }};
+  for (let index = 3; index < words.length; index += 1) {{
+    const arg = words[index];
+    const nextValue = (name) => {{
+      index += 1;
+      if (index >= words.length || !words[index]) throw new Error("stateful sandbox run " + name + " requires a value");
+      return words[index];
+    }};
+    if (arg === "--fs") params.fs = nextValue("--fs");
+    else if (arg === "--purpose") params.purpose = nextValue("--purpose");
+    else if (arg === "--write-target") params.write_targets.push(nextValue("--write-target"));
+    else if (arg === "--create-target") params.create_targets.push(nextValue("--create-target"));
+    else if (arg === "--write-dir") params.write_dirs.push(nextValue("--write-dir"));
+    else if (arg === "--connect-socket") params.connect_sockets.push(nextValue("--connect-socket"));
+    else if (arg === "--network") params.network = nextValue("--network");
+    else if (arg === "--timeout-seconds") nextValue("--timeout-seconds");
+    else if (arg === "--stream-events") continue;
+    else if (arg === "--allow-signal") params.allow_signal = true;
+    else if (arg === "--command") params.command = nextValue("--command");
+    else throw new Error("unsupported stateful sandbox run argument `" + arg + "`");
+  }}
+  if (!params.command) return {{ allow: false, reason: "stateful sandbox run requires exactly one --command" }};
+  if (params.fs === "external" && !params.purpose.trim()) {{
+    return {{ allow: false, reason: "stateful sandbox run --fs external requires --purpose" }};
+  }}
+  if (params.fs === "external" && (hasExternalWriteScope(params) || stringList(params.connect_sockets).length > 0 || params.allow_signal === true)) {{
+    return {{ allow: true, externalGrantParams: params }};
+  }}
+  return {{ allow: true }};
 }}
 
-
-function parseSandboxRunOutput(rawStdout) {{
-  const text = String(rawStdout || "").trim();
-  if (!text || !text.startsWith("{{")) {{
-    return null;
+function parseStatefulProcessFindWords(words) {{
+  if (words.length < 5 || words[1] !== "sandbox" || words[2] !== "process" || words[3] !== "find") {{
+    return {{ allow: false, reason: "Bash commands must use stateful sandbox process find" }};
   }}
+  return {{ allow: true }};
+}}
+
+function statefulBashPassthroughDecision(command) {{
   try {{
-    const parsed = JSON.parse(text);
-    if (!parsed || typeof parsed !== "object" || !("stdout" in parsed) || !("stderr" in parsed)) {{
-      return null;
+    const words = splitStatefulCommandWords(String(command || "").trim());
+    if (words.length === 0) return {{ allow: false, reason: "Bash command is empty" }};
+    if (!isTrustedStatefulCommand(words[0])) {{
+      return {{ allow: false, reason: "OMP raw Bash is denied; use the trusted stateful sandbox command" }};
     }}
-    return parsed;
-  }} catch (_) {{
-    return null;
+    let decision;
+    if (words[1] === "sandbox" && words[2] === "run") decision = parseStatefulSandboxRunWords(words);
+    else if (words[1] === "sandbox" && words[2] === "process" && words[3] === "find") decision = parseStatefulProcessFindWords(words);
+    else decision = {{ allow: false, reason: "Bash commands must use stateful sandbox run or stateful sandbox process find" }};
+    if (decision.allow) decision.words = words;
+    return decision;
+  }} catch (error) {{
+    return {{ allow: false, reason: error instanceof Error ? error.message : String(error) }};
   }}
 }}
 
-function buildSandboxToolResult(params, args, exitCode, stdout, stderr, error) {{
-  const text = sandboxToolResultText(exitCode, stdout, stderr, error);
-  return {{
-    isError: Boolean(error) || exitCode !== 0,
-    content: [{{ type: "text", text }}],
-    details: {{
-      exitCode,
-      stdout,
-      stderr,
-      error,
-      command: params.command,
-      sandboxArgs: args,
-    }},
-  }};
-}}
-
-function deliverSandboxStdoutChunk(onUpdate, jobId, label, chunk) {{
-  if (!chunk || typeof onUpdate !== "function") {{
-    return Promise.resolve();
-  }}
-  const update = {{
-    content: [{{ type: "text", text: chunk }}],
-    details: {{
-      runId: jobId,
-      stream: "stdout",
-      label,
-      collapsible: true,
-      collapseShortcut: "Ctrl+O",
-    }},
-  }};
-  try {{
-    return Promise.resolve(onUpdate(update)).catch(() => {{}});
-  }} catch (_) {{
-    try {{
-      return Promise.resolve(onUpdate(chunk)).catch(() => {{}});
-    }} catch (_) {{
-      return Promise.resolve();
-    }}
-  }}
-}}
- 
-function createSandboxStdoutStreamer(onUpdate, jobId, label) {{
-  let buffer = "";
-  let timer = null;
-  let pending = [];
-  const flush = () => {{
-    if (timer) {{
-      clearTimeout(timer);
-      timer = null;
-    }}
-    if (!buffer) return;
-    const chunk = buffer;
-    buffer = "";
-    pending.push(deliverSandboxStdoutChunk(onUpdate, jobId, label, chunk));
-  }};
-  return {{
-    push(chunk) {{
-      if (!chunk) return;
-      buffer = truncateSandboxToolText(buffer + chunk, label);
-      if (!timer) {{
-        timer = setTimeout(flush, 200);
-      }}
-    }},
-    flush,
-    async drain() {{
-      flush();
-      const deliveries = pending;
-      pending = [];
-      await Promise.allSettled(deliveries);
-    }},
-  }};
-}}
-
-function deliverSandboxBackgroundMessage(pi, jobId, label, text, details) {{
-  if (typeof pi?.sendMessage !== "function") {{
-    return;
-  }}
-  const final = details?.final === true;
-  try {{
-    pi.sendMessage(
-      {{
-        customType: final ? "stateful_sandbox_bash_result" : "stateful_sandbox_bash_output",
-        content: text,
-        display: true,
-        details: {{
-          runId: jobId,
-          label,
-          ...(details || {{}}),
-        }},
-      }},
-      {{ triggerTurn: true, deliverAs: "nextTurn" }}
-    );
-  }} catch (_) {{}}
-}}
-
-function killSandboxChild(child, signalName) {{
-  if (!child) return;
-  try {{
-    if (process.platform !== "win32" && typeof child.pid === "number") {{
-      process.kill(-child.pid, signalName);
-      return;
-    }}
-  }} catch (_) {{}}
-  try {{
-    child.kill(signalName);
-  }} catch (_) {{}}
-}}
-
-function runSandboxToolProcess(params, args, ctx, label, signal, onStdout) {{
-  return new Promise((resolve) => {{
-    let stdout = "";
-    let stderr = "";
-    let stdoutLineBuffer = "";
-    let streamedStdout = "";
-    let streamedOutput = false;
-    let processError = "";
-    let settled = false;
-    let cancelled = false;
-    let child;
-    let abortHandler;
-    let killTimer;
-    let resolveTimer;
-    const clearCancelTimers = () => {{
-      if (killTimer) {{
-        clearTimeout(killTimer);
-        killTimer = undefined;
-      }}
-      if (resolveTimer) {{
-        clearTimeout(resolveTimer);
-        resolveTimer = undefined;
-      }}
-    }};
-    const emitOutputChunk = (chunk) => {{
-      if (!chunk) return;
-      streamedOutput = true;
-      streamedStdout = truncateSandboxToolText(streamedStdout + chunk, label);
-      onStdout(chunk);
-    }};
-    const handleStdoutLine = (line) => {{
-      if (!line) return;
-      try {{
-        const event = JSON.parse(line);
-        if (event?.event === "sandbox_output" && typeof event.chunk === "string") {{
-          emitOutputChunk(event.chunk);
-          return;
-        }}
-      }} catch (_) {{}}
-      stdout += line + "\n";
-    }};
-    const handleStatefulStdout = (chunk) => {{
-      stdoutLineBuffer += chunk;
-      const lines = stdoutLineBuffer.split("\n");
-      stdoutLineBuffer = lines.pop() || "";
-      for (const line of lines) {{
-        handleStdoutLine(line);
-      }}
-    }};
-    const flushStatefulStdout = () => {{
-      if (!stdoutLineBuffer) return;
-      handleStdoutLine(stdoutLineBuffer);
-      stdoutLineBuffer = "";
-    }};
-    const finish = (exitCode, error) => {{
-      if (settled) return;
-      settled = true;
-      clearCancelTimers();
-      if (signal && abortHandler) {{
-        signal.removeEventListener("abort", abortHandler);
-      }}
-      flushStatefulStdout();
-      const sandboxRunOutput = parseSandboxRunOutput(stdout);
-      const fallbackStdout = streamedOutput ? streamedStdout : stdout;
-      const commandStdout = sandboxRunOutput ? String(sandboxRunOutput.stdout || "") : fallbackStdout;
-      const commandStderr = sandboxRunOutput ? String(sandboxRunOutput.stderr || "") || stderr : stderr;
-      const commandExitCode = typeof sandboxRunOutput?.exit_code === "number" ? sandboxRunOutput.exit_code : exitCode;
-      if (commandStdout && !streamedOutput) {{
-        onStdout(commandStdout);
-      }}
-      const result = buildSandboxToolResult(params, args, commandExitCode, commandStdout, commandStderr, error);
-      if (sandboxRunOutput) {{
-        result.details.sandboxRunOutput = sandboxRunOutput;
-      }}
-      if (cancelled) {{
-        result.details.cancelled = true;
-      }}
-      resolve(result);
-    }};
-    abortHandler = () => {{
-      if (settled || cancelled) return;
-      cancelled = true;
-      processError = "cancelled by user";
-      killSandboxChild(child, "SIGTERM");
-      killTimer = setTimeout(() => killSandboxChild(child, "SIGKILL"), 1000);
-      resolveTimer = setTimeout(() => finish(1, processError), 3000);
-    }};
-    if (signal?.aborted) {{
-      cancelled = true;
-      finish(1, "cancelled by user");
-      return;
-    }}
-    try {{
-      child = spawn(STATEFUL, args, {{
-        cwd: ctx.cwd,
-        stdio: ["ignore", "pipe", "pipe"],
-        detached: process.platform !== "win32",
-      }});
-    }} catch (error) {{
-      finish(1, error instanceof Error ? error.message : String(error));
-      return;
-    }}
-    if (signal) {{
-      signal.addEventListener("abort", abortHandler, {{ once: true }});
-    }}
-    if (signal?.aborted) {{
-      abortHandler();
-    }}
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", handleStatefulStdout);
-    child.stderr?.on("data", (chunk) => {{
-      stderr = truncateSandboxToolText(stderr + chunk, label);
-    }});
-    child.on("error", (error) => {{
-      processError = error instanceof Error ? error.message : String(error);
-    }});
-    child.on("close", (code, signalName) => {{
-      const exitCode = typeof code === "number" ? code : 1;
-      const signalError = signalName ? "terminated by signal " + signalName : "";
-      finish(exitCode, processError || signalError);
-    }});
-  }});
-}}
-
-function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout) {{
-  return new Promise((resolve) => {{
-    let stdout = "";
-    let stderr = "";
-    let processError = "";
-    let settled = false;
-    let cancelled = false;
-    let child;
-    let abortHandler;
-    let killTimer;
-    let timeoutTimer;
-    const finish = (exitCode, error) => {{
-      if (settled) return;
-      settled = true;
-      if (killTimer) clearTimeout(killTimer);
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (signal && abortHandler) {{
-        signal.removeEventListener("abort", abortHandler);
-      }}
-      if (stdout) onStdout(stdout);
-      const result = buildSandboxToolResult(params, ["sandbox-disabled"], exitCode, stdout, stderr, error);
-      result.details.sandboxDisabled = true;
-      if (cancelled) {{
-        result.details.cancelled = true;
-      }}
-      resolve(result);
-    }};
-    abortHandler = () => {{
-      if (settled || cancelled) return;
-      cancelled = true;
-      processError = "cancelled by user";
-      killSandboxChild(child, "SIGTERM");
-      killTimer = setTimeout(() => killSandboxChild(child, "SIGKILL"), 1000);
-      setTimeout(() => finish(1, processError), 3000);
-    }};
-    if (signal?.aborted) {{
-      cancelled = true;
-      finish(1, "cancelled by user");
-      return;
-    }}
-    try {{
-      child = spawn(expandSkillInternalUrlsInCommand(params.command), {{
-        cwd: ctx.cwd,
-        shell: true,
-        stdio: ["ignore", "pipe", "pipe"],
-        detached: process.platform !== "win32",
-      }});
-    }} catch (error) {{
-      finish(1, error instanceof Error ? error.message : String(error));
-      return;
-    }}
-    if (signal) {{
-      signal.addEventListener("abort", abortHandler, {{ once: true }});
-    }}
-    const timeoutSeconds = params.timeout_seconds ?? params.timeoutSeconds;
-    if (Number.isInteger(timeoutSeconds) && timeoutSeconds > 0) {{
-      timeoutTimer = setTimeout(() => {{
-        processError = "timed out after " + timeoutSeconds + "s";
-        killSandboxChild(child, "SIGTERM");
-        killTimer = setTimeout(() => killSandboxChild(child, "SIGKILL"), 1000);
-      }}, timeoutSeconds * 1000);
-    }}
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk) => {{
-      stdout = truncateSandboxToolText(stdout + chunk, label);
-    }});
-    child.stderr?.on("data", (chunk) => {{
-      stderr = truncateSandboxToolText(stderr + chunk, label);
-    }});
-    child.on("error", (error) => {{
-      processError = error instanceof Error ? error.message : String(error);
-    }});
-    child.on("close", (code, signalName) => {{
-      const exitCode = typeof code === "number" ? code : 1;
-      const signalError = signalName ? "terminated by signal " + signalName : "";
-      finish(exitCode, processError || signalError);
-    }});
-  }});
-}}
-
-async function runSandboxAwaitedTool(params, args, ctx, label, signal, onUpdate) {{
-  const runId = nextSandboxJobId(label);
-  const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
-  const stdoutStreamer = createSandboxStdoutStreamer(onUpdate, runId, commandLabel);
-  const runner = label === "sandbox_bash" && ompSandboxDisabled()
-    ? runSandboxDisabledToolProcess(params, ctx, label, signal, (chunk) => {{
-        stdoutStreamer.push(chunk);
-      }})
-    : runSandboxToolProcess(params, args, ctx, label, signal, (chunk) => {{
-        stdoutStreamer.push(chunk);
-      }});
-  const result = await runner;
-  await stdoutStreamer.drain();
-  return result;
-}}
-
-function backgroundToolCallIdFromEvent(event) {{
-  const id = event?.toolCallId || event?.tool_call_id || event?.id;
-  return typeof id === "string" && id.length > 0 ? id : "";
-}}
-
-function rememberBackgroundSandboxToolCall(toolCallId) {{
-  if (typeof toolCallId === "string" && toolCallId.length > 0) {{
-    backgroundSandboxToolCallIds.add(toolCallId);
-  }}
-}}
-
-function isBackgroundSandboxToolResult(event) {{
-  const toolCallId = backgroundToolCallIdFromEvent(event);
-  if (toolCallId && backgroundSandboxToolCallIds.delete(toolCallId)) {{
-    return true;
-  }}
-  return event?.result?.details?.background === true || event?.details?.background === true;
-}}
-
-function postBackgroundSandboxToolUse(ctx, label, params) {{
-  runStatefulHook("post-tool-use", {{
-    session_id: sessionId({{}}, ctx),
-    cwd: ctx.cwd,
-    tool_name: label,
-    tool_input: params || {{}},
-  }});
-}}
-
-function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, signal, onUpdate) {{
-  if (signal?.aborted) {{
-    return sandboxToolError("cancelled by user");
-  }}
-  rememberBackgroundSandboxToolCall(toolCallId);
-  const runId = nextSandboxJobId(label);
-  const commandLabel = params.command.length > 120 ? params.command.slice(0, 117) + "..." : params.command;
-  const stdoutStreamer = createSandboxStdoutStreamer((update) => {{
-    const chunk = update?.content?.[0]?.text || "";
-    deliverSandboxBackgroundMessage(pi, runId, label, chunk, {{
-      command: params.command,
-      stream: "stdout",
-    }});
-  }}, runId, commandLabel);
-  const runner = label === "sandbox_bash" && ompSandboxDisabled()
-    ? runSandboxDisabledToolProcess(params, ctx, label, undefined, (chunk) => {{
-        stdoutStreamer.push(chunk);
-      }})
-    : runSandboxToolProcess(params, args, ctx, label, undefined, (chunk) => {{
-        stdoutStreamer.push(chunk);
-      }});
-  runner.then(async (result) => {{
-    await stdoutStreamer.drain();
-    const details = result?.details || {{}};
-    postBackgroundSandboxToolUse(ctx, label, params);
-    deliverSandboxBackgroundMessage(
-      pi,
-      runId,
-      label,
-      sandboxToolResultText(details.exitCode ?? 1, details.stdout || "", details.stderr || "", details.error || ""),
-      {{
-        command: params.command,
-        final: true,
-        result,
-      }}
-    );
-  }}).catch((error) => {{
-    deliverSandboxBackgroundMessage(
-      pi,
-      runId,
-      label,
-      error instanceof Error ? error.message : String(error),
-      {{
-        command: params.command,
-        error: error instanceof Error ? error.message : String(error),
-        final: true,
-      }}
-    );
-  }});
-  return {{
-    isError: false,
-    content: [{{ type: "text", text: "Background job " + runId + " started." }}],
-    details: {{
-      runId,
-      background: true,
-      command: params.command,
-      sandboxArgs: args,
-    }},
-  }};
-}}
 
 export default function statefulOmpExtension(pi) {{
   pi.setLabel("Stateful");
+  pi.on("tool_call", async (event, ctx) => {{
+    if (event?.toolName !== "bash" && event?.toolName !== "functions.bash") return;
+    const decision = statefulBashPassthroughDecision(event?.input?.command);
+    if (!decision.allow) return {{ block: true, reason: decision.reason }};
+    if (decision.externalGrantParams) {{
+      const params = decision.externalGrantParams;
+      if (shouldAutoApproveStatefulPrompt(ctx, params)) {{
+        approveExternalBashGrantWithoutPrompt(params);
+        return;
+      }}
+      if (typeof ctx?.ui?.confirm !== "function") {{
+        const operationId = rememberLazyBashOperation(event, ctx, decision);
+        const suffix = operationId
+          ? "\n\nQueued lazy bash operation_id: " + operationId + "\nNext: approve the external sandbox grant, then call lazy_bash_resume with this operation_id."
+          : "";
+        return {{ block: true, reason: "Built-in Bash external sandbox command requires OMP UI confirmation; use stateful.autoApprove to skip this prompt." + suffix }};
+      }}
+      const signal = undefined;
+      const approved = await ensureExternalBashGrant(ctx, params, signal);
+      if (!approved) return {{ block: true, reason: "user denied stateful external sandbox grant" }};
+    }}
+  }});
   pi.registerTool({{
     name: "lazy_edit_resume",
     label: "Lazy Edit Resume",
@@ -2593,17 +2477,18 @@ export default function statefulOmpExtension(pi) {{
       const operationId = String(params?.operation_id || "").trim();
       const operation = lazyEditOperations.get(operationId);
       if (!operation) {{
-        return lazyEditToolResult("failed", "lazy edit operation not found in this live OMP extension session", {{ operation_id: operationId }});
+        return lazyToolResult("failed", "lazy edit operation not found in this live OMP extension session", {{ operation_id: operationId }});
       }}
       const authorization = runStatefulHook("pre-tool-use", {{
         session_id: operation.session_id,
+        reservation_id: operation.reservation_id || undefined,
         cwd: operation.cwd || ctx.cwd,
         yolo: true,
         tool_name: operation.tool_name,
         tool_input: operation.tool_input,
       }});
       if (authorization.decision !== "allow") {{
-        return lazyEditToolResult("failed", authorization.reason || "stateful authorization denied lazy edit resume", {{ operation_id: operationId, authorization }});
+        return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy edit resume", {{ operation_id: operationId, authorization }});
       }}
       let result;
       try {{
@@ -2620,124 +2505,110 @@ export default function statefulOmpExtension(pi) {{
           tool_input: operation.tool_input,
         }});
       }}
-      return lazyEditToolResult(result.status, result.message, {{ operation_id: operationId, targets: operation.targets }});
+      return lazyToolResult(result.status, result.message, {{ operation_id: operationId, targets: operation.targets }});
     }},
   }});
   pi.registerTool({{
-    name: "sandbox_bash",
-    label: "Sandbox Bash",
-    description: "Run a command through stateful sandbox run. Supports all sandbox run --fs profiles except external; use ext_ro_bash for read-only external operations or ext_rw_bash for external writes.",
+    name: "lazy_write_resume",
+    label: "Lazy Write Resume",
+    description: "Resume a blocked OMP write operation after the needed reservation or claim is ready. Replays only write operations captured in this live extension session and fails if the target changed while queued.",
     parameters: {{
       type: "object",
       properties: {{
-        fs: {{ type: "string", description: "Sandbox filesystem profile: read-only, write-targets, build, git, or github-pr. external is not supported here." }},
-        command: {{ type: "string", description: "Shell command to run inside the stateful sandbox." }},
-        write_targets: {{ type: "array", items: {{ type: "string" }}, description: "Existing repo-relative file paths the command may write." }},
-        create_targets: {{ type: "array", items: {{ type: "string" }}, description: "New repo-relative file paths the command may create." }},
-        write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Repo-relative directories or build scratch purpose the command may write under." }},
-        connect_sockets: {{ type: "array", items: {{ type: "string" }}, description: "Unix socket paths the sandbox may connect to when the selected profile supports sockets." }},
-        allow_signal: {{ type: "boolean", description: "Allow the sandboxed command to signal approved processes when the selected profile supports signaling." }},
-        network: {{ type: "string", description: "Network mode: enabled or disabled." }},
-        timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Run in the background when true or omitted; set false to wait for completion." }},
+        operation_id: {{ type: "string", description: "Queued lazy write operation id; either a Stateful wait_id or a generated live-session id printed in the block message." }},
       }},
-      required: ["fs", "command"],
+      required: ["operation_id"],
     }},
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {{
-      let args;
-      try {{
-        args = sandboxBashArgs(params);
-      }} catch (error) {{
-        return sandboxToolError(error);
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {{
+      const operationId = String(params?.operation_id || "").trim();
+      const operation = lazyWriteOperations.get(operationId);
+      if (!operation) {{
+        return lazyToolResult("failed", "lazy write operation not found in this live OMP extension session", {{ operation_id: operationId }});
       }}
-      if (params.async === false) return await runSandboxAwaitedTool(params, args, ctx, "sandbox_bash", signal, onUpdate);
-      return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, "sandbox_bash", signal, onUpdate);
+      const authorization = runStatefulHook("pre-tool-use", {{
+        session_id: operation.session_id,
+        reservation_id: operation.reservation_id || undefined,
+        cwd: operation.cwd || ctx.cwd,
+        yolo: true,
+        tool_name: operation.tool_name,
+        tool_input: operation.tool_input,
+      }});
+      if (authorization.decision !== "allow") {{
+        return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy write resume", {{ operation_id: operationId, authorization }});
+      }}
+      let result;
+      try {{
+        result = applyOmpWrite(operation.cwd || ctx.cwd, operation);
+      }} catch (error) {{
+        result = {{ status: "failed", message: error instanceof Error ? error.message : String(error) }};
+      }}
+      if (result.status === "applied") {{
+        lazyWriteOperations.delete(operationId);
+        runStatefulHook("post-tool-use", {{
+          session_id: operation.session_id,
+          cwd: operation.cwd || ctx.cwd,
+          tool_name: operation.tool_name,
+          tool_input: operation.tool_input,
+        }});
+      }}
+      return lazyToolResult(result.status, result.message, {{ operation_id: operationId, targets: operation.targets }});
     }},
   }});
   pi.registerTool({{
-    name: "ext_ro_bash",
-    label: "External Read-only Bash",
-    description: "Run a read-only command through stateful sandbox run --fs external without OMP UI confirmation. Write, socket, and signal scopes are rejected.",
+    name: "lazy_bash_resume",
+    label: "Lazy Bash Resume",
+    description: "Resume a blocked OMP Bash command after approving an external sandbox grant.",
     parameters: {{
       type: "object",
       properties: {{
-        purpose: {{ type: "string", description: "Human-readable purpose for the external read-only operation." }},
-        command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
-        network: {{ type: "string", description: "Network mode: enabled or disabled." }},
-        timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Run in the background when true or omitted; set false to wait for completion." }},
+        operation_id: {{ type: "string", description: "Queued lazy bash operation id printed in the block message." }},
       }},
-      required: ["purpose", "command"],
+      required: ["operation_id"],
     }},
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {{
-      let args;
-      try {{
-        args = externalReadOnlyBashArgs(params);
-      }} catch (error) {{
-        return sandboxToolError(error);
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
+      const operationId = String(params?.operation_id || "").trim();
+      const operation = lazyBashOperations.get(operationId);
+      if (!operation) {{
+        return lazyToolResult("failed", "lazy bash operation not found in this live OMP extension session", {{ operation_id: operationId }});
       }}
-      if (params.async === false) return await runSandboxAwaitedTool(params, args, ctx, "ext_ro_bash", signal, onUpdate);
-      return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, "ext_ro_bash", signal, onUpdate);
-    }},
-  }});
-  pi.registerTool({{
-    name: "ext_rw_bash",
-    label: "External Read/write Bash",
-    description: "Run a command through stateful sandbox run --fs external after explicit OMP UI approval of a scoped purpose grant. At least one write_targets, create_targets, or write_dirs entry is required.",
-    parameters: {{
-      type: "object",
-      properties: {{
-        purpose: {{ type: "string", description: "Human-readable purpose for the external write operation." }},
-        command: {{ type: "string", description: "Shell command to run inside the external sandbox." }},
-        write_targets: {{ type: "array", items: {{ type: "string" }}, description: "Existing repo-relative or absolute external file paths the command may write. At least one write/create/directory scope is required." }},
-        create_targets: {{ type: "array", items: {{ type: "string" }}, description: "New repo-relative or absolute external file paths the command may create. At least one write/create/directory scope is required." }},
-        write_dirs: {{ type: "array", items: {{ type: "string" }}, description: "Repo-relative directories or absolute external directories the command may write under. At least one write/create/directory scope is required." }},
-        connect_sockets: {{ type: "array", items: {{ type: "string" }}, description: "Optional absolute Unix socket paths the sandbox may connect to." }},
-        allow_signal: {{ type: "boolean", description: "Optionally allow the sandboxed command to signal approved external processes." }},
-        approval_examples: {{ type: "array", items: {{ type: "string" }}, description: "Optional example command classes to show in the approval prompt; raw command text is not shown." }},
-        grant_max_uses: {{ type: "number", description: "Maximum executions covered by the approved purpose/scope grant, from 1 to 20. Defaults to 5." }},
-        grant_expires_seconds: {{ type: "number", description: "Grant lifetime in seconds, from 1 to 3600. Defaults to 600." }},
-        network: {{ type: "string", description: "Network mode: enabled or disabled." }},
-        timeout_seconds: {{ type: "number", description: "Positive integer timeout in seconds." }},
-        async: {{ type: "boolean", description: "Run in the background when true or omitted; set false to wait for completion." }},
-      }},
-      required: ["purpose", "command"],
-    }},
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {{
-      let args;
-      try {{
-        args = externalReadWriteBashArgs(params);
-      }} catch (error) {{
-        return sandboxToolError(error);
+      if (typeof ctx?.ui?.confirm !== "function" && !shouldAutoApproveStatefulPrompt(ctx, operation.grant_params)) {{
+        return lazyToolResult("failed", "lazy bash resume requires OMP UI confirmation or stateful.autoApprove", {{ operation_id: operationId }});
       }}
-      if (typeof ctx?.ui?.confirm !== "function") {{
-        return {{
-          isError: true,
-          content: [{{ type: "text", text: "ext_rw_bash requires OMP UI confirmation, but ctx.ui.confirm is unavailable." }}],
-          details: {{ error: "confirmation_unavailable" }},
-        }};
-      }}
-      let approved;
-      try {{
-        approved = await ensureExternalBashGrant(ctx, params, signal);
-      }} catch (error) {{
-        return sandboxToolError(error);
-      }}
+      const approved = shouldAutoApproveStatefulPrompt(ctx, operation.grant_params)
+        ? approveExternalBashGrantWithoutPrompt(operation.grant_params)
+        : await ensureExternalBashGrant(ctx, operation.grant_params, signal);
       if (!approved) {{
-        return {{
-          isError: true,
-          content: [{{ type: "text", text: "ext_rw_bash blocked by user" }}],
-          details: {{ blocked: true }},
-        }};
+        return lazyToolResult("failed", "user denied stateful external sandbox grant", {{ operation_id: operationId }});
       }}
-      if (signal?.aborted) {{
-        return sandboxToolError("cancelled by user");
+      const authorization = runStatefulHook("pre-tool-use", {{
+        session_id: operation.session_id,
+        cwd: operation.cwd || ctx.cwd,
+        yolo: true,
+        tool_name: operation.tool_name,
+        tool_input: operation.tool_input,
+      }});
+      if (authorization.decision !== "allow") {{
+        return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy bash resume", {{ operation_id: operationId, authorization }});
       }}
-      if (params.async === false) return await runSandboxAwaitedTool(params, args, ctx, "ext_rw_bash", signal, onUpdate);
-      return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, "ext_rw_bash", signal, onUpdate);
+      const words = operation.command_words || [];
+      const result = spawnSync(words[0], words.slice(1), {{
+        cwd: operation.cwd || ctx.cwd,
+        encoding: "utf8",
+      }});
+      if (result.status === 0) {{
+        lazyBashOperations.delete(operationId);
+        runStatefulHook("post-tool-use", {{
+          session_id: operation.session_id,
+          cwd: operation.cwd || ctx.cwd,
+          tool_name: operation.tool_name,
+          tool_input: operation.tool_input,
+        }});
+      }}
+      return lazyToolResult(result.status === 0 ? "applied" : "failed", bashResumeText(result), {{ operation_id: operationId, exit_code: result.status }});
     }},
   }});
   pi.on("session_start", async (event, ctx) => {{
+    verifyBareStateful(ctx.cwd);
     const result = runStatefulHook("session-start", {{
       session_id: sessionId(event, ctx),
       cwd: ctx.cwd,
@@ -2745,14 +2616,17 @@ export default function statefulOmpExtension(pi) {{
     startReservationStream(pi, result?.notifications_stream);
   }});
   pi.on("tool_call", async (event, ctx) => {{
+    const benchmarkBlockReason = benchmarkSourceBlockReason(event);
+    if (benchmarkBlockReason) return {{ block: true, reason: benchmarkBlockReason }};
     const decision = runStatefulHook("pre-tool-use", {{
       session_id: sessionId(event, ctx),
+      reservation_id: reservationId(event),
       cwd: ctx.cwd,
       yolo: isYolo(event, ctx),
       tool_name: event.toolName,
       tool_input: event.input || {{}},
     }});
-    if (decision.decision === "prompt") {{
+    if (decision.decision === "prompt" && !shouldAutoApproveStatefulPrompt(ctx, event.input || {{}})) {{
       if (typeof ctx?.ui?.confirm !== "function") {{
         return {{
           block: true,
@@ -2768,15 +2642,17 @@ export default function statefulOmpExtension(pi) {{
       }}
     }}
     if (decision.decision === "block") {{
-      const operationId = rememberLazyEditOperation(event, ctx, decision);
-      const suffix = operationId
-        ? "\n\nQueued lazy edit operation_id: " + operationId + "\nNext: when reservation or claim is ready, call lazy_edit_resume with this operation_id."
-        : "";
+      const editOperationId = rememberLazyEditOperation(event, ctx, decision);
+      const writeOperationId = rememberLazyWriteOperation(event, ctx, decision);
+      const suffix = editOperationId
+        ? "\n\nQueued lazy edit operation_id: " + editOperationId + "\nNext: when reservation or claim is ready, call lazy_edit_resume with this operation_id."
+        : writeOperationId
+          ? "\n\nQueued lazy write operation_id: " + writeOperationId + "\nNext: when reservation or claim is ready, call lazy_write_resume with this operation_id."
+          : "";
       return {{ block: true, reason: decision.reason + suffix }};
     }}
   }});
   pi.on("tool_result", async (event, ctx) => {{
-    if (isBackgroundSandboxToolResult(event)) return;
     runStatefulHook("post-tool-use", {{
       session_id: sessionId(event, ctx),
       cwd: ctx.cwd,
@@ -2838,6 +2714,27 @@ fn stateful_command_policy_skill() -> &'static str {
     include_str!("../assets/stateful-command-policy/SKILL.md")
 }
 
+fn stateful_command_policy_support_files() -> &'static [(&'static str, &'static str)] {
+    &[
+        (
+            "omp-tools.md",
+            include_str!("../assets/stateful-command-policy/omp-tools.md"),
+        ),
+        (
+            "sandbox-tools.md",
+            include_str!("../assets/stateful-command-policy/sandbox-tools.md"),
+        ),
+        (
+            "denial-recovery.md",
+            include_str!("../assets/stateful-command-policy/denial-recovery.md"),
+        ),
+        (
+            "subagent-write-recovery.md",
+            include_str!("../assets/stateful-command-policy/subagent-write-recovery.md"),
+        ),
+    ]
+}
+
 fn dispatching_parallel_agents_skill() -> &'static str {
     include_str!("../assets/dispatching-parallel-agents/SKILL.md")
 }
@@ -2885,6 +2782,86 @@ mod tests {
             omp_required_rule_path(Path::new("home/.omp/profiles/stateful/agent")),
             PathBuf::from("home/.omp/profiles/stateful/agent/rules/stateful-required.md")
         );
+    }
+
+    #[test]
+    fn command_policy_support_files_are_installed_with_skill() {
+        assert_eq!(
+            global_command_policy_support_file_paths(Path::new("home/.codex/config.toml")),
+            vec![
+                PathBuf::from("home/.codex/skills/stateful-command-policy/omp-tools.md"),
+                PathBuf::from("home/.codex/skills/stateful-command-policy/sandbox-tools.md"),
+                PathBuf::from("home/.codex/skills/stateful-command-policy/denial-recovery.md"),
+                PathBuf::from(
+                    "home/.codex/skills/stateful-command-policy/subagent-write-recovery.md"
+                ),
+            ]
+        );
+        assert_eq!(
+            omp_command_policy_support_file_paths(Path::new("home/.omp/profiles/stateful/agent")),
+            vec![
+                PathBuf::from(
+                    "home/.omp/profiles/stateful/agent/skills/stateful-command-policy/omp-tools.md"
+                ),
+                PathBuf::from(
+                    "home/.omp/profiles/stateful/agent/skills/stateful-command-policy/sandbox-tools.md"
+                ),
+                PathBuf::from(
+                    "home/.omp/profiles/stateful/agent/skills/stateful-command-policy/denial-recovery.md"
+                ),
+                PathBuf::from(
+                    "home/.omp/profiles/stateful/agent/skills/stateful-command-policy/subagent-write-recovery.md"
+                ),
+            ]
+        );
+
+        let support_files = stateful_command_policy_support_files();
+        assert_eq!(support_files.len(), 4);
+        assert!(stateful_command_policy_skill().contains("Support Files"));
+    }
+
+    #[test]
+    fn omp_extension_compacts_empty_tool_output() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "stateful-omp-extension-empty-output-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("temp dir should be creatable");
+        let extension_path = temp_dir.join("stateful.js");
+
+        write_omp_extension(&extension_path, "/usr/local/bin/stateful")
+            .expect("extension should be written");
+        let contents = fs::read_to_string(&extension_path).expect("extension should be readable");
+
+        let helper_start = contents
+            .find("function emptyToolOutputText")
+            .expect("empty output helper should be generated");
+        let helper_end = contents[helper_start..]
+            .find("\n\nfunction lazyToolResult")
+            .map(|offset| helper_start + offset)
+            .expect("empty output helper should end before lazyToolResult");
+        let script = format!(
+            "{}\nconsole.log(JSON.stringify([emptyToolOutputText(''), emptyToolOutputText('  '), emptyToolOutputText('kept')]))",
+            &contents[helper_start..helper_end]
+        );
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .expect("node should execute generated extension helper");
+
+        assert!(
+            output.status.success(),
+            "node failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("stdout should be utf8"),
+            "[\"No output.\",\"No output.\",\"kept\"]\n"
+        );
+
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
     }
 
     #[test]

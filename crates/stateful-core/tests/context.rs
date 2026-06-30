@@ -43,6 +43,72 @@ fn detailed_context_renders_warning_nearby_and_stale_sections() {
 }
 
 #[test]
+fn brief_context_starts_with_summary_for_mixed_live_items() {
+    let package = ContextPackage::from_items(vec![
+        CurrentItem::new(
+            CurrentItemKind::Claim,
+            CurrentSeverity::Block,
+            CurrentFreshness::Live,
+            "src/auth.ts",
+            "Fix auth validation behavior requested by the user.",
+            "Session s1 has an active write claim.",
+        )
+        .with_next_action("Wait for s1 to release the claim."),
+        CurrentItem::new(
+            CurrentItemKind::Reservation,
+            CurrentSeverity::Info,
+            CurrentFreshness::Live,
+            "src/session.ts",
+            "Warm cache cleanup.",
+            "Session s2 declared a reservation.",
+        ),
+    ]);
+
+    let text = render_prompt_text(&package, RenderMode::Brief);
+
+    assert!(text.starts_with("Stateful summary:"));
+    assert!(text.contains("1 blocking"));
+    assert!(text.contains("1 info"));
+    assert!(text.contains("Blocking"));
+    assert!(text.contains("Required Next Action"));
+}
+
+#[test]
+fn brief_context_info_reservation_omits_purpose_after_summary() {
+    let package = ContextPackage::from_items(vec![CurrentItem::new(
+        CurrentItemKind::Reservation,
+        CurrentSeverity::Info,
+        CurrentFreshness::Live,
+        "src/cache.ts",
+        "Warm cache cleanup.",
+        "Session s2 declared a reservation.",
+    )]);
+
+    let text = render_prompt_text(&package, RenderMode::Brief);
+
+    assert!(text.starts_with("Stateful summary:"));
+    assert!(text.contains("Nearby Activity"));
+    assert!(!text.contains("purpose: Warm cache cleanup"));
+}
+
+#[test]
+fn detailed_context_info_reservation_keeps_purpose() {
+    let package = ContextPackage::from_items(vec![CurrentItem::new(
+        CurrentItemKind::Reservation,
+        CurrentSeverity::Info,
+        CurrentFreshness::Live,
+        "src/cache.ts",
+        "Warm cache cleanup.",
+        "Session s2 declared a reservation.",
+    )]);
+
+    let text = render_prompt_text(&package, RenderMode::Detailed);
+
+    assert!(text.contains("Nearby Activity"));
+    assert!(text.contains("purpose: Warm cache cleanup"));
+}
+
+#[test]
 fn structured_items_render_purpose_and_required_actions() {
     let package = ContextPackage::from_items(vec![
         CurrentItem::new(
@@ -72,7 +138,7 @@ fn structured_items_render_purpose_and_required_actions() {
     assert!(text.contains("purpose: Fix auth validation behavior requested by the user"));
     assert!(text.contains("next: Wait for s1 to release the claim"));
     assert!(text.contains("Nearby Activity"));
-    assert!(text.contains("purpose: Resume queued session cleanup after rereading"));
+    assert!(!text.contains("purpose: Resume queued session cleanup after rereading"));
     assert!(!text.contains("next: Reread src/session.ts before continuing"));
 }
 
@@ -141,7 +207,9 @@ fn brief_context_renders_evidence_kind_without_evidence_text() {
 
     let text = render_prompt_text(&package, RenderMode::Brief);
 
+    assert!(text.starts_with("Stateful summary:"));
     assert!(text.contains("evidence kind: declared_reservation"));
+    assert!(!text.contains("purpose: Fix auth validation behavior"));
     assert!(!text.contains("evidence: ReservationDeclared event"));
 }
 

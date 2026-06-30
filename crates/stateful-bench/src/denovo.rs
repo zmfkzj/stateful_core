@@ -1911,6 +1911,32 @@ pub struct DeNovoConditionReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_used_rate: Option<f64>,
     #[serde(default)]
+    pub orchestration_trace_observed: usize,
+    #[serde(default)]
+    pub orchestration_trace_captured: usize,
+    #[serde(default)]
+    pub orchestration_reservation_events: usize,
+    #[serde(default)]
+    pub orchestration_claim_events: usize,
+    #[serde(default)]
+    pub orchestration_conflict_events: usize,
+    #[serde(default)]
+    pub orchestration_event_count: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub orchestration_event_types: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub orchestration_heartbeat_events: usize,
+    #[serde(default)]
+    pub orchestration_heartbeat_windows: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestration_heartbeat_max_gap_ms: Option<u64>,
+    #[serde(default)]
+    pub orchestration_denial_events: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub orchestration_denial_paths: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub orchestration_denial_messages: BTreeMap<String, usize>,
+    #[serde(default)]
     pub token_observed_instances: usize,
     #[serde(default)]
     pub token_usage_turns: usize,
@@ -1953,6 +1979,90 @@ pub struct DeNovoComparisonReport {
     pub total_input_plus_output_tokens: u64,
     #[serde(default)]
     pub total_uncached_input_plus_output_tokens: u64,
+}
+
+#[derive(Debug, Default)]
+struct DeNovoTraceSummary {
+    observed: usize,
+    captured: usize,
+    reservation_events: usize,
+    claim_events: usize,
+    conflict_events: usize,
+    event_count: usize,
+    event_types: BTreeMap<String, usize>,
+    heartbeat_events: usize,
+    heartbeat_windows: usize,
+    heartbeat_max_gap_ms: Option<u64>,
+    denial_events: usize,
+    denial_paths: BTreeMap<String, usize>,
+    denial_messages: BTreeMap<String, usize>,
+}
+
+fn value_usize(value: Option<&Value>) -> usize {
+    value.and_then(Value::as_u64).unwrap_or(0) as usize
+}
+
+fn value_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(Value::as_u64)
+}
+
+fn value_count_map(value: Option<&Value>) -> BTreeMap<String, usize> {
+    value
+        .and_then(Value::as_object)
+        .map(|object| {
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), value.as_u64().unwrap_or(0) as usize))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn add_counts(target: &mut BTreeMap<String, usize>, source: BTreeMap<String, usize>) {
+    for (key, count) in source {
+        *target.entry(key).or_default() += count;
+    }
+}
+
+fn orchestration_trace_summary(results: &[DeNovoOfficialResult]) -> DeNovoTraceSummary {
+    let mut summary = DeNovoTraceSummary::default();
+    for result in results {
+        let Some(trace) = result
+            .extra
+            .get("orchestration_trace")
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        summary.observed += 1;
+        if trace.get("trace_captured").and_then(Value::as_bool) == Some(true) {
+            summary.captured += 1;
+        }
+        summary.reservation_events += value_usize(trace.get("reservation_events"));
+        summary.claim_events += value_usize(trace.get("claim_events"));
+        summary.conflict_events += value_usize(trace.get("conflict_events"));
+        summary.event_count += value_usize(trace.get("event_count"));
+        summary.heartbeat_events += value_usize(trace.get("heartbeat_events"));
+        summary.heartbeat_windows += value_usize(trace.get("heartbeat_windows"));
+        summary.denial_events += value_usize(trace.get("denial_events"));
+        if let Some(gap) = value_u64(trace.get("heartbeat_max_gap_ms")) {
+            summary.heartbeat_max_gap_ms =
+                Some(summary.heartbeat_max_gap_ms.map_or(gap, |old| old.max(gap)));
+        }
+        add_counts(
+            &mut summary.event_types,
+            value_count_map(trace.get("event_types")),
+        );
+        add_counts(
+            &mut summary.denial_paths,
+            value_count_map(trace.get("denial_paths")),
+        );
+        add_counts(
+            &mut summary.denial_messages,
+            value_count_map(trace.get("denial_messages")),
+        );
+    }
+    summary
 }
 
 pub fn build_denovo_condition_report(
@@ -2039,7 +2149,7 @@ pub fn build_denovo_condition_report(
         .iter()
         .map(|usage| usage.uncached_input_plus_output_tokens())
         .sum::<u64>();
-
+    let orchestration_trace = orchestration_trace_summary(&results);
     let condition_id = condition.id();
 
     DeNovoConditionReport {
@@ -2066,6 +2176,19 @@ pub fn build_denovo_condition_report(
         subagent_observed_instances,
         subagent_used_count,
         subagent_used_rate: ratio(subagent_used_count, subagent_observed_instances),
+        orchestration_trace_observed: orchestration_trace.observed,
+        orchestration_trace_captured: orchestration_trace.captured,
+        orchestration_reservation_events: orchestration_trace.reservation_events,
+        orchestration_claim_events: orchestration_trace.claim_events,
+        orchestration_conflict_events: orchestration_trace.conflict_events,
+        orchestration_event_count: orchestration_trace.event_count,
+        orchestration_event_types: orchestration_trace.event_types,
+        orchestration_heartbeat_events: orchestration_trace.heartbeat_events,
+        orchestration_heartbeat_windows: orchestration_trace.heartbeat_windows,
+        orchestration_heartbeat_max_gap_ms: orchestration_trace.heartbeat_max_gap_ms,
+        orchestration_denial_events: orchestration_trace.denial_events,
+        orchestration_denial_paths: orchestration_trace.denial_paths,
+        orchestration_denial_messages: orchestration_trace.denial_messages,
         token_observed_instances,
         token_usage_turns,
         token_input_tokens,

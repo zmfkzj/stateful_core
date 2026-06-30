@@ -8,7 +8,7 @@ use stateful_mcp::{ToolCall, map_tool_to_http, protocol_tool_name, tool_descript
 
 use crate::runtime::{
     current_stateful_session_id, read_current_session_file_for_mcp,
-    write_current_session_file_for_explicit_session,
+    read_current_session_file_for_session, write_current_session_file_for_explicit_session,
 };
 use crate::{
     CurrentSession, GlobalPaths, HttpResponse, RepoGate, RepoIdentity, ReservationCancelArgs,
@@ -36,7 +36,7 @@ pub fn call_mcp_tool_in_repo(
     if matches!(tool_name.as_str(), "state_file_write" | "state.file.write") {
         return Ok(error_response(
             410,
-            "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after task-level reservation covers the target and a successful same-session file claim.",
+            "state_file_write was removed; use native edit tools with hook-visible targets, such as Codex apply_patch or Edit, after task-level reservation covers the target and a successful same-reservation file claim.",
         ));
     }
     let protocol_name = protocol_tool_name(&tool_name).map_err(anyhow::Error::msg)?;
@@ -138,7 +138,29 @@ fn current_session_for_mcp_tool(
         return Ok(None);
     }
 
+    if protocol_name == "state.claim.acquire" {
+        return current_session_for_claim_acquire(repo_root);
+    }
+
     read_current_session_file_for_mcp(repo_root).map(Some)
+}
+
+fn current_session_for_claim_acquire(repo_root: &Path) -> anyhow::Result<Option<CurrentSession>> {
+    if std::env::var_os("CODEX_THREAD_ID").is_some()
+        || std::env::var_os("STATEFUL_CODEX_RUN_ID").is_some()
+    {
+        return read_current_session_file_for_mcp(repo_root).map(Some);
+    }
+
+    let Some(session_id) = current_stateful_session_id()? else {
+        return read_current_session_file_for_mcp(repo_root).map(Some);
+    };
+
+    match read_current_session_file_for_session(repo_root, &session_id) {
+        Ok(current_session) => Ok(Some(current_session)),
+        Err(error) if is_not_found_error(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn is_not_found_error(error: &anyhow::Error) -> bool {
@@ -384,6 +406,7 @@ fn reservation_claim_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::R
 
     let wait_id = take_string(&mut object, "wait_id")
         .ok_or_else(|| anyhow::anyhow!("state.reservation.claim requires wait_id"))?;
+    let reservation_id = take_string(&mut object, "reservation_id");
     let session_id = take_string(&mut object, "session_id")
         .unwrap_or_else(|| format!("stateful-mcp:{}", runtime.pid));
     let workspace_id =
@@ -396,6 +419,7 @@ fn reservation_claim_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow::R
             session_id,
             workspace_id,
             wait_id,
+            reservation_id,
             identity,
         },
         "mcp",
@@ -410,6 +434,7 @@ fn reservation_request_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow:
 
     let request_id = take_string(&mut object, "request_id")
         .ok_or_else(|| anyhow::anyhow!("state.reservation.request requires request_id"))?;
+    let reservation_id = take_string(&mut object, "reservation_id");
     let action = take_string(&mut object, "action")
         .ok_or_else(|| anyhow::anyhow!("state.reservation.request requires action"))?;
     let path = take_string(&mut object, "path")
@@ -428,6 +453,7 @@ fn reservation_request_mcp_body(runtime: &ServerRuntime, body: Value) -> anyhow:
             session_id,
             workspace_id,
             request_id,
+            reservation_id,
             action,
             path,
             purpose,
@@ -494,14 +520,12 @@ fn enrich_arguments(
     if is_session_bound_mcp_tool(tool_name)
         && let Some(session) = current_session
     {
-        object.insert(
-            "session_id".to_string(),
-            Value::String(session.session_id.clone()),
-        );
-        object.insert(
-            "workspace_id".to_string(),
-            Value::String(session.workspace_id.clone()),
-        );
+        object
+            .entry("session_id".to_string())
+            .or_insert_with(|| Value::String(session.session_id.clone()));
+        object
+            .entry("workspace_id".to_string())
+            .or_insert_with(|| Value::String(session.workspace_id.clone()));
     }
 
     if matches!(

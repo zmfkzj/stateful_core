@@ -114,38 +114,37 @@ other POST routes still use flat request bodies.
 
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --agent codex --yes` configures global Codex hooks and MCP,
-and writes `skills/stateful-command-policy/SKILL.md` and
+and writes `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
+`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`) and
 `skills/dispatching-parallel-agents/SKILL.md`.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) and ensures the target keys
-`tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
-`eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
+`tools.approvalMode: yolo`, `stateful.autoApprove: false`,
+`bash.enabled: true`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
+and `eval.jl: false`; it removes
 `tools.approval` from the stateful profile because yolo mode delegates safety to
 Stateful hooks. Without `--update`, existing scalar values are preserved and
 only missing keys are inserted; with `--update`, existing target scalar values
 are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
 tools are denied at the host approval and hook levels. The installer also writes
-`rules/stateful-required.md`, `skills/stateful-command-policy/SKILL.md`, and
-`skills/dispatching-parallel-agents/SKILL.md` under that isolated agent
-directory: the always-apply rule tells the model when Stateful policy applies,
-the `stateful-command-policy` manual keeps the detailed procedure, and hooks
-remain the
-enforcement boundary. The
-generated extension registers `sandbox_bash` for read-only, write-targets,
-build, git, and github-pr sandbox runs, including common sandbox flags,
-registers `ext_ro_bash` for read-only `--fs external` commands, and registers
-`ext_rw_bash` for external writes that require write/create/dir scope plus a
-scoped OMP UI approval grant. That grant shows purpose, declared
+`rules/stateful-required.md` and `skills/stateful-command-policy/` (`SKILL.md`,
+`omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
+`subagent-write-recovery.md`) under that isolated agent directory: the
+always-apply rule tells the model when
+Stateful policy applies, the `stateful-command-policy` manual keeps the detailed
+procedure, and hooks remain the enforcement boundary. The
+generated extension keeps built-in Bash preflight plus lazy edit/write resume
+tools. Built-in Bash may run only strict trusted `stateful sandbox run ...` and
+`stateful sandbox process find ...` commands after Stateful preflight; command
+execution and process inspection are not generated tool calls. External
+write/create/write-dir/socket/signal scope asks for a scoped OMP UI grant by
+default; `stateful.autoApprove: true` skips only that Stateful-owned prompt
+while sandbox scope validation, hooks, reservation/claim checks, and grant
+limits still apply. The grant prompt shows purpose, declared
 write/socket/signal scope, network mode, examples, max uses, and expiry instead
 of raw command text, and matching calls can reuse it until the limit is reached.
-All three generated `*_bash` tools run sandbox commands in the background by
-default. With `async` omitted or `true`, they return a job id immediately,
-stream stdout/output via OMP messages using `pi.sendMessage`, and send final
-stdout, stderr, and exit status as a follow-up message. Set `async: false` to
-keep the old awaited foreground behavior, where final stdout/stderr/status are
-returned in tool details. `sandbox_bash` rejects
-`--fs external` with guidance to use `ext_ro_bash` or `ext_rw_bash`. Raw Bash and
+When auto-approval is enabled, no prompt is shown. Raw Bash and
 Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
 are blocked even if their command text
@@ -166,11 +165,13 @@ stateful binary available by absolute path or PATH lookup
 Codex global hooks, repo-local compatibility hooks, and managed Codex hooks
 share the Codex lifecycle model. The isolated OMP `stateful` profile uses OMP
 extension entry points and does not expose `UserPromptSubmit`. Its
-`session-start` hook prefers `event.sessionId` or
-`ctx.sessionManager.session.id`, stores that id in `STATEFUL_SESSION_ID`, and
-persists current-session files so session-aware MCP tools resolve the same OMP
-session. Later managed Codex hooks should move the same thin hook adapters to
-administrator-controlled paths and configure them from `requirements.toml`.
+`session-start` hook stores `STATEFUL_SESSION_ID` from explicit event/ctx ids
+(`event.sessionId`, `event.session_id`, session fields), falling back to the
+`ctx.sessionManager.getSessionFile()` header/stem and then `getLeafId()`, then
+persists current-session files so session-aware MCP tools
+resolve the same OMP session. Later managed Codex hooks should move the same
+thin hook adapters to administrator-controlled paths and configure them from
+`requirements.toml`.
 
 Plugin packaging is a team-beta distribution layer, not the prototype
 enforcement path. A plugin can bundle hooks, MCP config, skills, and docs, but
@@ -194,15 +195,16 @@ tool classification plus Bash sandbox-wrapper validation. If the state server
 is unavailable, the hook follows the availability policy: agent writes and
 reconciliation fail closed; read/search/diff remains allowed.
 
-For OMP, the generated `sandbox_bash` tool owns non-external sandbox command
-execution for read-only, write-targets, build, git, and github-pr profiles;
-`ext_ro_bash` owns read-only external commands without OMP UI confirmation; and
-`ext_rw_bash` owns external writes through reusable scoped purpose grants. Each
-generated tool runs in the background by default: when `async` is omitted or
-`true`, it returns a job id immediately, streams stdout/output via
-`pi.sendMessage`, and sends final stdout/stderr/exit status as a follow-up
-message. `async: false` keeps the old awaited foreground behavior with final
-stdout/stderr/exit status in returned tool details.
+For OMP, built-in Bash owns sandbox command execution and process inspection
+only when the command is a single trusted `stateful sandbox run ...` or
+`stateful sandbox process find ...` invocation that passes Stateful preflight.
+External write/create/write-dir/socket/signal scope asks for a scoped OMP UI
+grant by default; `stateful.autoApprove: true` skips only that Stateful-owned
+prompt while sandbox scope validation, hooks, reservation/claim checks, and
+grant limits still apply. The grant prompt shows purpose, declared scope,
+examples, max uses, and expiry rather than raw command text, and matching calls
+reuse the grant until it expires or reaches its use limit. When auto-approval
+is enabled, no prompt is shown.
 Other stateful allows translate to OMP allow. Stateful deny or unavailable server
 translates to a hard block, even when OMP yolo metadata is present.
 
@@ -262,23 +264,23 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 `PreToolUse`:
 
 - deny supported write calls when the session has no active reservation
-- deny Codex raw Bash with sandbox guidance. For OMP, raw Bash and the
-  Python/JavaScript/JS/Ruby/Julia eval tools are denied at host approval and hook
-  levels, even when the raw command invokes `stateful sandbox run`; non-external
-  sandbox command work must use `sandbox_bash`, read-only repo-external shell
-  work must use `ext_ro_bash` without OMP UI confirmation, and external writes
-  must use `ext_rw_bash` with write/create/dir scope plus a scoped purpose grant.
-  Hook-mediated command execution outside OMP custom tools must be a single
-  strict invocation of the trusted absolute `stateful` binary running
-  `<absolute-stateful-binary> sandbox run ... --command <cmd>`. Read-only
-  command-shaped inspection uses `--fs read-only --network disabled`; process
-  inspection uses `sandbox process find <selector>`. Command-shaped repo writes
-  use `--fs write-targets` with explicit `--write-target <file>` /
-  `--create-target <file>` values and repo reservation plus same-session claims. Local
+- deny Codex raw Bash with sandbox guidance. For OMP, built-in Bash may run
+  only strict trusted `stateful sandbox run ...` and `stateful sandbox process
+  find ...` commands after Stateful preflight; arbitrary raw Bash and the
+  Python/JavaScript/JS/Ruby/Julia eval tools remain denied at host approval and
+  hook levels. Scoped external writes still ask for a Stateful OMP UI grant by
+  default; `stateful.autoApprove: true` skips only that Stateful-owned prompt
+  while sandbox scope validation, hooks, reservation/claim checks, and grant
+  limits still apply.
+  Hook-mediated command execution outside OMP built-in Bash must be a single
+  strict invocation of the trusted absolute `stateful` binary. Read-only
+  command-shaped inspection uses `--fs read-only --network disabled`; Codex
+  process inspection uses `<absolute-stateful-binary> sandbox process find <selector>`. Command-shaped repo
+  writes use `--fs write-targets` with explicit `--write-target <file>` /
+  `--create-target <file>` values and repo reservation plus same-reservation claims. Local
   Git uses `--fs git --network disabled`, GitHub PR operations use
   `--fs github-pr --network enabled`, and external operations use `--fs external`
-  with Codex approval, OMP `ext_ro_bash` for read-only/no-write-scope commands,
-  or OMP `ext_rw_bash` for writes. A purpose and command are sufficient for
+  through the trusted stateful command path. A purpose and command are sufficient for
   read-only/no-declared-scope external operations; absolute external targets
   remain required when declaring external write scope. On macOS, external runs
   allow `trustd` and DirectoryService Mach lookups for TLS certificate
@@ -289,7 +291,7 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 `PostToolUse`:
 
 - observe files, commands, and results from supported tool calls
-- release same-session repo-write claims after completed native edit and
+- release same-reservation repo-write claims after completed native edit and
   `write-targets` transactions
 - refresh heartbeat timestamps and claim TTLs only for remaining active claims
   still covered by active reservation
@@ -356,32 +358,29 @@ classification, so `functions.bash` is Bash,
 
 - Native edit tools such as Codex `apply_patch`, `Edit`, and `Write` or OMP
   `edit` and `write`: enforce by inspecting hook-exposed targets after
-  task-level reservation covers the target and a successful same-session file
+  task-level reservation covers the target and a successful same-reservation file
   claim is active. The completed write transaction releases the claim that
   authorized it.
-- Command execution: Codex raw Bash is denied with sandbox guidance. OMP raw Bash
-  and Python/JavaScript/JS/Ruby/Julia eval-tool execution are denied at host
-  approval and hook levels, even when the raw command itself invokes
-  `stateful sandbox run`. OMP command-shaped sandbox work uses generated tools:
-  `sandbox_bash` for read-only, write-targets, build, git, and github-pr
-  profiles, `ext_ro_bash` for read-only `--fs external` commands without OMP UI
-  confirmation, and `ext_rw_bash` for external writes with a scoped purpose
-  grant. These tools run sandbox commands in the background by default, return
-  a job id immediately when `async` is omitted or `true`, stream stdout/output
-  via OMP messages using `pi.sendMessage`, and send final stdout/stderr/exit
-  status as a follow-up message. `async: false` keeps the old awaited
-  foreground behavior and returns final stdout/stderr/exit status in tool
-  details.
+- Command execution: Codex raw Bash is denied with sandbox guidance. OMP built-in
+  Bash may run only strict trusted `stateful sandbox run ...` and
+  `stateful sandbox process find ...` commands after Stateful preflight;
+  arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution
+  are denied at host approval and hook levels. External write/create/write-dir,
+  socket, or signal scope asks for a scoped OMP UI grant by default;
+  `stateful.autoApprove: true` skips only that Stateful-owned prompt while
+  sandbox scope validation, hooks, reservation/claim checks, and grant limits
+  still apply.
   Ordinary read work should use native read/search/diff tools when available.
   Read-only command-shaped inspection that genuinely needs a shell uses
   `--fs read-only --network disabled`; process inspection uses
-  `sandbox process find <selector>`, not raw `ps` or `pgrep`. Command-shaped
-  repo writes use `--fs write-targets` with explicit `--write-target <file>` /
-  `--create-target <file>` values and target authorization. External operations
-  use `--fs external` with no repo reservation or claim, and Codex approval or OMP
-  `ext_ro_bash` for read-only/no-write-scope commands; OMP external writes use
-  `ext_rw_bash` with at least one write target, create target, or write dir and a
-  scoped purpose grant. On
+  `<absolute-stateful-binary> sandbox process find <selector>` in Codex and a
+  strict trusted `stateful sandbox process find ...` command through built-in
+  Bash in OMP. Command-shaped repo writes use `--fs write-targets` with explicit
+  `--write-target <file>` / `--create-target <file>` values and target
+  authorization. External operations use `--fs external`; OMP external
+  write/create/write-dir/socket/signal scope asks for the scoped grant described
+  above.
+  On
   macOS, the external profile permits `trustd` and DirectoryService Mach lookups
   so Go TLS clients such as `gh` can verify certificates.
 - Test execution: run only through sandboxed test actions such as
@@ -392,9 +391,9 @@ classification, so `functions.bash` is Bash,
 
 Denied Bash should direct the agent to native read/search tools for ordinary
 read work, native edit tools for repo file edits, strict sandbox-run wrappers
-for Codex command-shaped shell execution, `sandbox_bash` for OMP non-external
-sandbox runs, `ext_ro_bash` for OMP read-only external runs, `ext_rw_bash` for
-OMP external writes, and build-profile sandbox wrappers for tests.
+for Codex command-shaped shell execution, OMP built-in Bash for strict trusted
+`stateful sandbox run ...` and `stateful sandbox process find ...` commands,
+and build-profile sandbox wrappers for tests.
 
 MCP does not perform local command-shaped file writes. Hook-mediated shell
 execution uses `<absolute-stateful-binary> sandbox run ... --command <cmd>`;
@@ -410,8 +409,8 @@ other Bash command.
 
 Agents cannot run raw Bash or Python/JavaScript/JS/Ruby/Julia eval-tool test
 commands through hooks. They call the trusted build-profile wrapper with a
-scratch purpose; in OMP they call the generated `sandbox_bash` tool for this
-build profile:
+scratch purpose; in OMP they run the same strict trusted `stateful sandbox run`
+command through built-in Bash:
 
 ```text
 stateful sandbox run --fs build --network enabled --write-dir test-run --command <cmd>
@@ -585,7 +584,7 @@ Initial policy:
   instruction
 - current shipped hook path records file target observations on exact file claim
   acquire, denies hook-originated writes when the claimed file changes before
-  authorization, and refreshes that observation after same-session supported file
+  authorization, and refreshes that observation after same-reservation supported file
   tools complete
 - unrelated reads and searches: allow
 - reads, searches, diffs, and sandboxed tests after human writes: allow
@@ -623,15 +622,16 @@ Raw event logs should not be dumped into prompts. The rendered view should help
 the agent decide what to avoid, wait for, or coordinate.
 
 `state_context_render` supports `brief` and `detailed` modes plus an optional
-resource filter. `brief` is for session start and prompt submit context.
-`detailed` is for denied actions or focused resource checks. Rendered output
-must include concrete next actions when a block or warning is present.
+singular `resource` filter. `brief` is for session start, prompt submit context,
+and planning-time known-target resource checks. `detailed` is for manual deep
+inspection when planning context lacks enough evidence. Denial recovery should
+follow the denial's direct next action rather than rendering ambient context.
 
 The current server route renders store-backed live context from active reservations,
 active claims, and queued or claimable (`reserved`) wait records. The response
 includes summary counts, structured `items`, and prompt-ready `prompt_text`.
-Released claims are absent from this live render. A later same-session write
-must acquire a fresh claim or claim a claimable reservation before authorization
+Released claims are absent from this live render. A later write in that session
+must acquire a fresh same-reservation claim or claim a claimable reservation before authorization
 can succeed.
 
 The shipped `/v1/context/render` route returns structured data and prompt-ready
@@ -683,15 +683,15 @@ The system should prefer explicit uncertainty:
 - interrupted session -> keep last state until TTL expires
 - hook failure -> warn and fail closed only for high-risk writes
 - OMP stateful hook deny or unavailable result -> block, never warn because of
-  yolo metadata; repo-external command-shaped work must still use `ext_ro_bash`
-  for reads or `ext_rw_bash` for writes, not raw Bash or eval tools
+  yolo metadata; repo-external command-shaped work must still pass Stateful
+  external grant checks
 - state server unavailable -> deny supported writes that cannot prove active
   reservation
-- state server unavailable -> deny Codex raw Bash, repo-internal Bash, and all
-  OMP raw Bash plus Python/JavaScript/JS/Ruby/Julia eval-tool execution. OMP
-  non-external sandbox runs must use `sandbox_bash`, and command-shaped writes
-  through `--fs write-targets` fail
-  closed when target authorization cannot be proven.
+- state server unavailable -> deny Codex raw Bash, arbitrary OMP raw Bash, and
+  all Python/JavaScript/JS/Ruby/Julia eval-tool execution. OMP built-in Bash
+  passthrough is limited to strict trusted Stateful sandbox/process commands,
+  and command-shaped writes through `--fs write-targets` fail closed when target
+  authorization cannot be proven.
 - state server unavailable -> write-target sandbox authorization fails closed
   and does not run the command
 - state server unavailable -> fail closed for `state.reconcile.ack`, reservation

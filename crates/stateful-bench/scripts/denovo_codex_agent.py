@@ -5,18 +5,25 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import http.server
 import json
 import os
 import re
+import select
 import shutil
 import sqlite3
+import socket
+import socketserver
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
+from collections import Counter
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -43,6 +50,17 @@ from codex_pair_agent import (  # noqa: E402
 OFFICIAL_BENCHMARK_PROTOCOL = "denovo_swe_single_rollout"
 RESUME_POLICY_CONTEXT_OR_TOKEN_ONLY = "context_or_token_failure_only"
 DEFAULT_SUBAGENT_MIN_COUNT = 3
+CODEX_EMPTY_STOP_EXIT_CODE = 2
+
+
+def cli_runtime_failure(returncode: int, cli_runtime: str) -> tuple[str, str]:
+    if returncode == CODEX_EMPTY_STOP_EXIT_CODE:
+        return (
+            f"{cli_runtime}-empty-stop",
+            f"{cli_runtime} returned an empty stop after retry cap",
+        )
+    return (f"{cli_runtime}-error", f"{cli_runtime} exited {returncode}")
+
 DEFAULT_MIN_FREE_DISK_GB = 20.0
 BYTES_PER_GIB = 1024**3
 DEFAULT_OMP_AGENT_DOCKER_STATEFUL_BINARY = "/usr/local/bin/stateful"
@@ -61,6 +79,7 @@ OMP_AGENT_DOCKER_ENV_ALLOWLIST = {
     "OPENAI_BASE_URL",
     "OPENROUTER_API_KEY",
     "SSL_CERT_FILE",
+    "STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS",
     "STATEFUL_SERVER_TOKEN",
     "STATEFUL_SERVER_URL",
 }
@@ -128,6 +147,9 @@ BENCHMARK_SOURCE_LEAK_HOST_PATTERNS = (
     "patch-diff.githubusercontent.com",
     "api.github.com/repos",
 )
+BENCHMARK_SOURCE_LEAK_CONNECT_HOSTS = tuple(
+    sorted({pattern.split("/", 1)[0] for pattern in BENCHMARK_SOURCE_LEAK_HOST_PATTERNS})
+)
 
 
 @dataclass
@@ -179,7 +201,6 @@ def native_subagent_prompt_instruction(subagent: str, subagent_min_count: int) -
 Native Codex/OMP subagent requirements:
 - MUST use native subagents for this benchmark condition before making the final answer.
 - Before implementation or broad repository exploration, and after any narrow setup needed to read this prompt, inspect tool availability, or initialize stateful coordination, spawn at least {subagent_min_count} native subagents unless the runtime does not expose any native subagent tool.
-- MUST read and use the `dispatching-parallel-agents` skill before spawning native subagents when that skill is available.
 - In OMP, the current native subagent tool is `task`: call it with a `tasks` array containing at least {subagent_min_count} implementation subagents. Older OMP multi-agent builds may expose `multi_agent_v1spawn_agent` instead.
 - Use all {subagent_min_count} native subagents for repository editing; each subagent must inspect, edit, and verify a distinct implementation slice.
 - Do not leave any native subagent as analysis-only, documentation-only, or idle.
@@ -362,7 +383,7 @@ def run_omp_with_timeout(
         raise CodexTimeoutError(f"omp timed out after {timeout_seconds:g}s") from error
     return CodexExecutionSummary(
         returncode=completed.returncode,
-        token_usage=empty_codex_token_usage(),
+        token_usage=omp_token_usage_from_output(completed.stdout),
     )
 
 
@@ -386,26 +407,106 @@ def add_codex_token_usage(total: dict[str, int], update: dict[str, int]) -> None
 
 def codex_token_usage_from_output(output: str) -> dict[str, int]:
     total = empty_codex_token_usage()
+    total_event: dict[str, int] | None = None
     for event in iter_json_events(output):
-        if not isinstance(event, dict) or event.get("type") != "turn.completed":
+        if not isinstance(event, dict):
             continue
-        usage = event.get("usage")
-        if not isinstance(usage, dict):
+        usage = codex_usage_from_event(event)
+        if usage is None:
             continue
-        input_tokens = int(usage.get("input_tokens", 0) or 0)
-        cached_input_tokens = int(usage.get("cached_input_tokens", 0) or 0)
-        output_tokens = int(usage.get("output_tokens", 0) or 0)
-        reasoning_output_tokens = int(usage.get("reasoning_output_tokens", 0) or 0)
-        uncached_input_tokens = max(0, input_tokens - cached_input_tokens)
-        total["turns"] += 1
-        total["input_tokens"] += input_tokens
-        total["cached_input_tokens"] += cached_input_tokens
-        total["output_tokens"] += output_tokens
-        total["reasoning_output_tokens"] += reasoning_output_tokens
-        total["input_plus_output_tokens"] += input_tokens + output_tokens
-        total["uncached_input_tokens"] += uncached_input_tokens
-        total["uncached_input_plus_output_tokens"] += uncached_input_tokens + output_tokens
+        if event.get("type") == "turn.completed":
+            add_codex_token_usage(total, usage)
+        else:
+            total_event = usage
+    if total["turns"] == 0 and total_event is not None:
+        return total_event
     return total
+
+
+def omp_token_usage_from_output(output: str) -> dict[str, int]:
+    total = empty_codex_token_usage()
+    for event in iter_json_events(output):
+        if not isinstance(event, dict):
+            continue
+        usage = omp_usage_from_event(event)
+        if usage is not None:
+            add_codex_token_usage(total, usage)
+    return total
+
+
+def omp_usage_from_event(event: dict[str, Any]) -> dict[str, int] | None:
+    usage = first_dict(pointer(event, "message", "usage"))
+    if usage is None:
+        return None
+    uncached_input_tokens = int(usage.get("input", 0) or 0)
+    cached_input_tokens = int(usage.get("cacheRead", 0) or 0)
+    input_tokens = uncached_input_tokens + cached_input_tokens
+    output_tokens = int(usage.get("output", 0) or 0)
+    reasoning_output_tokens = int(usage.get("reasoningTokens", 0) or 0)
+    input_plus_output_tokens = (
+        int(usage.get("totalTokens", 0) or 0) or input_tokens + output_tokens
+    )
+    return {
+        "turns": 1,
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": reasoning_output_tokens,
+        "input_plus_output_tokens": input_plus_output_tokens,
+        "uncached_input_tokens": uncached_input_tokens,
+        "uncached_input_plus_output_tokens": uncached_input_tokens + output_tokens,
+    }
+
+
+def codex_usage_from_event(event: dict[str, Any]) -> dict[str, int] | None:
+    usage = first_dict(
+        event.get("usage"),
+        pointer(event, "info", "total_token_usage"),
+        pointer(event, "payload", "info", "total_token_usage"),
+        pointer(event, "payload", "usage"),
+        pointer(event, "response", "usage"),
+        pointer(event, "payload", "response", "usage"),
+    )
+    if usage is None:
+        return None
+    input_tokens = int(usage.get("input_tokens", 0) or 0)
+    cached_input_tokens = int(
+        usage.get("cached_input_tokens", 0)
+        or pointer(usage, "input_tokens_details", "cached_tokens")
+        or 0
+    )
+    output_tokens = int(usage.get("output_tokens", 0) or 0)
+    reasoning_output_tokens = int(
+        usage.get("reasoning_output_tokens", 0)
+        or pointer(usage, "output_tokens_details", "reasoning_tokens")
+        or 0
+    )
+    input_plus_output_tokens = (
+        int(usage.get("total_tokens", 0) or 0) or input_tokens + output_tokens
+    )
+    uncached_input_tokens = max(0, input_tokens - cached_input_tokens)
+    return {
+        "turns": 1,
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": reasoning_output_tokens,
+        "input_plus_output_tokens": input_plus_output_tokens,
+        "uncached_input_tokens": uncached_input_tokens,
+        "uncached_input_plus_output_tokens": uncached_input_tokens + output_tokens,
+    }
+
+
+def pointer(value: object, *path: str) -> object | None:
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def first_dict(*values: object) -> dict[str, Any] | None:
+    return next((value for value in values if isinstance(value, dict)), None)
 
 
 def add_aweagent_to_path(aweagent_root: Path) -> None:
@@ -923,12 +1024,134 @@ def denovo_omp_environment(
     if stateful_session_id is not None:
         env["STATEFUL_SESSION_ID"] = stateful_session_id
     home = output / "omp-homes" / path_fragment(instance_id) / "home"
+    auth_source_agent = source_env.get("OMP_AUTH_SOURCE_AGENT_DIR")
+    if not auth_source_agent:
+        source_home = Path(source_env.get("HOME", "")).expanduser()
+        for candidate in (
+            source_home / ".omp" / "profiles" / "stateful" / "agent",
+            source_home / ".omp" / "agent",
+        ):
+            if (candidate / "agent.db").exists():
+                auth_source_agent = str(candidate)
+                break
+    if auth_source_agent:
+        env["OMP_AUTH_SOURCE_AGENT_DIR"] = auth_source_agent
     env["HOME"] = str(home)
     env["STATEFUL_HOME"] = str(home)
     env["PI_CODING_AGENT_DIR"] = str(home / ".omp" / "profiles" / "stateful" / "agent")
     env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["XDG_CACHE_HOME"] = str(home / ".cache")
     return env
+
+def seed_omp_auth_credentials(env: dict[str, str]) -> None:
+    source_agent = env.get("OMP_AUTH_SOURCE_AGENT_DIR")
+    if not source_agent:
+        return
+    source_db = Path(source_agent) / "agent.db"
+    target_db = Path(env["PI_CODING_AGENT_DIR"]) / "agent.db"
+    if not source_db.exists():
+        return
+    with sqlite3.connect(source_db) as source:
+        auth_schema = source.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'"
+        ).fetchone()
+        rows = source.execute(
+            """
+            SELECT provider, credential_type, data, disabled_cause, identity_key, created_at, updated_at
+            FROM auth_credentials
+            WHERE provider = 'openai-codex' AND credential_type = 'oauth'
+            """
+        ).fetchall()
+    if not rows:
+        return
+    target_db.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(target_db) as target:
+        has_auth = target.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'"
+        ).fetchone()
+        if auth_schema is not None and has_auth is None:
+            target.execute(auth_schema[0])
+        target.execute(
+            "DELETE FROM auth_credentials WHERE provider = 'openai-codex' AND credential_type = 'oauth'"
+        )
+        target.executemany(
+            """
+            INSERT INTO auth_credentials
+                (provider, credential_type, data, disabled_cause, identity_key, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+
+def denovo_source_guard_extension_source() -> str:
+    return """const BENCHMARK_SOURCE_BLOCK_ENV = "STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS";
+
+function benchmarkSourceBlockPatterns() {
+  const raw = process.env[BENCHMARK_SOURCE_BLOCK_ENV];
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => String(item || "").trim()).filter(Boolean);
+    }
+  } catch (_) {}
+  return String(raw).split(/[\\r\\n,]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function benchmarkSourcePatternMatches(text, pattern) {
+  const lowerPattern = pattern.toLowerCase();
+  if (lowerPattern === "upstream" || lowerPattern === "upstream/") {
+    return /(^|[^a-z0-9_-])upstream(?:\\/|[^a-z0-9_-]|$)/.test(text);
+  }
+  return text.includes(lowerPattern);
+}
+
+function benchmarkSourceBlockReason(event) {
+  const patterns = benchmarkSourceBlockPatterns();
+  if (patterns.length === 0) return "";
+  const text = (String(event?.toolName || "") + "\\n" + JSON.stringify(event?.input || {})).toLowerCase();
+  for (const pattern of patterns) {
+    if (benchmarkSourcePatternMatches(text, pattern)) {
+      return "DeNovo benchmark blocked target upstream source access before tool execution: " + pattern;
+    }
+  }
+  return "";
+}
+
+export default function denovoBenchmarkSourceGuard(pi) {
+  pi.on("tool_call", async (event) => {
+    const benchmarkBlockReason = benchmarkSourceBlockReason(event);
+    if (benchmarkBlockReason) return { block: true, reason: benchmarkBlockReason };
+  });
+}
+"""
+
+
+def install_non_stateful_omp_source_guard(env: dict[str, str]) -> None:
+    agent_dir = Path(env["PI_CODING_AGENT_DIR"])
+    extension_path = agent_dir / "extensions" / "denovo-benchmark-source-guard.js"
+    extension_path.parent.mkdir(parents=True, exist_ok=True)
+    extension_path.write_text(denovo_source_guard_extension_source(), encoding="utf-8")
+
+    config_path = agent_dir / "config.yml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = f"  - {extension_path}"
+    contents = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    if any(line.strip() == entry.strip() for line in contents.splitlines()):
+        return
+    lines = contents.splitlines()
+    for offset, line in enumerate(lines):
+        if line.strip() == "extensions:":
+            lines.insert(offset + 1, entry)
+            config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return
+    if contents and not contents.endswith("\n"):
+        contents += "\n"
+    contents += "extensions:\n"
+    contents += entry
+    contents += "\n"
+    config_path.write_text(contents, encoding="utf-8")
 
 
 def prepare_omp_environment(
@@ -990,6 +1213,9 @@ def prepare_omp_environment(
             message = (completed.stderr or completed.stdout).strip()
             raise StatefulRepoEnableError(message or f"omp agents unpack exited {completed.returncode}")
     if not enable_stateful:
+        install_non_stateful_omp_source_guard(env)
+        if runtime_omp_home is not None:
+            rewrite_omp_config_for_runtime_home(env, runtime_omp_home)
         return
     command = [stateful_binary, "install", "--agent", "omp", "--yes"]
     if runtime_stateful_binary and runtime_stateful_binary != stateful_binary:
@@ -1078,6 +1304,32 @@ def empty_native_subagent_usage(subagent_min_count: int) -> dict[str, Any]:
     }
 
 
+def stateful_workspace_id_from_repo_metadata(
+    env: dict[str, str],
+    workspace_root: Path | str,
+) -> str | None:
+    repos_dir = Path(env.get("STATEFUL_HOME") or env["HOME"]) / "repos"
+    if not repos_dir.exists():
+        return None
+    roots = {str(workspace_root).rstrip("/")}
+    try:
+        roots.add(str(Path(workspace_root).resolve()).rstrip("/"))
+    except OSError:
+        pass
+    workspace_ids: list[str] = []
+    for metadata_path in repos_dir.glob("*.json"):
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        repo_id = metadata.get("repo_id")
+        if not isinstance(repo_id, str) or not repo_id.startswith("repo-"):
+            continue
+        workspace_id = "workspace-" + repo_id.removeprefix("repo-")
+        workspace_ids.append(workspace_id)
+        root = metadata.get("root")
+        if isinstance(root, str) and root.rstrip("/") in roots:
+            return workspace_id
+    return workspace_ids[0] if len(workspace_ids) == 1 else None
+
+
 def enable_stateful_repo(
     env: dict[str, str],
     workspace: Path,
@@ -1108,6 +1360,12 @@ def enable_stateful_repo(
         raise StatefulRepoEnableError(message)
     if runtime_workspace is not None:
         rewrite_stateful_repo_metadata_for_runtime_workspace(env, workspace, runtime_workspace)
+    workspace_id = stateful_workspace_id_from_repo_metadata(
+        env,
+        runtime_workspace or workspace,
+    )
+    if workspace_id is not None:
+        env["STATEFUL_WORKSPACE_ID"] = workspace_id
     return cleanup
 
 
@@ -1547,6 +1805,14 @@ def benchmark_source_leak_command_pattern(
     return None
 
 
+def target_upstream_proxy_required(agent_docker_image: str | None) -> bool:
+    return agent_docker_image is not None
+
+
+def benchmark_source_block_patterns_for_env(instance_id: str) -> str:
+    return json.dumps([*benchmark_source_leak_url_patterns(instance_id), "upstream", "upstream/"])
+
+
 def benchmark_source_leak_url_pattern(text: str, patterns: tuple[str, ...]) -> str | None:
     candidate = text.strip()
     if candidate.lower().startswith("url:"):
@@ -1558,6 +1824,141 @@ def benchmark_source_leak_url_pattern(text: str, patterns: tuple[str, ...]) -> s
         if pattern in lower_candidate:
             return pattern
     return None
+
+
+@dataclass
+class TargetUpstreamDenyProxy:
+    server: socketserver.ThreadingTCPServer
+    thread: threading.Thread
+    url: str
+    container_url: str
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+
+class _TargetUpstreamProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler_class: type[http.server.BaseHTTPRequestHandler],
+        url_patterns: tuple[str, ...],
+    ) -> None:
+        super().__init__(server_address, handler_class)
+        self.url_patterns = url_patterns
+
+
+class _TargetUpstreamProxyHandler(http.server.BaseHTTPRequestHandler):
+    timeout = 60
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+    def _deny(self) -> None:
+        body = b"target upstream URL blocked by DeNovo benchmark proxy\n"
+        self.send_response(403)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_CONNECT(self) -> None:
+        host, _, raw_port = self.path.rpartition(":")
+        host = host.lower()
+        if host in BENCHMARK_SOURCE_LEAK_CONNECT_HOSTS:
+            self._deny()
+            return
+        upstream = socket.create_connection((host, int(raw_port or "443")), timeout=self.timeout)
+        try:
+            self.send_response(200, "Connection Established")
+            self.end_headers()
+            self._relay(upstream)
+        finally:
+            upstream.close()
+
+    def do_GET(self) -> None:
+        self._handle_http_request()
+
+    def do_HEAD(self) -> None:
+        self._handle_http_request()
+
+    def _handle_http_request(self) -> None:
+        if benchmark_source_leak_url_pattern(self.path, self.server.url_patterns) is not None:
+            self._deny()
+            return
+        parsed = urllib.parse.urlparse(self.path)
+        if not parsed.scheme or not parsed.hostname:
+            self.send_error(502, "proxy requires absolute-form URL")
+            return
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if parsed.scheme == "https":
+            self.send_error(502, "https proxying requires CONNECT")
+            return
+        target = urllib.parse.urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
+        body = None
+        content_length = self.headers.get("Content-Length")
+        if content_length is not None:
+            body = self.rfile.read(int(content_length))
+        with socket.create_connection((parsed.hostname, port), timeout=self.timeout) as upstream:
+            request = f"{self.command} {target} HTTP/1.1\r\n"
+            upstream.sendall(request.encode("ascii"))
+            for key, value in self.headers.items():
+                if key.lower() in {"proxy-connection", "connection"}:
+                    continue
+                upstream.sendall(f"{key}: {value}\r\n".encode("latin-1"))
+            upstream.sendall(b"Connection: close\r\n\r\n")
+            if body is not None:
+                upstream.sendall(body)
+            while True:
+                chunk = upstream.recv(65536)
+                if not chunk:
+                    break
+                self.connection.sendall(chunk)
+
+    def _relay(self, upstream: socket.socket) -> None:
+        sockets = [self.connection, upstream]
+        while True:
+            readable, _, _ = select.select(sockets, [], [], self.timeout)
+            if not readable:
+                return
+            for source in readable:
+                data = source.recv(65536)
+                if not data:
+                    return
+                target = upstream if source is self.connection else self.connection
+                target.sendall(data)
+
+
+def start_target_upstream_deny_proxy(instance_id: str) -> TargetUpstreamDenyProxy | None:
+    url_patterns = benchmark_source_leak_url_patterns(instance_id)
+    if not url_patterns:
+        return None
+    server = _TargetUpstreamProxyServer(("0.0.0.0", 0), _TargetUpstreamProxyHandler, url_patterns)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    return TargetUpstreamDenyProxy(
+        server=server,
+        thread=thread,
+        url=f"http://127.0.0.1:{port}",
+        container_url=f"http://host.docker.internal:{port}",
+    )
+
+
+def install_target_upstream_proxy_env(env: dict[str, str], proxy: TargetUpstreamDenyProxy) -> None:
+    env["HTTP_PROXY"] = proxy.container_url
+    env["HTTPS_PROXY"] = proxy.container_url
+    no_proxy = [part for part in env.get("NO_PROXY", "").split(",") if part]
+    for host in ("127.0.0.1", "localhost", "host.docker.internal"):
+        if host not in no_proxy:
+            no_proxy.append(host)
+    env["NO_PROXY"] = ",".join(no_proxy)
 
 
 def parse_tool_arguments(arguments: Any) -> Any:
@@ -1741,25 +2142,114 @@ def stateful_http_json(
         return json.loads(response.read().decode("utf-8"))
 
 
+def event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+def event_field(event: dict[str, Any], key: str) -> Any:
+    payload = event_payload(event)
+    return payload.get(key, event.get(key))
+
+
+def parse_event_time(event: dict[str, Any]) -> datetime | None:
+    value = event.get("timestamp") or event.get("created_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def top_counts(counter: Counter[str], limit: int) -> dict[str, int]:
+    return dict(sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:limit])
+
+
+def heartbeat_key(event: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        event.get("session_id"),
+        event.get("workspace_id"),
+        event.get("repo_id"),
+        event.get("worktree_id"),
+    )
+
+
+def heartbeat_summary(events: list[dict[str, Any]]) -> dict[str, int | None]:
+    windows = 0
+    count = 0
+    max_gap_ms: int | None = None
+    previous_key: tuple[Any, ...] | None = None
+    previous_time: datetime | None = None
+    in_window = False
+    for event in events:
+        if event.get("event_type") != "SessionHeartbeat":
+            in_window = False
+            continue
+        count += 1
+        current_key = heartbeat_key(event)
+        current_time = parse_event_time(event)
+        if not in_window or current_key != previous_key:
+            windows += 1
+        if current_key == previous_key and current_time is not None and previous_time is not None:
+            gap_ms = int((current_time - previous_time).total_seconds() * 1000)
+            max_gap_ms = gap_ms if max_gap_ms is None else max(max_gap_ms, gap_ms)
+        in_window = True
+        previous_key = current_key
+        previous_time = current_time
+    return {
+        "heartbeat_events": count,
+        "heartbeat_windows": windows,
+        "heartbeat_max_gap_ms": max_gap_ms,
+    }
+
+
 def summarize_orchestration_events(
     events: list[dict[str, Any]],
     session_id: str | None,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
-    matching = [
-        event
-        for event in events
-        if not session_id or event.get("session_id") == session_id
-    ]
-    event_types = [str(event.get("event_type", "")) for event in matching]
+    if workspace_id:
+        matching = [
+            event for event in events if event.get("workspace_id") == workspace_id
+        ]
+    else:
+        matching = [
+            event
+            for event in events
+            if not session_id or event.get("session_id") == session_id
+        ]
+    event_types = Counter(str(event.get("event_type", "")) for event in matching)
+    denial_paths: Counter[str] = Counter()
+    denial_messages: Counter[str] = Counter()
+    for event in matching:
+        if event.get("event_type") != "AuthorizationDenied":
+            continue
+        path = event_field(event, "path") or event_field(event, "resource") or event_field(event, "requested_path")
+        message = event_field(event, "message") or event_field(event, "denial_reason")
+        if path:
+            denial_paths[str(path)] += 1
+        if message:
+            denial_messages[str(message)] += 1
+    heartbeat = heartbeat_summary(matching)
     return {
         "event_count": len(matching),
-        "reservation_events": sum(1 for event_type in event_types if event_type.startswith("Reservation")),
-        "claim_events": sum(1 for event_type in event_types if event_type.startswith("Claim")),
+        "event_types": dict(sorted(event_types.items())),
+        "reservation_events": sum(
+            count for event_type, count in event_types.items() if event_type.startswith("Reservation")
+        ),
+        "claim_events": sum(
+            count for event_type, count in event_types.items() if event_type.startswith("Claim")
+        ),
         "conflict_events": sum(
-            1
-            for event_type in event_types
+            count
+            for event_type, count in event_types.items()
             if event_type == "AuthorizationDenied" or "Conflict" in event_type
         ),
+        "denial_events": event_types.get("AuthorizationDenied", 0),
+        "denial_paths": top_counts(denial_paths, 10),
+        "denial_messages": top_counts(denial_messages, 5),
+        **heartbeat,
     }
 
 
@@ -1788,11 +2278,13 @@ def write_orchestration_trace(
         events = events_body.get("events", [])
         if not isinstance(events, list):
             events = []
-        trace.update(summarize_orchestration_events(events, session_id))
+        workspace_id = env.get("STATEFUL_WORKSPACE_ID")
+        if workspace_id:
+            trace["workspace_id"] = workspace_id
+        trace.update(summarize_orchestration_events(events, session_id, workspace_id))
         trace["trace_captured"] = True
         trace["current"] = current.get("current", current)
         trace["events"] = events
-        workspace_id = env.get("STATEFUL_WORKSPACE_ID")
         if workspace_id:
             trace["context"] = stateful_http_json(
                 env,
@@ -1812,6 +2304,14 @@ def write_orchestration_trace(
         "reservation_events": trace.get("reservation_events", 0),
         "claim_events": trace.get("claim_events", 0),
         "conflict_events": trace.get("conflict_events", 0),
+        "event_count": trace.get("event_count", 0),
+        "event_types": trace.get("event_types", {}),
+        "heartbeat_events": trace.get("heartbeat_events", 0),
+        "heartbeat_windows": trace.get("heartbeat_windows", 0),
+        "heartbeat_max_gap_ms": trace.get("heartbeat_max_gap_ms"),
+        "denial_events": trace.get("denial_events", 0),
+        "denial_paths": trace.get("denial_paths", {}),
+        "denial_messages": trace.get("denial_messages", {}),
     }
 
 
@@ -1953,6 +2453,7 @@ async def run_one_instance_async(
     stateful_repo_cleanup = None
     codex_env = None
     image = None
+    target_upstream_proxy = None
 
     try:
         source_env = dict(os.environ)
@@ -2091,6 +2592,14 @@ async def run_one_instance_async(
                 enable_native_subagent=args.subagent == "on",
                 agent_docker_image=args.agent_docker_image,
             )
+            seed_omp_auth_credentials(env)
+            env["STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS"] = (
+                benchmark_source_block_patterns_for_env(inst.id)
+            )
+            if target_upstream_proxy_required(args.agent_docker_image):
+                target_upstream_proxy = start_target_upstream_deny_proxy(inst.id)
+                if target_upstream_proxy is not None:
+                    install_target_upstream_proxy_env(env, target_upstream_proxy)
             if args.agent_docker_image:
                 command = docker_omp_command_for_profile(
                     workspace=workspace,
@@ -2232,12 +2741,13 @@ async def run_one_instance_async(
             finish_command_record(orchestration_trace)
             cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
             stateful_repo_cleanup = None
+            finish_reason, error = cli_runtime_failure(returncode, args.cli_runtime)
             return InstanceResult(
                 inst.id,
                 False,
                 None,
-                f"{args.cli_runtime}-error",
-                f"{args.cli_runtime} exited {returncode}",
+                finish_reason,
+                error,
                 None,
                 subagent_used=subagent_usage["subagent_used"],
                 subagent_usage=subagent_usage,
@@ -2330,6 +2840,8 @@ async def run_one_instance_async(
     except Exception as error:
         return instance_setup_exception_result(inst.id, error)
     finally:
+        if target_upstream_proxy is not None:
+            target_upstream_proxy.close()
         cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
         cleanup_seeded_auth(seeded_auth)
         if codex_env is not None:

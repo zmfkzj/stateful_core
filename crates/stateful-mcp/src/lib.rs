@@ -177,17 +177,36 @@ fn input_schema_for(protocol_name: &str) -> Value {
             ],
             ["request_id", "action", "path", "purpose"],
         ),
-        "state.reservation.claim" => object_schema([("wait_id", string_schema())], ["wait_id"]),
+        "state.reservation.claim" => object_schema(
+            [
+                ("wait_id", string_schema()),
+                (
+                    "reservation_id",
+                    string_schema_with_description(
+                        "Reservation id that owns the claim batch. When supplied, write authorization requires claims under this same reservation.",
+                    ),
+                ),
+            ],
+            ["wait_id"],
+        ),
         "state.reservation.cancel" => {
             object_schema([("request_id", string_schema())], ["request_id"])
         }
         "state.claim.acquire" => object_schema(
-            [(
-                "paths",
-                non_empty_string_array_schema_with_description(
-                    "Repo-relative file or directory scopes to claim in one batch.",
+            [
+                (
+                    "paths",
+                    non_empty_string_array_schema_with_description(
+                        "Repo-relative file or directory scopes to claim in one batch.",
+                    ),
                 ),
-            )],
+                (
+                    "reservation_id",
+                    string_schema_with_description(
+                        "Reservation id that owns the claim batch. When supplied, write authorization requires claims under this same reservation.",
+                    ),
+                ),
+            ],
             ["paths"],
         ),
         "state.claim.release" => object_schema([("path", string_schema())], ["path"]),

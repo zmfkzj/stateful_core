@@ -23,6 +23,7 @@ pub struct WaitQueueInfo {
 #[derive(Debug, Clone)]
 pub struct AuthorizeWriteInput {
     pub session_id: String,
+    pub reservation_id: Option<String>,
     pub workspace_id: Option<String>,
     pub repo_id: Option<String>,
     pub worktree_id: Option<String>,
@@ -124,7 +125,7 @@ fn missing_rename_or_move_paths() -> AuthorizationOutcome {
         decision: Decision::deny(
             "missing_rename_paths",
             "Rename or move authorization requires non-empty old_path and new_path.",
-            "Provide both old_path and new_path, add exact scopes for both paths to the task reservation, and acquire matching claims before writing.",
+            "Provide both old_path and new_path, add exact scopes for both paths to the task reservation, and acquire matching same-reservation claims before writing.",
         ),
         wait: None,
         reservation: None,
@@ -189,7 +190,11 @@ impl<'a> PolicyService<'a> {
         let mut lazy_claimed_reservation = None;
         if let Some(workspace_id) = &input.workspace_id {
             let current_session_reservation =
-                self.current_session_reservation(&input, workspace_id)?;
+                if let Some(reservation_id) = input.reservation_id.as_deref() {
+                    self.supplied_session_reservation(&input, workspace_id, reservation_id)?
+                } else {
+                    self.current_session_reservation(&input, workspace_id)?
+                };
             if let Some(reservation) = current_session_reservation {
                 if self.allows_lazy_claim_on_authorize(&input)
                     && matches!(input.action.as_str(), "write_file" | "write_directory")
@@ -209,8 +214,8 @@ impl<'a> PolicyService<'a> {
                     return Ok(AuthorizationOutcome {
                         decision: Decision::deny(
                             "reservation_claim_required",
-                            "Write target has an active reservation for this session, but it has not been claimed.",
-                            "Reread the target, then call state.reservation.claim for the reservation before writing.",
+                            "Write target is inside active reservation scope, but the reservation has not been claimed.",
+                            "Reread the target, then call state.reservation.claim for the reservation to create the same-reservation claim before writing.",
                         ),
                         wait: None,
                         reservation: Some(reservation),
@@ -219,7 +224,13 @@ impl<'a> PolicyService<'a> {
             }
         }
 
-        let policy_state = if let Some(workspace_id) = &input.workspace_id {
+        let policy_state = if let (Some(workspace_id), Some(reservation_id)) =
+            (&input.workspace_id, input.reservation_id.as_deref())
+        {
+            self.store
+                .policy_state_for_reservation(reservation_id, workspace_id)
+                .map_err(|error| error.to_string())?
+        } else if let Some(workspace_id) = &input.workspace_id {
             self.store
                 .policy_state_for_session(&input.session_id, workspace_id)
                 .map_err(|error| error.to_string())?
@@ -255,7 +266,7 @@ impl<'a> PolicyService<'a> {
                 decision: Decision::deny(
                     "missing_claim",
                     "Write target is inside active reservation scope, but workspace is missing so claim ownership cannot be checked.",
-                    "Include workspace_id and acquire the relevant same-session file or directory claim successfully before writing. Do not change session_id; that does not create same-session claim ownership.",
+                    "Include workspace_id and acquire the relevant same-reservation file or directory claim successfully before writing. Do not change reservation_id; that does not create same-reservation claim ownership.",
                 ),
                 wait: None,
                 reservation: None,
@@ -295,7 +306,7 @@ impl<'a> PolicyService<'a> {
                 decision: Decision::deny(
                     "scope_mismatch",
                     "Hook file targets require active task reservation exact file scope for every affected path.",
-                    "Add exact file scope for every affected path to the task reservation and acquire matching same-session file claims before writing.",
+                    "Add exact file scope for every affected path to the task reservation and acquire matching same-reservation file claims before writing.",
                 ),
                 wait: None,
                 reservation: None,
@@ -329,14 +340,14 @@ impl<'a> PolicyService<'a> {
             let decision = if requires_exact_hook_file_scope {
                 Decision::deny(
                     "missing_claim",
-                    "Hook file targets require exact active same-session file claims for every affected path.",
-                    "Acquire matching same-session file claims for every affected path before writing. Do not change session_id; that does not create same-session claim ownership.",
+                    "Hook file targets require exact active same-reservation file claims for every affected path.",
+                    "Acquire matching same-reservation file claims for every affected path before writing. Do not change reservation_id; that does not create same-reservation claim ownership.",
                 )
             } else {
                 Decision::deny(
                     "missing_claim",
-                    "Write target is inside active reservation scope, but no active same-session claim matches it.",
-                    "Acquire exact same-session file claims for file actions, or exact same-session directory claims for write-directory actions. Do not change session_id; that does not create same-session claim ownership.",
+                    "Write target is inside active reservation scope, but no active same-reservation claim matches it.",
+                    "Acquire exact same-reservation file claims for file actions, or exact same-reservation directory claims for write-directory actions. Do not change reservation_id; that does not create same-reservation claim ownership.",
                 )
             };
             self.release_lazy_claimed_lease_if_needed(&input, lazy_claimed_reservation.as_ref())?;
@@ -492,6 +503,19 @@ impl<'a> PolicyService<'a> {
         input: &AuthorizeWriteInput,
         workspace_id: &str,
     ) -> Result<bool, String> {
+        if let Some(reservation_id) = input.reservation_id.as_deref() {
+            for path in self.affected_paths(input) {
+                if !self
+                    .store
+                    .active_exact_file_intent_by_reservation(workspace_id, path, reservation_id)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+
         for path in self.affected_paths(input) {
             if !self
                 .store
@@ -509,6 +533,19 @@ impl<'a> PolicyService<'a> {
         input: &AuthorizeWriteInput,
         workspace_id: &str,
     ) -> Result<bool, String> {
+        if let Some(reservation_id) = input.reservation_id.as_deref() {
+            for path in self.affected_paths(input) {
+                if !self
+                    .store
+                    .active_exact_file_lease_by_reservation(workspace_id, path, reservation_id)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+
         for path in self.affected_paths(input) {
             if !self
                 .store
@@ -531,15 +568,24 @@ impl<'a> PolicyService<'a> {
         }
 
         for path in self.affected_paths(input) {
-            let Some(observation) = self
-                .store
-                .active_exact_file_claim_observation_by_session(
-                    workspace_id,
-                    path,
-                    &input.session_id,
-                )
-                .map_err(|error| error.to_string())?
-            else {
+            let observation = if let Some(reservation_id) = input.reservation_id.as_deref() {
+                self.store
+                    .active_exact_file_claim_observation_by_reservation(
+                        workspace_id,
+                        path,
+                        reservation_id,
+                    )
+                    .map_err(|error| error.to_string())?
+            } else {
+                self.store
+                    .active_exact_file_claim_observation_by_session(
+                        workspace_id,
+                        path,
+                        &input.session_id,
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            let Some(observation) = observation else {
                 continue;
             };
             let Some(root) = input.root.as_deref().filter(|root| !root.is_empty()) else {
@@ -568,6 +614,51 @@ impl<'a> PolicyService<'a> {
         input: &AuthorizeWriteInput,
         workspace_id: &str,
     ) -> Result<bool, String> {
+        if let Some(reservation_id) = input.reservation_id.as_deref() {
+            return match input.action.as_str() {
+                "write_directory" => self
+                    .store
+                    .active_claim_covers_directory_by_reservation(
+                        workspace_id,
+                        &input.path,
+                        reservation_id,
+                    )
+                    .map_err(|error| error.to_string()),
+                "write_file" | "delete_file" => self
+                    .store
+                    .active_exact_file_lease_by_reservation(
+                        workspace_id,
+                        &input.path,
+                        reservation_id,
+                    )
+                    .map_err(|error| error.to_string()),
+                "rename_file" | "move_file" => {
+                    let Some((old_path, new_path)) = self.rename_or_move_paths(input) else {
+                        return Ok(false);
+                    };
+                    let old_lease = self
+                        .store
+                        .active_exact_file_lease_by_reservation(
+                            workspace_id,
+                            old_path,
+                            reservation_id,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    if !old_lease {
+                        return Ok(false);
+                    }
+                    self.store
+                        .active_exact_file_lease_by_reservation(
+                            workspace_id,
+                            new_path,
+                            reservation_id,
+                        )
+                        .map_err(|error| error.to_string())
+                }
+                _ => Ok(false),
+            };
+        }
+
         match input.action.as_str() {
             "write_directory" => self
                 .store
@@ -702,6 +793,39 @@ impl<'a> PolicyService<'a> {
             }
         }
         Ok(None)
+    }
+
+    fn supplied_session_reservation(
+        &self,
+        input: &AuthorizeWriteInput,
+        workspace_id: &str,
+        reservation_id: &str,
+    ) -> Result<Option<WaitRecord>, String> {
+        let Some(reservation) = self
+            .store
+            .reservation_by_id(reservation_id)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+
+        if reservation.session_id != input.session_id
+            || reservation.workspace_id != workspace_id
+            || reservation.action != input.action
+        {
+            return Ok(None);
+        }
+
+        let reserved_path = normalize_relative_path(&reservation.relative_path);
+        let covers_target = if input.action == "write_directory" {
+            reserved_path == normalize_relative_path(&input.path)
+        } else {
+            self.affected_paths(input)
+                .iter()
+                .any(|path| reserved_path == normalize_relative_path(path))
+        };
+
+        Ok(covers_target.then_some(reservation))
     }
 
     fn current_session_reservation(
@@ -999,7 +1123,7 @@ fn stale_observation_decision(message: &str) -> Decision {
     Decision::deny(
         "stale_target_observation",
         message,
-        "Reread the target and retry with a fresh base_observations entry before writing.",
+        "Reread target, retry same edit with fresh base observation.",
     )
 }
 
@@ -1007,7 +1131,7 @@ fn stale_claim_observation_decision(message: &str) -> Decision {
     Decision::deny(
         "stale_claim_observation",
         message,
-        "Reread the target, release and reacquire the claim, then retry before writing.",
+        "Reread target, reacquire claim, retry same edit.",
     )
 }
 

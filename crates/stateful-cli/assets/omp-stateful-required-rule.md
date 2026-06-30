@@ -12,13 +12,13 @@ Before any of these actions, read and follow `skill://stateful-command-policy`:
 
 - running shell, eval, build, test, git, GitHub PR, benchmark, generator, formatter, or repo-external commands;
 - creating, editing, deleting, moving, renaming, or overwriting repository files;
-- responding to `missing_reservation`, `missing_claim`, `claim_conflict`, same-session claim denial, or any Stateful hook denial;
+- responding to `missing_reservation`, `missing_claim`, `claim_conflict`, same-reservation claim denial, or any Stateful hook denial;
 - authorizing OMP yolo/write approval, external sandbox approval, or subagent write recovery.
 
 ## Non-negotiable defaults
 
-- Inspect current state first with `state_current_read` or `state_context_render`.
+- Use `state_context_render(mode="brief", resource="<target>")` only for planning/manual inspection when active coordination may affect the plan. Do not call it as routine denial recovery; follow the denial's next action instead.
 - Declare exact intended files with `state_reservation_declare(files_planned=[...])` and acquire matching claims with `state_claim_acquire(paths=[...])` before writes.
 - Use active Stateful MCP tool names for coordination; never repair session state through Bash or eval.
-- In OMP, use `sandbox_bash` for non-external sandbox profiles, `ext_ro_bash` for read-only `--fs external` commands with only `purpose` and `command` and no OMP UI confirmation, and `ext_rw_bash` for `--fs external` commands with at least one write target, create target, or write directory scope and a scoped purpose grant prompt; repo-relative external write scopes require Stateful reservation and claims, and raw Bash/eval wrappers are never allowed.
+- In OMP, use built-in Bash only for strict trusted `stateful sandbox run ...` and `stateful sandbox process find ...` commands. Bare `stateful` is trusted only after session-start preflight hash-verifies the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted. External write/create/write-dir/socket/signal scope prompts for a scoped OMP UI grant unless `stateful.autoApprove: true`; auto-approval skips only the Stateful-owned UI prompt and does not bypass Stateful sandbox scope validation, hooks, reservation/claim checks, or grant limits. Repo-relative external write scopes require Stateful reservation and claims, and raw Bash/eval wrappers are never allowed.
 - If a hook denies an action, read the denial and choose the documented Stateful alternative instead of retrying variants.

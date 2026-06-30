@@ -26,8 +26,9 @@ installer prints a dry-run plan.
 stateful install --agent codex --yes
 ```
 
-Installs global stateful files, writes global
-`skills/stateful-command-policy/SKILL.md` and
+Installs global stateful files, writes global `skills/stateful-command-policy/`
+(`SKILL.md`, `omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
+`subagent-write-recovery.md`) and
 `skills/dispatching-parallel-agents/SKILL.md`, writes Codex external sandbox
 prompt rules under the Codex config directory's `rules/stateful.rules`, and
 merges the stateful block into Codex
@@ -63,7 +64,8 @@ The target OMP profile keys are:
 
 ```yaml
 tools.approvalMode: yolo
-bash.enabled: false
+stateful.autoApprove: false
+bash.enabled: true
 eval.py: false
 eval.js: false
 eval.rb: false
@@ -75,35 +77,43 @@ safety to Stateful hooks. Without `--update`, existing scalar values are
 preserved and only missing keys are inserted. With `--update`, existing target
 scalar values are updated.
 
-The installer also writes `rules/stateful-required.md`,
-`skills/stateful-command-policy/SKILL.md`, and
-`skills/dispatching-parallel-agents/SKILL.md` under that isolated agent
-directory. The always-apply rule owns activation; the
+The installer also writes `rules/stateful-required.md` and
+`skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
+`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`) under
+that isolated agent directory. The always-apply rule owns activation; the
 `stateful-command-policy` manual owns the detailed Stateful procedure.
 
-Generated OMP tools:
+Installed OMP support:
 
-- `sandbox_bash` for non-external `stateful sandbox run` profiles: `read-only`,
-  `write-targets`, `build`, `git`, and `github-pr`
-- `ext_ro_bash` for read-only `--fs external` purpose-and-command operations
-  without OMP UI confirmation
-- `ext_rw_bash` for external writes that declare write/create/dir scope and ask
-  for a scoped purpose grant. The approval prompt omits raw command text and
-  grants matching calls keyed by purpose plus write/create/write-dir/socket/
-  signal/network scope until expiry or max uses; defaults are 5 uses and 600
-  seconds.
+- Built-in Bash for strict trusted `stateful sandbox run ...` commands with the
+  narrowest valid sandbox profile and any required Stateful reservation/claim
+  preflight.
+- Built-in Bash for strict trusted `stateful sandbox process find ...` process
+  inspection commands.
+- External write/create/write-dir/socket/signal scope asks for a scoped OMP UI
+  grant by default; `stateful.autoApprove: true` skips only that
+  Stateful-owned prompt while sandbox scope validation, hooks,
+  reservation/claim checks, and grant limits still apply. The approval prompt
+  omits raw command text and grants matching calls keyed by purpose plus
+  write/create/write-dir/socket/signal/network scope until expiry or max uses;
+  defaults are 5 uses and 600 seconds. When auto-approval is enabled, no prompt
+  is shown.
+- `lazy_bash_resume` for a blocked external Bash command that could not prompt
+  for its scoped grant on the original tool call. The live extension stores the
+  trusted `stateful sandbox run --fs external ...` command, asks for the same
+  grant during resume, re-authorizes the original Bash tool call, and reruns the
+  stored command.
 - `lazy_edit_resume` for strict replay of blocked, line-based OMP `edit` patches.
   The live extension stores the original patch after `missing_reservation`,
   `missing_claim`, or claim-conflict denials; after the agent fixes the missing
   scope or receives a claimable reservation, it re-authorizes the original edit,
-  checks the file has not changed since queue time, then applies the stored patch.
+  checks the file has not changed since queue time, then applies the stored
+  line-based patch.
+- `lazy_write_resume` for replay of blocked full OMP `write` content. It uses the
+  same queued wait id or generated operation id path, re-authorizes after the
+  agent fixes the missing scope or receives a claimable reservation, and fails
+  if the target changed since the write was queued.
 
-Generated OMP bash tools wait for sandbox commands to finish before returning,
-emit stdout through inline OMP tool updates, include final stdout/stderr/status
-before the agent can end the turn, and cancel on OMP abort/ESC.
-
-Raw Bash and eval tool calls are denied by stateful hooks; use the generated
-OMP tools instead.
 
 ### Repo allowlist
 
@@ -171,35 +181,41 @@ In active Codex or OMP sessions, prefer MCP tools over shelling out to
 `stateful reservation ...` or `stateful mcp call ...`; lifecycle hooks bind the active
 runtime session as the Stateful session id.
 
-Manual CLI use outside active hooks can pass session and workspace explicitly:
+Manual CLI use outside active hooks can pass session and workspace explicitly.
+Capture the returned `reservation_id` and pass it through later write
+authorization steps:
 
 ```bash
-stateful reservation declare \
+reservation_id=$(stateful reservation declare \
   --session-id demo \
   --workspace-id <workspace> \
   --purpose "Update README content requested by the user." \
-  README.md
+  README.md | jq -r '.reservation_id')
 ```
 
 Reservation commands:
 
 ```bash
 stateful reservation declare --purpose <purpose> <paths...>
-stateful reservation request --request-id <id> --action write_file|write_directory --path <path> --purpose <purpose>
-stateful reservation claim --wait-id <id>
+stateful reservation request --reservation-id <reservation_id> --request-id <id> --action write_file|write_directory --path <path> --purpose <purpose>
+stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>
 stateful reservation cancel --request-id <id>
 ```
 
 Notes:
 
-- `declare` requires at least one non-empty path and a non-empty purpose.
-- Declarations add to the session's active scope in that workspace.
+- `declare` requires at least one non-empty path and a non-empty purpose, and
+  returns `reservation_id`.
+- Declarations add to the session's active scope under that `reservation_id`.
 - Re-declaring the same path updates the purpose used for future claim
   acquisition.
-- MCP `state_claim_acquire` uses `paths: string[]` to acquire one or more exact
-  file or directory resources from active reservation scope.
+- MCP `state_claim_acquire` uses `reservation_id` plus `paths: string[]` to
+  acquire one or more exact file or directory resources from that reservation.
+- Writes must carry the same `reservation_id` through native edit/write
+  integration or `stateful sandbox run --reservation-id <reservation_id>`.
 - `request` creates or returns an idempotent queued or claimable (`reserved`)
-  write request.
+  write request. During queued-reservation compatibility, wait records expose
+  the same id as both `wait_id` and `reservation_id`.
 - `claim` uses the stored reservation purpose; clients do not pass a new claim
   purpose.
 - Native edit hooks and sandbox `write-targets` authorization may lazy-claim a
@@ -252,16 +268,18 @@ Write/execute paths still require the normal stateful authorization flow.
 ## Hooks And Sessions
 
 `SessionStart` registers the active session and writes the current-session file
-used by CLI and MCP calls. In OMP, `stateful hook omp session-start` prefers the
-actual OMP session id from `event.sessionId` or `ctx.sessionManager.session.id`,
-stores that id in `process.env.STATEFUL_SESSION_ID`, and persists current-session
-files before session-aware MCP tools run. In Codex, `UserPromptSubmit` renders
-current-state context.
+used by CLI and MCP calls. In OMP, `stateful hook omp session-start` stores
+`process.env.STATEFUL_SESSION_ID` from explicit event/ctx ids
+(`event.sessionId`, `event.session_id`, session fields), falling back to the
+`ctx.sessionManager.getSessionFile()` header/stem and then `getLeafId()` before
+session-aware MCP tools run. In Codex,
+`UserPromptSubmit` renders current-state context.
 
 `PreToolUse` authorizes supported tool actions. Server-side authorization records
 an implicit session heartbeat for the checked session. `PostToolUse` records
-activity or heartbeats; Codex `PostToolUse` also releases same-session repo-write
-claims after completed native edit and `write-targets` transactions. `Stop` posts
+activity or heartbeats; Codex `PostToolUse` also releases authorizing
+same-reservation repo-write claims after completed native edit and
+`write-targets` transactions. `Stop` posts
 `state_activity_finalize`, finalizing activity and releasing the session's
 claims.
 
@@ -287,19 +305,22 @@ The v1 authorization API supports:
 - `rename_file`
 - `move_file`
 
-Task-level reservation authorizes writes only when its file set includes the exact file or directory resource. Directory scope authorizes only `write_directory` for the exact directory resource. File writes, deletes, renames, and moves require exact file scopes for the affected paths; directory scope does not authorize them.
+Task-level reservation authorizes writes only when its file set includes the exact file or directory resource and the write supplies that `reservation_id`. Directory scope authorizes only `write_directory` for the exact directory resource. File writes, deletes, renames, and moves require exact file scopes for the affected paths; directory scope does not authorize them.
 
-Writes without matching active reservation are denied. Active claims held by another
-session block conflicting writes. A blocked writer can queue with
+Writes without matching active reservation are denied. A write is allowed only
+when the `reservation_id` has active scope for the target and an active claim
+under the same `reservation_id` covers the target. Conflicting claims outside
+the authorizing reservation block writes. A blocked writer can queue with
 `queue_on_conflict`; after promotion, the reservation notification and resume
 payload carry the stored request purpose, and the session with the claimable
 reservation must reread the target.
 
 Repo file edits should use native edit tools with hook-visible targets after
-task-level reservation covers the target and a successful same-session file claim. Hooks extract
-the native tool target, call `/v1/authorize` with the operation-specific action,
-allow the edit only after an allow decision, and release the authorizing claim
-after the completed write transaction.
+task-level reservation covers the target and a successful same-reservation file
+claim. Hooks extract the native tool target, call `/v1/authorize` with the
+operation-specific action and `reservation_id`, allow the edit only after an
+allow decision, and release the authorizing claim after the completed write
+transaction.
 
 ## Sandbox Profiles
 
@@ -310,7 +331,7 @@ sandbox profile that matches the command.
 | --- | --- |
 | `read-only` | Shell-based read-only repo inspection when native read/search tools are insufficient. Network must be disabled. |
 | `build` | Build/test/package commands that write disposable artifacts under `/tmp/stateful/<session>/<scratch-purpose>/`. |
-| `write-targets` | Command-shaped repo writes after matching reservation and same-session file or directory claim. |
+| `write-targets` | Command-shaped repo writes after matching reservation and same-reservation file or directory claim; pass the same id with `--reservation-id <reservation_id>`. |
 | `git` | Local or remote `git ...` operations. Use `--network enabled` only for remote git operations. |
 | `github-pr` | Non-interactive `gh pr list|view|status|create` commands. |
 | `external` | Repo-external shell operations with a purpose; add explicit external write/create/dir scope only when needed. |
@@ -318,19 +339,27 @@ sandbox profile that matches the command.
 Examples:
 
 ```bash
+reservation_id=$(stateful reservation declare --purpose "Update README content requested by the user." README.md | jq -r '.reservation_id')
 stateful sandbox run --fs build --network enabled --write-dir test-run --command 'cargo test --workspace'
-stateful sandbox run --fs write-targets --write-target README.md --command 'python3 update_readme.py'
+stateful sandbox run --fs write-targets --reservation-id "$reservation_id" --write-target README.md --command 'python3 update_readme.py'
 stateful sandbox run --fs git --network disabled --command 'git status --short'
 stateful sandbox run --fs github-pr --network enabled --command 'gh pr status'
 stateful sandbox run --fs external --purpose "inspect external tool version" --command 'some-external-tool --version'
 ```
 
-`stateful sandbox process find` is the supported process-inspection entry point:
+Codex process inspection uses `stateful sandbox process find`:
 
 ```bash
 stateful sandbox process find --name stateful-bench
 stateful sandbox process find --contains denovo_codex_agent
 ```
+
+In OMP, use built-in Bash with a single trusted
+`stateful sandbox process find ...` command after Stateful preflight. Result JSON
+includes safe process metadata fields: `pid`, `ppid`, `pgid`, `user`, `uid`,
+`stat`, `start`, `etime`, `time`, `pcpu`, `pmem`, `rss`, `vsz`, `nice`, `pri`,
+`tty`, and `comm`. Command strings, argv, and environment data are never exposed
+in result JSON.
 
 ## HTTP And MCP Surface
 
@@ -357,20 +386,27 @@ names:
 - `state_current_read` / `state.current.read`
 - `state_events_read` / `state.events.read`
 - `state_context_render` / `state.context.render`
+
+`state_context_render` is for planning/manual inspection. Routine write and
+denial recovery should use reservation, claim, resume, and the denial's direct
+next action instead of rendering ambient context.
+
 - `state_reconcile_ack` / `state.reconcile.ack`
 - `state_notifications_poll` / `state.notifications.poll`
 - `state_resume_next` / `state.resume.next`
 
-`state_claim_acquire` takes `paths: string[]`; each path must match active exact
-file or directory reservation scope, and the server creates one exact resource
-claim per entry. Legacy server requests with `path` are still accepted for
-compatibility. `state_claim_release` remains single-resource and takes
-`path: string`.
+`state_claim_acquire` takes `reservation_id` and `paths: string[]`; each path
+must match active exact file or directory reservation scope under that
+reservation, and the server creates one exact resource claim per entry. Legacy
+server requests with `path` are still accepted for compatibility.
+
+`state_claim_release` remains single-resource and takes `path: string`.
 
 `state_file_write` / `state.file.write` and `state_bash_write` /
 `state.bash.write` were removed. Use native edit tools with hook-visible targets
-for file edits after task-level reservation and exact claim, and use `stateful sandbox run --fs
-write-targets ...` for command-shaped writes.
+for file edits after task-level reservation and exact same-reservation claim,
+and use `stateful sandbox run --fs write-targets --reservation-id <reservation_id> ...`
+for command-shaped writes.
 
 The `/v1/authorize` endpoint and the reservation declare/request/claim/cancel
 endpoints require the `stateful.v1` request envelope with `payload`. Flat legacy
@@ -409,8 +445,10 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
   capabilities.
 - `STATEFUL_SESSION_ID` selects the session-bound current-session file at
   `.stateful_core/runtime/sessions/<session_id>.json` for MCP tools and other
-  session-bound callers. The OMP extension sets it from `event.sessionId` /
-  `ctx.sessionManager.session.id`; Codex MCP resolution prefers
+  session-bound callers. The OMP extension sets it from explicit event/ctx ids
+  (`event.sessionId`, `event.session_id`, session fields), or from the
+  `ctx.sessionManager.getSessionFile()` header/stem and then `getLeafId()`
+  when those are absent; Codex MCP resolution prefers
   `CODEX_THREAD_ID` when present.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
   authorize Bash. Bash authorization goes through a trusted
@@ -430,12 +468,21 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
 - `denovo`: wrap AweAgent DeNovoSWE extract/evaluation workflows and run the
   official AweAgent agent recipe, a host Codex CLI adapter, or an OMP CLI adapter
   while recording `stateful`, `subagent`, and `running_time_ms` comparison axes.
+- `programbench`: run Codex or OMP agents on ProgramBench instances, evaluate the
+  resulting `submission.tar.gz` artifacts with official ProgramBench tooling, and
+  report stateful/no-state quality plus time/token efficiency deltas.
+  ProgramBench Codex/OMP runs use host CLI adapters in an empty temporary
+  airlock seeded from the target container's `/workspace`; see the ProgramBench
+  guide for the run-behavior details.
 
 For DeNovoSWE, new official-style run commands should pass `--prompt-version v2`;
 the CLI's default remains compatible with historical behavior. See
 [DeNovoSWE Benchmark Guide](denovo-benchmark-guide.md) for interpretation rules
 and [DeNovoSWE Benchmark Commands](denovo-benchmark-commands.md) for reusable
 command lines.
+
+For ProgramBench, scored runs require Linux `amd64` Docker support and official
+`programbench eval`; see [ProgramBench Benchmark Guide](programbench-benchmark-guide.md).
 
 Benchmark artifacts live under `.stateful_bench/` and are intentionally ignored.
 

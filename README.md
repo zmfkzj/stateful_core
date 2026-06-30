@@ -130,9 +130,10 @@ stateful install --yes
 
 ### Codex
 
-Install Codex integration when you want global Codex hooks, MCP, and the
-installed `skills/stateful-command-policy/SKILL.md` and
-`skills/dispatching-parallel-agents/SKILL.md` skills:
+Install Codex integration when you want global Codex hooks, MCP,
+`skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
+`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`), and
+`skills/dispatching-parallel-agents/SKILL.md`:
 
 ```bash
 stateful install --agent codex --yes
@@ -143,9 +144,10 @@ stateful codex
 ### OMP
 
 Install OMP integration when you want the isolated OMP `stateful` profile,
-stateful hooks, MCP, generated sandbox command tools, lazy edit resume, and the installed
-`skills/stateful-command-policy/SKILL.md` and
-`skills/dispatching-parallel-agents/SKILL.md` skills:
+stateful hooks, MCP, built-in Bash preflight, OMP edit/write auto-declare/claim
+for missing scope, lazy resume fallbacks, and `skills/stateful-command-policy/`
+(`SKILL.md`, `omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
+`subagent-write-recovery.md`):
 
 ```bash
 stateful install --agent omp --yes
@@ -162,14 +164,16 @@ stateful doctor
 ## Day-To-Day Coordination
 
 In normal `stateful codex` or OMP `stateful` profile use, lifecycle hooks and MCP
-bind the active session. Hook messages tell the agent when an explicit
+bind the active session. In OMP, `session-start` uses explicit event/ctx ids
+(`event.sessionId`, `event.session_id`) or the `ctx.sessionManager` session-file
+header to set it. Hook messages tell the agent when an explicit
 coordination step is needed.
 
-Manual CLI use outside an active agent session can declare scope and inspect the
-current state:
+Manual CLI use outside an active agent session can declare scope, keep the
+returned reservation id, and inspect the current state:
 
 ```bash
-stateful reservation declare --purpose "Update README content requested by the user." README.md
+reservation_id=$(stateful reservation declare --purpose "Update README content requested by the user." README.md | jq -r '.reservation_id')
 stateful current
 ```
 
@@ -178,22 +182,32 @@ instead of routing `stateful reservation declare` or `stateful mcp call` through
 shell. The usual write flow is:
 
 ```text
-read current state -> declare task reservation with known file set -> acquire exact claims for reserved paths -> reread targets -> write
+read current state -> declare task reservation with known file set -> keep reservation_id -> acquire exact same-reservation claims for reserved paths -> reread targets -> write with the same reservation_id
 ```
 
 Reservation and claim are separate on purpose. A reservation groups the task's
-known file and directory scopes under one purpose, and can be expanded when the
-task discovers another target. MCP claim acquisition uses `paths: string[]` so
-callers can acquire a batch from that reservation in one request. Each resulting
-claim still owns one exact file or directory resource and expires when the
-session stops being fresh.
+known file and directory scopes under one purpose and one `reservation_id`, and
+can be expanded when the task discovers another target. MCP claim acquisition
+uses `reservation_id` plus `paths: string[]` so callers can acquire a batch from
+that reservation in one request. Each resulting claim still owns one exact file
+or directory resource and expires when the session stops being fresh.
 
-When another active claim blocks a write, the writer can queue for that resource.
-When the resource is released or expires, the server reserves it for the next
-eligible waiter and sends a resume notification. In OMP, blocked line-based
-`edit` patches are kept as live-session lazy edit operations, so an agent can
-acquire the missing reservation or claim and call `lazy_edit_resume` instead of
-regenerating the patch.
+For native OMP `edit` and `write`, pre-tool authorization can recover when the
+only denial is missing reservation/scope and the tool call did not supply an
+explicit reservation id: the extension declares the exact file scope, acquires
+same-reservation claims, and retries authorization. When another active claim
+blocks a write, the writer can queue for that resource. When the resource is
+released or expires, the server reserves it for the next eligible waiter and
+sends a resume notification. During queued-reservation compatibility, wait
+records expose the same id as both `wait_id` and `reservation_id`; use that id
+for the eventual claim and write. In OMP, queued/conflicting edits, writes whose
+target changed before replay, unavailable authorization runtime, unsupported
+targets, explicit bad reservation ids, other denials, and external Bash commands
+waiting on a scoped grant remain lazy-resume cases. Agents call
+`lazy_edit_resume` for strict line-based patch replay, `lazy_write_resume` for
+captured write replay, or `lazy_bash_resume` to rerun a blocked external Bash
+command after approving its grant. Write replay fails if the target changed
+since the operation was queued.
 
 Detailed queue states, claim expiry behavior, and promotion rules are documented
 in [State model](docs/state-model.md),
@@ -207,18 +221,28 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 
 | Need | Use |
 | --- | --- |
-| Repo file edit | Native edit/write tools after task-level reservation and exact same-session file claim |
+| Repo file edit | Native edit/write tools after task-level reservation and exact same-reservation file claim |
 | Build or test command | `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` |
-| Command-shaped repo write | `stateful sandbox run --fs write-targets --write-target <file> --command <cmd>` |
+| Command-shaped repo write | `stateful sandbox run --fs write-targets --reservation-id <reservation_id> --write-target <file> --command <cmd>` |
 | Local git operation | `stateful sandbox run --fs git --network disabled --command 'git <args>'` |
 | Remote git operation | Git sandbox profile with `--network enabled` |
 | GitHub PR list/view/status/create | `stateful sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` |
 | Repo-external shell operation | `stateful sandbox run --fs external --purpose <purpose> --command <cmd>` for reads; add exact `--write-target`, `--create-target`, or `--write-dir` scopes for writes |
 
-In OMP, use the generated tools instead of raw Bash: `sandbox_bash` for
-non-external sandbox profiles, `ext_ro_bash` for read-only external shell work,
-`ext_rw_bash` for external writes with a scoped purpose grant and declared scope,
-and `lazy_edit_resume` for strict replay of blocked line-based OMP `edit` patches.
+In OMP, built-in Bash may run only strict trusted `stateful sandbox run ...`
+and `stateful sandbox process find ...` commands. Bare `stateful` is trusted
+only after session-start preflight hash-verifies the first PATH `stateful`
+binary against the installed Stateful binary; otherwise use the installed
+absolute binary path. External write/create/write-dir/socket/signal scope still
+asks for a Stateful OMP UI grant by default; `stateful.autoApprove: true` skips
+only that Stateful-owned prompt while sandbox scope validation, hooks,
+reservation/claim checks, and grant limits still apply. When auto-approval is
+enabled, no prompt is shown. For native OMP `edit` and `write`, missing
+reservation/scope can be auto-declared and claimed before authorization is
+retried. Use `lazy_edit_resume` for queued/conflicting line-based OMP `edit`
+patches, `lazy_write_resume` for captured full OMP `write` replay with a
+stale-target guard, and `lazy_bash_resume` to rerun a queued external Bash
+command after the scoped grant is approved.
 
 See [Usage reference](docs/usage-reference.md) for detailed CLI, hook, sandbox,
 LAN sharing, generated-file, and release notes.
@@ -285,8 +309,8 @@ local generated state.
 - `crates/stateful-cli`: CLI, hook adapter, runtime discovery, repo registry,
   outbox sync, and sandbox wrappers.
 - `crates/stateful-mcp`: MCP tool surface.
-- `crates/stateful-bench`: benchmark tooling for paired-agent, synthetic, and
-  DeNovoSWE experiments.
+- `crates/stateful-bench`: benchmark tooling for paired-agent, synthetic,
+  DeNovoSWE, and ProgramBench experiments.
 - `docs/`: concept, state model, architecture, implementation contract,
   coordination, hardening-scope, ADR, and benchmark guidance.
 
@@ -294,16 +318,18 @@ local generated state.
 
 `stateful-bench` supports SWE-bench pair preparation/runs, reports, comparisons,
 synthetic coordination experiments, and DeNovoSWE adapters for official AweAgent,
-host Codex CLI, and OMP CLI workflows.
+host Codex CLI, and OMP CLI workflows, and ProgramBench stateful/no-state
+condition runs with official ProgramBench evaluation and efficiency reporting.
 
 Benchmark artifacts live under `.stateful_bench/` and are intentionally ignored.
 The checked-in synthetic fixture is a smoke test for report plumbing, not
 empirical evidence that real paired agents avoid conflicts. This repository does
 not currently ship a checked-in empirical paired-agent stateful/no-state result.
 
-For DeNovoSWE setup, interpretation rules, and reusable command lines, read
-[DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md) and
-[DeNovoSWE Benchmark Commands](docs/denovo-benchmark-commands.md).
+For DeNovoSWE and ProgramBench setup, interpretation rules, and reusable command
+lines, read [DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md),
+[DeNovoSWE Benchmark Commands](docs/denovo-benchmark-commands.md), and
+[ProgramBench Benchmark Guide](docs/programbench-benchmark-guide.md).
 
 ## Development
 
@@ -336,6 +362,7 @@ release workflow notes.
 - [V1 hardening scope decisions](docs/v1-hardening-scope-decisions.md)
 - [DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md)
 - [DeNovoSWE Benchmark Commands](docs/denovo-benchmark-commands.md)
+- [ProgramBench Benchmark Guide](docs/programbench-benchmark-guide.md)
 - [ADR 0001: State-first, not memory-first](docs/adr/0001-state-first-not-memory-first.md)
 
 Some historical implementation plans and specs are tracked under

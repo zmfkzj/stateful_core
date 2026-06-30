@@ -18,6 +18,21 @@ fn default_allowed_tools() -> Vec<String> {
         "task",
         "yield",
         "lsp",
+        "glob",
+        "ask",
+        "ast_grep",
+        "browser",
+        "find",
+        "generate_image",
+        "grep",
+        "irc",
+        "job",
+        "read",
+        "report_tool_issue",
+        "search",
+        "search_tool_bm25",
+        "todo",
+        "web_search",
     ]
     .into_iter()
     .map(str::to_string)

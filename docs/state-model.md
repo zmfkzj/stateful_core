@@ -27,16 +27,17 @@ authorize writes.
 
 `turn_id` identifies one agent execution slice inside a session: one prompt,
 the tool calls that follow, and the final response, pause, or stop. V1 records
-turn identity where available, but write authorization is still enforced by
-session identity plus active reservation and claim.
+turn identity where available, but write authorization is reservation-scoped:
+active `reservation_id` scope plus an active same-reservation claim.
 
 `reservation` is the task-level write scope. A reservation belongs to one
 session, expires, and groups the known file or directory scopes for one task
-purpose. Agents should declare the complete known file set for a task, then add
-scopes to that same task reservation as the target set grows.
+purpose under a stable `reservation_id`. Agents should declare the complete known
+file set for a task, then add scopes to that same reservation as the target set
+grows.
 
 `claim` is the live resource-level ownership signal. Each supported write still
-requires a fresh same-session claim for the exact file or directory resource
+requires a fresh same-reservation claim for the exact file or directory resource
 being mutated.
 
 The practical hierarchy is:
@@ -45,7 +46,7 @@ The practical hierarchy is:
 session
   goal
     turn
-      task reservation
+      reservation_id
         file/directory scopes
           resource claims
             write actions
@@ -53,12 +54,13 @@ session
 
 For v1, Codex hooks must treat the current Codex hook `thread_id` as
 authoritative when present, falling back to `session_id` for older payloads. The
-OMP extension must prefer the actual OMP session id from `event.sessionId` or
-`ctx.sessionManager.session.id`, store it in `process.env.STATEFUL_SESSION_ID`,
-and persist current-session files during `stateful hook omp session-start`. MCP
+OMP extension must store `process.env.STATEFUL_SESSION_ID` from explicit OMP
+event/ctx ids (`event.sessionId`, `event.session_id`, session fields), falling
+back to the `ctx.sessionManager.getSessionFile()` header/stem and then
+`getLeafId()` during `stateful hook omp session-start`. MCP
 reservation declaration may omit `session_id`; in that case the adapter uses the
-current session recorded by lifecycle hooks so that MCP-declared reservation and write
-authorization evaluate against the same session.
+current session recorded by lifecycle hooks so MCP declarations keep the current
+session as reservation owner while write authorization uses `reservation_id`.
 
 ## Activity Record
 
@@ -275,11 +277,11 @@ purpose. Abstract resources in `resources_planned`, such as `task`, `test`,
 
 `phase` is shipped for activity records and write authorization. `goal`,
 `resources_planned`, `next_plan`, and `max_expires_at` remain target model
-fields. Shipped authorization is based on active, unexpired scope rows,
-same-session claims, and active phases.
+fields. Shipped authorization is based on active, unexpired reservation scope
+rows, active same-reservation claims, and active phases.
 
-Reservation declarations add to the session's active scope in that workspace. This
-lets a session keep one task reservation while adding a newly discovered source
+Reservation declarations add to the session's active reservation scope in that workspace. This
+lets a session keep one reservation while adding a newly discovered source
 file or `tmp/` build/test scope without invalidating existing claimed paths. If
 the same path is declared again, the latest matching active declaration supplies
 the purpose used for future claim acquisition.
@@ -385,10 +387,11 @@ records in v1.
 
 Promotion creates claimable reservations, not active write authority. Each
 waiting session must reread the target. Manual MCP/CLI flows then explicitly
-claim the reservation with `state_reservation_claim` or
-`stateful reservation claim --wait-id <id>`; native edit hooks and sandbox
-`write-targets` authorization can lazy-claim it at the retried write boundary.
-Claiming creates active reservation scope and active same-session claims.
+claim the reservation with `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)`
+or `stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>`;
+native edit hooks and sandbox `write-targets` authorization can lazy-claim it at
+the retried write boundary. Claiming creates active reservation scope and active
+same-reservation claims.
 The default claimable reservation TTL is 120 seconds. If a claimable reservation
 expires, the server may promote the next eligible FIFO waiter.
 
@@ -463,7 +466,7 @@ fields are protocol vocabulary for native subagent-aware adapters. The Codex
 integration records each native subagent under its own effective session
 identity when Codex exposes a thread id. Parent and child sessions coordinate
 through the same workspace state, but a child does not inherit the parent's
-same-session claim authority. Same-owner sessions do not receive automatic
+same-reservation claim authority. Same-owner sessions do not receive automatic
 override authority.
 
 ## Sandboxed Test Execution
@@ -482,8 +485,8 @@ configured under the same external scratch root.
 
 Source-tree edits should use native edit tools with hook-visible targets, such
 as Codex `apply_patch` or Edit, after task-level reservation covers the target
-and a successful same-session file claim is active. Native edit hooks and
-`sandbox run --fs write-targets` release their authorized same-session claims
+and a successful same-reservation file claim is active. Native edit hooks and
+`sandbox run --fs write-targets` release their authorized same-reservation claims
 after the write transaction completes; subsequent writes must reread and
 reacquire a claim or claim a
 claimable reservation. Command-shaped source writes must use exact
@@ -706,15 +709,16 @@ Expected materialized views:
 - prompt context package for Codex hooks and MCP tools
 
 The current server exposes `/v1/context/render` and `state_context_render` as a
-store-backed live view over active reservations, active claims, and queued or
-claimable (`reserved`) wait records. Responses include current summary counts,
-structured `items`, and prompt-ready `prompt_text`; an empty live state produces an empty prompt.
+store-backed planning/manual inspection view over active reservations, active
+claims, and queued or claimable (`reserved`) wait records. Responses include
+current summary counts, structured `items`, and prompt-ready `prompt_text`; an
+empty unfiltered live render means no planning context needs to be shown.
 
 Prompt context packages should support:
 
 ```text
 mode: brief | detailed
-resources: optional file or directory filter
+resource: optional file or directory filter
 status: ok | error
 prompt_text
 sections:

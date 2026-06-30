@@ -176,7 +176,7 @@ reservation must reread the target. Manual MCP/CLI flows then call
 the claim uses the stored reservation purpose, and clients do not provide a new
 claim purpose. Native edit hooks and sandbox `write-targets` authorization can
 lazy-claim the claimable reservation when the write is retried. Claiming creates
-active reservation scope and the active same-session claim. The default
+active reservation scope and the active same-reservation claim. The default
 claimable reservation TTL is 120 seconds. If a claimable reservation expires
 without being claimed, the server may promote the next eligible FIFO waiter.
 
@@ -252,37 +252,37 @@ profile.
 
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --agent codex --yes` configures global Codex hooks and MCP,
-and writes `skills/stateful-command-policy/SKILL.md` and
+and writes `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
+`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`) and
 `skills/dispatching-parallel-agents/SKILL.md`.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) and ensures the target keys
-`tools.approvalMode: yolo`, `bash.enabled: false`, `eval.py: false`,
-`eval.js: false`, `eval.rb: false`, and `eval.jl: false`; it removes
+`tools.approvalMode: yolo`, `stateful.autoApprove: false`,
+`bash.enabled: true`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
+and `eval.jl: false`; it removes
 `tools.approval` from the stateful profile because yolo mode delegates safety to
 Stateful hooks. Without `--update`, existing scalar values are preserved and
 only missing keys are inserted; with `--update`, existing target scalar values
 are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
 tools are denied at the host approval and hook levels. The installer also writes
-`rules/stateful-required.md`, `skills/stateful-command-policy/SKILL.md`, and
-`skills/dispatching-parallel-agents/SKILL.md` under that isolated agent
-directory: the always-apply rule tells the model when Stateful policy applies,
-the `stateful-command-policy` manual keeps the detailed procedure, and hooks
-remain the
-enforcement boundary. The
-generated extension registers `sandbox_bash` for read-only, write-targets,
-build, git, and github-pr sandbox runs, including common sandbox flags,
-registers `ext_ro_bash` for read-only `--fs external` commands, and registers
-`ext_rw_bash` for external writes that require write/create/dir scope plus a
-scoped OMP UI grant. That grant omits raw command text, shows purpose and
-declared scope, and can cover matching calls until expiry or max uses. All three
-generated `*_bash` tools run sandbox commands in the background by default.
-With `async` omitted or `true`, they return a job id immediately, stream
-stdout/output via OMP messages using `pi.sendMessage`, and send final stdout,
-stderr, and exit status as a follow-up message. Set `async: false` to keep the
-old awaited foreground behavior that returns final stdout/stderr/status in tool
-details. `sandbox_bash` rejects
-`--fs external` with guidance to use `ext_ro_bash` or `ext_rw_bash`. Raw Bash and
+`rules/stateful-required.md` and `skills/stateful-command-policy/` (`SKILL.md`,
+`omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
+`subagent-write-recovery.md`) under that isolated agent directory: the
+always-apply rule tells the model when
+Stateful policy applies, the `stateful-command-policy` manual keeps the detailed
+procedure, and hooks remain the enforcement boundary. The
+generated extension keeps built-in Bash preflight, edit/write auto-declare/claim,
+and lazy resume tools. Built-in Bash may run only strict trusted
+`stateful sandbox run ...` and `stateful sandbox process find ...` commands
+after Stateful preflight; command execution and process inspection are not
+generated tool calls. External
+write/create/write-dir/socket/signal scope asks for a scoped OMP UI grant by
+default; `stateful.autoApprove: true` skips only that Stateful-owned prompt
+while sandbox scope validation, hooks, reservation/claim checks, and grant
+limits still apply. That grant omits raw command text, shows purpose and
+declared scope, and can cover matching calls until expiry or max uses. When
+auto-approval is enabled, no prompt is shown. Raw Bash and
 Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
 are blocked even if their command text
@@ -305,14 +305,21 @@ share the Codex lifecycle model: `SessionStart`, `UserPromptSubmit`,
 `PreToolUse`, `PostToolUse`, and `Stop`. The isolated OMP `stateful` profile
 uses OMP extension entry points for `SessionStart`, `PreToolUse`,
 `PostToolUse`, and `Stop`; OMP does not expose `UserPromptSubmit`. OMP
-`session-start` prefers the actual runtime id from `event.sessionId` or
-`ctx.sessionManager.session.id`, stores it in `process.env.STATEFUL_SESSION_ID`,
-and persists the same current-session files used by session-aware CLI and MCP
-callers. With that state in place, `state_session_register` ->
-`state_reservation_declare` -> `state_claim_acquire` resolves the active OMP session
-without a caller-supplied environment override. Plugin packaging is deferred to
-team beta for distribution and update UX, while managed hooks remain the
-long-term organization-enforcement path.
+`session-start` stores `STATEFUL_SESSION_ID` from explicit event/ctx ids
+(`event.sessionId`, `event.session_id`, session fields), falling back to the
+`ctx.sessionManager.getSessionFile()` header/stem and then `getLeafId()`, and
+persists the same current-session files used by
+session-aware CLI and MCP callers. With that state in place,
+`state_session_register` -> `state_reservation_declare` ->
+`state_claim_acquire` resolves the active OMP session without a caller-supplied
+environment override. OMP native `edit` and `write` pre-tool authorization can
+also auto-declare the exact file scope, acquire same-reservation claims, and
+retry when the only denial is missing reservation/scope and no explicit
+reservation id was supplied; queued conflicts, unavailable runtime,
+changed-target replay, unsupported targets, explicit bad reservation ids, and
+other denials still use lazy resume or normal denial recovery. Plugin packaging
+is deferred to team beta for distribution and update UX, while managed hooks
+remain the long-term organization-enforcement path.
 
 Hook scripts are thin integration adapters. They parse runtime hook input,
 classify runtime-specific tool calls, extract action and targets when supported,
@@ -328,17 +335,14 @@ paths. OMP `SessionStart`, `PostToolUse`, and `Stop` lifecycle posts use flat
 session-event bodies with `metadata` and `source`, while OMP `PreToolUse`
 authorization still uses the v1 envelope.
 
-OMP adapters preserve stateful hard blocks: `sandbox_bash` owns non-external
-sandbox command execution for read-only, write-targets, build, git, and
-github-pr profiles; `ext_ro_bash` owns read-only external commands without OMP
-UI confirmation; `ext_rw_bash` owns external writes through reusable scoped
-purpose grants; all generated `*_bash` tools run sandbox commands in the
-background by default, return a job id immediately when `async` is omitted or
-`true`, stream stdout/output via OMP messages using `pi.sendMessage`, and send
-final stdout/stderr/exit status as a follow-up message; `async: false` waits for
-completion and returns final stdout/stderr/exit status in tool details;
-stateful allow maps to allow; and stateful denial or unavailable state maps to
-block even when OMP yolo metadata is present.
+OMP adapters preserve stateful hard blocks: built-in Bash may run only strict
+trusted `stateful sandbox run ...` and `stateful sandbox process find ...`
+commands after Stateful preflight. External write/create/write-dir/socket/signal
+scope asks for a scoped OMP UI grant by default; `stateful.autoApprove: true`
+skips only that Stateful-owned prompt while sandbox scope validation, hooks,
+reservation/claim checks, and grant limits still apply; stateful allow maps to
+allow; and stateful denial or unavailable state maps to block even when OMP yolo
+metadata is present.
 
 ### Hook Responsibilities
 
@@ -361,13 +365,14 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 - intercept supported tool calls before execution
 - deny supported write calls when the session has no active reservation
-- deny Codex raw Bash with sandbox guidance. For OMP, raw Bash and the
-  Python/JavaScript/JS/Ruby/Julia eval tools are denied at host approval and hook
-  levels, even when the raw command itself invokes `stateful sandbox run`;
-  non-external sandbox command work must use `sandbox_bash`, read-only
-  repo-external command-shaped work must use `ext_ro_bash` without OMP UI
-  confirmation, and external writes must use `ext_rw_bash` with write/create/dir
-  scope plus a scoped purpose grant.
+- deny Codex raw Bash with sandbox guidance. For OMP, built-in Bash may run
+  only strict trusted `stateful sandbox run ...` and `stateful sandbox process
+  find ...` commands after Stateful preflight; arbitrary raw Bash and the
+  Python/JavaScript/JS/Ruby/Julia eval tools remain denied at host approval and
+  hook levels. Scoped external writes still ask for a Stateful OMP UI grant by
+  default; `stateful.autoApprove: true` skips only that Stateful-owned prompt
+  while sandbox scope validation, hooks, reservation/claim checks, and grant
+  limits still apply.
 - check whether requested files or resources conflict with active claims
 - deny, warn, or add context based on policy
 
@@ -375,7 +380,7 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 - observe supported tool results
 - update files touched, phase, test results, and last result
-- release same-session repo-write claims after completed native edit and
+- release same-reservation repo-write claims after completed native edit and
   `write-targets` transactions
 - refresh heartbeat timestamps and claim timestamps only for remaining active
   claims still covered by active reservation
@@ -492,22 +497,23 @@ namespaced runtime tool names -> classify by leaf
   tools; functions.read / functions.search as native read/search)
 native read/search/diff tools -> preferred path for ordinary read work
 native edit tools with hook-visible targets -> enforce by inspecting targets
-  after task-level reservation covers the target and a same-session claim; release the claim after the
+  after task-level reservation covers the target and a same-reservation claim; release the claim after the
   completed write transaction
 Codex Bash read-only inspection that genuinely needs a shell -> require a strict
   trusted wrapper:
   <absolute-stateful-binary> sandbox run --fs read-only --network disabled
   --command <cmd>
-OMP read-only/write-targets/build/git/github-pr sandbox runs -> require
-  `sandbox_bash`
-process inspection -> use sandbox process find <selector>, not raw ps/pgrep
+OMP built-in Bash sandbox/process commands -> allow only strict trusted
+  `stateful sandbox run ...` and `stateful sandbox process find ...` commands
+  after Stateful preflight
+Codex process inspection -> use <absolute-stateful-binary> sandbox process find <selector>, not raw ps/pgrep
 Codex Bash command-shaped repo writes -> require the trusted wrapper with
   --fs write-targets plus explicit --write-target <file>/--create-target <file> values
 test execution -> run through sandbox run --fs build --network enabled with
   --write-dir <scratch-purpose>; scratch lives under /tmp/stateful/<session>/
-Codex raw Bash, OMP raw Bash, or OMP Python/JavaScript/JS/Ruby/Julia eval tools
+Codex raw Bash, arbitrary OMP raw Bash, or OMP Python/JavaScript/JS/Ruby/Julia eval tools
   -> deny
-repo-external OMP command-shaped work -> require `ext_ro_bash` for reads or `ext_rw_bash` with a scoped purpose grant for writes
+repo-external OMP command-shaped work -> use built-in Bash with a strict trusted `stateful sandbox run --fs external ...` command; write/create/write-dir/socket/signal scope asks for a scoped OMP UI grant by default, and `stateful.autoApprove: true` skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply
 ```
 
 Bash denial should tell the agent to use native read/search/diff tools for
@@ -515,13 +521,13 @@ ordinary read work,
 `<absolute-stateful-binary> sandbox run --fs read-only --network disabled
 --command <cmd>` for Codex shell-based read-only inspection,
 `<absolute-stateful-binary> sandbox run --fs write-targets --write-target <file> ... --command <cmd>`
-for Codex command-shaped repo writes after reservation and same-session claim,
-OMP `sandbox_bash` for read-only, write-targets, build, git, and github-pr
-sandbox runs,
-Codex `<absolute-stateful-binary> sandbox run --fs external --purpose ...
---command <cmd>`, OMP `ext_ro_bash` for read-only external work, or OMP
-`ext_rw_bash` with a scoped purpose grant for approved repo-external writes,
-and native edit tools for repo file edits.
+for Codex command-shaped repo writes after reservation and same-reservation claim,
+OMP built-in Bash with strict trusted `stateful sandbox run ...` commands for
+sandbox runs and repo-external work. External write/create/write-dir,
+socket, or signal scope asks for a scoped OMP UI grant by default;
+`stateful.autoApprove: true` skips only that Stateful-owned prompt while
+sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. Use
+native edit tools for repo file edits.
 
 The read-only sandbox profile is a write-confinement profile. It does not
 provide full process containment, and it cannot be combined with
@@ -532,7 +538,7 @@ authorize `rg`, `git diff`, test runners, stateful operational commands, or any
 other Bash command. Test commands should run through the trusted
 `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
 --command <cmd>` wrapper. Repo writes require task-level reservation covering
-the target plus a matching same-session claim and must use native edit tools or
+the target plus a matching same-reservation claim and must use native edit tools or
 `--fs write-targets` with explicit targets.
 
 Minimum sandboxed test shape:
@@ -544,7 +550,7 @@ stateful sandbox run --fs build --network enabled --write-dir test-run --command
 The build profile writes disposable artifacts under
 `/tmp/stateful/<session>/<scratch-purpose>/`. Source-tree edits use native edit tools
 with hook-visible targets, such as Codex `apply_patch` or Edit, after exact
-reservation declaration and a successful same-session file claim; the completed write
+reservation declaration and a successful same-reservation file claim; the completed write
 transaction releases the authorizing claim. Command-shaped source writes must
 use exact `--write-target <file>` or `--create-target <file>` entries.
 
@@ -561,11 +567,11 @@ Initial policy should prefer advisory claims:
   `write_directory` scope: deny
 - Codex raw Bash or non-wrapper Bash: deny, including repo-external
   command-shaped work
-- OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution: deny at
-  host approval and hook levels, even when the raw command invokes
-  `stateful sandbox run`; use `sandbox_bash` for non-external sandbox profiles,
-  `ext_ro_bash` for read-only `--fs external`, and `ext_rw_bash` with a scoped
-  purpose grant for external writes
+- OMP built-in Bash may run only strict trusted `stateful sandbox run ...` and
+  `stateful sandbox process find ...` commands after Stateful preflight;
+  arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution is
+  denied at host approval and hook levels. Scoped external writes still ask for
+  the Stateful OMP UI grant unless auto-approved.
 - directory reservation and directory claim authorize only `write_directory` for the
   exact directory resource; they do not authorize `write_file`, delete, rename,
   or move actions on child paths
@@ -736,11 +742,11 @@ non-Bash read/search/diff path: allow
 ```
 
 At the OMP adapter boundary, a stateful hook deny or unavailable result is
-returned as block, not warning, regardless of OMP yolo metadata. Non-external
-sandbox runs must use `sandbox_bash`, repo-external command-shaped reads must
-use `ext_ro_bash`, external writes must use `ext_rw_bash` with a scoped purpose
-grant, and raw OMP Bash plus Python/JavaScript/JS/Ruby/Julia
-eval-tool sandbox invocations are denied.
+returned as block, not warning, regardless of OMP yolo metadata. Built-in Bash
+passthrough is limited to strict trusted Stateful sandbox/process commands, and
+repo-external command-shaped work must pass Stateful external grant checks.
+Arbitrary raw OMP Bash plus Python/JavaScript/JS/Ruby/Julia eval-tool sandbox
+invocations are denied.
 
 When the state server is unavailable:
 
@@ -749,9 +755,9 @@ When the state server is unavailable:
 - Codex raw Bash and repo-internal Bash calls remain denied unless they use a
   strict trusted `<absolute-stateful-binary> sandbox run ... --command <cmd>`
   wrapper
-- OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution remains
-  denied at host approval and hook levels; non-external sandbox runs must use
-  `sandbox_bash`
+- OMP built-in Bash passthrough remains limited to strict trusted Stateful
+  sandbox/process commands; arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia
+  eval-tool execution remains denied at host approval and hook levels
 - sandbox-run wrappers that need authorization fail closed and do not run the
   command
 - `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block
@@ -844,10 +850,11 @@ supported write action + no active reservation -> deny
 supported write action + expired reservation -> deny as missing active reservation
 supported write action + reservation without file/directory scope -> deny
 supported write action + target outside reservation scope -> deny
-Codex raw Bash -> deny; OMP raw Bash plus Python/JavaScript/JS/Ruby/Julia
-  eval tools -> deny even when the command invokes `stateful sandbox run`; use
-  `sandbox_bash` for non-external sandbox profiles, `ext_ro_bash` for read-only
-  external work, and `ext_rw_bash` with a scoped purpose grant for external writes
+Codex raw Bash -> deny; OMP built-in Bash -> allow only strict trusted
+  `stateful sandbox run ...` and `stateful sandbox process find ...` commands
+  after Stateful preflight; arbitrary raw OMP Bash and Python/JavaScript/JS/Ruby/Julia
+  eval tools -> deny. Scoped external writes still ask for the Stateful OMP UI
+  grant unless auto-approved.
 delete action + non-exact file scope -> deny
 rename/move action + non-exact source or destination scope -> deny
 active write claim in hard conflict domain -> deny
@@ -901,7 +908,7 @@ fail because no active task reservation remains.
 
 The shipped hook path records target existence and content hash when an exact
 file claim is acquired with `root`, denies hook-originated native file writes
-when that file changes before authorization, and releases the same-session claim
+when that file changes before authorization, and releases the same-reservation claim
 after a completed native edit or `write-targets` transaction. This is a
 per-claim freshness check, not a filesystem watcher or IDE human-save observer.
 
@@ -925,14 +932,16 @@ record and authorization path.
 Prompt context rendering:
 
 ```text
-state_context_render(workspace, session_id, resources?, mode)
+state_context_render(workspace, session_id, resource?, mode)
 mode: brief | detailed
 sections: Blocking, Required Next Action, Warnings, Nearby Activity, Stale/Expired
 ```
 
-`brief` is used for session start and user prompt context. `detailed` is used
-after denied actions or for focused resource checks. Rendering should be
-actionable, not a raw event dump.
+`brief` is used for session start, user prompt context, and planning-time
+known-target resource checks. `detailed` is used for manual deep inspection when
+brief planning context lacks enough evidence. Rendering should be actionable,
+not a raw event dump, and denial recovery should follow direct next-action
+payloads instead of automatically rendering context.
 
 The current server route renders store-backed live context from active reservations,
 active claims, and queued or claimable (`reserved`) wait records. The response includes

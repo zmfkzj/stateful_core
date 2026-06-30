@@ -80,7 +80,30 @@ def empty_stats() -> dict[str, Any]:
         "orchestration_reservation_events": 0,
         "orchestration_claim_events": 0,
         "orchestration_conflict_events": 0,
+        "orchestration_event_count": 0,
+        "orchestration_event_types": Counter(),
+        "orchestration_heartbeat_events": 0,
+        "orchestration_heartbeat_windows": 0,
+        "orchestration_heartbeat_max_gap_ms": None,
+        "orchestration_denial_events": 0,
+        "orchestration_denial_paths": Counter(),
+        "orchestration_denial_messages": Counter(),
     }
+
+
+def update_counter(counter: Counter[str], value: Any) -> None:
+    if not isinstance(value, dict):
+        return
+    for key, count in value.items():
+        counter[str(key)] += int_or_zero(count)
+
+
+def update_max_gap(stats: dict[str, Any], value: Any) -> None:
+    gap = int_or_zero(value)
+    if gap <= 0:
+        return
+    current = stats.get("orchestration_heartbeat_max_gap_ms")
+    stats["orchestration_heartbeat_max_gap_ms"] = max(current or 0, gap)
 
 
 def add_orchestration_trace(stats: dict[str, Any], trace: Any) -> None:
@@ -92,6 +115,14 @@ def add_orchestration_trace(stats: dict[str, Any], trace: Any) -> None:
     stats["orchestration_reservation_events"] += int_or_zero(trace.get("reservation_events"))
     stats["orchestration_claim_events"] += int_or_zero(trace.get("claim_events"))
     stats["orchestration_conflict_events"] += int_or_zero(trace.get("conflict_events"))
+    stats["orchestration_event_count"] += int_or_zero(trace.get("event_count"))
+    stats["orchestration_heartbeat_events"] += int_or_zero(trace.get("heartbeat_events"))
+    stats["orchestration_heartbeat_windows"] += int_or_zero(trace.get("heartbeat_windows"))
+    stats["orchestration_denial_events"] += int_or_zero(trace.get("denial_events"))
+    update_max_gap(stats, trace.get("heartbeat_max_gap_ms"))
+    update_counter(stats["orchestration_event_types"], trace.get("event_types"))
+    update_counter(stats["orchestration_denial_paths"], trace.get("denial_paths"))
+    update_counter(stats["orchestration_denial_messages"], trace.get("denial_messages"))
 
 
 def add_row(stats: dict[str, Any], row: dict[str, Any]) -> None:
@@ -148,6 +179,25 @@ def add_summary(stats: dict[str, Any], summary: dict[str, Any]) -> None:
     stats["orchestration_conflict_events"] += int_or_zero(
         summary.get("orchestration_conflict_events")
     )
+    stats["orchestration_event_count"] += int_or_zero(
+        summary.get("orchestration_event_count")
+    )
+    stats["orchestration_heartbeat_events"] += int_or_zero(
+        summary.get("orchestration_heartbeat_events")
+    )
+    stats["orchestration_heartbeat_windows"] += int_or_zero(
+        summary.get("orchestration_heartbeat_windows")
+    )
+    stats["orchestration_denial_events"] += int_or_zero(
+        summary.get("orchestration_denial_events")
+    )
+    update_max_gap(stats, summary.get("orchestration_heartbeat_max_gap_ms"))
+    update_counter(stats["orchestration_event_types"], summary.get("orchestration_event_types"))
+    update_counter(stats["orchestration_denial_paths"], summary.get("orchestration_denial_paths"))
+    update_counter(
+        stats["orchestration_denial_messages"],
+        summary.get("orchestration_denial_messages"),
+    )
 
 
 def finalized_stats(
@@ -175,6 +225,16 @@ def finalized_stats(
         "orchestration_reservation_events": stats["orchestration_reservation_events"],
         "orchestration_claim_events": stats["orchestration_claim_events"],
         "orchestration_conflict_events": stats["orchestration_conflict_events"],
+        "orchestration_event_count": stats["orchestration_event_count"],
+        "orchestration_event_types": dict(sorted(stats["orchestration_event_types"].items())),
+        "orchestration_heartbeat_events": stats["orchestration_heartbeat_events"],
+        "orchestration_heartbeat_windows": stats["orchestration_heartbeat_windows"],
+        "orchestration_heartbeat_max_gap_ms": stats["orchestration_heartbeat_max_gap_ms"],
+        "orchestration_denial_events": stats["orchestration_denial_events"],
+        "orchestration_denial_paths": dict(sorted(stats["orchestration_denial_paths"].items())),
+        "orchestration_denial_messages": dict(
+            sorted(stats["orchestration_denial_messages"].items())
+        ),
         "progress_rate": (
             rows / expected_instances_per_condition
             if expected_instances_per_condition
@@ -259,6 +319,32 @@ def summarize_report(
         if "setup_errors" in report
         else result_stats["setup_errors"]
     )
+    result_summary = finalized_stats(result_stats, None)
+
+    def report_int_or_result(key: str) -> int:
+        return int_or_zero(report.get(key)) if key in report else int_or_zero(result_summary.get(key))
+
+
+    report_has_trace_summary = any(
+        key in report
+        for key in (
+            "orchestration_event_count",
+            "orchestration_heartbeat_events",
+            "orchestration_heartbeat_windows",
+            "orchestration_denial_events",
+        )
+    )
+
+    def report_trace_int_or_result(key: str) -> int:
+        if report_has_trace_summary:
+            return int_or_zero(report.get(key))
+        return int_or_zero(result_summary.get(key))
+
+    def report_trace_value_or_result(key: str, default: Any) -> Any:
+        if report_has_trace_summary:
+            return report.get(key, default)
+        return result_summary.get(key, default)
+
 
     return {
         "run_id": run_dir.name,
@@ -274,21 +360,38 @@ def summarize_report(
         "subagent_observed": subagent_observed,
         "subagent_used_count": subagent_used_count,
         "subagent_used_rate": subagent_used_rate,
-        "orchestration_trace_observed": int_or_zero(
-            report.get("orchestration_trace_observed")
+        "orchestration_trace_observed": report_int_or_result("orchestration_trace_observed"),
+        "orchestration_trace_captured": report_int_or_result("orchestration_trace_captured"),
+        "orchestration_reservation_events": report_int_or_result(
+            "orchestration_reservation_events"
         ),
-        "orchestration_trace_captured": int_or_zero(
-            report.get("orchestration_trace_captured")
+        "orchestration_claim_events": report_int_or_result("orchestration_claim_events"),
+        "orchestration_conflict_events": report_int_or_result("orchestration_conflict_events"),
+        "orchestration_event_count": report_trace_int_or_result("orchestration_event_count"),
+        "orchestration_event_types": report_trace_value_or_result(
+            "orchestration_event_types", {}
+        )
+        or {},
+        "orchestration_heartbeat_events": report_trace_int_or_result(
+            "orchestration_heartbeat_events"
         ),
-        "orchestration_reservation_events": int_or_zero(
-            report.get("orchestration_reservation_events")
+        "orchestration_heartbeat_windows": report_trace_int_or_result(
+            "orchestration_heartbeat_windows"
         ),
-        "orchestration_claim_events": int_or_zero(
-            report.get("orchestration_claim_events")
+        "orchestration_heartbeat_max_gap_ms": report_trace_value_or_result(
+            "orchestration_heartbeat_max_gap_ms", None
         ),
-        "orchestration_conflict_events": int_or_zero(
-            report.get("orchestration_conflict_events")
+        "orchestration_denial_events": report_trace_int_or_result(
+            "orchestration_denial_events"
         ),
+        "orchestration_denial_paths": report_trace_value_or_result(
+            "orchestration_denial_paths", {}
+        )
+        or {},
+        "orchestration_denial_messages": report_trace_value_or_result(
+            "orchestration_denial_messages", {}
+        )
+        or {},
         "progress_rate": (
             rows / expected_instances_per_condition
             if expected_instances_per_condition
@@ -371,10 +474,22 @@ def format_orchestration_trace(summary: dict[str, Any]) -> str:
     reservation_events = int_or_zero(summary.get("orchestration_reservation_events"))
     claim_events = int_or_zero(summary.get("orchestration_claim_events"))
     conflict_events = int_or_zero(summary.get("orchestration_conflict_events"))
-    return (
-        f"{captured}/{observed} captured; "
-        f"reservation={reservation_events}, claim={claim_events}, conflict={conflict_events}"
-    )
+    event_count = int_or_zero(summary.get("orchestration_event_count"))
+    heartbeat_events = int_or_zero(summary.get("orchestration_heartbeat_events"))
+    denial_events = int_or_zero(summary.get("orchestration_denial_events"))
+    details = [
+        f"{captured}/{observed} captured",
+        f"reservation={reservation_events}",
+        f"claim={claim_events}",
+        f"conflict={conflict_events}",
+    ]
+    if event_count:
+        details.append(f"events={event_count}")
+    if heartbeat_events:
+        details.append(f"heartbeat={heartbeat_events}")
+    if denial_events:
+        details.append(f"denial={denial_events}")
+    return "; ".join(details)
 
 
 def render_markdown(summary: dict[str, Any]) -> str:

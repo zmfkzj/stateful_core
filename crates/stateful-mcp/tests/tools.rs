@@ -335,6 +335,10 @@ fn reservation_claim_descriptor_exposes_required_input_schema() {
     assert_injected_session_fields_are_hidden(&tool.input_schema);
     assert_eq!(tool.input_schema["properties"]["wait_id"]["type"], "string");
     assert_eq!(
+        tool.input_schema["properties"]["reservation_id"]["type"],
+        "string"
+    );
+    assert_eq!(
         tool.input_schema["required"],
         serde_json::json!(["wait_id"])
     );
@@ -398,6 +402,10 @@ fn lease_descriptors_expose_batch_acquire_and_path_release_schemas() {
     assert_eq!(
         acquire.input_schema["properties"]["paths"]["items"]["minLength"],
         1
+    );
+    assert_eq!(
+        acquire.input_schema["properties"]["reservation_id"]["type"],
+        "string"
     );
     assert_eq!(
         acquire.input_schema["required"],

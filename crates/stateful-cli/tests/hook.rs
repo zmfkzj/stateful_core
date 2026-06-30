@@ -345,7 +345,8 @@ fn pre_tool_use_raw_bash_denial_mentions_command_policy_skill_and_example() {
     };
 
     assert!(reason.contains("stateful-command-policy"));
-    assert!(reason.contains("state_current_read"));
+    assert!(reason.contains("state_context_render"));
+    assert!(reason.contains("planning/manual inspection"));
     assert!(reason.contains("state_reservation_declare"));
     assert!(reason.contains("state_claim_acquire"));
     assert!(reason.contains("--fs read-only --network disabled"));
@@ -637,7 +638,7 @@ fn pre_tool_use_denies_untrusted_process_find() {
 
     assert_bash_denial_mentions(
         outcome,
-        "stateful sandbox process find requires the trusted absolute stateful binary",
+        "stateful sandbox process find requires a trusted stateful binary",
     );
 }
 
@@ -1378,7 +1379,7 @@ fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
         (
             "untrusted executable",
             "/bin/echo sandbox run --command 'rg auth src'".to_string(),
-            "trusted absolute stateful binary",
+            "trusted stateful binary",
         ),
         (
             "duplicate command",
@@ -2291,7 +2292,7 @@ fn pre_tool_use_denies_unclassified_tool_names() {
 }
 
 #[test]
-fn pre_tool_use_bash_denial_in_repo_includes_live_context() {
+fn pre_tool_use_bash_denial_in_repo_does_not_render_live_context() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-bash-denial-context-test-{}",
         std::process::id()
@@ -2304,7 +2305,7 @@ fn pre_tool_use_bash_denial_in_repo_includes_live_context() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"status":"ok","prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared reservation for src/auth.ts."}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- unexpected context"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -2331,20 +2332,18 @@ fn pre_tool_use_bash_denial_in_repo_includes_live_context() {
         "stateful hook failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("Bash denial should render live context");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
-    assert!(context_request.contains("\"session_id\":\"s1\""));
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "Bash denial should not render live context"
+    );
     let rendered: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
     assert_eq!(rendered["hookSpecificOutput"]["permissionDecision"], "deny");
-    assert!(
-        rendered["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("deny reason should contain rendered context")
-            .contains("Nearby Activity")
-    );
+    let reason = rendered["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("deny reason should be text");
+    assert!(reason.contains("Raw Bash is denied"));
+    assert!(!reason.contains("Nearby Activity"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -2609,6 +2608,55 @@ fn omp_unclassified_tools_are_manageable_with_stateful_tools_allowlist() {
         &paths,
         &["hook", "omp", "pre-tool-use"],
         &yield_input,
+    );
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
+    assert_eq!(stdout["decision"], "allow");
+    let list = tool_list_for_repo(&paths, &repo_root).expect("tool list should load");
+    assert!(list.unclassified_tools.is_empty());
+    let lazy_write_resume_input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": repo_root,
+        "yolo": false,
+        "tool_name": "lazy_write_resume",
+        "tool_input": {"operation_id": "wait-123"}
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "pre-tool-use"],
+        &lazy_write_resume_input,
+    );
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
+    assert_eq!(stdout["decision"], "allow");
+    let list = tool_list_for_repo(&paths, &repo_root).expect("tool list should load");
+    assert!(list.unclassified_tools.is_empty());
+
+    let glob_input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": repo_root,
+        "yolo": false,
+        "tool_name": "functions.glob",
+        "tool_input": {"pattern": "**/*.rs"}
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "pre-tool-use"],
+        &glob_input,
     );
     assert!(
         output.status.success(),
@@ -2896,10 +2944,151 @@ fn omp_edit_authorize_includes_lazy_queue_metadata_when_scope_exists() {
 }
 
 #[test]
-fn omp_raw_bash_denies_sandbox_write_target_and_points_to_sandbox_bash() {
-    let stateful = trusted_stateful_path();
+fn omp_write_pre_tool_declares_missing_file_reservation_and_retries_authorize() {
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{
+            "decision": "deny",
+            "message": "Supported writes require active file or directory reservation.",
+            "reason_code": "missing_reservation",
+            "required_next_action": "Call state.reservation.declare with file scope before writing."
+        }"#,
+        r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
+        r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
+        r#"{"decision":"allow","message":"ok"}"#,
+    ]);
     let input = serde_json::json!({
         "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "write",
+        "tool_input": { "path": "docs/a.md", "content": "hello" }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        Some(&runtime),
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp write should auto-declare missing reservation before blocking");
+
+    assert_eq!(outcome, OmpHookOutcome::Allow);
+    let first_authorize = request_json_body(&rx.recv().expect("first authorize should arrive"));
+    assert_eq!(first_authorize["payload"]["action"], "write_file");
+    assert_eq!(first_authorize["payload"]["path"], "docs/a.md");
+    let declare = request_json_body(&rx.recv().expect("reservation declare should arrive"));
+    assert_eq!(declare["source"]["event"], "reservation_declare");
+    assert_eq!(
+        declare["payload"]["files_planned"],
+        serde_json::json!(["docs/a.md"])
+    );
+    let claim = request_json_body(&rx.recv().expect("claim acquire should arrive"));
+    assert_eq!(claim["session_id"], "omp-parent");
+    assert_eq!(claim["reservation_id"], "auto-reservation");
+    assert_eq!(claim["paths"], serde_json::json!(["docs/a.md"]));
+    let retry_authorize = request_json_body(&rx.recv().expect("retry authorize should arrive"));
+    assert_eq!(
+        retry_authorize["payload"]["reservation_id"],
+        "auto-reservation"
+    );
+    assert_eq!(retry_authorize["payload"]["path"], "docs/a.md");
+}
+
+#[test]
+fn omp_write_uses_tool_input_reservation_when_top_level_reservation_is_blank() {
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"deny","message":"missing","reason_code":"missing_reservation"}"#,
+    );
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "reservation_id": "   ",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "write",
+        "tool_input": {
+            "reservation_id": "explicit-reservation",
+            "path": "docs/a.md",
+            "content": "hello"
+        }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        Some(&runtime),
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp write should parse");
+
+    assert!(matches!(outcome, OmpHookOutcome::Block { .. }));
+    let authorize = request_json_body(&rx.recv().expect("authorize should arrive"));
+    assert_eq!(
+        authorize["payload"]["reservation_id"],
+        "explicit-reservation"
+    );
+    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+}
+
+#[test]
+fn omp_write_releases_auto_claim_when_retry_authorization_blocks() {
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{
+            "decision": "deny",
+            "message": "Supported writes require active file or directory reservation.",
+            "reason_code": "missing_reservation"
+        }"#,
+        r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
+        r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
+        r#"{
+            "decision": "deny",
+            "message": "Write target is covered by another active session claim.",
+            "reason_code": "active_claim_conflict"
+        }"#,
+        r#"{"status":"ok"}"#,
+    ]);
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "write",
+        "tool_input": { "path": "docs/a.md", "content": "hello" }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        Some(&runtime),
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp write should parse");
+
+    assert!(matches!(outcome, OmpHookOutcome::Block { .. }));
+    let _first_authorize = rx.recv().expect("first authorize should arrive");
+    let _declare = rx.recv().expect("reservation declare should arrive");
+    let _claim = rx.recv().expect("claim acquire should arrive");
+    let _retry_authorize = rx.recv().expect("retry authorize should arrive");
+    let release = request_json_body(
+        &rx.recv_timeout(Duration::from_secs(1))
+            .expect("claim release should arrive"),
+    );
+    assert_eq!(release["session_id"], "omp-parent");
+    assert_eq!(release["workspace_id"], runtime.workspace_id);
+    assert_eq!(release["path"], "docs/a.md");
+}
+
+#[test]
+fn omp_raw_bash_authorizes_trusted_write_target_sandbox_run() {
+    let stateful = trusted_stateful_path();
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
         "cwd": "/repo",
         "yolo": false,
         "tool_name": "bash",
@@ -2909,31 +3098,66 @@ fn omp_raw_bash_denies_sandbox_write_target_and_points_to_sandbox_bash() {
     })
     .to_string();
 
-    let OmpHookOutcome::Block { reason } = handle_omp_pre_tool_use_with_runtime(
-        &input,
-        None,
-        Some(Path::new("/repo")),
-        Some(Path::new("/repo")),
-    )
-    .unwrap() else {
-        panic!("raw OMP bash should be denied even when it invokes stateful sandbox run");
-    };
-
-    assert!(reason.contains("OMP raw bash is denied"));
-    assert!(reason.contains("sandbox_bash"));
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &input,
+            Some(&runtime),
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Allow
+    );
+    let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
+    assert_eq!(body["payload"]["action"], "write_file");
+    assert_eq!(body["payload"]["path"], "docs/a.md");
 }
 
 #[test]
-fn omp_sandbox_bash_tool_is_allowed_for_internal_sandbox_runner() {
+fn omp_removed_generated_command_tools_are_not_allowlisted() {
+    for tool_name in [
+        "sandbox_bash",
+        "ext_ro_bash",
+        "ext_rw_bash",
+        "process_find",
+        "sandbox_job_poll",
+    ] {
+        let input = serde_json::json!({
+            "session_id": "omp-parent",
+            "cwd": "/repo",
+            "yolo": false,
+            "tool_name": tool_name,
+            "tool_input": {
+                "command": "pwd",
+                "purpose": "test removed generated tool",
+                "fs": "read-only"
+            }
+        })
+        .to_string();
+
+        let OmpHookOutcome::Block { reason } = handle_omp_pre_tool_use_with_runtime(
+            &input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo")),
+        )
+        .unwrap() else {
+            panic!("{tool_name} should no longer be allowlisted");
+        };
+        assert!(reason.contains("not classified") || reason.contains("unclassified"));
+    }
+}
+
+#[test]
+fn omp_raw_bash_allows_trusted_external_sandbox_run_for_extension_preflight() {
+    let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "omp-parent",
         "cwd": "/repo",
         "yolo": false,
-        "tool_name": "sandbox_bash",
+        "tool_name": "bash",
         "tool_input": {
-            "fs": "write-targets",
-            "write_targets": ["docs/a.md"],
-            "command": "printf ok > docs/a.md"
+            "command": format!("{stateful} sandbox run --fs external --purpose 'write external artifact' --write-target /tmp/stateful-outside.txt --command 'printf ok > /tmp/stateful-outside.txt'")
         }
     })
     .to_string();
@@ -2948,75 +3172,6 @@ fn omp_sandbox_bash_tool_is_allowed_for_internal_sandbox_runner() {
         .unwrap(),
         OmpHookOutcome::Allow
     );
-}
-
-#[test]
-fn omp_raw_bash_denies_sandbox_external_and_points_to_external_tools() {
-    let stateful = trusted_stateful_path();
-    let input = serde_json::json!({
-        "session_id": "omp-parent",
-        "cwd": "/repo",
-        "yolo": false,
-        "tool_name": "bash",
-        "tool_input": {
-            "command": format!("{stateful} sandbox run --fs external --purpose 'write external artifact' --write-target /tmp/stateful-outside.txt --command 'printf ok > /tmp/stateful-outside.txt'")
-        }
-    })
-    .to_string();
-
-    let OmpHookOutcome::Block { reason } = handle_omp_pre_tool_use_with_runtime(
-        &input,
-        None,
-        Some(Path::new("/repo")),
-        Some(Path::new("/repo")),
-    )
-    .unwrap() else {
-        panic!("raw OMP bash must not run external sandbox commands directly");
-    };
-
-    assert!(reason.contains("ext_rw_bash"));
-    assert!(reason.contains("--fs external"));
-}
-
-#[test]
-fn omp_external_tool_wrappers_are_allowed_for_internal_runners() {
-    for (tool_name, tool_input) in [
-        (
-            "ext_ro_bash",
-            serde_json::json!({
-                "purpose": "inspect external artifact",
-                "command": "test -r /tmp/stateful-outside.txt"
-            }),
-        ),
-        (
-            "ext_rw_bash",
-            serde_json::json!({
-                "purpose": "write external artifact",
-                "write_targets": ["/tmp/stateful-outside.txt"],
-                "command": "printf ok > /tmp/stateful-outside.txt"
-            }),
-        ),
-    ] {
-        let input = serde_json::json!({
-            "session_id": "omp-parent",
-            "cwd": "/repo",
-            "yolo": false,
-            "tool_name": tool_name,
-            "tool_input": tool_input
-        })
-        .to_string();
-
-        assert_eq!(
-            handle_omp_pre_tool_use_with_runtime(
-                &input,
-                None,
-                Some(Path::new("/repo")),
-                Some(Path::new("/repo"))
-            )
-            .unwrap(),
-            OmpHookOutcome::Allow
-        );
-    }
 }
 
 #[test]
@@ -3044,15 +3199,32 @@ fn omp_repo_internal_raw_bash_rejects_shell_writes_and_unsafe_find_actions() {
 }
 
 #[test]
-fn omp_repo_internal_raw_bash_is_denied_even_for_sandbox_run_requests() {
+fn omp_repo_internal_raw_bash_allows_only_trusted_sandbox_requests() {
     let stateful = trusted_stateful_path();
-    let commands = vec![
-        "pwd".to_string(),
-        format!("{stateful} sandbox run --fs read-only --network disabled --command 'pwd'"),
-        "python scripts/gen.py".to_string(),
-    ];
+    let allowed =
+        format!("{stateful} sandbox run --fs read-only --network disabled --command 'pwd'");
+    let denied = ["pwd".to_string(), "python scripts/gen.py".to_string()];
 
-    for command in commands {
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "bash",
+        "tool_input": { "command": allowed }
+    })
+    .to_string();
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo"))
+        )
+        .unwrap(),
+        OmpHookOutcome::Allow
+    );
+
+    for command in denied {
         let input = serde_json::json!({
             "session_id": "omp-parent",
             "cwd": "/repo",
@@ -3069,19 +3241,22 @@ fn omp_repo_internal_raw_bash_is_denied_even_for_sandbox_run_requests() {
             Some(Path::new("/repo")),
         )
         .unwrap() else {
-            panic!("raw OMP bash should be denied");
+            panic!("non-stateful raw OMP bash should be denied");
         };
         assert!(reason.contains("OMP raw bash is denied"));
-        assert!(reason.contains("sandbox_bash"));
+        assert!(reason.contains("stateful sandbox run"));
     }
 }
 
 #[test]
-fn omp_namespaced_bash_is_denied_even_for_sandbox_run_requests() {
+fn omp_namespaced_bash_allows_only_trusted_sandbox_requests() {
     let stateful = trusted_stateful_path();
-    for command in [
-        "pwd".to_string(),
-        format!("{stateful} sandbox run --fs read-only --network disabled --command 'pwd'"),
+    for (command, allowed) in [
+        ("pwd".to_string(), false),
+        (
+            format!("{stateful} sandbox run --fs read-only --network disabled --command 'pwd'"),
+            true,
+        ),
     ] {
         let input = serde_json::json!({
             "session_id": "omp-parent",
@@ -3091,17 +3266,22 @@ fn omp_namespaced_bash_is_denied_even_for_sandbox_run_requests() {
             "tool_input": { "command": command }
         })
         .to_string();
-        let OmpHookOutcome::Block { reason } = handle_omp_pre_tool_use_with_runtime(
+        let outcome = handle_omp_pre_tool_use_with_runtime(
             &input,
             None,
             Some(Path::new("/repo")),
             Some(Path::new("/repo")),
         )
-        .unwrap() else {
-            panic!("namespaced raw OMP bash should be denied");
-        };
-        assert!(reason.contains("OMP raw functions.bash is denied"));
-        assert!(reason.contains("sandbox_bash"));
+        .unwrap();
+        if allowed {
+            assert_eq!(outcome, OmpHookOutcome::Allow);
+        } else {
+            let OmpHookOutcome::Block { reason } = outcome else {
+                panic!("non-stateful namespaced raw OMP bash should be denied");
+            };
+            assert!(reason.contains("OMP raw functions.bash is denied"));
+            assert!(reason.contains("stateful sandbox run"));
+        }
     }
 }
 
@@ -3136,7 +3316,13 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
             panic!("raw OMP eval tool should block");
         };
         assert!(reason.contains(&format!("OMP eval tool {tool_name} is denied")));
-        assert!(reason.contains("sandbox_bash"));
+        assert!(reason.contains("built-in Bash"));
+        assert!(reason.contains("stateful sandbox run"));
+        assert!(reason.contains("stateful sandbox process find"));
+        assert!(!reason.contains("sandbox_bash"));
+        assert!(!reason.contains("process_find"));
+        assert!(!reason.contains("ext_ro_bash"));
+        assert!(!reason.contains("ext_rw_bash"));
     }
 
     let raw_python_input = serde_json::json!({
@@ -3157,7 +3343,13 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
         panic!("raw OMP python should block");
     };
     assert!(reason.contains("OMP eval tool functions.python is denied"));
-    assert!(reason.contains("sandbox_bash"));
+    assert!(reason.contains("built-in Bash"));
+    assert!(reason.contains("stateful sandbox run"));
+    assert!(reason.contains("stateful sandbox process find"));
+    assert!(!reason.contains("sandbox_bash"));
+    assert!(!reason.contains("process_find"));
+    assert!(!reason.contains("ext_ro_bash"));
+    assert!(!reason.contains("ext_rw_bash"));
 
     let stateful = trusted_stateful_path();
     let sandboxed_python_input = serde_json::json!({
@@ -3180,7 +3372,13 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
         panic!("sandbox-run through raw OMP python should still block");
     };
     assert!(reason.contains("OMP eval tool python is denied"));
-    assert!(reason.contains("sandbox_bash"));
+    assert!(reason.contains("built-in Bash"));
+    assert!(reason.contains("stateful sandbox run"));
+    assert!(reason.contains("stateful sandbox process find"));
+    assert!(!reason.contains("sandbox_bash"));
+    assert!(!reason.contains("process_find"));
+    assert!(!reason.contains("ext_ro_bash"));
+    assert!(!reason.contains("ext_rw_bash"));
 
     let repo_external_python_input = serde_json::json!({
         "session_id": "omp-parent",
@@ -3200,7 +3398,13 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
         panic!("repo-external OMP python should block");
     };
     assert!(reason.contains("OMP eval tool python is denied"));
-    assert!(reason.contains("ext_ro_bash"));
+    assert!(reason.contains("built-in Bash"));
+    assert!(reason.contains("stateful sandbox run"));
+    assert!(reason.contains("stateful sandbox process find"));
+    assert!(!reason.contains("sandbox_bash"));
+    assert!(!reason.contains("process_find"));
+    assert!(!reason.contains("ext_ro_bash"));
+    assert!(!reason.contains("ext_rw_bash"));
 }
 
 #[test]
@@ -3270,11 +3474,11 @@ fn omp_repo_external_raw_bash_blocks_without_external_sandbox_profile() {
         panic!("repo-external targetless bash should block");
     };
     assert!(reason.contains("OMP raw bash is denied"));
-    assert!(reason.contains("ext_ro_bash"));
+    assert!(reason.contains("stateful sandbox run"));
 }
 
 #[test]
-fn omp_denies_sandbox_external_profile_without_external_tool_wrappers() {
+fn omp_allows_sandbox_external_profile_after_extension_preflight() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "session_id": "omp-parent",
@@ -3287,18 +3491,16 @@ fn omp_denies_sandbox_external_profile_without_external_tool_wrappers() {
     })
     .to_string();
 
-    let outcome = handle_omp_pre_tool_use_with_runtime(
-        &input,
-        None,
-        Some(Path::new("/repo")),
-        Some(Path::new("/repo")),
-    )
-    .unwrap();
-    let OmpHookOutcome::Block { reason } = outcome else {
-        panic!("OMP raw bash external sandbox profile should be blocked");
-    };
-    assert!(reason.contains("ext_rw_bash"));
-    assert!(reason.contains("--fs external"));
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo")),
+        )
+        .unwrap(),
+        OmpHookOutcome::Allow
+    );
 }
 
 #[test]
@@ -3501,7 +3703,7 @@ fn pre_tool_use_edit_denies_when_authorize_connection_drops() {
 }
 
 #[test]
-fn pre_tool_use_edit_posts_authorize_and_renders_live_context_when_server_allows() {
+fn pre_tool_use_edit_posts_authorize_without_rendering_live_context_when_server_allows() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-edit-allow-context-test-{}",
         std::process::id()
@@ -3517,7 +3719,7 @@ fn pre_tool_use_edit_posts_authorize_and_renders_live_context_when_server_allows
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","items":[{"severity":"info"}],"prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared reservation for src/auth.ts."}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- unexpected context"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -3550,15 +3752,13 @@ fn pre_tool_use_edit_posts_authorize_and_renders_live_context_when_server_allows
     assert!(request.contains("POST /v1/authorize HTTP/1.1"));
     assert!(request.contains("\"action\":\"write_file\""));
     assert!(request.contains("\"path\":\"src/auth.ts\""));
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("Edit should render live context after authorization");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
-    assert!(context_request.contains("\"session_id\":\"s1\""));
-    assert!(context_request.contains("\"mode\":\"brief\""));
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "Edit authorization should not render live context"
+    );
     assert!(
         output.stdout.is_empty(),
-        "info-only context should not be injected for allowed Edit writes: {}",
+        "allowed Edit writes should not inject live context: {}",
         String::from_utf8_lossy(&output.stdout)
     );
 
@@ -3794,7 +3994,7 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","prompt_text":"Nearby Activity\n- [info] src/auth.ts: Session s2 declared reservation for src/auth.ts."}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- unexpected context"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -3858,15 +4058,13 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     assert_eq!(body["payload"]["queue_on_conflict"], true);
     assert_eq!(body["payload"]["purpose"], "Fix auth validation behavior.");
     assert!(body.get("action").is_none());
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("apply_patch should render live context after authorization");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
-    assert!(context_request.contains("\"session_id\":\"s1\""));
-    assert!(context_request.contains("\"mode\":\"brief\""));
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "apply_patch authorization should not render live context"
+    );
     assert!(
         output.stdout.is_empty(),
-        "info-only context should not be injected for allowed writes: {}",
+        "allowed writes should not inject live context: {}",
         String::from_utf8_lossy(&output.stdout)
     );
 
@@ -3874,9 +4072,9 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
 }
 
 #[test]
-fn pre_tool_use_apply_patch_injects_warn_context_when_server_allows() {
+fn pre_tool_use_apply_patch_repeated_same_path_denial_suggests_single_writer() {
     let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-warn-context-test-{}",
+        "stateful-hook-repeated-denial-test-{}",
         std::process::id()
     ));
     if temp_root.exists() {
@@ -3887,13 +4085,242 @@ fn pre_tool_use_apply_patch_injects_warn_context_when_server_allows() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","items":[{"severity":"warn"}],"prompt_text":"Warnings\n- [warn] src/auth.ts: related active work."}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
       "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "apply_patch",
+      "tool_input": {
+        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
+      }
+    }"#;
+
+    let first = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
+    let second = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        input,
+    );
+
+    assert!(
+        first.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let _first_request = rx.recv().expect("first authorize request should arrive");
+    let _second_request = rx.recv().expect("second authorize request should arrive");
+
+    let first_json: serde_json::Value =
+        serde_json::from_slice(&first.stdout).expect("first deny outcome should serialize");
+    let first_reason = first_json["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("first denial reason should be text");
+    assert!(first_reason.contains("Reread target"));
+    assert!(!first_reason.contains("Use one writer"));
+
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("second deny outcome should serialize");
+    assert_eq!(
+        second_json["hookSpecificOutput"]["permissionDecision"],
+        "deny"
+    );
+    let second_reason = second_json["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("second denial reason should be text");
+    assert!(second_reason.contains("Repeated denial for src/auth.ts"));
+    assert!(second_reason.contains("Use one writer"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_apply_patch_different_path_denial_does_not_trigger_single_writer() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-repeated-denial-different-path-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let first_input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "apply_patch",
+      "tool_input": {
+        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
+      }
+    }"#;
+    let second_input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "apply_patch",
+      "tool_input": {
+        "command": "*** Begin Patch\n*** Update File: src/session.ts\n*** End Patch\n"
+      }
+    }"#;
+
+    let first = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        first_input,
+    );
+    let second = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        second_input,
+    );
+
+    assert!(
+        first.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let _first_request = rx.recv().expect("first authorize request should arrive");
+    let _second_request = rx.recv().expect("second authorize request should arrive");
+
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("second deny outcome should serialize");
+    assert_eq!(
+        second_json["hookSpecificOutput"]["permissionDecision"],
+        "deny"
+    );
+    let second_reason = second_json["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("second denial reason should be text");
+    assert!(!second_reason.contains("Use one writer"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_apply_patch_path_marker_key_does_not_collapse_separators() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-repeated-denial-path-key-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let first_input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "apply_patch",
+      "tool_input": {
+        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
+      }
+    }"#;
+    let second_input = r#"{
+      "session_id": "s1",
+      "cwd": "/repo",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "apply_patch",
+      "tool_input": {
+        "command": "*** Begin Patch\n*** Update File: src_auth.ts\n*** End Patch\n"
+      }
+    }"#;
+
+    let first = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        first_input,
+    );
+    let second = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        second_input,
+    );
+
+    assert!(
+        first.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let _first_request = rx.recv().expect("first authorize request should arrive");
+    let _second_request = rx.recv().expect("second authorize request should arrive");
+
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("second deny outcome should serialize");
+    let second_reason = second_json["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("second denial reason should be text");
+    assert!(!second_reason.contains("Use one writer"));
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn pre_tool_use_apply_patch_invalid_session_id_does_not_write_denial_marker() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-repeated-denial-session-key-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = r#"{
+      "session_id": "../escape",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -3914,83 +4341,20 @@ fn pre_tool_use_apply_patch_injects_warn_context_when_server_allows() {
         "stateful hook failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let _authorize_request = rx.recv().expect("authorize request should arrive");
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("apply_patch should render live context after authorization");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
-    let rendered: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("allow outcome should serialize");
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("hook stdout should be JSON");
+    assert_eq!(stdout["hookSpecificOutput"]["permissionDecision"], "deny");
     assert!(
-        rendered["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .expect("additional context should be present")
-            .contains("Warnings")
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "unsupported session id should fail closed before authorization"
     );
+    assert!(!repo_root.join(".stateful_core/runtime/escape").exists());
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn pre_tool_use_apply_patch_injects_block_context_when_server_allows() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-block-context-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    let paths = GlobalPaths::new(temp_root.join("home"));
-    let repo_root = temp_root.join("repo");
-    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
-    enable_test_repo(&paths, &repo_root);
-    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","items":[{"severity":"block"}],"prompt_text":"Blocking\n- [block] src/auth.ts: another session has a claim."}"#,
-    ]);
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
-
-    let input = r#"{
-      "session_id": "s1",
-      "cwd": "/repo",
-      "hook_event_name": "PreToolUse",
-      "tool_name": "apply_patch",
-      "tool_input": {
-        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
-      }
-    }"#;
-
-    let output = run_hook_subprocess(
-        &repo_root,
-        &paths,
-        &["hook", "codex", "pre-tool-use"],
-        input,
-    );
-
-    assert!(
-        output.status.success(),
-        "stateful hook failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let _authorize_request = rx.recv().expect("authorize request should arrive");
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("apply_patch should render live context after authorization");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
-    let rendered: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("allow outcome should serialize");
-    assert!(
-        rendered["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .expect("additional context should be present")
-            .contains("Blocking")
-    );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[test]
-fn pre_tool_use_apply_patch_denial_keeps_info_context() {
+fn pre_tool_use_apply_patch_denial_does_not_render_live_context() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-deny-info-context-test-{}",
         std::process::id()
@@ -4004,7 +4368,7 @@ fn pre_tool_use_apply_patch_denial_keeps_info_context() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"decision":"deny","reason_code":"scope_mismatch","message":"Write target is outside active reservation scope.","required_next_action":"Declare matching reservation."}"#,
-        r#"{"status":"ok","items":[{"severity":"info"}],"prompt_text":"Nearby Activity\n- [info] src/session.ts: another session declared reservation."}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- unexpected context"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -4031,19 +4395,18 @@ fn pre_tool_use_apply_patch_denial_keeps_info_context() {
         String::from_utf8_lossy(&output.stderr)
     );
     let _authorize_request = rx.recv().expect("authorize request should arrive");
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("apply_patch should render live context after denial");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "apply_patch denial should not render live context"
+    );
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
     assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
-    assert!(
-        json["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .expect("deny reason should be text")
-            .contains("Nearby Activity")
-    );
+    let reason = json["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("deny reason should be text");
+    assert_eq!(reason, "Declare matching reservation.");
+    assert!(!reason.contains("Nearby Activity"));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -4463,7 +4826,7 @@ dependencies = ["langchain-core>=0.3"]
     .expect("pyproject should write");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- unexpected context"}"#,
     );
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -4495,17 +4858,9 @@ dependencies = ["langchain-core>=0.3"]
     assert!(stdout.contains("dependency shadowing guard"));
     assert!(stdout.contains("langchain_core"));
     assert!(stdout.contains("langchain-core"));
-    let context_request = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("apply_patch should render live context even when locally denied");
-    assert!(context_request.contains("POST /v1/context/render HTTP/1.1"));
-    assert!(
-        !context_request.contains("POST /v1/authorize HTTP/1.1"),
-        "shadowing guard should deny before posting /v1/authorize"
-    );
     assert!(
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
-        "shadowing guard should not post /v1/authorize after live context render"
+        "shadowing guard should not post /v1/context/render or /v1/authorize"
     );
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -4954,7 +5309,6 @@ fn codex_stateful_lifecycle_posts_expected_server_requests() {
         r#"{"status":"ok"}"#,
         r#"{"status":"ok","prompt_text":"Lifecycle Prompt\n- none"}"#,
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
-        r#"{"status":"ok","items":[],"prompt_text":"Lifecycle Pre\n- none"}"#,
         r#"{"status":"ok"}"#,
         r#"{"status":"ok"}"#,
     ]);
@@ -5040,11 +5394,6 @@ fn codex_stateful_lifecycle_posts_expected_server_requests() {
     assert_eq!(authorize_body["session"]["session_id"], "codex-session");
     assert_eq!(authorize_body["payload"]["action"], "write_file");
     assert_eq!(authorize_body["payload"]["path"], "src/auth.ts");
-    let pre_context = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("pre-tool context render request should arrive");
-    assert!(pre_context.contains("POST /v1/context/render HTTP/1.1"));
-
     let post_tool = serde_json::json!({
         "session_id": "codex-session",
         "cwd": repo_root,
@@ -5296,7 +5645,7 @@ fn user_prompt_submit_posts_context_render() {
     );
     let rendered = String::from_utf8(output.stdout).expect("prompt output should be utf8");
     assert!(rendered.contains("Nearby Activity"));
-    assert!(rendered.contains("Before using Bash"));
+    assert!(rendered.contains("planning/manual inspection"));
     assert!(rendered.contains("stateful-command-policy"));
     assert!(rendered.contains("Use canonical Stateful MCP tool names"));
     assert!(rendered.contains("state_reservation_declare"));

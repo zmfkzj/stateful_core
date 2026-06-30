@@ -76,7 +76,7 @@ fn install_omp_dry_run_plans_command_policy_skill_without_writing() {
     assert!(plan.summary.contains("dry-run"));
     assert!(applied.summary.contains("dry-run"));
     assert!(plan.files.contains(&command_policy_skill_path));
-    assert!(plan.files.contains(&dispatching_skill_path));
+    assert!(!plan.files.contains(&dispatching_skill_path));
     assert!(!fixture.paths.home.exists());
     assert!(!command_policy_skill_path.exists());
     assert!(!dispatching_skill_path.exists());
@@ -144,7 +144,7 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     assert!(first_config.contains("[mcp_servers.stateful]"));
     assert!(first_config.contains("command = \"/opt/stateful/bin/stateful\""));
     assert!(first_config.contains(
-        "env_vars = [\"CODEX_THREAD_ID\", \"STATEFUL_CODEX_RUN_ID\", \"STATEFUL_SESSION_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
+        "env_vars = [\"CODEX_THREAD_ID\", \"STATEFUL_CODEX_RUN_ID\", \"STATEFUL_SERVER_URL\", \"STATEFUL_SERVER_TOKEN\"]"
     ));
     assert!(first_config.contains(
         "approval_policy = { granular = { sandbox_approval = false, rules = true, mcp_elicitations = false, request_permissions = false, skill_approval = false } }"
@@ -205,7 +205,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(omp_mcp.is_file());
     assert!(omp_extension.is_file());
     assert!(omp_skill.is_file());
-    assert!(omp_dispatching_skill.is_file());
+    assert!(!omp_dispatching_skill.exists());
     assert!(
         fs::read_to_string(&omp_config)
             .expect("omp config should read")
@@ -214,7 +214,7 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("stateful-omp-extension.js"));
     assert!(config.contains(
-        "tools:\n  approvalMode: yolo\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: false\n",
+        "tools:\n  approvalMode: yolo\nstateful:\n  autoApprove: false\neval:\n  py: false\n  js: false\n  rb: false\n  jl: false\nbash:\n  enabled: true\n",
     ));
     assert!(!config.contains("approval:"));
     assert!(
@@ -223,88 +223,86 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
             .contains("\"mcpServers\"")
     );
     let extension = fs::read_to_string(&omp_extension).expect("omp extension should read");
+    assert!(extension.contains("STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS"));
+    assert!(extension.contains("function benchmarkSourceBlockReason(event)"));
+    assert!(extension.contains("function benchmarkSourcePatternMatches(text, pattern)"));
+    let benchmark_block = extension
+        .find("const benchmarkBlockReason = benchmarkSourceBlockReason(event);")
+        .expect("benchmark guard should run in pre-tool hook");
+    let stateful_pre_tool = extension
+        .find("const decision = runStatefulHook(\"pre-tool-use\"")
+        .expect("stateful pre-tool hook should still run");
+    assert!(
+        benchmark_block < stateful_pre_tool,
+        "benchmark guard should block before Stateful reservation handling"
+    );
+    assert!(extension.contains(
+        "if (benchmarkBlockReason) return { block: true, reason: benchmarkBlockReason };"
+    ));
     assert!(!extension.contains("@sinclair/typebox"));
     assert!(!extension.contains("Type.Object"));
     assert!(extension.contains("export default function statefulOmpExtension"));
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
-    assert!(extension.contains("event?.sessionId || ctx?.sessionManager?.session?.id"));
+    assert!(extension.contains("function detectSessionId(event, ctx)"));
+    assert!(extension.contains("event?.sessionId"));
+    assert!(!extension.contains("ctx?.sessionManager?.session?.id"));
+    assert!(extension.contains("event?.session_id"));
+    assert!(extension.contains("sessionManager?.getSessionFile?.()"));
+    assert!(extension.contains("sessionManager?.getLeafId?.()"));
+    assert!(extension.contains("function sessionIdFromString(value, prefix = \"omp\")"));
+    assert!(extension.contains("function sessionIdFromSessionFile(sessionFile)"));
+    assert!(!extension.contains("|| \"omp-session\""));
+    assert!(!extension.contains("process.env.STATEFUL_SESSION_ID ||"));
     assert!(extension.contains("pi.registerTool"));
-    assert!(extension.contains("name: \"ext_ro_bash\""));
-    assert!(extension.contains("name: \"ext_rw_bash\""));
-    assert!(!extension.contains("name: \"external_bash\""));
-    assert!(extension.contains("name: \"sandbox_bash\""));
     assert!(extension.contains("name: \"lazy_edit_resume\""));
+    assert!(extension.contains("name: \"lazy_write_resume\""));
+    assert!(extension.contains("name: \"lazy_bash_resume\""));
+    assert!(extension.contains("lazyBashOperations"));
+    assert!(extension.contains("rememberLazyBashOperation(event, ctx, decision)"));
+    assert!(extension.contains("Queued lazy bash operation_id"));
+    assert!(
+        extension.contains(
+            "Resume a blocked OMP Bash command after approving an external sandbox grant."
+        )
+    );
+    assert!(!extension.contains("name: \"sandbox_bash\""));
+    assert!(!extension.contains("name: \"ext_ro_bash\""));
+    assert!(!extension.contains("name: \"ext_rw_bash\""));
+    assert!(!extension.contains("name: \"process_find\""));
+    assert!(!extension.contains("name: \"sandbox_job_poll\""));
     assert!(extension.contains("applyOmpLinePatch"));
     assert!(extension.contains("lazyEditOperations"));
     assert!(extension.contains("let lazyEditOperationCounter = 0"));
     assert!(extension.contains("nextLazyEditOperationId()"));
+    assert!(extension.contains("lazyWriteOperations"));
+    assert!(extension.contains("nextLazyWriteOperationId()"));
     assert!(extension.contains("reservation or claim is ready"));
     assert!(extension.contains("structuredLazyEditOperationId(decision)"));
+    assert!(extension.contains("structuredLazyWriteOperationId(decision)"));
+    assert!(extension.contains("function extractReservationId(reason)"));
+    assert!(extension.contains("extractReservationId(decision?.reason)"));
+    assert!(extension.contains("extractReservationId(decision?.message)"));
+    assert!(extension.contains("Queued lazy write operation_id"));
+    assert!(extension.contains("!target.includes(\":\")"));
     assert!(extension.contains("validateOmpLinePatchBases"));
     assert!(extension.contains("line === \"*** Begin Patch\""));
-    assert!(extension.contains("SANDBOX_BASH_FS_PROFILES"));
-    assert!(extension.contains("sandbox_bash does not support --fs external; use ext_ro_bash"));
-    assert!(extension.contains("import { spawn, spawnSync } from \"node:child_process\""));
+    assert!(extension.contains("import { spawnSync } from \"node:child_process\""));
+    assert!(extension.contains("import { createHash } from \"node:crypto\""));
+    assert!(extension.contains(
+        "import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from \"node:fs\""
+    ));
     assert!(
-        extension.contains("import { existsSync, readFileSync, writeFileSync } from \"node:fs\"")
+        extension.contains(
+            "import { basename, delimiter, dirname, extname, resolve } from \"node:path\""
+        )
     );
     assert!(extension.contains("import { fileURLToPath } from \"node:url\""));
-    assert!(extension.contains("function resolveSkillInternalUrl(rawUrl)"));
-    assert!(extension.contains("function expandSkillInternalUrlsInCommand(command)"));
-    assert!(extension.contains("function singleQuoteEscape(value)"));
-    assert!(extension.contains("quote === \"'\" ? singleQuoteEscape(resolved)"));
-    assert!(
-        extension.contains(
-            "args.push(\"--command\", expandSkillInternalUrlsInCommand(params.command));"
-        )
-    );
     assert!(
         extension
-            .contains("function runSandboxToolProcess(params, args, ctx, label, signal, onStdout)")
+            .contains("const OMP_AGENT_CONFIG = resolve(EXTENSION_DIR, \"..\", \"config.yml\")")
     );
-    assert!(extension.contains("process.env.STATEFUL_OMP_SANDBOX === \"off\""));
-    assert!(
-        extension.contains(
-            "function runSandboxDisabledToolProcess(params, ctx, label, signal, onStdout)"
-        )
-    );
-    assert!(!extension.contains("function runSandboxTool(params"));
-    assert!(extension.contains("spawn(STATEFUL, args"));
-    assert!(extension.contains(
-        "async: { type: \"boolean\", description: \"Run in the background when true or omitted; set false to wait for completion.\" }"
-    ));
-    assert!(
-        extension
-            .contains("function deliverSandboxBackgroundMessage(pi, jobId, label, text, details)")
-    );
-    assert!(extension.contains("stateful_sandbox_bash_output"));
-    assert!(extension.contains("stateful_sandbox_bash_result"));
-    assert!(extension.contains(
-        "function startSandboxBackgroundTool(pi, toolCallId, params, args, ctx, label, signal, onUpdate)"
-    ));
-    assert!(extension.contains("Background job "));
-    assert!(extension.contains("params.async === false"));
-    assert!(
-        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, \"sandbox_bash\", signal, onUpdate)")
-    );
-    assert!(
-        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, \"ext_ro_bash\", signal, onUpdate)")
-    );
-    assert!(
-        extension.contains("return startSandboxBackgroundTool(pi, _toolCallId, params, args, ctx, \"ext_rw_bash\", signal, onUpdate)")
-    );
-    assert!(extension.contains(
-        "return await runSandboxAwaitedTool(params, args, ctx, \"sandbox_bash\", signal, onUpdate)"
-    ));
-    assert!(extension.contains("const backgroundSandboxToolCallIds = new Set();"));
-    assert!(extension.contains("function isBackgroundSandboxToolResult(event)"));
-    assert!(extension.contains("if (isBackgroundSandboxToolResult(event)) return;"));
-    assert!(extension.contains("postBackgroundSandboxToolUse(ctx, label, params)"));
-    assert!(extension.contains("async execute(_toolCallId, params, signal, onUpdate, ctx)"));
-    assert!(extension.contains("args.push(\"--stream-events\");"));
-    assert!(extension.contains("pi.sendMessage"));
-    assert!(extension.contains("display: true"));
-    assert!(extension.contains("triggerTurn: true"));
+    assert!(extension.contains("process.env.HOME"));
+    assert!(extension.contains(".omp/profiles/stateful/agent/config.yml"));
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?session_id="));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));
@@ -313,32 +311,41 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("typeof purpose === \"string\" && purpose.trim().length > 0"));
     assert!(extension.contains("startReservationStream(pi, result?.notifications_stream)"));
     assert!(extension.contains("stopReservationStream();"));
-    assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", fs]"));
     assert!(extension.contains("ctx.ui.confirm"));
     assert!(extension.contains("const externalBashGrants = new Map()"));
     assert!(extension.contains("function externalGrantDescriptor(params)"));
     assert!(extension.contains("async function ensureExternalBashGrant(ctx, params, signal)"));
+    assert!(extension.contains("pi.on(\"tool_call\""));
+    assert!(extension.contains("function statefulBashPassthroughDecision"));
+    assert!(extension.contains("let verifiedBareStatefulPath = null"));
+    assert!(extension.contains("function statefulBinaryDigest(path)"));
+    assert!(extension.contains("verifyBareStateful(ctx.cwd)"));
+    assert!(extension.contains("isTrustedStatefulCommand(words[0])"));
+    assert!(extension.contains("event?.toolName !== \"bash\""));
+    assert!(extension.contains("ensureExternalBashGrant(ctx, params, signal)"));
     assert!(extension.contains("Approve external sandbox grant"));
     assert!(
         extension.contains("Raw command text is intentionally hidden from this approval prompt.")
     );
     assert!(!extension.contains("\"Command:\""));
     assert!(!extension.contains("\"Sandbox invocation:\""));
-    assert!(extension.contains("[\"sandbox\", \"run\", \"--fs\", \"external\""));
-    assert!(extension.contains("without OMP UI confirmation"));
     assert!(
-        extension.contains(
-            "At least one write_targets, create_targets, or write_dirs entry is required"
-        )
+        extension.contains("Built-in Bash external sandbox command requires OMP UI confirmation")
     );
-    assert!(extension.contains("ext_ro_bash does not accept write, socket, or signal scope"));
-    assert!(extension.contains("ext_rw_bash requires at least one write_targets"));
-    assert!(extension.contains("required: [\"purpose\", \"command\"]"));
-    assert!(extension.contains("process.env.STATEFUL_SESSION_ID = id"));
+    assert!(extension.contains("delete process.env.STATEFUL_SESSION_ID"));
     assert!(extension.contains("pre-tool-use"));
     assert!(extension.contains("decision: \"block\""));
-    assert!(extension.contains("decision.decision === \"prompt\""));
+    assert!(extension.contains("if (decision.decision === \"prompt\" && !shouldAutoApproveStatefulPrompt(ctx, event.input || {}))"));
     assert!(extension.contains("ctx?.ui?.confirm"));
+    assert!(extension.contains("function shouldAutoApproveStatefulPrompt(ctx, _params)"));
+    assert!(extension.contains("ctx?.config?.stateful?.autoApprove"));
+    assert!(extension.contains("ctx?.config?.[\"stateful.autoApprove\"]"));
+    assert!(extension.contains("function configTextAutoApprove(text)"));
+    assert!(extension.contains("statefulConfigFileAutoApprove()"));
+    assert!(extension.contains("value === \"true\""));
+    assert!(!extension.contains("params?.auto_approve === true"));
+    assert!(extension.contains("function recordExternalBashGrant(params, now)"));
+    assert!(extension.contains("function approveExternalBashGrantWithoutPrompt(params)"));
     let command_policy_skill = fs::read_to_string(&omp_skill).expect("omp skill should read");
     let source_command_policy_skill = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/stateful-command-policy/SKILL.md"),
@@ -347,15 +354,32 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert_eq!(command_policy_skill, source_command_policy_skill);
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
     assert!(plan.files.contains(&omp_skill));
-    let dispatching_skill =
-        fs::read_to_string(&omp_dispatching_skill).expect("omp dispatching skill should read");
-    let source_dispatching_skill = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/dispatching-parallel-agents/SKILL.md"),
-    )
-    .expect("source dispatching skill should exist");
-    assert_eq!(dispatching_skill, source_dispatching_skill);
-    assert!(dispatching_skill.contains("name: dispatching-parallel-agents"));
-    assert!(plan.files.contains(&omp_dispatching_skill));
+    for (name, marker) in [
+        ("omp-tools.md", "Use OMP-Native Stateful Tools"),
+        (
+            "sandbox-tools.md",
+            "Choose the narrowest existing entry point",
+        ),
+        ("denial-recovery.md", "Denials are the API"),
+        ("subagent-write-recovery.md", "Subagent Write Recovery"),
+    ] {
+        let support_path = omp_agent_dir
+            .join("skills/stateful-command-policy")
+            .join(name);
+        let support_file =
+            fs::read_to_string(&support_path).expect("OMP support file should exist");
+        let source_support_file = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/stateful-command-policy")
+                .join(name),
+        )
+        .expect("source support file should exist");
+        assert_eq!(support_file, source_support_file);
+        assert!(support_file.contains(marker));
+        assert!(plan.files.contains(&support_path));
+    }
+    assert!(!omp_dispatching_skill.exists());
+    assert!(!plan.files.contains(&omp_dispatching_skill));
     assert!(plan.files.iter().any(|path| path.ends_with("mcp.json")));
 }
 
@@ -417,13 +441,14 @@ fn install_omp_yes_can_run_twice_without_existing_file_errors() {
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert_eq!(count(&config, "stateful-omp-extension.js"), 1);
     assert_eq!(count(&config, "approvalMode: yolo"), 1);
+    assert_eq!(count(&config, "autoApprove: false"), 1);
     assert_eq!(count(&config, "approval:"), 0);
     assert_eq!(count(&config, "external_bash:"), 0);
     assert_eq!(count(&config, "\n  py: false"), 1);
     assert_eq!(count(&config, "\n  js: false"), 1);
     assert_eq!(count(&config, "\n  rb: false"), 1);
     assert_eq!(count(&config, "\n  jl: false"), 1);
-    assert_eq!(count(&config, "\n  enabled: false"), 1);
+    assert_eq!(count(&config, "\n  enabled: true"), 1);
     assert!(
         fs::read_to_string(&omp_mcp)
             .expect("omp mcp should read")
@@ -455,6 +480,7 @@ fn install_omp_yes_preserves_existing_config_and_uses_yolo_approval() {
     assert!(config.contains("existing-extension.js"));
     assert!(config.contains("stateful-omp-extension.js"));
     assert!(config.contains("tools:\n  approvalMode: yolo\n"));
+    assert!(config.contains("stateful:\n  autoApprove: false\n"));
     assert!(!config.contains("approval:"));
     assert!(!config.contains("task: allow"));
     assert!(!config.contains("sandbox_bash: allow"));
@@ -462,7 +488,7 @@ fn install_omp_yes_preserves_existing_config_and_uses_yolo_approval() {
     assert!(!config.contains("ext_rw_bash: allow"));
     assert!(!config.contains("external_bash:"));
     assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
-    assert!(config.contains("bash:\n  enabled: false\n"));
+    assert!(config.contains("bash:\n  enabled: true\n"));
     let extension = fs::read_to_string(
         omp_agent_dir
             .join("extensions")
@@ -481,7 +507,7 @@ fn install_omp_yes_removes_existing_tool_approval_without_update() {
     let omp_config = omp_agent_dir.join("config.yml");
     fs::write(
         &omp_config,
-        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    bash: prompt\n    edit: prompt\n",
+        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    bash: prompt\n    edit: prompt\nstateful:\n  autoApprove: true\nbash:\n  enabled: false\n",
     )
     .expect("existing config should write");
 
@@ -489,6 +515,7 @@ fn install_omp_yes_removes_existing_tool_approval_without_update() {
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("tools:\n  approvalMode: yolo\n"));
+    assert!(config.contains("stateful:\n  autoApprove: true\n"));
     assert!(!config.contains("approval:"));
     assert!(!config.contains("task: prompt"));
     assert!(!config.contains("bash: prompt"));
@@ -499,7 +526,7 @@ fn install_omp_yes_removes_existing_tool_approval_without_update() {
     assert!(!config.contains("ext_rw_bash: allow"));
     assert!(!config.contains("external_bash:"));
     assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
-    assert!(config.contains("bash:\n  enabled: false\n"));
+    assert!(config.contains("bash:\n  enabled: true\n"));
     assert_eq!(count(&config, "approvalMode:"), 1);
     assert_eq!(count(&config, "approval:"), 0);
 }
@@ -512,7 +539,7 @@ fn install_omp_update_removes_existing_tool_approval() {
     let omp_config = omp_agent_dir.join("config.yml");
     fs::write(
         &omp_config,
-        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    sandbox_bash: prompt\n    external_bash: prompt\n    ext_ro_bash: prompt\n    ext_rw_bash: prompt\n    edit: prompt\neval:\n  py: true\n  js: true\n  rb: true\n  jl: true\nbash:\n  enabled: true\n",
+        "model: gpt-5.5\ntools:\n  approvalMode: yolo\n  approval:\n    task: prompt\n    sandbox_bash: prompt\n    external_bash: prompt\n    ext_ro_bash: prompt\n    ext_rw_bash: prompt\n    edit: prompt\neval:\n  py: true\n  js: true\n  rb: true\n  jl: true\nbash:\n  enabled: true\nstateful:\n  autoApprove: true\n",
     )
     .expect("existing config should write");
 
@@ -522,6 +549,7 @@ fn install_omp_update_removes_existing_tool_approval() {
 
     let config = fs::read_to_string(&omp_config).expect("omp config should read");
     assert!(config.contains("tools:\n  approvalMode: yolo\n"));
+    assert!(config.contains("stateful:\n  autoApprove: false\n"));
     assert!(!config.contains("approval:"));
     assert!(!config.contains("task: allow"));
     assert!(!config.contains("sandbox_bash: allow"));
@@ -530,7 +558,7 @@ fn install_omp_update_removes_existing_tool_approval() {
     assert!(!config.contains("external_bash:"));
     assert!(!config.contains("edit: prompt"));
     assert!(config.contains("eval:\n  py: false\n  js: false\n  rb: false\n  jl: false\n"));
-    assert!(config.contains("bash:\n  enabled: false\n"));
+    assert!(config.contains("bash:\n  enabled: true\n"));
     assert_eq!(count(&config, "approvalMode: yolo"), 1);
     assert_eq!(count(&config, "approval:"), 0);
 }
@@ -597,22 +625,33 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     .expect("source stateful command policy skill should exist");
     assert_eq!(command_policy_skill, source_command_policy_skill);
     assert!(command_policy_skill.contains("name: stateful-command-policy"));
-    assert!(command_policy_skill.contains("Use canonical Stateful MCP tool names"));
+    assert!(command_policy_skill.contains("Support Files"));
     assert!(command_policy_skill.contains("state_reservation_declare"));
     assert!(command_policy_skill.contains("state_claim_acquire"));
-    assert!(command_policy_skill.contains("runtime-specific tool names"));
-    assert!(
-        command_policy_skill.contains(
-            "Do not run `stateful reservation declare` or `stateful mcp call` through Bash"
+    assert!(command_policy_skill.contains("Runtime-specific wrappers are aliases"));
+    for (name, marker) in [
+        ("omp-tools.md", "Use OMP-Native Stateful Tools"),
+        (
+            "sandbox-tools.md",
+            "Choose the narrowest existing entry point",
+        ),
+        ("denial-recovery.md", "Denials are the API"),
+        ("subagent-write-recovery.md", "Subagent Write Recovery"),
+    ] {
+        let support_path = fixture
+            .codex_config_parent()
+            .join("skills/stateful-command-policy")
+            .join(name);
+        let support_file = fs::read_to_string(&support_path).expect("support file should exist");
+        let source_support_file = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/stateful-command-policy")
+                .join(name),
         )
-    );
-    assert!(command_policy_skill.contains("task-level file sets"));
-    assert!(command_policy_skill.contains("--fs build --network enabled"));
-    assert!(command_policy_skill.contains("--write-dir <scratch-purpose>"));
-    assert!(command_policy_skill.contains("state_reservation_request"));
-    assert!(command_policy_skill.contains("state_notifications_poll"));
-    assert!(command_policy_skill.contains("state_resume_next"));
-    assert!(command_policy_skill.contains("state_reservation_claim"));
+        .expect("source support file should exist");
+        assert_eq!(support_file, source_support_file);
+        assert!(support_file.contains(marker));
+    }
     assert!(!command_policy_skill.contains("Reservation declarations replace"));
     assert!(
         !command_policy_skill.contains("--fs write-targets --network enabled --write-dir target")
@@ -630,6 +669,21 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     let plan =
         apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");
     assert!(plan.files.contains(&skill_path));
+    for name in [
+        "omp-tools.md",
+        "sandbox-tools.md",
+        "denial-recovery.md",
+        "subagent-write-recovery.md",
+    ] {
+        assert!(
+            plan.files.contains(
+                &fixture
+                    .codex_config_parent()
+                    .join("skills/stateful-command-policy")
+                    .join(name)
+            )
+        );
+    }
     assert!(plan.files.contains(&dispatching_skill_path));
     assert_eq!(
         fs::read_to_string(&skill_path).expect("global command policy skill should reread"),

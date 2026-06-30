@@ -63,7 +63,7 @@ Hook-mediated Bash must be a single strict invocation of the trusted absolute
 <cmd>`. The build profile writes disposable artifacts under
 `/tmp/stateful/<session>/<scratch-purpose>/`; source-tree edits use native edit tools
 with hook-visible targets, such as Codex `apply_patch` or Edit, after exact
-reservation declaration and a successful same-session file claim. The completed write
+reservation declaration and a successful same-reservation file claim. The completed write
 transaction releases the authorizing claim. Command-shaped source writes require
 exact `--write-target <file>` or `--create-target <file>` entries.
 
@@ -157,7 +157,7 @@ Filesystem watcher inference remains out of scope for this pass.
 
 MCP file-write tools are not the current repo edit path. Repo file edits should
 use native edit tools with hook-visible targets, such as Codex `apply_patch` or
-Edit, after task-level reservation covers the target and a successful same-session file claim.
+Edit, after task-level reservation covers the target and a successful same-reservation file claim.
 Hooks normalize hook-exposed targets, call the same policy service as MCP and
 CLI, fail closed on missing state, protocol mismatch, or denied authorization,
 record activity after successful edits, and release the authorizing claim after

@@ -304,6 +304,7 @@ async fn authorize(
 
     let input = AuthorizeWriteInput {
         session_id: session.session_id,
+        reservation_id: payload.reservation_id,
         workspace_id: Some(workspace.workspace_id),
         repo_id: non_empty_identity(workspace.repo_id),
         worktree_id: non_empty_identity(workspace.worktree_id),
@@ -378,18 +379,26 @@ async fn reservation_declare(
         branch: non_empty_identity(envelope.request.workspace.branch),
     };
 
-    append_event_response(
-        &config.store,
-        with_request_identity(
-            Event::reservation_declared(
-                envelope.request.session.session_id,
-                envelope.request.workspace.workspace_id,
-                purpose,
-                files_planned,
-            ),
-            identity,
+    let event = with_request_identity(
+        Event::reservation_declared(
+            envelope.request.session.session_id,
+            envelope.request.workspace.workspace_id,
+            purpose,
+            files_planned,
         ),
-    )
+        identity,
+    );
+    let reservation_id = event.event_id.clone();
+    match append_event(&config.store, event) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "reservation_id": reservation_id
+            })),
+        ),
+        Err(message) => status_response(Err(message)),
+    }
 }
 
 async fn reservation_request(
@@ -640,8 +649,8 @@ fn reservation_claim_required_response(reservation: WaitRecord) -> (StatusCode, 
             "status": "error",
             "reason_code": "reservation_claim_required",
             "message": "A reservation for this session must be claimed before acquiring the claim.",
-            "reservation": reservation,
-            "required_next_action": "Reread the target, then call state.reservation.claim with the wait_id before retrying the write."
+            "reservation": reservation_json(reservation),
+            "required_next_action": "Reread the target, then call state.reservation.claim with the reservation_id before retrying the write."
         })),
     )
 }
@@ -725,6 +734,7 @@ async fn lease_acquire(
             };
             let session_id = input.session_id;
             let workspace_id = input.workspace_id;
+            let reservation_id = input.reservation_id;
             if paths.len() == 1 {
                 let path = paths[0].clone();
                 let observation = match input.root.as_deref().filter(|root| !root.is_empty()) {
@@ -734,12 +744,23 @@ async fn lease_acquire(
                     },
                     None => None,
                 };
-                match store.acquire_claim_with_observation_and_event(
-                    &session_id,
-                    &workspace_id,
-                    &path,
-                    observation,
-                ) {
+                let acquire_result = match reservation_id.as_deref() {
+                    Some(reservation_id) => store
+                        .acquire_claim_for_reservation_with_observation_and_event(
+                            reservation_id,
+                            &session_id,
+                            &workspace_id,
+                            &path,
+                            observation,
+                        ),
+                    None => store.acquire_claim_with_observation_and_event(
+                        &session_id,
+                        &workspace_id,
+                        &path,
+                        observation,
+                    ),
+                };
+                match acquire_result {
                     Ok(()) => Ok(LeaseAcquireOutcome::Acquired),
                     Err(StoreError::ClaimConflict) => {
                         let reservation = if path.ends_with('/') {
@@ -787,11 +808,21 @@ async fn lease_acquire(
                             .map(|path| (path.clone(), None))
                             .collect::<Vec<_>>(),
                     };
-                match store.acquire_claims_with_observations_and_events(
-                    &session_id,
-                    &workspace_id,
-                    claims,
-                ) {
+                let acquire_result = match reservation_id.as_deref() {
+                    Some(reservation_id) => store
+                        .acquire_claims_for_reservation_with_observations_and_events(
+                            reservation_id,
+                            &session_id,
+                            &workspace_id,
+                            claims,
+                        ),
+                    None => store.acquire_claims_with_observations_and_events(
+                        &session_id,
+                        &workspace_id,
+                        claims,
+                    ),
+                };
+                match acquire_result {
                     Ok(result) => Ok(LeaseAcquireOutcome::Batch(BatchAcquireSuccess {
                         paths,
                         result,
@@ -1030,6 +1061,7 @@ async fn conflicts_check(
 
     let input = AuthorizeWriteInput {
         session_id: input.session_id,
+        reservation_id: input.reservation_id,
         workspace_id: input.workspace_id,
         repo_id: None,
         worktree_id: None,
@@ -1293,7 +1325,7 @@ async fn resume_next(
             Json(json!({
                 "status": "ok",
                 "resume_available": true,
-                "reservation": reservation,
+                "reservation": reservation_json(reservation),
                 "required_next_action": "Reread the target, then call state.reservation.claim for the reservation before writing."
             })),
         ),
@@ -1593,6 +1625,7 @@ fn authorization_denied_audit_event(
     if let Some(wait) = outcome.wait.as_ref() {
         event.payload["wait"] = json!({
             "wait_id": wait.record.wait_id,
+            "reservation_id": wait.record.wait_id,
             "session_id": wait.record.session_id,
             "workspace_id": wait.record.workspace_id,
             "relative_path": wait.record.relative_path,
@@ -1639,29 +1672,11 @@ fn authorization_json(outcome: AuthorizationOutcome) -> Value {
     });
 
     if let Some(wait) = outcome.wait {
-        value["wait"] = json!({
-            "wait_id": wait.record.wait_id,
-            "session_id": wait.record.session_id,
-            "workspace_id": wait.record.workspace_id,
-            "relative_path": wait.record.relative_path,
-            "action": wait.record.action,
-            "status": wait.record.status,
-            "queue_position": wait.queue_position,
-            "blocking_session_id": wait.record.blocking_session_id,
-        });
+        value["wait"] = wait_queue_json(wait);
     }
 
     if let Some(reservation) = outcome.reservation {
-        value["reservation"] = json!({
-            "wait_id": reservation.wait_id,
-            "session_id": reservation.session_id,
-            "workspace_id": reservation.workspace_id,
-            "relative_path": reservation.relative_path,
-            "action": reservation.action,
-            "status": reservation.status,
-            "purpose": reservation.purpose,
-            "reservation_expires_at": reservation.reservation_expires_at,
-        });
+        value["reservation"] = reservation_json(reservation);
     }
 
     value
@@ -1671,15 +1686,7 @@ fn claim_intent_json(outcome: ClaimReservationOutcome) -> Value {
     let reservation = outcome.reservation;
     json!({
         "status": "ok",
-        "reservation": {
-            "wait_id": reservation.wait_id,
-            "session_id": reservation.session_id,
-            "workspace_id": reservation.workspace_id,
-            "relative_path": reservation.relative_path,
-            "action": reservation.action,
-            "status": reservation.status,
-            "reservation_expires_at": reservation.reservation_expires_at,
-        }
+        "reservation": reservation_json(reservation)
     })
 }
 
@@ -1715,7 +1722,9 @@ fn wait_queue_json(wait: WaitQueueInfo) -> Value {
 }
 
 fn wait_record_json(record: WaitRecord, queue_position: Option<u64>) -> Value {
+    let reservation_id = record.wait_id.clone();
     json!({
+        "reservation_id": reservation_id,
         "wait_id": record.wait_id,
         "session_id": record.session_id,
         "workspace_id": record.workspace_id,
@@ -1729,7 +1738,9 @@ fn wait_record_json(record: WaitRecord, queue_position: Option<u64>) -> Value {
 }
 
 fn reservation_json(reservation: WaitRecord) -> Value {
+    let reservation_id = reservation.wait_id.clone();
     json!({
+        "reservation_id": reservation_id,
         "wait_id": reservation.wait_id,
         "session_id": reservation.session_id,
         "workspace_id": reservation.workspace_id,
@@ -1815,6 +1826,8 @@ struct LeaseAcquireRequest {
     session_id: String,
     workspace_id: String,
     #[serde(default)]
+    reservation_id: Option<String>,
+    #[serde(default)]
     path: Option<String>,
     #[serde(default)]
     paths: Vec<String>,
@@ -1880,6 +1893,8 @@ struct AuthorizePayload {
     queue_on_conflict: bool,
     #[serde(default)]
     purpose: Option<String>,
+    #[serde(default)]
+    reservation_id: Option<String>,
     action: String,
     #[serde(default)]
     old_path: Option<String>,
@@ -1913,6 +1928,8 @@ struct AuthorizeRequest {
     session_id: String,
     #[serde(default)]
     workspace_id: Option<String>,
+    #[serde(default)]
+    reservation_id: Option<String>,
     #[serde(default)]
     queue_on_conflict: bool,
     action: String,
