@@ -2181,7 +2181,7 @@ function benchmarkSourceBlockPatterns() {{
 function benchmarkSourcePatternMatches(text, pattern) {{
   const lowerPattern = pattern.toLowerCase();
   if (lowerPattern === "upstream" || lowerPattern === "upstream/") {{
-    return /(^|[^a-z0-9_-])upstream(?:\\/|[^a-z0-9_-]|$)/.test(text);
+    return /(^|[^a-z0-9_-])upstream(?:\/|[^a-z0-9_-]|$)/.test(text);
   }}
   return text.includes(lowerPattern);
 }}

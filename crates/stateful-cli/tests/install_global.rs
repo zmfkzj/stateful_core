@@ -226,6 +226,8 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS"));
     assert!(extension.contains("function benchmarkSourceBlockReason(event)"));
     assert!(extension.contains("function benchmarkSourcePatternMatches(text, pattern)"));
+    assert!(extension.contains("upstream(?:\\/|[^a-z0-9_-]|$)"));
+    assert!(!extension.contains("upstream(?:\\\\/|"));
     let benchmark_block = extension
         .find("const benchmarkBlockReason = benchmarkSourceBlockReason(event);")
         .expect("benchmark guard should run in pre-tool hook");
