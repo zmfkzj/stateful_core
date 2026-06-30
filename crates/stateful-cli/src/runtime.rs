@@ -199,8 +199,18 @@ fn sync_parent_dir(path: &Path) -> anyhow::Result<()> {
         anyhow::bail!("runtime file path has no parent");
     };
     let directory = fs::File::open(parent)?;
-    directory.sync_all()?;
+    if let Err(error) = directory.sync_all() {
+        if parent_dir_sync_is_unsupported(&error) {
+            return Ok(());
+        }
+        return Err(error.into());
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+fn parent_dir_sync_is_unsupported(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::Unsupported || matches!(error.raw_os_error(), Some(45 | 95))
 }
 
 #[cfg(not(unix))]
@@ -1199,4 +1209,17 @@ fn read_http_response(stream: &mut TcpStream) -> anyhow::Result<String> {
     }
 
     Ok(String::from_utf8(buffer)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_dir_sync_ignores_enotsup() {
+        let error = std::io::Error::from_raw_os_error(45);
+
+        assert!(parent_dir_sync_is_unsupported(&error));
+    }
 }
