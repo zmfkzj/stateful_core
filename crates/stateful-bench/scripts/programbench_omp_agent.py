@@ -27,6 +27,7 @@ from programbench_codex_agent import (  # noqa: E402
     resolve_host_binary,
     run_main,
     stop_stateful_server,
+    smoke_compile_airlock,
     token_usage_from_value,
 )
 
@@ -191,6 +192,10 @@ def run_agent(args, prompt):
             finally:
                 if hasattr(args, "condition_dir"):
                     instance_dir = Path(args.condition_dir) / args.instance_id
+                    try:
+                        smoke_compile_airlock(airlock, args)
+                    except Exception as exc:  # noqa: BLE001 - preserve submission for failed compile diagnostics.
+                        args.smoke_compile_error = str(exc)
                     try:
                         args.submission_path = str(archive_airlock_workspace(airlock, instance_dir))
                     except Exception as exc:  # noqa: BLE001 - preserve OMP logs before reporting archive failure.

@@ -205,42 +205,38 @@ fn programbench_eval_report_compare_commands_parse() {
 }
 
 #[test]
-fn programbench_condition_parser_accepts_axes_and_defaults_cover_four_conditions() {
-    let condition =
+fn programbench_condition_parser_accepts_axes_and_defaults_to_subagent_on() {
+    let explicit_off =
         parse_programbench_condition("stateful:on,subagent:off").expect("condition should parse");
 
-    assert!(condition.stateful);
-    assert!(!condition.subagent);
-    assert_eq!(condition.id(), "stateful-on_subagent-off");
+    assert!(explicit_off.stateful);
+    assert!(!explicit_off.subagent);
+    assert_eq!(explicit_off.id(), "stateful-on_subagent-off");
+
+    let default_subagent =
+        parse_programbench_condition("stateful:off").expect("condition should parse");
+    assert!(!default_subagent.stateful);
+    assert!(default_subagent.subagent);
+    assert_eq!(default_subagent.id(), "stateful-off_subagent-on");
 
     assert_eq!(
         default_programbench_conditions()
             .iter()
             .map(ProgramBenchCondition::id)
             .collect::<Vec<_>>(),
-        vec![
-            "stateful-off_subagent-off",
-            "stateful-on_subagent-off",
-            "stateful-off_subagent-on",
-            "stateful-on_subagent-on",
-        ]
+        vec!["stateful-off_subagent-on", "stateful-on_subagent-on"]
     );
 }
 
 #[test]
-fn programbench_run_uses_default_four_axis_matrix_when_no_conditions_passed() {
+fn programbench_run_uses_subagent_on_stateful_axis_when_no_conditions_passed() {
     let conditions = planned_programbench_conditions(&[]).expect("default conditions should build");
     assert_eq!(
         conditions
             .iter()
             .map(ProgramBenchCondition::id)
             .collect::<Vec<_>>(),
-        vec![
-            "stateful-off_subagent-off",
-            "stateful-on_subagent-off",
-            "stateful-off_subagent-on",
-            "stateful-on_subagent-on",
-        ]
+        vec!["stateful-off_subagent-on", "stateful-on_subagent-on"]
     );
 }
 
@@ -328,6 +324,7 @@ esac
             r#"#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "{}"
+printf '#!/bin/sh\nprintf ok > executable\n' > compile.sh
 printf '{{"usage":{{"input_tokens":7,"output_tokens":5}}}}\n'
 "#,
             codex_log.display()
@@ -673,7 +670,10 @@ print(json.dumps({
     assert_ne!(observed["cd_value"], "/workspace");
     assert_eq!(observed["calls"][4]["timeout"], 123);
     assert_eq!(observed["home"], observed["cd_value"]);
-    assert_eq!(observed["stateful_home"], observed["cd_value"]);
+    assert_eq!(
+        observed["stateful_home"],
+        format!("{}/.stateful", observed["cd_value"].as_str().unwrap())
+    );
     let prompt = observed["prompt"]
         .as_str()
         .expect("prompt should be a string");
@@ -814,7 +814,10 @@ print(json.dumps({
         serde_json::from_str(&output).expect("airlock env should be JSON");
 
     assert_eq!(observed["HOME"], "/tmp/programbench-airlock");
-    assert_eq!(observed["STATEFUL_HOME"], "/tmp/programbench-airlock");
+    assert_eq!(
+        observed["STATEFUL_HOME"],
+        "/tmp/programbench-airlock/.stateful"
+    );
     assert_eq!(observed["CODEX_HOME"], "/tmp/programbench-airlock/.codex");
     assert_eq!(observed["STATEFUL_SERVER_URL"], serde_json::Value::Null);
     assert_eq!(observed["STATEFUL_SERVER_TOKEN"], serde_json::Value::Null);
@@ -1092,7 +1095,10 @@ print(json.dumps({
     assert_ne!(observed["cwd_value"], "/workspace");
     assert_eq!(observed["calls"][4]["timeout"], 456);
     assert_eq!(observed["home"], observed["cwd_value"]);
-    assert_eq!(observed["stateful_home"], observed["cwd_value"]);
+    assert_eq!(
+        observed["stateful_home"],
+        format!("{}/.stateful", observed["cwd_value"].as_str().unwrap())
+    );
     assert_eq!(
         observed["agent_dir"],
         format!(
@@ -1431,6 +1437,12 @@ with tempfile.TemporaryDirectory() as root:
     (airlock / ".omp" / "profiles" / "stateful" / "agent" / "agent.db").write_text("secret", encoding="utf-8")
     (airlock / ".stateful_core").mkdir()
     (airlock / ".stateful_core" / "runtime.json").write_text("stateful", encoding="utf-8")
+    (airlock / "config.yml").write_text("stateful", encoding="utf-8")
+    (airlock / "state.db").write_bytes(b"sqlite")
+    (airlock / "repos").mkdir()
+    (airlock / "repos" / "repo.db").write_text("stateful", encoding="utf-8")
+    (airlock / "runtime").mkdir()
+    (airlock / "runtime" / "server.pid").write_text("123", encoding="utf-8")
     (airlock / ".git").mkdir()
     (airlock / ".git" / "config").write_text("git", encoding="utf-8")
     (airlock / "Library" / "Caches" / "com.apple.python").mkdir(parents=True)
@@ -1461,6 +1473,10 @@ print(json.dumps(names))
                 && !name.contains("__pycache__")
                 && !name.ends_with(".pyc")
                 && !name.contains(".pytest_cache")
+                && !name.contains("config.yml")
+                && !name.contains("state.db")
+                && !name.contains("repos")
+                && !name.contains("runtime")
         }),
         "archive must not contain agent/runtime/cache files: {names:?}"
     );
@@ -1559,6 +1575,63 @@ print(json.dumps(observed))
         "permission denied reading executable"
     );
     assert_eq!(observed["error"], serde_json::Value::Null);
+}
+
+#[test]
+fn programbench_adapter_marks_smoke_compile_failure() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import subprocess
+import tempfile
+import types
+from pathlib import Path
+
+def fake_agent(args, prompt):
+    args.smoke_compile_error = "compile.sh exited 1"
+    args.submission_path = str(Path(args.condition_dir) / args.instance_id / "submission.tar.gz")
+    return subprocess.CompletedProcess(["codex"], 0, stdout="agent stdout\n", stderr="")
+
+with tempfile.TemporaryDirectory() as condition_dir:
+    args = types.SimpleNamespace(
+        condition_dir=condition_dir,
+        instance_id="owner__repo.abc123",
+        condition_id="stateful-off_subagent-on",
+        container_id="programbench-container",
+        docker_bin="docker",
+        timeout_seconds=123,
+        subagent=True,
+        stateful=False,
+        benchmark_max_turns=500,
+        subagent_min_count=3,
+    )
+    exit_code = mod.run_main(
+        args,
+        agent_name="codex-cli",
+        exited_error_prefix="codex",
+        token_usage_from_output=mod.codex_token_usage_from_output,
+        run_agent_func=fake_agent,
+    )
+    metadata = json.loads((Path(condition_dir) / "owner__repo.abc123" / "instance.json").read_text())
+    observed = {
+        "exit_code": exit_code,
+        "metadata_exit_code": metadata.get("exit_code"),
+        "error": metadata.get("error"),
+        "smoke_compile_error": metadata.get("smoke_compile_error"),
+    }
+print(json.dumps(observed))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("adapter observation should be JSON");
+
+    assert_eq!(observed["exit_code"], 1);
+    assert_eq!(observed["metadata_exit_code"], 1);
+    assert_eq!(
+        observed["error"],
+        "smoke compile failed: compile.sh exited 1"
+    );
+    assert_eq!(observed["smoke_compile_error"], "compile.sh exited 1");
 }
 
 #[test]

@@ -135,6 +135,10 @@ ARCHIVE_EXCLUDED_TOP_LEVEL = {
     ".stateful",
     ".stateful_core",
     ".stateful-tmp",
+    "config.yml",
+    "repos",
+    "runtime",
+    "state.db",
 }
 
 ARCHIVE_EXCLUDED_PARTS = {
@@ -235,9 +239,42 @@ def airlock_env(airlock: str) -> dict[str, str]:
         if key.startswith("STATEFUL_") or key == "CODEX_THREAD_ID":
             env.pop(key)
     env["HOME"] = airlock
-    env["STATEFUL_HOME"] = airlock
+    env["STATEFUL_HOME"] = str(Path(airlock) / ".stateful")
     env["CODEX_HOME"] = str(Path(airlock) / ".codex")
     return env
+
+
+def format_process_failure(label: str, returncode: int, stdout: str, stderr: str) -> str:
+    parts = [f"{label} exited {returncode}"]
+    if stdout:
+        parts.append(f"stdout:\n{stdout.strip()}")
+    if stderr:
+        parts.append(f"stderr:\n{stderr.strip()}")
+    return "\n".join(parts)
+
+
+def smoke_compile_airlock(airlock: str, args) -> None:
+    compile_path = Path(airlock) / "compile.sh"
+    if not compile_path.is_file():
+        raise FileNotFoundError("compile.sh")
+    try:
+        subprocess.run(
+            ["sh", "./compile.sh"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout_seconds,
+            cwd=airlock,
+            env=airlock_env(airlock),
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            format_process_failure("compile.sh", exc.returncode, output_text(exc.stdout), output_text(exc.stderr))
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"compile.sh timed out after {args.timeout_seconds}s") from exc
+    if not (Path(airlock) / "executable").is_file():
+        raise RuntimeError("compile.sh completed but executable was not created")
 
 
 def initialize_airlock_git_repo(args, airlock: str) -> None:
@@ -340,6 +377,10 @@ def run_agent(args, prompt):
             finally:
                 if hasattr(args, "condition_dir"):
                     instance_dir = Path(args.condition_dir) / args.instance_id
+                    try:
+                        smoke_compile_airlock(airlock, args)
+                    except Exception as exc:  # noqa: BLE001 - preserve submission for failed compile diagnostics.
+                        args.smoke_compile_error = str(exc)
                     try:
                         args.submission_path = str(archive_airlock_workspace(airlock, instance_dir))
                     except Exception as exc:  # noqa: BLE001 - preserve agent logs before reporting archive failure.
@@ -466,6 +507,7 @@ def run_main(
     (instance_dir / "agent.stderr.log").write_text(stderr, encoding="utf-8")
 
     archive_error = getattr(args, "archive_error", None)
+    smoke_compile_error = getattr(args, "smoke_compile_error", None)
     submission_path = instance_dir / "submission.tar.gz"
     try:
         submission_path = archive_workspace(args, instance_dir)
@@ -473,6 +515,9 @@ def run_main(
         archive_error = str(exc)
         if error is None:
             error = f"archive failed: {exc}"
+    if smoke_compile_error is not None and error is None:
+        exit_code = 1
+        error = f"smoke compile failed: {smoke_compile_error}"
     finished_at_ms = now_ms()
     metadata = {
         "instance_id": args.instance_id,
@@ -488,6 +533,8 @@ def run_main(
     }
     if archive_error is not None:
         metadata["archive_error"] = archive_error
+    if smoke_compile_error is not None:
+        metadata["smoke_compile_error"] = smoke_compile_error
     if cleanup_error is not None:
         metadata["cleanup_error"] = cleanup_error
     subagent_used = observed_subagent_used(stdout, stderr)

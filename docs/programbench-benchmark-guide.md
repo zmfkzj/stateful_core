@@ -13,14 +13,17 @@ host.
 `stateful-bench` keeps each ProgramBench Docker container alive until the run
 finishes, then removes it explicitly. The Codex and OMP adapters copy the
 container's `/workspace` into an empty temporary host airlock, run the host CLI
-there, and archive that airlock as the ProgramBench submission.
+there, smoke-run `./compile.sh` before archiving/reporting metadata, and archive
+that airlock as the ProgramBench submission. Adapter runtime state uses
+`STATEFUL_HOME` under the airlock's `.stateful` directory.
 
 For OMP runs, the adapter mirrors DeNovoSWE auth seeding: it copies only the
 `openai-codex` OAuth provider credential from `OMP_AUTH_SOURCE_AGENT_DIR`,
 `~/.omp/profiles/stateful/agent`, or `~/.omp/agent` into the isolated airlock
-profile. Submission archives exclude agent/runtime/cache directories such as
-`.omp`, `.codex`, `.stateful*`, `.config`, `.cache`, `.git`,
-`Library/Caches`, `__pycache__`, `.pytest_cache`, and Python bytecode files.
+profile. Submission archives exclude agent/runtime/cache directories and files
+such as `.omp`, `.codex`, `.stateful*`, `.config`, `.cache`, `.git`,
+`config.yml`, `state.db`, `repos`, `runtime`, `Library/Caches`, `__pycache__`,
+`.pytest_cache`, and Python bytecode files.
 
 Install the official `programbench` CLI with one of:
 
@@ -32,17 +35,17 @@ uvx programbench
 
 ## Stateful Comparison Matrix
 
-By default, `stateful-bench programbench run` plans the four condition matrix:
+By default, `stateful-bench programbench run` compares Stateful off versus on
+with subagents enabled:
 
 ```text
-stateful:off,subagent:off
-stateful:on,subagent:off
 stateful:off,subagent:on
 stateful:on,subagent:on
 ```
 
 Use the same instance set, model, image tag, max turns, timeout, and network
-policy across compared conditions.
+policy across compared conditions. Explicit `subagent:off` conditions still
+parse for diagnostic or backwards-compatible runs.
 
 For `stateful:on`, the adapter installs and enables Stateful in the host
 airlock used by that agent run. The ProgramBench container seeds the airlock and
@@ -85,22 +88,22 @@ Write JSON reports for each compared condition:
 
 ```bash
 stateful-bench programbench report \
-  --condition-dir .stateful_bench/programbench/runs/pb-dev/conditions/stateful-off_subagent-off \
+  --condition-dir .stateful_bench/programbench/runs/pb-dev/conditions/stateful-off_subagent-on \
   --format json \
-  --output .stateful_bench/programbench/runs/pb-dev/reports/stateful-off_subagent-off.json
+  --output .stateful_bench/programbench/runs/pb-dev/reports/stateful-off_subagent-on.json
 
 stateful-bench programbench report \
-  --condition-dir .stateful_bench/programbench/runs/pb-dev/conditions/stateful-on_subagent-off \
+  --condition-dir .stateful_bench/programbench/runs/pb-dev/conditions/stateful-on_subagent-on \
   --format json \
-  --output .stateful_bench/programbench/runs/pb-dev/reports/stateful-on_subagent-off.json
+  --output .stateful_bench/programbench/runs/pb-dev/reports/stateful-on_subagent-on.json
 ```
 
 Compare two saved reports:
 
 ```bash
 stateful-bench programbench compare \
-  --report .stateful_bench/programbench/runs/pb-dev/reports/stateful-off_subagent-off.json \
-  --report .stateful_bench/programbench/runs/pb-dev/reports/stateful-on_subagent-off.json \
+  --report .stateful_bench/programbench/runs/pb-dev/reports/stateful-off_subagent-on.json \
+  --report .stateful_bench/programbench/runs/pb-dev/reports/stateful-on_subagent-on.json \
   --format markdown
 ```
 

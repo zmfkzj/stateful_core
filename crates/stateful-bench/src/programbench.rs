@@ -1014,8 +1014,6 @@ where
 
 pub fn default_programbench_conditions() -> Vec<ProgramBenchCondition> {
     vec![
-        ProgramBenchCondition::new(false, false),
-        ProgramBenchCondition::new(true, false),
         ProgramBenchCondition::new(false, true),
         ProgramBenchCondition::new(true, true),
     ]
@@ -1036,7 +1034,7 @@ pub fn parse_programbench_condition(input: &str) -> Result<ProgramBenchCondition
     }
     Ok(ProgramBenchCondition::new(
         stateful.unwrap_or(false),
-        subagent.unwrap_or(false),
+        subagent.unwrap_or(true),
     ))
 }
 
