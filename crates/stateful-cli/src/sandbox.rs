@@ -853,6 +853,7 @@ pub(crate) fn parse_sandbox_process_find_bash_invocation(
                     .fields
                     .push(parse_sandbox_run_arg_value(&words, index, "--field")?);
             }
+            "--json" => {}
             _ => {
                 return Err(format!(
                     "unsupported stateful sandbox process find argument `{arg}`"

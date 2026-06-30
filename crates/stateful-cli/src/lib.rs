@@ -267,6 +267,8 @@ pub enum SandboxProcessCommand {
         process_groups: Vec<u32>,
         #[arg(long = "field")]
         fields: Vec<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -688,6 +690,7 @@ pub fn run() -> anyhow::Result<()> {
                     parent_pids,
                     process_groups,
                     fields,
+                    json,
                 },
         }) => {
             let output = sandbox::run_sandbox_process_find(sandbox::SandboxProcessFindRequest {
@@ -698,7 +701,9 @@ pub fn run() -> anyhow::Result<()> {
                 process_groups,
                 fields,
             })?;
-            println!("{}", serde_json::to_string(&output)?);
+            let rendered = render_sandbox_process_find_cli_output(&output, json)?;
+            std::io::stdout().write_all(&rendered.stdout)?;
+            std::io::stderr().write_all(&rendered.stderr)?;
         }
         Command::Enable { repo } => {
             let paths = GlobalPaths::from_env()?;
@@ -1059,6 +1064,22 @@ fn render_sandbox_run_cli_output(
     })
 }
 
+fn render_sandbox_process_find_cli_output(
+    output: &sandbox::SandboxProcessFindOutput,
+    json: bool,
+) -> anyhow::Result<SandboxRunCliOutput> {
+    let mut stdout = if json {
+        serde_json::to_vec(output)?
+    } else {
+        serde_json::to_vec(&output.processes)?
+    };
+    stdout.push(b'\n');
+    Ok(SandboxRunCliOutput {
+        stdout,
+        stderr: Vec::new(),
+    })
+}
+
 fn default_config_yml() -> &'static str {
     r#"# stateful-core repo policy config
 # These are informational target defaults for this repository.
@@ -1091,6 +1112,13 @@ mod tests {
         }
     }
 
+    fn process_find_output() -> sandbox::SandboxProcessFindOutput {
+        sandbox::SandboxProcessFindOutput {
+            status: "ok",
+            processes: vec![serde_json::json!({ "pid": 202 })],
+        }
+    }
+
     #[test]
     fn sandbox_run_cli_default_renders_child_streams_only() {
         let rendered = render_sandbox_run_cli_output(&sandbox_output("exited", Some(7)), false)
@@ -1112,5 +1140,28 @@ mod tests {
         assert_eq!(body["exit_code"], 5);
         assert_eq!(body["stdout"], "child-out");
         assert_eq!(body["stderr"], "child-err");
+    }
+
+    #[test]
+    fn sandbox_process_find_cli_default_renders_processes_only() {
+        let rendered = render_sandbox_process_find_cli_output(&process_find_output(), false)
+            .expect("passthrough rendering should succeed");
+        let body: serde_json::Value =
+            serde_json::from_slice(&rendered.stdout).expect("stdout should be json");
+
+        assert_eq!(rendered.stderr, b"");
+        assert_eq!(body, serde_json::json!([{ "pid": 202 }]));
+    }
+
+    #[test]
+    fn sandbox_process_find_cli_json_renders_status_envelope() {
+        let rendered = render_sandbox_process_find_cli_output(&process_find_output(), true)
+            .expect("json rendering should succeed");
+        let body: serde_json::Value =
+            serde_json::from_slice(&rendered.stdout).expect("stdout should be json");
+
+        assert_eq!(rendered.stderr, b"");
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["processes"], serde_json::json!([{ "pid": 202 }]));
     }
 }

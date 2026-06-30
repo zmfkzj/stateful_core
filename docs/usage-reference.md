@@ -369,11 +369,13 @@ stateful sandbox process find --contains denovo_codex_agent
 ```
 
 In OMP, use built-in Bash with a single trusted
-`stateful sandbox process find ...` command after Stateful preflight. Result JSON
-includes safe process metadata fields: `pid`, `ppid`, `pgid`, `user`, `uid`,
-`stat`, `start`, `etime`, `time`, `pcpu`, `pmem`, `rss`, `vsz`, `nice`, `pri`,
-`tty`, and `comm`. Command strings, argv, and environment data are never exposed
-in result JSON.
+`stateful sandbox process find ...` command after Stateful preflight. By
+default stdout is the safe process list JSON array. Add `--json` only when
+automation needs the structured envelope with `status` and `processes`. Each
+process entry includes safe metadata fields: `pid`, `ppid`, `pgid`, `user`,
+`uid`, `stat`, `start`, `etime`, `time`, `pcpu`, `pmem`, `rss`, `vsz`, `nice`,
+`pri`, `tty`, and `comm`. Command strings, argv, and environment data are
+never exposed.
 
 ## HTTP And Native Tool Surface
 

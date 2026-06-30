@@ -2,8 +2,9 @@ use clap::Parser;
 use stateful_cli::{
     Cli, CodexSandboxMode, Command, GlobalPaths, HookCommand, HookRuntime, InstallAgent,
     NotificationsCommand, OmpInstallOptions, ReposCommand, ResumeCommand, SandboxCommand,
-    SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, ToolsCommand, allow_tool_for_repo,
-    apply_omp_install, doctor_report_with_global, enable_repo, record_unclassified_tool_for_repo,
+    SandboxFsProfile, SandboxNetworkPolicy, SandboxProcessCommand, ServerCommand, ToolsCommand,
+    allow_tool_for_repo, apply_omp_install, doctor_report_with_global, enable_repo,
+    record_unclassified_tool_for_repo,
 };
 use std::{fs, path::PathBuf, process::Command as ProcessCommand};
 
@@ -68,6 +69,29 @@ fn parses_sandbox_run_json_flag() {
             assert_eq!(command, "printf ok");
         }
         other => panic!("expected sandbox run command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_sandbox_process_find_json_flag() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "process",
+        "find",
+        "--json",
+        "--contains",
+        "denovo_codex_agent",
+    ])
+    .expect("sandbox process find --json should parse");
+
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Process {
+            command: SandboxProcessCommand::Find { contains, .. },
+        }) => {
+            assert_eq!(contains, vec!["denovo_codex_agent"]);
+        }
+        other => panic!("expected sandbox process find command, got {other:?}"),
     }
 }
 

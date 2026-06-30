@@ -548,6 +548,25 @@ fn pre_tool_use_allows_structured_process_find() {
 }
 
 #[test]
+fn pre_tool_use_allows_structured_process_find_json_envelope() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "agent_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox process find --json --contains denovo_codex_agent")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
 fn pre_tool_use_denies_process_find_without_selector() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
