@@ -3026,7 +3026,10 @@ fn omp_write_uses_tool_input_reservation_when_top_level_reservation_is_blank() {
 
     assert!(matches!(outcome, OmpHookOutcome::Block { .. }));
     let authorize = request_json_body(&rx.recv().expect("authorize should arrive"));
-    assert_eq!(authorize["payload"]["reservation_id"], "explicit-reservation");
+    assert_eq!(
+        authorize["payload"]["reservation_id"],
+        "explicit-reservation"
+    );
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
 }
 
@@ -3070,7 +3073,10 @@ fn omp_write_releases_auto_claim_when_retry_authorization_blocks() {
     let _declare = rx.recv().expect("reservation declare should arrive");
     let _claim = rx.recv().expect("claim acquire should arrive");
     let _retry_authorize = rx.recv().expect("retry authorize should arrive");
-    let release = request_json_body(&rx.recv().expect("claim release should arrive"));
+    let release = request_json_body(
+        &rx.recv_timeout(Duration::from_secs(1))
+            .expect("claim release should arrive"),
+    );
     assert_eq!(release["session_id"], "omp-parent");
     assert_eq!(release["workspace_id"], runtime.workspace_id);
     assert_eq!(release["path"], "docs/a.md");

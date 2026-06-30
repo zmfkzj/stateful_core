@@ -528,6 +528,7 @@ fn authorize_omp_targets(
         .unwrap_or_else(|| effective_workspace_id(runtime, identity));
     let mut reservation_id = input.reservation_id().map(str::to_string);
     let mut auto_declared = false;
+    let mut auto_claimed_paths = BTreeSet::new();
 
     'authorize: loop {
         for target in &targets {
@@ -544,7 +545,10 @@ fn authorize_omp_targets(
                 &purpose,
             ) {
                 Ok(decision) => decision,
-                Err(outcome) => return Ok(outcome),
+                Err(outcome) => {
+                    release_omp_auto_claims(runtime, input, &workspace_id, &auto_claimed_paths);
+                    return Ok(outcome);
+                }
             };
             if decision.decision != "allow" {
                 if !auto_declared
@@ -564,6 +568,7 @@ fn authorize_omp_targets(
                             Err(outcome) => return Ok(outcome),
                         },
                     );
+                    auto_claimed_paths = targets.iter().map(|target| target.path.clone()).collect();
                     auto_declared = true;
                     continue 'authorize;
                 }
@@ -582,11 +587,23 @@ fn authorize_omp_targets(
                 } else {
                     authorization_denial_reason(decision)
                 };
+                release_omp_auto_claims(runtime, input, &workspace_id, &auto_claimed_paths);
                 return Ok(OmpHookOutcome::Block { reason });
             }
         }
 
         return Ok(OmpHookOutcome::Allow);
+    }
+}
+
+fn release_omp_auto_claims(
+    runtime: &ServerRuntime,
+    input: &OmpPreToolUseInput,
+    workspace_id: &str,
+    paths: &BTreeSet<String>,
+) {
+    if !paths.is_empty() {
+        release_pre_tool_authorized_claims(runtime, &input.session_id, workspace_id, paths);
     }
 }
 
@@ -2984,7 +3001,6 @@ pub struct OmpPreToolUseInput {
     #[serde(default)]
     tool_input: serde_json::Value,
 }
-
 impl OmpPreToolUseInput {
     fn audit_metadata(&self) -> serde_json::Value {
         json!({
@@ -3004,13 +3020,15 @@ impl OmpPreToolUseInput {
     fn reservation_id(&self) -> Option<&str> {
         self.reservation_id
             .as_deref()
+            .map(str::trim)
+            .filter(|reservation_id| !reservation_id.is_empty())
             .or_else(|| {
                 self.tool_input
                     .get("reservation_id")
                     .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|reservation_id| !reservation_id.is_empty())
             })
-            .map(str::trim)
-            .filter(|reservation_id| !reservation_id.is_empty())
     }
 }
 
