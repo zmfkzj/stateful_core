@@ -1117,6 +1117,7 @@ fn sandbox_run_read_only_does_not_require_reachable_runtime() {
         &[
             "sandbox",
             "run",
+            "--json",
             "--fs",
             "read-only",
             "--network",
@@ -1154,6 +1155,88 @@ fn sandbox_run_read_only_does_not_require_reachable_runtime() {
 }
 
 #[test]
+fn sandbox_run_defaults_to_passthrough_streams_and_exit_code() {
+    if macos_stateful_sandbox_is_active() {
+        return;
+    }
+
+    let temp_root = temp_root("stateful-sandbox-run-passthrough");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+
+    let output = run_stateful_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[
+            ("STATEFUL_SERVER_URL", "http://127.0.0.1:9"),
+            ("STATEFUL_SERVER_TOKEN", "unreachable-token"),
+        ],
+        &[
+            "sandbox",
+            "run",
+            "--fs",
+            "read-only",
+            "--network",
+            "disabled",
+            "--command",
+            "printf out; printf err >&2; exit 7",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "out");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "err");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn sandbox_run_json_flag_preserves_result_envelope() {
+    if macos_stateful_sandbox_is_active() {
+        return;
+    }
+
+    let temp_root = temp_root("stateful-sandbox-run-json");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+
+    let output = run_stateful_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[
+            ("STATEFUL_SERVER_URL", "http://127.0.0.1:9"),
+            ("STATEFUL_SERVER_TOKEN", "unreachable-token"),
+        ],
+        &[
+            "sandbox",
+            "run",
+            "--json",
+            "--fs",
+            "read-only",
+            "--network",
+            "disabled",
+            "--command",
+            "printf json-out; printf json-err >&2; exit 5",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("sandbox output should be json");
+    assert_eq!(body["status"], "exited");
+    assert_eq!(body["exit_code"], 5);
+    assert_eq!(body["stdout"], "json-out");
+    assert_eq!(body["stderr"], "json-err");
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn sandbox_run_external_profile_allows_read_only_scope_without_runtime() {
     if macos_stateful_sandbox_is_active() {
         return;
@@ -1175,6 +1258,7 @@ fn sandbox_run_external_profile_allows_read_only_scope_without_runtime() {
         &[
             "sandbox",
             "run",
+            "--json",
             "--fs",
             "external",
             "--network",

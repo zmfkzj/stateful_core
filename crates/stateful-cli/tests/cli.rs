@@ -1,9 +1,10 @@
 use clap::Parser;
 use stateful_cli::{
     Cli, CodexSandboxMode, Command, GlobalPaths, HookCommand, HookRuntime, InstallAgent,
-    McpCommand, NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand,
-    SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, ToolsCommand, allow_tool_for_repo,
-    doctor_report_with_global, enable_repo, record_unclassified_tool_for_repo,
+    McpCommand, NotificationsCommand, OmpInstallOptions, ReposCommand, ResumeCommand,
+    SandboxCommand, SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, ToolsCommand,
+    allow_tool_for_repo, apply_omp_install, doctor_report_with_global, enable_repo,
+    record_unclassified_tool_for_repo,
 };
 use std::{fs, path::PathBuf, process::Command as ProcessCommand};
 
@@ -23,6 +24,7 @@ fn parses_sandbox_run_read_only_defaults() {
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             command,
             timeout_seconds,
             stream_events,
@@ -36,9 +38,31 @@ fn parses_sandbox_run_read_only_defaults() {
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!json);
             assert!(!stream_events);
             assert_eq!(command, "rg auth src");
             assert_eq!(timeout_seconds, None);
+        }
+        other => panic!("expected sandbox run command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_sandbox_run_json_flag() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "run",
+        "--json",
+        "--command",
+        "printf ok",
+    ])
+    .expect("sandbox run --json should parse");
+
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Run { json, command, .. }) => {
+            assert!(json);
+            assert_eq!(command, "printf ok");
         }
         other => panic!("expected sandbox run command, got {other:?}"),
     }
@@ -112,6 +136,7 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             command,
             timeout_seconds,
             stream_events,
@@ -125,6 +150,7 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             assert_eq!(write_dirs, vec!["tmp"]);
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!json);
             assert!(!stream_events);
             assert_eq!(command, "printf x > README.md");
             assert_eq!(timeout_seconds, Some(12));
@@ -161,6 +187,7 @@ fn parses_sandbox_run_git_profile() {
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             command,
             timeout_seconds,
             stream_events,
@@ -174,6 +201,7 @@ fn parses_sandbox_run_git_profile() {
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!json);
             assert!(!stream_events);
             assert_eq!(command, "git fetch --all");
             assert_eq!(timeout_seconds, Some(30));
@@ -210,6 +238,7 @@ fn parses_sandbox_run_github_pr_profile() {
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             command,
             timeout_seconds,
             stream_events,
@@ -223,6 +252,7 @@ fn parses_sandbox_run_github_pr_profile() {
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!json);
             assert!(!stream_events);
             assert_eq!(command, "gh pr status");
             assert_eq!(timeout_seconds, Some(30));
@@ -259,6 +289,7 @@ fn parses_sandbox_run_build_profile() {
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             command,
             timeout_seconds,
             stream_events,
@@ -272,6 +303,7 @@ fn parses_sandbox_run_build_profile() {
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!json);
             assert!(!stream_events);
             assert_eq!(command, "npm test");
             assert_eq!(timeout_seconds, Some(60));
@@ -437,6 +469,7 @@ fn parses_sandbox_run_external_profile() {
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             timeout_seconds,
             command,
             stream_events,
@@ -449,6 +482,7 @@ fn parses_sandbox_run_external_profile() {
             assert_eq!(write_dirs, vec!["/opt/stateful/bin"]);
             assert_eq!(connect_sockets, vec!["/private/tmp/tmux-501/default"]);
             assert!(allow_signal);
+            assert!(!json);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(timeout_seconds, Some(10));
             assert!(!stream_events);
@@ -650,6 +684,37 @@ fn parses_install_agent_omp_command() {
             ..
         } if agents == &vec![InstallAgent::Omp]
     ));
+}
+
+#[test]
+fn omp_extension_uses_strict_agent_id_identity() {
+    let temp = std::env::temp_dir().join(format!(
+        "stateful-omp-extension-agent-id-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp);
+    let agent_dir = temp.join("agent");
+
+    apply_omp_install(OmpInstallOptions {
+        yes: true,
+        paths: GlobalPaths::new(temp.join("home")),
+        binary_path: "/usr/local/bin/stateful".to_string(),
+        project_config_path: None,
+        omp_agent_dir: Some(agent_dir.clone()),
+        update: true,
+    })
+    .expect("OMP install should write generated extension");
+
+    let extension = fs::read_to_string(agent_dir.join("extensions/stateful-omp-extension.js"))
+        .expect("generated OMP extension should be readable");
+
+    assert!(extension.contains("function agentIdFromString"));
+    assert!(extension.contains("function detectAgentId"));
+    assert!(extension.contains("agent_id"));
+    assert!(!extension.contains("process.env.STATEFUL_SESSION_ID"));
+    assert!(!extension.contains("sessionIdFromSessionManager"));
+
+    fs::remove_dir_all(&temp).expect("temp root should remove");
 }
 
 #[test]

@@ -336,6 +336,12 @@ sandbox profile that matches the command.
 | `github-pr` | Non-interactive `gh pr list|view|status|create` commands. |
 | `external` | Repo-external shell operations with a purpose; add explicit external write/create/dir scope only when needed. |
 
+`stateful sandbox run` defaults to command-like pass-through: the wrapped
+command's `stdout`, `stderr`, and exit code become the wrapper's `stdout`,
+`stderr`, and exit code. Add `--json` when callers need the structured result
+envelope with `status`, `exit_code`, captured streams, and authorization
+metadata.
+
 Examples:
 
 ```bash

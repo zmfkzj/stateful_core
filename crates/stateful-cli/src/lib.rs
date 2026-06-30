@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{
+    io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -221,6 +222,8 @@ pub enum SandboxCommand {
         connect_sockets: Vec<String>,
         #[arg(long)]
         allow_signal: bool,
+        #[arg(long)]
+        json: bool,
         #[arg(long)]
         command: String,
         #[arg(long)]
@@ -595,6 +598,7 @@ pub fn run() -> anyhow::Result<()> {
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             command,
             timeout_seconds,
             stream_events,
@@ -630,7 +634,9 @@ pub fn run() -> anyhow::Result<()> {
                     return Err(error);
                 }
             };
-            println!("{}", serde_json::to_string(&output)?);
+            let rendered = render_sandbox_run_cli_output(&output, json)?;
+            std::io::stdout().write_all(&rendered.stdout)?;
+            std::io::stderr().write_all(&rendered.stderr)?;
             if let Some(exit_code) = sandbox::sandbox_run_cli_exit_code(&output) {
                 std::process::exit(exit_code);
             }
@@ -1060,6 +1066,38 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
     }
 }
 
+struct SandboxRunCliOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn render_sandbox_run_cli_output(
+    output: &sandbox::SandboxRunOutput,
+    json: bool,
+) -> anyhow::Result<SandboxRunCliOutput> {
+    if json {
+        let mut stdout = serde_json::to_vec(output)?;
+        stdout.push(b'\n');
+        return Ok(SandboxRunCliOutput {
+            stdout,
+            stderr: Vec::new(),
+        });
+    }
+
+    let mut stderr = output.stderr.as_bytes().to_vec();
+    if output.status != "exited" {
+        if !stderr.is_empty() && !stderr.ends_with(b"\n") {
+            stderr.push(b'\n');
+        }
+        stderr.extend_from_slice(format!("stateful sandbox run {}\n", output.status).as_bytes());
+    }
+
+    Ok(SandboxRunCliOutput {
+        stdout: output.stdout.as_bytes().to_vec(),
+        stderr,
+    })
+}
+
 fn default_config_yml() -> &'static str {
     r#"# stateful-core repo policy config
 # These are informational target defaults for this repository.
@@ -1075,4 +1113,43 @@ rename_requires_exact_file_scope: true
 default_write_policy: deny
 event_retention_days: 14
     "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sandbox_output(status: &'static str, exit_code: Option<i32>) -> sandbox::SandboxRunOutput {
+        sandbox::SandboxRunOutput {
+            status,
+            exit_code,
+            stdout: "child-out".to_string(),
+            stderr: "child-err".to_string(),
+            allowed_write_targets: Vec::new(),
+            denied_write_targets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sandbox_run_cli_default_renders_child_streams_only() {
+        let rendered = render_sandbox_run_cli_output(&sandbox_output("exited", Some(7)), false)
+            .expect("passthrough rendering should succeed");
+
+        assert_eq!(rendered.stdout, b"child-out");
+        assert_eq!(rendered.stderr, b"child-err");
+    }
+
+    #[test]
+    fn sandbox_run_cli_json_renders_result_envelope() {
+        let rendered = render_sandbox_run_cli_output(&sandbox_output("exited", Some(5)), true)
+            .expect("json rendering should succeed");
+        let body: serde_json::Value =
+            serde_json::from_slice(&rendered.stdout).expect("stdout should be json");
+
+        assert_eq!(rendered.stderr, b"");
+        assert_eq!(body["status"], "exited");
+        assert_eq!(body["exit_code"], 5);
+        assert_eq!(body["stdout"], "child-out");
+        assert_eq!(body["stderr"], "child-err");
+    }
 }

@@ -229,6 +229,11 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 | GitHub PR list/view/status/create | `stateful sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` |
 | Repo-external shell operation | `stateful sandbox run --fs external --purpose <purpose> --command <cmd>` for reads; add exact `--write-target`, `--create-target`, or `--write-dir` scopes for writes |
 
+By default, `stateful sandbox run` passes the wrapped command's `stdout`,
+`stderr`, and exit code through unchanged. Add `--json` when automation needs the
+structured result envelope with `status`, `exit_code`, captured streams, and
+authorization metadata.
+
 In OMP, built-in Bash may run only strict trusted `stateful sandbox run ...`
 and `stateful sandbox process find ...` commands. Bare `stateful` is trusted
 only after session-start preflight hash-verifies the first PATH `stateful`

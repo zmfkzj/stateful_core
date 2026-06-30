@@ -718,6 +718,7 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
                     "stateful sandbox run --timeout-seconds requires an integer value".to_string()
                 })?);
             }
+            "--json" => {}
             "--stream-events" => {
                 stream_events = true;
             }
@@ -4507,6 +4508,18 @@ mod tests {
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].pid, 202);
+    }
+
+    #[test]
+    fn sandbox_run_bash_parser_accepts_json_output_flag() {
+        let invocation = parse_sandbox_run_bash_invocation(
+            "stateful sandbox run --json --fs read-only --network disabled --command 'printf ok'",
+        )
+        .expect("sandbox run --json should parse for trusted Bash authorization");
+
+        assert_eq!(invocation.request.fs, SandboxFsProfile::ReadOnly);
+        assert_eq!(invocation.request.network, SandboxNetworkPolicy::Disabled);
+        assert_eq!(invocation.request.command, "printf ok");
     }
 
     #[test]
