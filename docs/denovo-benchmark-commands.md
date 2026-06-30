@@ -1,6 +1,6 @@
 # DeNovoSWE Benchmark Commands
 
-Last updated: 2026-06-24.
+Last updated: 2026-06-30.
 
 Use this file to relaunch the OMP-backed DeNovoSWE benchmark without
 reconstructing the command line.
@@ -76,6 +76,12 @@ file, not the public full JSONL. The aborted r36 attempt duplicated the full
   `OMP_BIN`, `TMUX`, and `TMUX_SOCKET`.
 - For Docker-backed OMP agent runs through Docker Desktop or Colima, set
   `DOCKER_HOST` to the Unix socket used by the Docker CLI before launching.
+- For Docker-backed OMP agent runs, keep `DENOVO_OUTPUT_ROOT` on a host path
+  mounted into the Docker daemon. With Colima, prefer `$REPO_ROOT/target/...` or
+  another `/Users/...` path. Avoid `/private/tmp/...`: `stateful-bench` may
+  create `omp-homes/<instance>/home` on the host, but Docker can still fail with
+  `invalid mount config for type "bind": bind source path does not exist`
+  because the daemon cannot see that tree.
 - Change run IDs and isolated OMP home directories before reusing commands.
 - For Docker-isolated OMP runs, build or tag the agent image from
   `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. The image includes
@@ -341,6 +347,12 @@ Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
   detached run. Use a short, existing-parent socket path because long paths can
   exceed tmux's socket length limit; create the session with that socket and
   keep benchmark stdout/stderr in a launch log under the run output directory.
+- If Docker reports `invalid mount config for type "bind": bind source path
+  does not exist` for an `omp-homes/<instance>/home` path, first verify whether
+  the benchmark output root is under `/private/tmp` or another path not mounted
+  into the Docker daemon. The host directory can exist while Colima still cannot
+  bind it. Move `DENOVO_OUTPUT_ROOT` to `$REPO_ROOT/target/stateful_bench_runs`
+  or another `/Users/...` path and relaunch with fresh run IDs.
 - Rebuild or retag the Docker OMP agent image after changing the Dockerfile. If
   a Docker OMP run still shows `bubblewrap` namespace failures, confirm the
   command includes `--agent-docker-sandbox off`; otherwise nested OMP sandboxing

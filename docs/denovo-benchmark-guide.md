@@ -1,6 +1,6 @@
 # DeNovoSWE Benchmark Guide
 
-Last updated: 2026-06-24.
+Last updated: 2026-06-30.
 
 This guide records the protocol we use when running DeNovoSWE through
 `stateful-bench`. It follows the official AweAgent DeNovoSWE recipe/task
@@ -223,6 +223,13 @@ Lifecycle troubleshooting checklist:
   long-running `stateful-bench` process is owned by a durable process manager.
   Some restricted command wrappers reap daemonized/background children on exit;
   the symptom is a pid file or empty launch log with no durable run directory.
+- If Docker reports `invalid mount config for type "bind": bind source path
+  does not exist` for an `omp-homes/<instance>/home` path that exists on the
+  host, the Docker daemon cannot see that host path. This is common with Colima
+  when `DENOVO_OUTPUT_ROOT` is under `/private/tmp` or another unmounted host
+  tree. Relaunch with the benchmark output under a Docker-mounted path such as
+  `$REPO_ROOT/target/stateful_bench_runs/...` or another `/Users/...` path, then
+  use fresh run IDs and OMP homes.
 
 ## Reporting Rules
 
