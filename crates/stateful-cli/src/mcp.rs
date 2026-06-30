@@ -224,6 +224,33 @@ fn current_session_from_env_or_existing(
     Ok(current_session)
 }
 
+fn normalize_mcp_tool_response(protocol_name: &str, response: HttpResponse) -> HttpResponse {
+    if protocol_name != "state.claim.release" || response.status_code != 404 {
+        return response;
+    }
+
+    let Ok(body) = serde_json::from_str::<Value>(&response.body) else {
+        return response;
+    };
+    if body.get("reason_code").and_then(Value::as_str) != Some("claim_not_found") {
+        return response;
+    }
+
+    let message = body.get("message").and_then(Value::as_str).unwrap_or(
+        "No active same-session claim matched the requested path, workspace, and claim type.",
+    );
+    HttpResponse {
+        status_code: 200,
+        body: serde_json::json!({
+            "status": "ok",
+            "released": false,
+            "reason_code": "claim_not_found",
+            "message": message,
+        })
+        .to_string(),
+    }
+}
+
 fn call_mcp_tool(
     runtime: &ServerRuntime,
     repo_root: &Path,
@@ -248,7 +275,7 @@ fn call_mcp_tool(
     );
     let request = map_tool_to_http(tool).map_err(anyhow::Error::msg)?;
 
-    match request.method {
+    let response = match request.method {
         "GET" => get_json(runtime, request.path),
         "POST" => {
             let body = if protocol_name == "state.reservation.declare" {
@@ -265,7 +292,8 @@ fn call_mcp_tool(
             post_json(runtime, request.path, &body)
         }
         method => anyhow::bail!("unsupported MCP HTTP method: {method}"),
-    }
+    }?;
+    Ok(normalize_mcp_tool_response(protocol_name, response))
 }
 
 fn reject_mismatched_current_session(

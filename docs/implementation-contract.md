@@ -177,7 +177,11 @@ the same stateful server.
 MCP tools map directly onto these endpoints. MCP handlers do not implement
 policy branches; they validate tool arguments, resolve the current session from
 explicit arguments, `STATEFUL_SESSION_ID`, or hook-persisted current-session
-files as appropriate, call the HTTP API, and return the server result. The OMP
+files as appropriate, call the HTTP API, and return the server result. The
+single adapter-only exception is duplicate cleanup:
+`state_claim_release` maps a server `404 claim_not_found` into a successful
+no-op result when the same-session claim is already gone, while the direct HTTP
+route still returns `404`. The OMP
 current-session path supports `state_session_register` ->
 `state_reservation_declare` -> `state_claim_acquire` without a caller-supplied env
 override after `stateful hook omp session-start` has persisted the active

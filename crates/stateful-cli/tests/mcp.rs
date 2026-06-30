@@ -1878,6 +1878,64 @@ fn mcp_context_render_defaults_to_current_session_workspace() {
 }
 
 #[test]
+fn mcp_claim_release_treats_missing_same_session_claim_as_noop() {
+    let temp_root = temp_root("stateful-mcp-claim-release-noop");
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence_with_status(vec![(
+        404,
+        r#"{"status":"error","reason_code":"claim_not_found","message":"No active same-session claim matched the requested path, workspace, and claim type."}"#,
+    )]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    write_current_session_file_for_session(&repo_root, "s1", &CurrentSession::new("s1", "w1"))
+        .expect("session-bound current session should write");
+
+    let response = run_mcp_jsonrpc_in_repo_with_env(
+        &repo_root,
+        &paths,
+        &[("STATEFUL_SESSION_ID", "s1")],
+        r#"{
+          "jsonrpc":"2.0",
+          "id":4,
+          "method":"tools/call",
+          "params":{
+            "name":"state_claim_release",
+            "arguments":{
+              "path":"crates/stateful-cli/src/install.rs"
+            }
+          }
+        }"#,
+    );
+
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("POST /v1/claim/release HTTP/1.1"));
+    let body = request_json_body(&request);
+    assert_eq!(body["session_id"], "s1");
+    assert_eq!(body["workspace_id"], "w1");
+    assert_eq!(body["path"], "crates/stateful-cli/src/install.rs");
+
+    let json: serde_json::Value = serde_json::from_str(&response).expect("response should be json");
+    assert_eq!(json["jsonrpc"], "2.0");
+    assert_eq!(json["id"], 4);
+    assert_eq!(json["result"]["isError"], false);
+    let text = json["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool content should be text");
+    let body: serde_json::Value = serde_json::from_str(text).expect("tool content should be json");
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["released"], false);
+    assert_eq!(body["reason_code"], "claim_not_found");
+    assert_eq!(
+        body["message"],
+        "No active same-session claim matched the requested path, workspace, and claim type."
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn mcp_tools_call_for_reservation_declare_posts_to_state_server() {
     let temp_root = temp_root("stateful-mcp-reservation-declare");
     let paths = GlobalPaths::new(temp_root.join("home"));
