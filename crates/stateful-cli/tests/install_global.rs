@@ -146,7 +146,10 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     assert!(!first_config.contains("STATEFUL_SESSION_ID"));
     assert!(!first_config.contains("CODEX_THREAD_ID"));
     assert!(!first_config.contains("STATEFUL_CODEX_RUN_ID"));
-    assert!(first_config.contains("command = \"'/opt/stateful/bin/stateful' hook codex session-start\""));
+    assert!(
+        first_config
+            .contains("command = \"'/opt/stateful/bin/stateful' hook codex session-start\"")
+    );
     assert!(first_config.contains(
         "approval_policy = { granular = { sandbox_approval = false, rules = true, mcp_elicitations = false, request_permissions = false, skill_approval = false } }"
     ));
@@ -235,16 +238,23 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(!extension.contains("Type.Object"));
     assert!(extension.contains("export default function statefulOmpExtension"));
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
-    assert!(extension.contains("function detectSessionId(event, ctx)"));
-    assert!(extension.contains("event?.sessionId"));
-    assert!(!extension.contains("ctx?.sessionManager?.session?.id"));
-    assert!(extension.contains("event?.session_id"));
-    assert!(extension.contains("sessionManager?.getSessionFile?.()"));
-    assert!(extension.contains("sessionManager?.getLeafId?.()"));
-    assert!(extension.contains("function sessionIdFromString(value, prefix = \"omp\")"));
-    assert!(extension.contains("function sessionIdFromSessionFile(sessionFile)"));
-    assert!(!extension.contains("|| \"omp-session\""));
-    assert!(!extension.contains("process.env.STATEFUL_SESSION_ID ||"));
+    assert!(extension.contains("function detectAgentId(event, ctx)"));
+    assert!(extension.contains("event?.agentId"));
+    assert!(extension.contains("event?.agent_id"));
+    assert!(extension.contains("ctx?.agentId"));
+    assert!(extension.contains("ctx?.agent_id"));
+    assert!(extension.contains("function agentId(event, ctx)"));
+    assert!(extension.contains("Stateful requires adapter-provided agent_id"));
+    assert!(extension.contains("function detectWorkspaceId(event, ctx)"));
+    assert!(extension.contains("function commandWithActiveSandboxIdentity(words, event, ctx)"));
+    assert!(extension.contains("stateful sandbox run --agent-id must match the active agent_id"));
+    assert!(
+        extension
+            .contains("stateful sandbox run --workspace-id must match the active workspace_id")
+    );
+    assert!(extension.contains("event.input.command = rewritten.command"));
+    assert!(!extension.contains("process.env.STATEFUL_SESSION_ID"));
+    assert!(!extension.contains("sessionIdFromSessionManager"));
     assert!(extension.contains("pi.registerTool"));
     assert!(extension.contains("name: \"lazy_edit_resume\""));
     assert!(extension.contains("name: \"lazy_write_resume\""));
@@ -281,13 +291,9 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(extension.contains("import { spawnSync } from \"node:child_process\""));
     assert!(extension.contains("import { createHash } from \"node:crypto\""));
     assert!(extension.contains(
-        "import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from \"node:fs\""
+        "import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from \"node:fs\""
     ));
-    assert!(
-        extension.contains(
-            "import { basename, delimiter, dirname, extname, resolve } from \"node:path\""
-        )
-    );
+    assert!(extension.contains("import { delimiter, dirname, resolve } from \"node:path\""));
     assert!(extension.contains("import { fileURLToPath } from \"node:url\""));
     assert!(
         extension
@@ -296,11 +302,11 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(extension.contains("process.env.HOME"));
     assert!(extension.contains(".omp/profiles/stateful/agent/config.yml"));
     assert!(extension.contains("function startReservationStream(pi, stream)"));
-    assert!(extension.contains("/v1/notifications/stream?session_id="));
+    assert!(extension.contains("/v1/notifications/stream?agent_id="));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));
-    assert!(extension.contains("function notificationTargetsStreamSession(notification, stream)"));
+    assert!(extension.contains("function notificationTargetsStreamAgent(notification, stream)"));
     assert!(
-        extension.contains("if (!notificationTargetsStreamSession(notification, stream)) return;")
+        extension.contains("if (!notificationTargetsStreamAgent(notification, stream)) return;")
     );
     assert!(extension.contains("purpose: \" + purpose.trim()"));
     assert!(extension.contains("const purpose = payload.purpose"));
@@ -328,7 +334,7 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(
         extension.contains("Built-in Bash external sandbox command requires OMP UI confirmation")
     );
-    assert!(extension.contains("delete process.env.STATEFUL_SESSION_ID"));
+    assert!(extension.contains("agent_id: agentId(event, ctx)"));
     assert!(extension.contains("pre-tool-use"));
     assert!(extension.contains("decision: \"block\""));
     assert!(extension.contains("if (decision.decision === \"prompt\" && !shouldAutoApproveStatefulPrompt(ctx, event.input || {}))"));
@@ -618,7 +624,7 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     assert!(command_policy_skill.contains("Support Files"));
     assert!(command_policy_skill.contains("state_reservation_declare"));
     assert!(command_policy_skill.contains("state_claim_acquire"));
-    assert!(command_policy_skill.contains("Runtime-specific wrappers are aliases"));
+    assert!(command_policy_skill.contains("call the exact shown equivalent"));
     for (name, marker) in [
         ("omp-tools.md", "Use OMP-Native Stateful Tools"),
         (

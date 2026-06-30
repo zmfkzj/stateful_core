@@ -11,11 +11,10 @@ use std::{
 };
 
 use stateful_cli::{
-    CurrentSession, GlobalPaths, HookOutcome, OmpHookOutcome, STATEFUL_SESSION_ID_ENV,
-    ServerRuntime, allow_tool_for_repo, enable_repo, handle_omp_post_tool_use_with_runtime,
-    handle_omp_pre_tool_use_with_runtime, handle_omp_session_start_with_runtime,
-    handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
-    read_current_session_file_for_session, tool_list_for_repo, workspace_id_for_enabled_repo,
+    GlobalPaths, HookOutcome, OmpHookOutcome, ServerRuntime, allow_tool_for_repo, enable_repo,
+    handle_omp_post_tool_use_with_runtime, handle_omp_pre_tool_use_with_runtime,
+    handle_omp_session_start_with_runtime, handle_post_tool_use_in_repo, handle_pre_tool_use,
+    handle_pre_tool_use_in_repo, tool_list_for_repo, workspace_id_for_enabled_repo,
     write_global_runtime_file,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -65,16 +64,23 @@ fn trusted_tmux_path() -> &'static str {
     "/opt/homebrew/bin/tmux"
 }
 
-fn read_legacy_current_session_file(repo_root: &Path) -> CurrentSession {
-    let path = repo_root.join(".stateful_core/runtime/session.json");
-    let contents = fs::read_to_string(path).expect("legacy current session should read");
-    serde_json::from_str(&contents).expect("legacy current session should decode")
+fn assert_current_agent_context_absent(repo_root: &Path) {
+    assert!(
+        !repo_root
+            .join(".stateful_core/runtime/session.json")
+            .exists(),
+        "legacy current agent context file should not exist"
+    );
+    assert!(
+        !repo_root.join(".stateful_core/runtime/sessions").exists(),
+        "agent-bound current context directory should not exist"
+    );
 }
 
 #[test]
-fn session_start_records_current_session_under_thread_id_when_present() {
+fn session_start_registers_explicit_agent_without_current_file() {
     let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-session-start-session-id-test-{}",
+        "stateful-hook-session-start-agent-id-test-{}",
         std::process::id()
     ));
     if temp_root.exists() {
@@ -88,8 +94,7 @@ fn session_start_records_current_session_under_thread_id_when_present() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "parent-session-1",
-      "thread_id": "codex-thread-1",
+      "agent_id": "codex-agent-1",
       "transcript_path": "/tmp/transcript.jsonl",
       "cwd": "/repo",
       "hook_event_name": "SessionStart"
@@ -109,11 +114,8 @@ fn session_start_records_current_session_under_thread_id_when_present() {
     );
     let request = rx.recv().expect("session register request should arrive");
     assert!(request.contains("POST /v1/session/register HTTP/1.1"));
-    assert!(request.contains("\"session_id\":\"codex-thread-1\""));
-    let session = read_current_session_file_for_session(&repo_root, "codex-thread-1")
-        .expect("current session should be keyed by thread id");
-    assert_eq!(session.session_id, "codex-thread-1");
-    assert_eq!(session.workspace_id, "w1");
+    assert!(request.contains("\"agent_id\":\"codex-agent-1\""));
+    assert_current_agent_context_absent(&repo_root);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -136,8 +138,7 @@ fn session_start_derives_workspace_id_for_default_local_runtime() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "derived-session",
-      "thread_id": "derived-thread-1",
+      "agent_id": "derived-agent",
       "transcript_path": "/tmp/transcript.jsonl",
       "cwd": "/repo",
       "hook_event_name": "SessionStart"
@@ -163,12 +164,8 @@ fn session_start_derives_workspace_id_for_default_local_runtime() {
     assert!(workspace_id.starts_with("workspace-"));
     assert_ne!(workspace_id, "local");
 
-    assert_eq!(body["session_id"], "derived-thread-1");
-
-    let session = read_current_session_file_for_session(&repo_root, "derived-thread-1")
-        .expect("current session should be keyed by thread id");
-    assert_eq!(session.session_id, "derived-thread-1");
-    assert_eq!(session.workspace_id, workspace_id);
+    assert_eq!(body["agent_id"], "derived-agent");
+    assert_current_agent_context_absent(&repo_root);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -191,8 +188,7 @@ fn session_start_derives_workspace_id_for_default_shared_runtime() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "derived-shared-session",
-      "thread_id": "derived-shared-thread-1",
+      "agent_id": "derived-shared-agent",
       "transcript_path": "/tmp/transcript.jsonl",
       "cwd": "/repo",
       "hook_event_name": "SessionStart"
@@ -218,18 +214,14 @@ fn session_start_derives_workspace_id_for_default_shared_runtime() {
     assert!(workspace_id.starts_with("workspace-"));
     assert_ne!(workspace_id, "shared");
 
-    assert_eq!(body["session_id"], "derived-shared-thread-1");
-
-    let session = read_current_session_file_for_session(&repo_root, "derived-shared-thread-1")
-        .expect("current session should be keyed by thread id");
-    assert_eq!(session.session_id, "derived-shared-thread-1");
-    assert_eq!(session.workspace_id, workspace_id);
+    assert_eq!(body["agent_id"], "derived-shared-agent");
+    assert_current_agent_context_absent(&repo_root);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn pre_tool_use_authorization_uses_thread_id_when_present() {
+fn pre_tool_use_authorization_uses_explicit_agent_id_when_thread_id_present() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-pre-tool-session-id-test-{}",
         std::process::id()
@@ -246,7 +238,7 @@ fn pre_tool_use_authorization_uses_thread_id_when_present() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "parent-session-1",
+      "agent_id": "parent-session-1",
       "thread_id": "codex-thread-1",
       "transcript_path": "/tmp/transcript.jsonl",
       "cwd": "/repo",
@@ -271,7 +263,7 @@ fn pre_tool_use_authorization_uses_thread_id_when_present() {
     );
     let request = rx.recv().expect("captured request should arrive");
     let body = request_json_body(&request);
-    assert_eq!(body["session"]["session_id"], "codex-thread-1");
+    assert_eq!(body["agent"]["agent_id"], "parent-session-1");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -279,7 +271,7 @@ fn pre_tool_use_authorization_uses_thread_id_when_present() {
 #[test]
 fn pre_tool_use_denies_raw_read_only_bash_after_sandbox_runner_migration() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -296,7 +288,7 @@ fn pre_tool_use_denies_raw_read_only_bash_after_sandbox_runner_migration() {
 #[test]
 fn pre_tool_use_denies_namespaced_raw_bash_tool() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "functions.bash",
@@ -313,7 +305,7 @@ fn pre_tool_use_denies_namespaced_raw_bash_tool() {
 #[test]
 fn pre_tool_use_allows_namespaced_safe_read_tool() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "functions.read",
@@ -330,7 +322,7 @@ fn pre_tool_use_allows_namespaced_safe_read_tool() {
 #[test]
 fn pre_tool_use_raw_bash_denial_mentions_command_policy_skill_and_example() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -358,7 +350,7 @@ fn pre_tool_use_raw_bash_denial_mentions_command_policy_skill_and_example() {
 #[test]
 fn pre_tool_use_requires_read_only_sandbox_for_shell_read_fallback() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -383,7 +375,7 @@ fn pre_tool_use_requires_read_only_sandbox_for_shell_read_fallback() {
 fn pre_tool_use_allows_sandbox_external_for_repo_external_write_approval_path() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -402,7 +394,7 @@ fn pre_tool_use_allows_sandbox_external_for_repo_external_write_approval_path() 
 fn pre_tool_use_allows_sandbox_external_without_write_scope() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -421,7 +413,7 @@ fn pre_tool_use_allows_sandbox_external_without_write_scope() {
 fn pre_tool_use_allows_sandbox_external_with_supported_scopes() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -440,7 +432,7 @@ fn pre_tool_use_allows_sandbox_external_with_supported_scopes() {
 fn pre_tool_use_denies_sandbox_external_without_prompt_matched_prefix() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -459,7 +451,7 @@ fn pre_tool_use_denies_sandbox_external_without_prompt_matched_prefix() {
 fn pre_tool_use_denies_sandbox_external_without_purpose() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -478,7 +470,7 @@ fn pre_tool_use_denies_sandbox_external_without_purpose() {
 fn pre_tool_use_denies_external_run_request_for_repo_external_write() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -496,7 +488,7 @@ fn pre_tool_use_denies_external_run_request_for_repo_external_write() {
 #[test]
 fn pre_tool_use_denies_raw_repo_external_write_without_approval_wrapper() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -521,7 +513,7 @@ fn pre_tool_use_denies_raw_repo_external_write_without_approval_wrapper() {
 fn pre_tool_use_allows_canonical_sandbox_run_read_only() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -540,7 +532,7 @@ fn pre_tool_use_allows_canonical_sandbox_run_read_only() {
 fn pre_tool_use_allows_structured_process_find() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -559,7 +551,7 @@ fn pre_tool_use_allows_structured_process_find() {
 fn pre_tool_use_denies_process_find_without_selector() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -581,7 +573,7 @@ fn pre_tool_use_denies_process_find_without_selector() {
 fn pre_tool_use_denies_sandbox_run_with_raw_process_inspection() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -603,7 +595,7 @@ fn pre_tool_use_denies_sandbox_run_with_raw_process_inspection() {
 fn pre_tool_use_denies_sandbox_run_with_wrapped_raw_process_inspection() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -624,7 +616,7 @@ fn pre_tool_use_denies_sandbox_run_with_wrapped_raw_process_inspection() {
 #[test]
 fn pre_tool_use_denies_untrusted_process_find() {
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -646,7 +638,7 @@ fn pre_tool_use_denies_untrusted_process_find() {
 fn pre_tool_use_denies_read_only_sandbox_run_with_network_enabled() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -665,7 +657,7 @@ fn pre_tool_use_denies_read_only_sandbox_run_with_network_enabled() {
 fn pre_tool_use_allows_canonical_sandbox_run_write_targets() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -684,7 +676,7 @@ fn pre_tool_use_allows_canonical_sandbox_run_write_targets() {
 fn pre_tool_use_allows_sandbox_run_git_profile_for_git_commands() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -709,7 +701,7 @@ fn pre_tool_use_allows_sandbox_run_github_pr_profile_for_pr_commands() {
         "gh pr create --title 'Update policy' --body 'Adds github-pr profile' --base dev --head feature --draft",
     ] {
         let input = serde_json::json!({
-            "session_id": "s1",
+            "agent_id": "s1",
             "cwd": "/repo",
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
@@ -771,7 +763,7 @@ fn pre_tool_use_denies_sandbox_run_github_pr_profile_unsafe_requests() {
 
     for (name, command, expected) in cases {
         let input = serde_json::json!({
-            "session_id": "s1",
+            "agent_id": "s1",
             "cwd": "/repo",
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
@@ -836,7 +828,7 @@ fn pre_tool_use_denies_sandbox_run_git_profile_dispatch_surfaces() {
 
     for (name, command) in cases {
         let input = serde_json::json!({
-            "session_id": "s1",
+            "agent_id": "s1",
             "cwd": "/repo",
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
@@ -862,7 +854,7 @@ fn pre_tool_use_denies_sandbox_run_git_profile_dispatch_surfaces() {
 fn pre_tool_use_allows_sandbox_run_write_dir() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -881,7 +873,7 @@ fn pre_tool_use_allows_sandbox_run_write_dir() {
 fn pre_tool_use_allows_sandbox_run_direct_tmp_write_dir() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -900,7 +892,7 @@ fn pre_tool_use_allows_sandbox_run_direct_tmp_write_dir() {
 fn pre_tool_use_allows_sandbox_run_write_dir_outside_artifact_tree() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -919,7 +911,7 @@ fn pre_tool_use_allows_sandbox_run_write_dir_outside_artifact_tree() {
 fn pre_tool_use_allows_sandbox_run_build_profile_with_scoped_tmp_write_dir() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -938,7 +930,7 @@ fn pre_tool_use_allows_sandbox_run_build_profile_with_scoped_tmp_write_dir() {
 fn pre_tool_use_denies_sandbox_run_build_profile_without_scoped_tmp_write_dir() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -958,7 +950,7 @@ fn pre_tool_use_denies_sandbox_run_build_profile_without_scoped_tmp_write_dir() 
 fn pre_tool_use_denies_nested_codex_benchmark_sandbox_without_feature() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -983,7 +975,7 @@ fn pre_tool_use_denies_nested_codex_benchmark_sandbox_without_feature() {
 fn pre_tool_use_allows_nested_codex_benchmark_sandbox_with_feature() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -1005,7 +997,7 @@ fn pre_tool_use_allows_nested_codex_benchmark_sandbox_with_feature() {
 fn pre_tool_use_allows_nested_codex_benchmark_sandbox_with_docker_socket() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -1031,7 +1023,7 @@ fn pre_tool_use_allows_tmux_new_session_for_nested_codex_benchmark() {
         "{stateful} sandbox run-nested-codex-benchmark --purpose 'run DeNovoSWE full dataset Codex benchmark fixture a' --write-dir target --codex-home-root target/nested-codex-homes/fixture-denovo-full-3-codex-a --docker-socket /private/tmp/docker.sock --timeout-seconds 43200 --command 'target/debug/stateful-bench denovo run --run-id fixture-denovo-full-3-codex-a'"
     );
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -1050,10 +1042,10 @@ fn pre_tool_use_allows_tmux_new_session_for_nested_codex_benchmark() {
 
 #[test]
 #[cfg(feature = "codex-benchmark")]
-fn pre_tool_use_denies_tmux_send_keys_even_for_benchmark_sessions() {
+fn pre_tool_use_denies_tmux_send_keys_even_for_benchmark_agents() {
     let tmux = trusted_tmux_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -1074,7 +1066,7 @@ fn pre_tool_use_denies_tmux_send_keys_even_for_benchmark_sessions() {
 fn pre_tool_use_denies_external_run_request() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -1093,7 +1085,7 @@ fn pre_tool_use_denies_external_run_request() {
 fn pre_tool_use_denies_external_run_approve_and_run() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -1112,7 +1104,7 @@ fn pre_tool_use_denies_external_run_approve_and_run() {
 fn pre_tool_use_denies_external_run_run() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -1138,7 +1130,7 @@ fn pre_tool_use_denies_trusted_stateful_git_wrappers() {
 
     for command in cases {
         let input = serde_json::json!({
-            "session_id": "s1",
+            "agent_id": "s1",
             "cwd": "/repo",
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
@@ -1164,7 +1156,7 @@ fn pre_tool_use_allows_trusted_stateful_server_control() {
 
     for command in cases {
         let input = serde_json::json!({
-            "session_id": "s1",
+            "agent_id": "s1",
             "cwd": "/repo",
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
@@ -1184,7 +1176,7 @@ fn pre_tool_use_allows_trusted_stateful_server_control() {
 fn pre_tool_use_denies_external_run_with_outer_command_separator() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -1203,7 +1195,7 @@ fn pre_tool_use_denies_external_run_with_outer_command_separator() {
 fn pre_tool_use_denies_sandbox_run_with_outer_command_separator() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -1222,7 +1214,7 @@ fn pre_tool_use_denies_sandbox_run_with_outer_command_separator() {
 fn pre_tool_use_denies_sandbox_run_write_targets_without_target() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -1317,7 +1309,7 @@ fn pre_tool_use_denies_invalid_nested_codex_benchmark_sandbox_wrappers() {
 
     for (name, command, expected) in cases {
         let input = serde_json::json!({
-            "session_id": "s1",
+            "agent_id": "s1",
             "cwd": "/repo",
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
@@ -1337,7 +1329,7 @@ fn pre_tool_use_denies_invalid_nested_codex_benchmark_sandbox_wrappers() {
 fn pre_tool_use_denies_sandbox_run_with_shell_escape_quote_mismatch() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -1415,7 +1407,7 @@ fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
 
     for (name, command, expected) in cases {
         let input = serde_json::json!({
-            "session_id": "s1",
+            "agent_id": "s1",
             "cwd": "/repo",
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
@@ -1440,7 +1432,7 @@ fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
 #[test]
 fn pre_tool_use_denies_raw_read_only_bash_with_sandbox_run_guidance() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -1457,7 +1449,7 @@ fn pre_tool_use_denies_raw_read_only_bash_with_sandbox_run_guidance() {
 #[test]
 fn pre_tool_use_denies_raw_bash_even_when_legacy_sandbox_metadata_exists() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -1479,7 +1471,7 @@ fn pre_tool_use_denies_raw_bash_even_when_legacy_sandbox_metadata_exists() {
 #[test]
 fn pre_tool_use_denies_raw_quoted_rg_regex_alternation() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -1496,7 +1488,7 @@ fn pre_tool_use_denies_raw_quoted_rg_regex_alternation() {
 #[test]
 fn pre_tool_use_denies_raw_read_only_bash_dev_null_redirection() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -1513,7 +1505,7 @@ fn pre_tool_use_denies_raw_read_only_bash_dev_null_redirection() {
 #[test]
 fn pre_tool_use_denies_raw_test_bash_with_sandbox_run_guidance() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -1530,7 +1522,7 @@ fn pre_tool_use_denies_raw_test_bash_with_sandbox_run_guidance() {
 #[test]
 fn pre_tool_use_denies_raw_stateful_diagnostic_bash() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -1547,7 +1539,7 @@ fn pre_tool_use_denies_raw_stateful_diagnostic_bash() {
 #[test]
 fn pre_tool_use_denies_raw_stateful_bench_operational_bash() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -1562,9 +1554,9 @@ fn pre_tool_use_denies_raw_stateful_bench_operational_bash() {
 }
 
 #[test]
-fn pre_tool_use_in_repo_records_current_session_for_mcp() {
+fn pre_tool_use_in_repo_does_not_write_current_agent_context() {
     let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-current-session-test-{}",
+        "stateful-hook-current-agent-test-{}",
         std::process::id()
     ));
     if temp_root.exists() {
@@ -1580,7 +1572,7 @@ fn pre_tool_use_in_repo_records_current_session_for_mcp() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s-current",
+      "agent_id": "s-current",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -1601,17 +1593,15 @@ fn pre_tool_use_in_repo_records_current_session_for_mcp() {
         "stateful hook failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let session = read_legacy_current_session_file(&repo_root);
-    assert_eq!(session.session_id, "s-current");
-    assert_eq!(session.workspace_id, "w1");
+    assert_current_agent_context_absent(&repo_root);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn pre_tool_use_records_current_session_for_stateful_session_id() {
+fn pre_tool_use_uses_payload_agent_id_without_environment_fallback() {
     let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-stateful-session-test-{}",
+        "stateful-hook-stateful-agent-test-{}",
         std::process::id()
     ));
     if temp_root.exists() {
@@ -1621,27 +1611,26 @@ fn pre_tool_use_records_current_session_for_stateful_session_id() {
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
-    let (runtime, _rx) = spawn_fake_stateful_server(
+    let (runtime, rx) = spawn_fake_stateful_server(
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
     );
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s-current",
+      "agent_id": "s-current",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
-      "tool_name": "Bash",
+      "tool_name": "apply_patch",
       "tool_input": {
-        "command": "rg auth src"
+        "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
       }
     }"#;
 
-    let output = run_hook_subprocess_with_extra_env(
+    let output = run_hook_subprocess(
         &repo_root,
         &paths,
         &["hook", "codex", "pre-tool-use"],
         input,
-        &[(STATEFUL_SESSION_ID_ENV, "s-current")],
     );
 
     assert!(
@@ -1649,10 +1638,9 @@ fn pre_tool_use_records_current_session_for_stateful_session_id() {
         "stateful hook failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let session = read_current_session_file_for_session(&repo_root, "s-current")
-        .expect("session-bound current session should read");
-    assert_eq!(session.session_id, "s-current");
-    assert_eq!(session.workspace_id, "w1");
+    let request = rx.recv().expect("authorize request should arrive");
+    assert!(request.contains("\"agent_id\":\"s-current\""));
+    assert_current_agent_context_absent(&repo_root);
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -1677,7 +1665,7 @@ fn pre_tool_use_from_enabled_subdir_records_session_at_repo_root() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s-subdir",
+      "agent_id": "s-subdir",
       "cwd": "/repo/nested/worktree",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -1694,8 +1682,7 @@ fn pre_tool_use_from_enabled_subdir_records_session_at_repo_root() {
         String::from_utf8_lossy(&output.stderr)
     );
     let _request = rx.recv().expect("captured request should arrive");
-    let session = read_legacy_current_session_file(&repo_root);
-    assert_eq!(session.session_id, "s-subdir");
+    assert_current_agent_context_absent(&repo_root);
     assert!(!subdir.join(".stateful_core/runtime/session.json").exists());
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -1713,7 +1700,7 @@ fn pre_tool_use_in_disabled_repo_noops_without_runtime() {
     fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
 
     let input = r#"{
-      "session_id": "s-disabled",
+      "agent_id": "s-disabled",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -1749,7 +1736,7 @@ fn pre_tool_use_allows_read_only_sandbox_when_runtime_unreachable() {
     enable_test_repo(&paths, &repo_root);
     let stateful = env!("CARGO_BIN_EXE_stateful");
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": "/repo",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -1798,7 +1785,7 @@ fn pre_tool_use_denies_native_write_when_runtime_unreachable() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -1831,14 +1818,14 @@ fn pre_tool_use_denies_native_write_when_runtime_unreachable() {
 }
 
 #[test]
-fn pre_tool_use_denies_raw_stateful_reservation_declare_with_mcp_guidance() {
+fn pre_tool_use_denies_raw_stateful_reservation_declare_with_native_tool_guidance() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
       "tool_input": {
-      "command": "stateful reservation declare --session-id s1 --workspace-id w1 --purpose 'Fix auth validation behavior.' src/auth.ts"
+      "command": "stateful reservation declare --agent-id s1 --workspace-id w1 --purpose 'Fix auth validation behavior.' src/auth.ts"
       }
     }"#;
 
@@ -1847,7 +1834,7 @@ fn pre_tool_use_denies_raw_stateful_reservation_declare_with_mcp_guidance() {
     assert_bash_denial_mentions_all(
         outcome,
         &[
-            "Use canonical Stateful MCP tool names",
+            "Use active Stateful native coordination tool names",
             "state_reservation_declare",
             "state_claim_acquire",
             "Do not run `stateful reservation declare`",
@@ -1856,9 +1843,9 @@ fn pre_tool_use_denies_raw_stateful_reservation_declare_with_mcp_guidance() {
 }
 
 #[test]
-fn pre_tool_use_denies_stateful_mcp_call_reservation_declare_with_mcp_guidance() {
+fn pre_tool_use_denies_legacy_stateful_mcp_call_with_native_tool_guidance() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -1872,10 +1859,10 @@ fn pre_tool_use_denies_stateful_mcp_call_reservation_declare_with_mcp_guidance()
     assert_bash_denial_mentions_all(
         outcome,
         &[
-            "Use canonical Stateful MCP tool names",
+            "Use active Stateful native coordination tool names",
             "state_reservation_declare",
             "state_claim_acquire",
-            "`stateful mcp call` through Bash",
+            "legacy `stateful mcp call` through Bash",
         ],
     );
 }
@@ -1883,7 +1870,7 @@ fn pre_tool_use_denies_stateful_mcp_call_reservation_declare_with_mcp_guidance()
 #[test]
 fn pre_tool_use_denies_raw_other_stateful_control_commands() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -1900,7 +1887,7 @@ fn pre_tool_use_denies_raw_other_stateful_control_commands() {
 #[test]
 fn pre_tool_use_denies_raw_bash_control_syntax_even_with_legacy_read_only_tmp_sandbox() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -1922,7 +1909,7 @@ fn pre_tool_use_denies_raw_bash_control_syntax_even_with_legacy_read_only_tmp_sa
 #[test]
 fn pre_tool_use_denies_raw_pipeline_even_with_legacy_read_only_tmp_sandbox() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -1944,7 +1931,7 @@ fn pre_tool_use_denies_raw_pipeline_even_with_legacy_read_only_tmp_sandbox() {
 #[test]
 fn pre_tool_use_denies_bash_control_syntax_without_sandbox_run_wrapper() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -1974,7 +1961,7 @@ fn run_hook_pre_tool_use_denies_raw_bash_with_legacy_trusted_sandbox_env() {
     let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -2019,7 +2006,7 @@ fn run_hook_pre_tool_use_denies_raw_bash_with_legacy_trusted_sandbox_env() {
 #[test]
 fn pre_tool_use_denies_tool_input_spoofed_read_only_bash_sandbox() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -2041,7 +2028,7 @@ fn pre_tool_use_denies_tool_input_spoofed_read_only_bash_sandbox() {
 #[test]
 fn pre_tool_use_denies_raw_bash_even_with_legacy_repo_writable_root_metadata() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -2063,7 +2050,7 @@ fn pre_tool_use_denies_raw_bash_even_with_legacy_repo_writable_root_metadata() {
 #[test]
 fn pre_tool_use_denies_raw_bash_even_with_legacy_network_access_metadata() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -2085,7 +2072,7 @@ fn pre_tool_use_denies_raw_bash_even_with_legacy_network_access_metadata() {
 #[test]
 fn pre_tool_use_denies_raw_bash_even_with_incomplete_legacy_network_metadata() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -2106,7 +2093,7 @@ fn pre_tool_use_denies_raw_bash_even_with_incomplete_legacy_network_metadata() {
 #[test]
 fn pre_tool_use_denies_raw_mutating_command_even_with_legacy_read_only_sandbox() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -2128,7 +2115,7 @@ fn pre_tool_use_denies_raw_mutating_command_even_with_legacy_read_only_sandbox()
 #[test]
 fn pre_tool_use_denies_raw_stateful_control_command_even_with_legacy_read_only_sandbox() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -2150,7 +2137,7 @@ fn pre_tool_use_denies_raw_stateful_control_command_even_with_legacy_read_only_s
 #[test]
 fn pre_tool_use_denies_arbitrary_raw_bash_even_with_legacy_read_only_sandbox() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "Bash",
@@ -2172,7 +2159,7 @@ fn pre_tool_use_denies_arbitrary_raw_bash_even_with_legacy_read_only_sandbox() {
 #[test]
 fn pre_tool_use_denies_apply_patch_until_intent_protocol_exists() {
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -2239,7 +2226,7 @@ fn pre_tool_use_allows_known_non_repo_write_tools_without_runtime() {
         "mcp__codex_apps__microsoft_teams__send_message",
     ] {
         let input = serde_json::json!({
-            "session_id": "s1",
+            "agent_id": "s1",
             "cwd": "/repo",
             "hook_event_name": "PreToolUse",
             "tool_name": tool_name,
@@ -2265,7 +2252,7 @@ fn pre_tool_use_denies_unclassified_tool_names() {
         "mcp__codex_apps__microsoft_teams__delete_message",
     ] {
         let input = serde_json::json!({
-          "session_id": "s1",
+          "agent_id": "s1",
           "cwd": "/repo",
           "hook_event_name": "PreToolUse",
           "tool_name": tool_name,
@@ -2310,7 +2297,7 @@ fn pre_tool_use_bash_denial_in_repo_does_not_render_live_context() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -2357,7 +2344,7 @@ fn pre_tool_use_denies_github_remote_repository_mutation_tools() {
         "mcp__codex_apps__github__update_ref",
     ] {
         let input = serde_json::json!({
-            "session_id": "s1",
+            "agent_id": "s1",
             "cwd": "/repo",
             "hook_event_name": "PreToolUse",
             "tool_name": tool_name,
@@ -2394,7 +2381,7 @@ fn pre_tool_use_records_unclassified_tools_for_tools_list() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "FutureWriteTool",
@@ -2448,7 +2435,7 @@ fn pre_tool_use_allows_repo_tool_allowlist_but_preserves_hard_denies() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let allowed_input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "mcp__codex_apps__github__merge_pull_request",
@@ -2473,7 +2460,7 @@ fn pre_tool_use_allows_repo_tool_allowlist_but_preserves_hard_denies() {
     );
 
     let denied_input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "mcp__filesystem__write_file",
@@ -2524,7 +2511,7 @@ fn pre_tool_use_denies_edit_and_write_without_runtime() {
         ),
     ] {
         let input = serde_json::json!({
-            "session_id": "s1",
+            "agent_id": "s1",
             "cwd": "/repo",
             "hook_event_name": "PreToolUse",
             "tool_name": tool_name,
@@ -2546,8 +2533,8 @@ fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
     let input = serde_json::json!({
         "runtime": "omp",
-        "session_id": "omp-parent",
-        "parent_session_id": serde_json::Value::Null,
+        "agent_id": "omp-parent",
+        "parent_agent_id": serde_json::Value::Null,
         "omp_agent_id": "main",
         "workspace_id": runtime.workspace_id,
         "cwd": "/repo",
@@ -2571,7 +2558,7 @@ fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
     let body = request_json_body(&request);
     assert_eq!(body["source"]["kind"], "hook");
     assert_eq!(body["source"]["event"], "omp_pre_tool_use");
-    assert_eq!(body["session"]["session_id"], "omp-parent");
+    assert_eq!(body["agent"]["agent_id"], "omp-parent");
     assert_eq!(body["payload"]["action"], "write_file");
     assert_eq!(body["payload"]["path"], "docs/a.md");
     assert!(body["payload"].get("commit_id").is_none());
@@ -2596,7 +2583,7 @@ fn omp_unclassified_tools_are_manageable_with_stateful_tools_allowlist() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let yield_input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "cwd": repo_root,
         "yolo": false,
         "tool_name": "yield",
@@ -2620,7 +2607,7 @@ fn omp_unclassified_tools_are_manageable_with_stateful_tools_allowlist() {
     let list = tool_list_for_repo(&paths, &repo_root).expect("tool list should load");
     assert!(list.unclassified_tools.is_empty());
     let lazy_write_resume_input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "cwd": repo_root,
         "yolo": false,
         "tool_name": "lazy_write_resume",
@@ -2645,7 +2632,7 @@ fn omp_unclassified_tools_are_manageable_with_stateful_tools_allowlist() {
     assert!(list.unclassified_tools.is_empty());
 
     let glob_input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "cwd": repo_root,
         "yolo": false,
         "tool_name": "functions.glob",
@@ -2670,7 +2657,7 @@ fn omp_unclassified_tools_are_manageable_with_stateful_tools_allowlist() {
     assert!(list.unclassified_tools.is_empty());
 
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "cwd": repo_root,
         "yolo": false,
         "tool_name": "future_omp_widget",
@@ -2726,7 +2713,7 @@ fn run_hook_omp_pre_tool_use_prints_extension_decision() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
         "cwd": repo_root,
         "yolo": false,
@@ -2745,7 +2732,7 @@ fn run_hook_omp_pre_tool_use_prints_extension_decision() {
         serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
     assert_eq!(stdout["decision"], "allow");
     let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
-    assert_eq!(body["session"]["session_id"], "omp-parent");
+    assert_eq!(body["agent"]["agent_id"], "omp-parent");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -2778,7 +2765,7 @@ fn run_hook_omp_env_runtime_derives_workspace_id_from_enabled_repo() {
     ];
 
     let session_start = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "cwd": repo_root,
         "omp_agent_id": "main"
     })
@@ -2801,7 +2788,7 @@ fn run_hook_omp_env_runtime_derives_workspace_id_from_enabled_repo() {
     assert_eq!(session_start_output["decision"], "allow");
     assert_eq!(session_start_output["workspace_id"], expected_workspace_id);
     assert_eq!(
-        session_start_output["notifications_stream"]["session_id"],
+        session_start_output["notifications_stream"]["agent_id"],
         "omp-parent"
     );
     assert_eq!(
@@ -2809,12 +2796,12 @@ fn run_hook_omp_env_runtime_derives_workspace_id_from_enabled_repo() {
         expected_workspace_id
     );
     let register = request_json_body(&rx.recv().expect("session register should arrive"));
-    assert_eq!(register["session_id"], "omp-parent");
+    assert_eq!(register["agent_id"], "omp-parent");
     assert_eq!(register["workspace_id"], expected_workspace_id);
     assert_ne!(register["workspace_id"], "unknown");
 
     let pre_tool = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "cwd": repo_root,
         "yolo": false,
         "omp_agent_id": "main",
@@ -2838,7 +2825,7 @@ fn run_hook_omp_env_runtime_derives_workspace_id_from_enabled_repo() {
         serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
     assert_eq!(stdout["decision"], "allow");
     let authorize = request_json_body(&rx.recv().expect("authorize request should arrive"));
-    assert_eq!(authorize["session"]["session_id"], "omp-parent");
+    assert_eq!(authorize["agent"]["agent_id"], "omp-parent");
     assert_eq!(
         authorize["workspace"]["workspace_id"],
         expected_workspace_id
@@ -2856,7 +2843,7 @@ fn run_hook_omp_env_runtime_derives_workspace_id_from_enabled_repo() {
 fn omp_edit_extracts_hashline_file_targets() {
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
         "cwd": "/repo",
         "yolo": false,
@@ -2900,7 +2887,7 @@ fn omp_edit_authorize_includes_lazy_queue_metadata_when_scope_exists() {
                 "items": [{
                     "kind": "reservation",
                     "freshness": "live",
-                    "session_id": "omp-parent",
+                    "agent_id": "omp-parent",
                     "workspace_id": "w1",
                     "resource": "docs/a.md",
                     "purpose": "Replay queued edit."
@@ -2909,7 +2896,7 @@ fn omp_edit_authorize_includes_lazy_queue_metadata_when_scope_exists() {
         ),
     );
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "workspace_id": "w1",
         "cwd": repo_root,
         "yolo": false,
@@ -2957,7 +2944,7 @@ fn omp_write_pre_tool_declares_missing_file_reservation_and_retries_authorize() 
         r#"{"decision":"allow","message":"ok"}"#,
     ]);
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
         "cwd": "/repo",
         "yolo": false,
@@ -2985,7 +2972,7 @@ fn omp_write_pre_tool_declares_missing_file_reservation_and_retries_authorize() 
         serde_json::json!(["docs/a.md"])
     );
     let claim = request_json_body(&rx.recv().expect("claim acquire should arrive"));
-    assert_eq!(claim["session_id"], "omp-parent");
+    assert_eq!(claim["agent_id"], "omp-parent");
     assert_eq!(claim["reservation_id"], "auto-reservation");
     assert_eq!(claim["paths"], serde_json::json!(["docs/a.md"]));
     let retry_authorize = request_json_body(&rx.recv().expect("retry authorize should arrive"));
@@ -3002,7 +2989,7 @@ fn omp_write_uses_tool_input_reservation_when_top_level_reservation_is_blank() {
         r#"{"decision":"deny","message":"missing","reason_code":"missing_reservation"}"#,
     );
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "reservation_id": "   ",
         "workspace_id": runtime.workspace_id,
         "cwd": "/repo",
@@ -3045,13 +3032,13 @@ fn omp_write_releases_auto_claim_when_retry_authorization_blocks() {
         r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
         r#"{
             "decision": "deny",
-            "message": "Write target is covered by another active session claim.",
+            "message": "Write target is covered by another active agent claim.",
             "reason_code": "active_claim_conflict"
         }"#,
         r#"{"status":"ok"}"#,
     ]);
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
         "cwd": "/repo",
         "yolo": false,
@@ -3077,7 +3064,7 @@ fn omp_write_releases_auto_claim_when_retry_authorization_blocks() {
         &rx.recv_timeout(Duration::from_secs(1))
             .expect("claim release should arrive"),
     );
-    assert_eq!(release["session_id"], "omp-parent");
+    assert_eq!(release["agent_id"], "omp-parent");
     assert_eq!(release["workspace_id"], runtime.workspace_id);
     assert_eq!(release["path"], "docs/a.md");
 }
@@ -3087,7 +3074,7 @@ fn omp_raw_bash_authorizes_trusted_write_target_sandbox_run() {
     let stateful = trusted_stateful_path();
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
         "cwd": "/repo",
         "yolo": false,
@@ -3123,7 +3110,7 @@ fn omp_removed_generated_command_tools_are_not_allowlisted() {
         "sandbox_job_poll",
     ] {
         let input = serde_json::json!({
-            "session_id": "omp-parent",
+            "agent_id": "omp-parent",
             "cwd": "/repo",
             "yolo": false,
             "tool_name": tool_name,
@@ -3152,7 +3139,7 @@ fn omp_removed_generated_command_tools_are_not_allowlisted() {
 fn omp_raw_bash_allows_trusted_external_sandbox_run_for_extension_preflight() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "cwd": "/repo",
         "yolo": false,
         "tool_name": "bash",
@@ -3178,7 +3165,7 @@ fn omp_raw_bash_allows_trusted_external_sandbox_run_for_extension_preflight() {
 fn omp_repo_internal_raw_bash_rejects_shell_writes_and_unsafe_find_actions() {
     for command in ["ls > docs/a.md", "find . -delete"] {
         let input = serde_json::json!({
-            "session_id": "omp-parent",
+            "agent_id": "omp-parent",
             "cwd": "/repo",
             "yolo": false,
             "tool_name": "bash",
@@ -3206,7 +3193,7 @@ fn omp_repo_internal_raw_bash_allows_only_trusted_sandbox_requests() {
     let denied = ["pwd".to_string(), "python scripts/gen.py".to_string()];
 
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "cwd": "/repo",
         "yolo": false,
         "tool_name": "bash",
@@ -3226,7 +3213,7 @@ fn omp_repo_internal_raw_bash_allows_only_trusted_sandbox_requests() {
 
     for command in denied {
         let input = serde_json::json!({
-            "session_id": "omp-parent",
+            "agent_id": "omp-parent",
             "cwd": "/repo",
             "yolo": false,
             "tool_name": "bash",
@@ -3259,7 +3246,7 @@ fn omp_namespaced_bash_allows_only_trusted_sandbox_requests() {
         ),
     ] {
         let input = serde_json::json!({
-            "session_id": "omp-parent",
+            "agent_id": "omp-parent",
             "cwd": "/repo",
             "yolo": false,
             "tool_name": "functions.bash",
@@ -3299,7 +3286,7 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
         "julia",
     ] {
         let input = serde_json::json!({
-            "session_id": "omp-parent",
+            "agent_id": "omp-parent",
             "cwd": "/repo",
             "yolo": false,
             "tool_name": tool_name,
@@ -3326,7 +3313,7 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
     }
 
     let raw_python_input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "cwd": "/repo",
         "yolo": false,
         "tool_name": "functions.python",
@@ -3353,7 +3340,7 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
 
     let stateful = trusted_stateful_path();
     let sandboxed_python_input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "cwd": "/repo",
         "yolo": false,
         "tool_name": "python",
@@ -3381,7 +3368,7 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
     assert!(!reason.contains("ext_rw_bash"));
 
     let repo_external_python_input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "cwd": "/tmp/outside",
         "yolo": false,
         "tool_name": "python",
@@ -3431,7 +3418,7 @@ fn omp_allows_classified_read_only_and_non_file_writing_tools() {
         "state_reservation_declare",
     ] {
         let input = serde_json::json!({
-            "session_id": "omp-parent",
+            "agent_id": "omp-parent",
             "cwd": "/repo",
             "yolo": false,
             "tool_name": tool_name,
@@ -3455,7 +3442,7 @@ fn omp_allows_classified_read_only_and_non_file_writing_tools() {
 #[test]
 fn omp_repo_external_raw_bash_blocks_without_external_sandbox_profile() {
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "cwd": "/tmp/outside",
         "yolo": false,
         "tool_name": "bash",
@@ -3481,7 +3468,7 @@ fn omp_repo_external_raw_bash_blocks_without_external_sandbox_profile() {
 fn omp_allows_sandbox_external_profile_after_extension_preflight() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "cwd": "/repo",
         "yolo": false,
         "tool_name": "bash",
@@ -3508,7 +3495,7 @@ fn omp_yolo_does_not_downgrade_server_denial() {
     let (runtime, _rx) =
         spawn_fake_stateful_server(r#"{"decision":"deny","message":"missing claim"}"#);
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
         "cwd": "/repo",
         "yolo": true,
@@ -3533,7 +3520,7 @@ fn omp_yolo_does_not_downgrade_server_denial() {
 fn omp_session_start_posts_parent_session_register() {
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     let input = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
         "cwd": "/repo",
         "omp_agent_id": "main",
@@ -3544,7 +3531,7 @@ fn omp_session_start_posts_parent_session_register() {
     let output = handle_omp_session_start_with_runtime(&input, &runtime)
         .expect("omp session start should post register");
     assert_eq!(output.decision, "allow");
-    assert_eq!(output.session_id, "omp-parent");
+    assert_eq!(output.agent_id, "omp-parent");
     assert_eq!(output.workspace_id, runtime.workspace_id);
     assert_eq!(output.notifications_stream.base_url, runtime.base_url);
     assert_eq!(
@@ -3553,7 +3540,7 @@ fn omp_session_start_posts_parent_session_register() {
     );
 
     let body = request_json_body(&rx.recv().expect("session register request should arrive"));
-    assert_eq!(body["session_id"], "omp-parent");
+    assert_eq!(body["agent_id"], "omp-parent");
     assert_eq!(body["workspace_id"], runtime.workspace_id);
     assert_eq!(body["metadata"]["runtime"], "omp");
     assert_eq!(body["metadata"]["omp_agent_id"], "main");
@@ -3564,8 +3551,8 @@ fn omp_session_start_posts_parent_session_register() {
 fn omp_subagent_post_tool_uses_child_session_and_parent_metadata() {
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
     let input = serde_json::json!({
-        "session_id": "omp-child",
-        "parent_session_id": "omp-parent",
+        "agent_id": "omp-child",
+        "parent_agent_id": "omp-parent",
         "omp_agent_id": "WorkerA",
         "workspace_id": runtime.workspace_id,
         "cwd": "/repo",
@@ -3578,9 +3565,9 @@ fn omp_subagent_post_tool_uses_child_session_and_parent_metadata() {
         .expect("omp post tool should post heartbeat");
 
     let body = request_json_body(&rx.recv().expect("heartbeat request should arrive"));
-    assert_eq!(body["session_id"], "omp-child");
+    assert_eq!(body["agent_id"], "omp-child");
     assert_eq!(body["workspace_id"], runtime.workspace_id);
-    assert_eq!(body["metadata"]["parent_session_id"], "omp-parent");
+    assert_eq!(body["metadata"]["parent_agent_id"], "omp-parent");
     assert_eq!(body["metadata"]["omp_agent_id"], "WorkerA");
 }
 
@@ -3605,7 +3592,7 @@ fn pre_tool_use_edit_posts_authorize_and_denies_when_server_denies() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "Edit",
@@ -3668,7 +3655,7 @@ fn pre_tool_use_edit_denies_when_authorize_connection_drops() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "Edit",
@@ -3724,7 +3711,7 @@ fn pre_tool_use_edit_posts_authorize_without_rendering_live_context_when_server_
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "Edit",
@@ -3785,7 +3772,7 @@ fn pre_tool_use_edit_relative_path_is_resolved_from_payload_cwd() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": docs_dir,
         "hook_event_name": "PreToolUse",
         "tool_name": "Edit",
@@ -3837,7 +3824,7 @@ fn run_hook_uses_payload_cwd_for_repo_gate() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s-cwd",
+        "agent_id": "s-cwd",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "apply_patch",
@@ -3857,8 +3844,8 @@ fn run_hook_uses_payload_cwd_for_repo_gate() {
     );
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/authorize HTTP/1.1"));
-    let session = read_legacy_current_session_file(&repo_root);
-    assert_eq!(session.session_id, "s-cwd");
+    assert!(request.contains("\"agent_id\":\"s-cwd\""));
+    assert_current_agent_context_absent(&repo_root);
     assert!(!outside.join(".stateful_core/runtime/session.json").exists());
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -3886,7 +3873,7 @@ fn pre_tool_use_apply_patch_omits_queue_without_matching_current_intent_purpose(
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -3940,7 +3927,7 @@ fn pre_tool_use_apply_patch_uses_current_intent_purpose_for_queue_even_when_targ
                 "freshness":"live",
                 "resource":"docs/notes.md",
                 "purpose":"Continue documented retry work.",
-                "session_id":"s1",
+                "agent_id":"s1",
                 "workspace_id":"w1"
             }]}"#,
         ),
@@ -3948,7 +3935,7 @@ fn pre_tool_use_apply_patch_uses_current_intent_purpose_for_queue_even_when_targ
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -3999,7 +3986,7 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -4025,7 +4012,7 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     assert!(request.contains("Authorization: Bearer secret-token"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v1");
-    assert_eq!(body["session"]["session_id"], "s1");
+    assert_eq!(body["agent"]["agent_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert!(
         body["workspace"]["repo_id"]
@@ -4085,13 +4072,13 @@ fn pre_tool_use_apply_patch_repeated_same_path_denial_suggests_single_writer() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
-        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active agent claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active agent claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -4163,13 +4150,13 @@ fn pre_tool_use_apply_patch_different_path_denial_does_not_trigger_single_writer
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
-        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active agent claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active agent claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let first_input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -4178,7 +4165,7 @@ fn pre_tool_use_apply_patch_different_path_denial_does_not_trigger_single_writer
       }
     }"#;
     let second_input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -4241,13 +4228,13 @@ fn pre_tool_use_apply_patch_path_marker_key_does_not_collapse_separators() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
-        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active agent claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active agent claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let first_input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -4256,7 +4243,7 @@ fn pre_tool_use_apply_patch_path_marker_key_does_not_collapse_separators() {
       }
     }"#;
     let second_input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -4302,7 +4289,7 @@ fn pre_tool_use_apply_patch_path_marker_key_does_not_collapse_separators() {
 }
 
 #[test]
-fn pre_tool_use_apply_patch_invalid_session_id_does_not_write_denial_marker() {
+fn pre_tool_use_apply_patch_invalid_agent_id_does_not_write_denial_marker() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-repeated-denial-session-key-test-{}",
         std::process::id()
@@ -4315,12 +4302,12 @@ fn pre_tool_use_apply_patch_invalid_session_id_does_not_write_denial_marker() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active agent claim.","required_next_action":"Reread target, then claim the reservation before writing."}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "../escape",
+      "agent_id": "../escape",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -4373,7 +4360,7 @@ fn pre_tool_use_apply_patch_denial_does_not_render_live_context() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -4432,7 +4419,7 @@ fn pre_tool_use_apply_patch_sends_base_observation_for_existing_file() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "apply_patch",
@@ -4490,7 +4477,7 @@ fn pre_tool_use_apply_patch_patch_field_authorizes_every_file_target() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "apply_patch",
@@ -4550,7 +4537,7 @@ fn pre_tool_use_apply_patch_move_authorizes_source_and_destination() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "apply_patch",
@@ -4611,7 +4598,7 @@ fn pre_tool_use_apply_patch_raw_string_payload_posts_authorize() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "apply_patch",
@@ -4660,7 +4647,7 @@ fn pre_tool_use_file_change_posts_authorize_for_changed_paths() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "file_change",
@@ -4713,7 +4700,7 @@ fn hook_pre_tool_use_discovers_global_runtime_file() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s-global",
+      "agent_id": "s-global",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -4770,7 +4757,7 @@ fn pre_tool_use_apply_patch_denies_when_server_denies() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -4831,7 +4818,7 @@ dependencies = ["langchain-core>=0.3"]
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "apply_patch",
@@ -4880,12 +4867,12 @@ fn pre_tool_use_apply_patch_denial_includes_wait_id_guidance() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active session claim.","required_next_action":"Wait for the active claim to release, then claim the reservation before writing.","wait":{"wait_id":"wait-123","session_id":"s1","workspace_id":"w1","path":"src/auth.ts","action":"write_file","status":"queued","queue_position":2,"blocking_session_id":"s2"}}"#,
+        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"Write target is covered by another active agent claim.","required_next_action":"Wait for the active claim to release, then claim the reservation before writing.","wait":{"wait_id":"wait-123","agent_id":"s1","workspace_id":"w1","path":"src/auth.ts","action":"write_file","status":"queued","queue_position":2,"blocking_agent_id":"s2"}}"#,
     );
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -4914,7 +4901,7 @@ fn pre_tool_use_apply_patch_denial_includes_wait_id_guidance() {
         .expect("denial reason should be text");
     assert!(reason.contains("wait-123"));
     assert!(reason.contains("queue position 2"));
-    assert!(reason.contains("blocked by session s2"));
+    assert!(reason.contains("blocked by agent s2"));
     assert!(reason.contains("state_notifications_poll"));
     assert!(reason.contains("state_resume_next"));
     assert!(reason.contains("reread"));
@@ -4940,7 +4927,7 @@ fn pre_tool_use_apply_patch_delete_posts_delete_file_action() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
@@ -4983,7 +4970,7 @@ fn session_start_posts_session_register() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "hook_event_name": "SessionStart"
     }"#;
 
@@ -5001,7 +4988,7 @@ fn session_start_posts_session_register() {
 
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/session/register HTTP/1.1"));
-    assert!(request.contains("\"session_id\":\"s1\""));
+    assert!(request.contains("\"agent_id\":\"s1\""));
     assert!(request.contains("\"workspace_id\":\"w1\""));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -5022,7 +5009,7 @@ fn post_tool_use_posts_session_heartbeat() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "hook_event_name": "PostToolUse",
       "tool_name": "Bash",
       "tool_input": {"command": "rg auth src"}
@@ -5042,7 +5029,7 @@ fn post_tool_use_posts_session_heartbeat() {
 
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/session/heartbeat HTTP/1.1"));
-    assert!(request.contains("\"session_id\":\"s1\""));
+    assert!(request.contains("\"agent_id\":\"s1\""));
     assert!(request.contains("\"workspace_id\":\"w1\""));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -5068,7 +5055,7 @@ fn post_tool_use_edit_refreshes_file_claim_observation() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PostToolUse",
         "tool_name": "Edit",
@@ -5100,7 +5087,7 @@ fn post_tool_use_edit_refreshes_file_claim_observation() {
         .expect("claim observation refresh request should arrive");
     assert!(refresh.contains("POST /v1/claim/refresh-observation HTTP/1.1"));
     let body = request_json_body(&refresh);
-    assert_eq!(body["session_id"], "s1");
+    assert_eq!(body["agent_id"], "s1");
     assert_eq!(body["workspace_id"], "w1");
     assert_eq!(body["path"], "src/auth.ts");
     assert_eq!(
@@ -5137,7 +5124,7 @@ fn post_tool_use_edit_reclaims_file_lease_after_refresh() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
-        "session_id": "s1",
+        "agent_id": "s1",
         "cwd": repo_root,
         "hook_event_name": "PostToolUse",
         "tool_name": "Edit",
@@ -5174,7 +5161,7 @@ fn post_tool_use_edit_reclaims_file_lease_after_refresh() {
         .expect("claim release request should arrive after refresh");
     assert!(release.contains("POST /v1/claim/release HTTP/1.1"));
     let body = request_json_body(&release);
-    assert_eq!(body["session_id"], "s1");
+    assert_eq!(body["agent_id"], "s1");
     assert_eq!(body["workspace_id"], "w1");
     assert_eq!(body["path"], "src/auth.ts");
 
@@ -5191,7 +5178,7 @@ fn post_tool_use_in_disabled_repo_noops_without_outbox() {
     fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "hook_event_name": "PostToolUse",
       "tool_name": "Bash",
       "tool_input": {"command": "rg auth src"}
@@ -5245,7 +5232,7 @@ fn post_tool_use_outbox_fallback_records_current_created_at() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "hook_event_name": "PostToolUse",
       "tool_name": "Bash",
       "tool_input": {"command": "rg auth src"}
@@ -5274,7 +5261,7 @@ fn post_tool_use_outbox_fallback_records_current_created_at() {
     let outbox = fs::read_to_string(&outbox_file).expect("outbox fallback should write");
     let record: serde_json::Value =
         serde_json::from_str(outbox.trim()).expect("outbox record should be json");
-    assert_eq!(record["event_type"], "SessionHeartbeatQueued");
+    assert_eq!(record["event_type"], "AgentHeartbeatQueued");
     let created_at = record["created_at"]
         .as_str()
         .expect("created_at should be a string");
@@ -5315,7 +5302,7 @@ fn codex_stateful_lifecycle_posts_expected_server_requests() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let session_start = serde_json::json!({
-        "session_id": "codex-session",
+        "agent_id": "codex-session",
         "thread_id": "codex-session",
         "transcript_path": "/tmp/transcript.jsonl",
         "cwd": repo_root,
@@ -5336,11 +5323,11 @@ fn codex_stateful_lifecycle_posts_expected_server_requests() {
     let register = rx.recv().expect("session register request should arrive");
     assert!(register.contains("POST /v1/session/register HTTP/1.1"));
     let register_body = request_json_body(&register);
-    assert_eq!(register_body["session_id"], "codex-session");
+    assert_eq!(register_body["agent_id"], "codex-session");
     assert_eq!(register_body["workspace_id"], "w1");
 
     let user_prompt = serde_json::json!({
-        "session_id": "codex-session",
+        "agent_id": "codex-session",
         "cwd": repo_root,
         "hook_event_name": "UserPromptSubmit",
         "prompt": "work on auth"
@@ -5362,11 +5349,11 @@ fn codex_stateful_lifecycle_posts_expected_server_requests() {
     let prompt_context = rx.recv().expect("context render request should arrive");
     assert!(prompt_context.contains("POST /v1/context/render HTTP/1.1"));
     let prompt_body = request_json_body(&prompt_context);
-    assert_eq!(prompt_body["session_id"], "codex-session");
+    assert_eq!(prompt_body["agent_id"], "codex-session");
     assert_eq!(prompt_body["mode"], "brief");
 
     let pre_tool = serde_json::json!({
-        "session_id": "codex-session",
+        "agent_id": "codex-session",
         "cwd": repo_root,
         "hook_event_name": "PreToolUse",
         "tool_name": "Edit",
@@ -5391,11 +5378,11 @@ fn codex_stateful_lifecycle_posts_expected_server_requests() {
     let authorize = rx.recv().expect("authorize request should arrive");
     assert!(authorize.contains("POST /v1/authorize HTTP/1.1"));
     let authorize_body = request_json_body(&authorize);
-    assert_eq!(authorize_body["session"]["session_id"], "codex-session");
+    assert_eq!(authorize_body["agent"]["agent_id"], "codex-session");
     assert_eq!(authorize_body["payload"]["action"], "write_file");
     assert_eq!(authorize_body["payload"]["path"], "src/auth.ts");
     let post_tool = serde_json::json!({
-        "session_id": "codex-session",
+        "agent_id": "codex-session",
         "cwd": repo_root,
         "hook_event_name": "PostToolUse",
         "tool_name": "Bash",
@@ -5415,10 +5402,10 @@ fn codex_stateful_lifecycle_posts_expected_server_requests() {
     );
     let heartbeat = rx.recv().expect("heartbeat request should arrive");
     assert!(heartbeat.contains("POST /v1/session/heartbeat HTTP/1.1"));
-    assert_eq!(request_json_body(&heartbeat)["session_id"], "codex-session");
+    assert_eq!(request_json_body(&heartbeat)["agent_id"], "codex-session");
 
     let stop = serde_json::json!({
-        "session_id": "codex-session",
+        "agent_id": "codex-session",
         "cwd": repo_root,
         "hook_event_name": "Stop"
     })
@@ -5431,7 +5418,7 @@ fn codex_stateful_lifecycle_posts_expected_server_requests() {
     );
     let finalize = rx.recv().expect("finalize request should arrive");
     assert!(finalize.contains("POST /v1/activity/finalize HTTP/1.1"));
-    assert_eq!(request_json_body(&finalize)["session_id"], "codex-session");
+    assert_eq!(request_json_body(&finalize)["agent_id"], "codex-session");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -5464,7 +5451,7 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
     ];
 
     let session_start = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
         "cwd": repo_root,
         "omp_agent_id": "main",
@@ -5486,29 +5473,14 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
     let register = rx.recv().expect("session register request should arrive");
     assert!(register.contains("POST /v1/session/register HTTP/1.1"));
     let register_body = request_json_body(&register);
-    assert_eq!(register_body["session_id"], "omp-parent");
+    assert_eq!(register_body["agent_id"], "omp-parent");
     assert_eq!(register_body["source"]["event"], "omp_session_start");
     assert_eq!(register_body["metadata"]["runtime"], "omp");
     assert_eq!(register_body["metadata"]["omp_agent_id"], "main");
-    let current_session = read_current_session_file_for_session(&repo_root, "omp-parent")
-        .expect("OMP session start should persist current session for MCP tools");
-    assert_eq!(current_session.session_id, "omp-parent");
-    assert_eq!(current_session.workspace_id, runtime.workspace_id);
-    let legacy_session: CurrentSession = serde_json::from_str(
-        &fs::read_to_string(
-            repo_root
-                .join(".stateful_core")
-                .join("runtime")
-                .join("session.json"),
-        )
-        .expect("legacy current session should read"),
-    )
-    .expect("legacy current session should parse");
-    assert_eq!(legacy_session.session_id, "omp-parent");
-    assert_eq!(legacy_session.workspace_id, runtime.workspace_id);
+    assert_current_agent_context_absent(&repo_root);
 
     let pre_tool = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
         "cwd": repo_root,
         "yolo": false,
@@ -5536,13 +5508,13 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
     let authorize = rx.recv().expect("authorize request should arrive");
     assert!(authorize.contains("POST /v1/authorize HTTP/1.1"));
     let authorize_body = request_json_body(&authorize);
-    assert_eq!(authorize_body["session"]["session_id"], "omp-parent");
+    assert_eq!(authorize_body["agent"]["agent_id"], "omp-parent");
     assert_eq!(authorize_body["source"]["event"], "omp_pre_tool_use");
     assert_eq!(authorize_body["payload"]["action"], "write_file");
     assert_eq!(authorize_body["payload"]["path"], "docs/a.md");
 
     let post_tool = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
         "cwd": repo_root,
         "omp_agent_id": "main",
@@ -5566,21 +5538,21 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
     let heartbeat = rx.recv().expect("heartbeat request should arrive");
     assert!(heartbeat.contains("POST /v1/session/heartbeat HTTP/1.1"));
     let heartbeat_body = request_json_body(&heartbeat);
-    assert_eq!(heartbeat_body["session_id"], "omp-parent");
+    assert_eq!(heartbeat_body["agent_id"], "omp-parent");
     assert_eq!(heartbeat_body["source"]["event"], "omp_post_tool_use");
     let refresh = rx.recv().expect("claim refresh request should arrive");
     assert!(refresh.contains("POST /v1/claim/refresh-observation HTTP/1.1"));
     let refresh_body = request_json_body(&refresh);
-    assert_eq!(refresh_body["session_id"], "omp-parent");
+    assert_eq!(refresh_body["agent_id"], "omp-parent");
     assert_eq!(refresh_body["path"], "docs/a.md");
     let release = rx.recv().expect("claim release request should arrive");
     assert!(release.contains("POST /v1/claim/release HTTP/1.1"));
     let reclaim_body = request_json_body(&release);
-    assert_eq!(reclaim_body["session_id"], "omp-parent");
+    assert_eq!(reclaim_body["agent_id"], "omp-parent");
     assert_eq!(reclaim_body["path"], "docs/a.md");
 
     let stop = serde_json::json!({
-        "session_id": "omp-parent",
+        "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
         "cwd": repo_root,
         "omp_agent_id": "main",
@@ -5602,7 +5574,7 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
     let finalize = rx.recv().expect("finalize request should arrive");
     assert!(finalize.contains("POST /v1/activity/finalize HTTP/1.1"));
     let finalize_body = request_json_body(&finalize);
-    assert_eq!(finalize_body["session_id"], "omp-parent");
+    assert_eq!(finalize_body["agent_id"], "omp-parent");
     assert_eq!(finalize_body["source"]["event"], "omp_stop");
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -5626,7 +5598,7 @@ fn user_prompt_submit_posts_context_render() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "hook_event_name": "UserPromptSubmit",
       "prompt": "work on auth"
     }"#;
@@ -5647,10 +5619,10 @@ fn user_prompt_submit_posts_context_render() {
     assert!(rendered.contains("Nearby Activity"));
     assert!(rendered.contains("planning/manual inspection"));
     assert!(rendered.contains("stateful-command-policy"));
-    assert!(rendered.contains("Use canonical Stateful MCP tool names"));
+    assert!(rendered.contains("Use native Stateful coordination tools"));
     assert!(rendered.contains("state_reservation_declare"));
     assert!(rendered.contains("state_claim_acquire"));
-    assert!(rendered.contains("runtime-specific tool names"));
+    assert!(rendered.contains("runtime-specific names"));
     assert!(rendered.contains("Do not run `stateful reservation declare`"));
     assert!(rendered.contains("--fs read-only --network disabled"));
     assert!(rendered.contains("--fs build --network enabled"));
@@ -5678,7 +5650,7 @@ fn user_prompt_submit_posts_context_render() {
     );
     assert!(
         second_output.stdout.is_empty(),
-        "second UserPromptSubmit for the same session should not print context: {}",
+        "second UserPromptSubmit for the same agent should not print context: {}",
         String::from_utf8_lossy(&second_output.stdout)
     );
     assert!(
@@ -5704,7 +5676,7 @@ fn stop_posts_activity_finalize() {
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
-      "session_id": "s1",
+      "agent_id": "s1",
       "hook_event_name": "Stop"
     }"#;
 
@@ -5717,7 +5689,7 @@ fn stop_posts_activity_finalize() {
 
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/activity/finalize HTTP/1.1"));
-    assert!(request.contains("\"session_id\":\"s1\""));
+    assert!(request.contains("\"agent_id\":\"s1\""));
     assert!(request.contains("\"workspace_id\":\"w1\""));
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -5776,7 +5748,7 @@ fn fake_current_response(request: &str) -> String {
             "freshness": "live",
             "resource": resource,
             "purpose": "Fix auth validation behavior.",
-            "session_id": "s1",
+            "agent_id": "s1",
             "workspace_id": "w1"
         }]
     })

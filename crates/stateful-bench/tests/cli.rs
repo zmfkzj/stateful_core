@@ -1161,7 +1161,7 @@ fn synthetic_command_parses_run_id_output_dir_and_report_output() {
 }
 
 #[test]
-fn codex_pair_agent_accepts_explicit_stateful_session_arguments() {
+fn codex_pair_agent_help_omits_stateful_session_arguments() {
     let output = ProcessCommand::new("python3")
         .args([
             concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/codex_pair_agent.py"),
@@ -1177,8 +1177,8 @@ fn codex_pair_agent_accepts_explicit_stateful_session_arguments() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
-    assert!(stdout.contains("--session-id"));
-    assert!(stdout.contains("--workspace-id"));
+    assert!(!stdout.contains("--session-id"));
+    assert!(stdout.contains("--workspace"));
     assert!(stdout.contains("--benchmark-model"));
     assert!(stdout.contains("--benchmark-reasoning-effort"));
     assert!(stdout.contains("--benchmark-model-context-window"));
@@ -2249,9 +2249,6 @@ source_env = {{
     "PATH": "/bin",
     "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
     "STATEFUL_SERVER_TOKEN": "token-123",
-    "CODEX_THREAD_ID": "outer-thread",
-    "STATEFUL_CODEX_RUN_ID": "outer-run",
-    "STATEFUL_SESSION_ID": "outer-session",
 }}
 output = root / "adapter-output"
 workspace = root / "workspace"
@@ -2279,8 +2276,6 @@ stateful_env = module.denovo_codex_environment(
     task_path=task_path,
     workspace=workspace,
     base_env=source_env,
-    preserve_stateful_session=True,
-    stateful_session_id="denovo-issue-stateful-test",
 )
 module.prepare_codex_environment(
     stateful_env,
@@ -2294,24 +2289,16 @@ stateful_config = (stateful_home / "config.toml").read_text()
 
 print(json.dumps({{
     "no_state_home": no_state_env["HOME"],
-    "no_state_has_thread": "CODEX_THREAD_ID" in no_state_env,
-    "no_state_has_codex_run": "STATEFUL_CODEX_RUN_ID" in no_state_env,
-    "no_state_has_session": "STATEFUL_SESSION_ID" in no_state_env,
     "no_state_config_exists": (no_state_home / "config.toml").exists(),
     "no_state_skill_exists": (no_state_home / "skills" / "stateful-command-policy" / "SKILL.md").exists(),
     "no_state_auth_exists": (no_state_home / "auth.json").exists(),
     "stateful_home": stateful_env["HOME"],
-    "stateful_has_thread": "CODEX_THREAD_ID" in stateful_env,
-    "stateful_has_codex_run": "STATEFUL_CODEX_RUN_ID" in stateful_env,
-    "stateful_codex_run_id": stateful_env.get("STATEFUL_CODEX_RUN_ID"),
-    "stateful_has_session": "STATEFUL_SESSION_ID" in stateful_env,
-    "stateful_session_id": stateful_env.get("STATEFUL_SESSION_ID"),
     "stateful_server_url": stateful_env.get("STATEFUL_SERVER_URL"),
     "stateful_server_token": stateful_env.get("STATEFUL_SERVER_TOKEN"),
     "stateful_config": stateful_config,
     "stateful_skill_exists": (stateful_home / "skills" / "stateful-command-policy" / "SKILL.md").exists(),
     "stateful_auth_exists": (stateful_home / "auth.json").exists(),
-    "generated_session_id": module.denovo_stateful_session_id(output, "owner/repo#1", task_path, workspace),
+    "generated_agent_id": module.denovo_stateful_agent_id(output, "owner/repo#1", task_path, workspace),
 }}, sort_keys=True))
 "#,
         agent_path = denovo_codex_agent_path_json(),
@@ -2326,9 +2313,6 @@ print(json.dumps({{
             .expect("no-state home should be text")
             .ends_with("adapter-output/codex-homes/issue-no-state/home")
     );
-    assert_eq!(output["no_state_has_session"], false);
-    assert_eq!(output["no_state_has_thread"], false);
-    assert_eq!(output["no_state_has_codex_run"], false);
     assert_eq!(output["no_state_config_exists"], false);
     assert_eq!(output["no_state_skill_exists"], false);
     assert_eq!(output["no_state_auth_exists"], true);
@@ -2344,28 +2328,17 @@ print(json.dumps({{
         .expect("stateful config should be text");
     assert!(!config.contains("[mcp_servers.stateful]"));
     assert!(!config.contains("args = [\"mcp\", \"serve\"]"));
-    assert!(!config.contains("STATEFUL_SESSION_ID"));
-    assert!(!config.contains("CODEX_THREAD_ID"));
-    assert!(!config.contains("STATEFUL_CODEX_RUN_ID"));
     assert!(config.contains("[[hooks.SessionStart]]"));
-    assert_eq!(output["stateful_has_session"], true);
-    assert_eq!(output["stateful_has_thread"], false);
-    assert_eq!(output["stateful_has_codex_run"], true);
-    assert_eq!(output["stateful_session_id"], "denovo-issue-stateful-test");
-    assert_eq!(
-        output["stateful_codex_run_id"],
-        "denovo-issue-stateful-test"
-    );
     assert_eq!(output["stateful_server_url"], "http://127.0.0.1:43873");
     assert_eq!(output["stateful_server_token"], "token-123");
     assert_eq!(output["stateful_skill_exists"], true);
     assert_eq!(output["stateful_auth_exists"], true);
-    let generated_session_id = output["generated_session_id"]
+    let generated_agent_id = output["generated_agent_id"]
         .as_str()
-        .expect("generated session id should be text");
-    assert!(generated_session_id.starts_with("denovo-owner-repo-1-"));
+        .expect("generated agent id should be text");
+    assert!(generated_agent_id.starts_with("denovo-owner-repo-1-"));
     assert!(
-        generated_session_id
+        generated_agent_id
             .bytes()
             .all(|byte| { byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' })
     );
@@ -2396,9 +2369,6 @@ source_env = {{
     "HOME": str(source_home),
     "PATH": "/bin",
     "CODEX_HOME": str(source_home / ".codex"),
-    "CODEX_THREAD_ID": "outer-thread",
-    "STATEFUL_CODEX_RUN_ID": "outer-run",
-    "STATEFUL_SESSION_ID": "outer-session",
     "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
     "STATEFUL_SERVER_TOKEN": "token-123",
     "XDG_CONFIG_HOME": str(root / "host-config"),
@@ -2441,14 +2411,7 @@ module.prepare_omp_environment(
     agent_docker_image="ghcr.io/stateful/omp-agent:latest",
 )
 stateful_agent = Path(stateful_env["PI_CODING_AGENT_DIR"])
-explicit_stateful_env = module.denovo_omp_environment(
-    output,
-    "issue/explicit-stateful",
-    task_path,
-    workspace,
-    source_env,
-    stateful_session_id="denovo-issue-stateful-test",
-)
+
 expected_no_state_home = output / "omp-homes" / module.path_fragment("issue/no-state") / "home"
 expected_stateful_home = output / "omp-homes" / module.path_fragment("issue/stateful") / "home"
 expected_no_state_config_home = expected_no_state_home / ".config"
@@ -2464,9 +2427,6 @@ print(json.dumps({{
     "no_state_home": no_state_env["HOME"],
     "no_state_agent": no_state_env["PI_CODING_AGENT_DIR"],
     "no_state_has_codex_home": "CODEX_HOME" in no_state_env,
-    "no_state_has_codex_thread": "CODEX_THREAD_ID" in no_state_env,
-    "no_state_has_codex_run": "STATEFUL_CODEX_RUN_ID" in no_state_env,
-    "no_state_has_session": "STATEFUL_SESSION_ID" in no_state_env,
     "no_state_config_exists": (no_state_agent / "config.yml").exists(),
     "no_state_config": no_state_config,
     "no_state_xdg_config_home": no_state_env["XDG_CONFIG_HOME"],
@@ -2474,17 +2434,10 @@ print(json.dumps({{
     "stateful_home": stateful_env["HOME"],
     "stateful_agent": stateful_env["PI_CODING_AGENT_DIR"],
     "stateful_has_codex_home": "CODEX_HOME" in stateful_env,
-    "stateful_has_codex_thread": "CODEX_THREAD_ID" in stateful_env,
-    "stateful_has_codex_run": "STATEFUL_CODEX_RUN_ID" in stateful_env,
-    "stateful_has_session": "STATEFUL_SESSION_ID" in stateful_env,
     "stateful_config": stateful_config,
     "stateful_config_exists": (stateful_agent / "config.yml").exists(),
     "stateful_xdg_config_home": stateful_env["XDG_CONFIG_HOME"],
     "stateful_xdg_cache_home": stateful_env["XDG_CACHE_HOME"],
-    "explicit_stateful_has_session": "STATEFUL_SESSION_ID" in explicit_stateful_env,
-    "explicit_stateful_session_id": explicit_stateful_env.get("STATEFUL_SESSION_ID"),
-    "explicit_stateful_has_codex_run": "STATEFUL_CODEX_RUN_ID" in explicit_stateful_env,
-    "explicit_stateful_codex_run_id": explicit_stateful_env.get("STATEFUL_CODEX_RUN_ID"),
     "unpack_command": commands[0]["command"] if commands else [],
     "install_command": commands[1]["command"] if len(commands) > 1 else [],
     "expected_no_state_home": str(expected_no_state_home),
@@ -2529,12 +2482,6 @@ print(json.dumps({{
     );
     assert_eq!(output["no_state_has_codex_home"], false);
     assert_eq!(output["stateful_has_codex_home"], false);
-    assert_eq!(output["no_state_has_codex_thread"], false);
-    assert_eq!(output["stateful_has_codex_thread"], false);
-    assert_eq!(output["no_state_has_codex_run"], false);
-    assert_eq!(output["stateful_has_codex_run"], false);
-    assert_eq!(output["no_state_has_session"], false);
-    assert_eq!(output["stateful_has_session"], false);
     assert_eq!(
         output["no_state_xdg_config_home"],
         output["expected_no_state_config_home"]
@@ -2551,13 +2498,6 @@ print(json.dumps({{
         output["stateful_xdg_cache_home"],
         output["expected_stateful_cache_home"]
     );
-    assert_eq!(output["explicit_stateful_has_session"], true);
-    assert_eq!(
-        output["explicit_stateful_session_id"],
-        "denovo-issue-stateful-test"
-    );
-    assert_eq!(output["explicit_stateful_has_codex_run"], false);
-    assert!(output["explicit_stateful_codex_run_id"].is_null());
     assert_eq!(output["no_state_config_exists"], true);
     assert_eq!(output["stateful_config_exists"], true);
     let no_state_config = output["no_state_config"]
@@ -4441,14 +4381,14 @@ sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
 events = [
-    {{"event_type": "ReservationDeclared", "session_id": "omp-session", "workspace_id": "workspace-a"}},
-    {{"event_type": "ClaimAcquired", "session_id": "omp-session", "workspace_id": "workspace-a"}},
-    {{"event_type": "AuthorizationDenied", "session_id": "omp-session", "workspace_id": "workspace-a"}},
-    {{"event_type": "AuthorizationDenied", "session_id": "omp-session", "workspace_id": "workspace-other"}},
+    {{"event_type": "ReservationDeclared", "agent_id": "omp-agent", "workspace_id": "workspace-a"}},
+    {{"event_type": "ClaimAcquired", "agent_id": "omp-agent", "workspace_id": "workspace-a"}},
+    {{"event_type": "AuthorizationDenied", "agent_id": "omp-agent", "workspace_id": "workspace-a"}},
+    {{"event_type": "AuthorizationDenied", "agent_id": "omp-agent", "workspace_id": "workspace-other"}},
 ]
 print(json.dumps(module.summarize_orchestration_events(
     events,
-    session_id="denovo-instance",
+    agent_id="denovo-instance",
     workspace_id="workspace-a",
 ), sort_keys=True))
 "#,
@@ -4476,17 +4416,17 @@ sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
 events = [
-    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:16:39Z", "session_id": "omp-session", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
-    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:16:44Z", "session_id": "omp-session", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
-    {{"event_type": "AuthorizationDenied", "timestamp": "2026-06-28T14:16:45Z", "session_id": "omp-session", "workspace_id": "workspace-a", "payload": {{"path": "src/pkg.py", "message": "Target existence changed since the supplied base observation."}}}},
-    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:17:30Z", "session_id": "omp-session", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
-    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:17:35Z", "session_id": "omp-session", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
-    {{"event_type": "ReservationDeclared", "timestamp": "2026-06-28T14:17:31Z", "session_id": "omp-session", "workspace_id": "workspace-a"}},
-    {{"event_type": "SessionHeartbeat", "timestamp": "2026-06-28T14:17:35Z", "session_id": "omp-session", "workspace_id": "workspace-other"}},
+    {{"event_type": "AgentHeartbeat", "timestamp": "2026-06-28T14:16:39Z", "agent_id": "omp-agent", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
+    {{"event_type": "AgentHeartbeat", "timestamp": "2026-06-28T14:16:44Z", "agent_id": "omp-agent", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
+    {{"event_type": "AuthorizationDenied", "timestamp": "2026-06-28T14:16:45Z", "agent_id": "omp-agent", "workspace_id": "workspace-a", "payload": {{"path": "src/pkg.py", "message": "Target existence changed since the supplied base observation."}}}},
+    {{"event_type": "AgentHeartbeat", "timestamp": "2026-06-28T14:17:30Z", "agent_id": "omp-agent", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
+    {{"event_type": "AgentHeartbeat", "timestamp": "2026-06-28T14:17:35Z", "agent_id": "omp-agent", "workspace_id": "workspace-a", "repo_id": "repo-a", "worktree_id": "worktree-a"}},
+    {{"event_type": "ReservationDeclared", "timestamp": "2026-06-28T14:17:31Z", "agent_id": "omp-agent", "workspace_id": "workspace-a"}},
+    {{"event_type": "AgentHeartbeat", "timestamp": "2026-06-28T14:17:35Z", "agent_id": "omp-agent", "workspace_id": "workspace-other"}},
 ]
 print(json.dumps(module.summarize_orchestration_events(
     events,
-    session_id="denovo-instance",
+    agent_id="denovo-instance",
     workspace_id="workspace-a",
 ), sort_keys=True))
 "#,
@@ -4495,7 +4435,7 @@ print(json.dumps(module.summarize_orchestration_events(
     let output = run_python_json(&script);
 
     assert_eq!(output["event_count"], 6);
-    assert_eq!(output["event_types"]["SessionHeartbeat"], 4);
+    assert_eq!(output["event_types"]["AgentHeartbeat"], 4);
     assert_eq!(output["heartbeat_events"], 4);
     assert_eq!(output["heartbeat_windows"], 2);
     assert_eq!(output["heartbeat_max_gap_ms"], 46000);
@@ -4859,10 +4799,10 @@ print(json.dumps({{
 
     let skill = output["skill"].as_str().expect("skill should be text");
     assert!(skill.contains("name: stateful-command-policy"));
-    assert!(skill.contains("Use canonical Stateful MCP tool names"));
+    assert!(skill.contains("Use active Stateful native tool names"));
     assert!(skill.contains("state_reservation_declare"));
     assert!(skill.contains("state_claim_acquire"));
-    assert!(skill.contains("runtime-specific tool names"));
+    assert!(skill.contains("runtime-specific names"));
     assert!(!skill.contains("benchmark-contamination"));
     assert!(!skill.contains("model-quality failure"));
     assert_eq!(output["auth_exists"], false);
@@ -4971,68 +4911,6 @@ print(json.dumps({{
 }
 
 #[test]
-fn codex_pair_agent_source_env_sets_stateful_session_id_for_stateful_mode() {
-    let script = format!(
-        r#"
-import importlib.util
-import json
-
-spec = importlib.util.spec_from_file_location("codex_pair_agent_source_env_test", {agent_path})
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-
-stateful = module.benchmark_source_env(
-    mode="stateful",
-    session_id="pair-one-agent-a",
-    base_env={{"PATH": "/bin"}},
-)
-stateful_with_native_subagent = module.benchmark_source_env(
-    mode="stateful",
-    session_id="pair-one-agent-a",
-    base_env={{"PATH": "/bin", "STATEFUL_SESSION_ID": "outer-session"}},
-    preserve_stateful_session=False,
-)
-no_state = module.benchmark_source_env(
-    mode="no-state",
-    session_id=None,
-    base_env={{"PATH": "/bin"}},
-)
-print(json.dumps({{
-    "stateful": stateful,
-    "stateful_with_native_subagent": stateful_with_native_subagent,
-    "no_state": no_state,
-}}, sort_keys=True))
-"#,
-        agent_path = codex_pair_agent_path_json(),
-    );
-    let output = run_python_json(&script);
-
-    assert_eq!(output["stateful"]["PATH"], "/bin");
-    assert_eq!(
-        output["stateful"]
-            .as_object()
-            .expect("stateful env should be an object")
-            .get("STATEFUL_SESSION_ID"),
-        Some(&serde_json::Value::String("pair-one-agent-a".to_string()))
-    );
-    assert_eq!(
-        output["stateful_with_native_subagent"]
-            .as_object()
-            .expect("native subagent env should be an object")
-            .contains_key("STATEFUL_SESSION_ID"),
-        false
-    );
-    assert_eq!(
-        output["no_state"]
-            .as_object()
-            .expect("no-state env should be an object")
-            .contains_key("STATEFUL_SESSION_ID"),
-        false
-    );
-    assert_eq!(output["no_state"]["PATH"], "/bin");
-}
-
-#[test]
 fn codex_pair_agent_resumes_after_context_token_failure() {
     let script = format!(
         r#"
@@ -5101,7 +4979,7 @@ print(json.dumps({{
     "observed": [
         {{
             "returncode": result.returncode,
-            "session_id": result.session_id,
+            "codex_session_id": result.codex_session_id,
             "resumeable_token_failure": result.resumeable_token_failure,
         }}
         for result in observed
@@ -5123,7 +5001,7 @@ print(json.dumps({{
         .as_array()
         .expect("observed results should be an array");
     assert_eq!(observed.len(), 2);
-    assert_eq!(observed[0]["session_id"], "session-123");
+    assert_eq!(observed[0]["codex_session_id"], "session-123");
     assert_eq!(observed[0]["resumeable_token_failure"], true);
     assert_eq!(observed[1]["returncode"], 0);
     assert_eq!(calls[0]["input"], "initial prompt");

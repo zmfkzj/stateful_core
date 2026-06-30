@@ -12,7 +12,6 @@ mod global_paths;
 mod hook;
 mod install;
 mod lan;
-mod mcp;
 mod outbox;
 mod push;
 mod repo_registry;
@@ -43,7 +42,6 @@ pub use lan::{
     join_server_runtime, print_server_start_result, server_join_commands,
     server_start_runtime_result, start_server_runtime,
 };
-pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio_in_repo};
 pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime, sync_outbox_with_runtime};
 pub use push::{PushRequest, PushResult, run_structured_push};
 pub use repo_registry::{
@@ -54,18 +52,15 @@ pub use repo_registry::{
     workspace_id_for_enabled_repo, workspace_id_for_repo_identity,
 };
 pub use runtime::{
-    CurrentSession, HttpResponse, ProtocolEnvelopeArgs, ReservationCancelArgs,
-    ReservationClaimArgs, ReservationDeclareArgs, ReservationRequestArgs, STATEFUL_SESSION_ID_ENV,
-    ServerRuntime, cancel_reservation_via_http, claim_reservation_via_http,
-    declare_reservation_via_http, discover_runtime, discover_runtime_with_global,
-    discover_runtime_with_optional_global, get_json, global_state_db_path, post_json,
-    protocol_envelope, read_current_session_file, read_current_session_file_for_session,
-    request_reservation_via_http, reservation_cancel_protocol_body,
-    reservation_claim_protocol_body, reservation_declare_protocol_body,
-    reservation_request_protocol_body, runtime_env_override_is_configured, runtime_from_remote,
-    runtime_has_required_identity, runtime_identity_matches_pid, write_current_session_file,
-    write_current_session_file_for_current_stateful_session,
-    write_current_session_file_for_session, write_global_runtime_file, write_runtime_file,
+    AgentContext, HttpResponse, ProtocolEnvelopeArgs, ReservationCancelArgs, ReservationClaimArgs,
+    ReservationDeclareArgs, ReservationRequestArgs, ServerRuntime, cancel_reservation_via_http,
+    claim_reservation_via_http, declare_reservation_via_http, discover_runtime,
+    discover_runtime_with_global, discover_runtime_with_optional_global, get_json,
+    global_state_db_path, post_json, protocol_envelope, request_reservation_via_http,
+    reservation_cancel_protocol_body, reservation_claim_protocol_body,
+    reservation_declare_protocol_body, reservation_request_protocol_body,
+    runtime_env_override_is_configured, runtime_from_remote, runtime_has_required_identity,
+    runtime_identity_matches_pid, validate_agent_id, write_global_runtime_file, write_runtime_file,
 };
 pub use sandbox::{SandboxFsProfile, SandboxNetworkPolicy};
 pub use server_lifecycle::{
@@ -142,8 +137,6 @@ pub enum Command {
     Resume(ResumeCommand),
     #[command(subcommand)]
     Reservation(ReservationCommand),
-    #[command(subcommand)]
-    Mcp(McpCommand),
     SyncOutbox,
     #[command(subcommand)]
     Hook(HookRuntime),
@@ -212,6 +205,10 @@ pub enum SandboxCommand {
         purpose: Option<String>,
         #[arg(long)]
         reservation_id: Option<String>,
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
+        #[arg(long = "workspace-id")]
+        workspace_id: Option<String>,
         #[arg(long = "write-target")]
         write_targets: Vec<String>,
         #[arg(long = "create-target")]
@@ -238,6 +235,10 @@ pub enum SandboxCommand {
     RunNestedCodexBenchmark {
         #[arg(long)]
         purpose: String,
+        #[arg(long = "agent-id")]
+        agent_id: String,
+        #[arg(long = "workspace-id")]
+        workspace_id: Option<String>,
         #[arg(long = "write-dir")]
         write_dir: String,
         #[arg(long = "codex-home-root")]
@@ -272,9 +273,9 @@ pub enum SandboxProcessCommand {
 #[derive(Debug, Subcommand)]
 pub enum ReservationCommand {
     Declare {
-        #[arg(long)]
-        session_id: Option<String>,
-        #[arg(long)]
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
+        #[arg(long = "workspace-id")]
         workspace_id: Option<String>,
         #[arg(long)]
         purpose: String,
@@ -282,9 +283,9 @@ pub enum ReservationCommand {
         files_planned: Vec<String>,
     },
     Request {
-        #[arg(long)]
-        session_id: Option<String>,
-        #[arg(long)]
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
+        #[arg(long = "workspace-id")]
         workspace_id: Option<String>,
         #[arg(long)]
         request_id: String,
@@ -298,9 +299,9 @@ pub enum ReservationCommand {
         purpose: String,
     },
     Claim {
-        #[arg(long)]
-        session_id: Option<String>,
-        #[arg(long)]
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
+        #[arg(long = "workspace-id")]
         workspace_id: Option<String>,
         #[arg(long)]
         reservation_id: Option<String>,
@@ -308,9 +309,9 @@ pub enum ReservationCommand {
         wait_id: String,
     },
     Cancel {
-        #[arg(long)]
-        session_id: Option<String>,
-        #[arg(long)]
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
+        #[arg(long = "workspace-id")]
         workspace_id: Option<String>,
         #[arg(long)]
         request_id: String,
@@ -343,8 +344,8 @@ pub enum ToolsCommand {
 #[derive(Debug, Subcommand)]
 pub enum NotificationsCommand {
     Poll {
-        #[arg(long)]
-        session_id: Option<String>,
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
         #[arg(long)]
         workspace_id: Option<String>,
     },
@@ -353,20 +354,11 @@ pub enum NotificationsCommand {
 #[derive(Debug, Subcommand)]
 pub enum ResumeCommand {
     Next {
-        #[arg(long)]
-        session_id: Option<String>,
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
         #[arg(long)]
         workspace_id: Option<String>,
     },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum McpCommand {
-    Call {
-        tool_name: String,
-        arguments_json: Option<String>,
-    },
-    Serve,
 }
 
 #[derive(Debug, Subcommand)]
@@ -593,6 +585,8 @@ pub fn run() -> anyhow::Result<()> {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -613,6 +607,8 @@ pub fn run() -> anyhow::Result<()> {
                     network,
                     purpose,
                     reservation_id,
+                    agent_id,
+                    workspace_id,
                     write_targets,
                     create_targets,
                     write_dirs,
@@ -643,6 +639,8 @@ pub fn run() -> anyhow::Result<()> {
         }
         Command::Sandbox(SandboxCommand::RunNestedCodexBenchmark {
             purpose,
+            agent_id,
+            workspace_id,
             write_dir,
             codex_home_root,
             docker_socket,
@@ -656,6 +654,8 @@ pub fn run() -> anyhow::Result<()> {
                 &paths,
                 codex_benchmark::NestedCodexBenchmarkSandboxRequest {
                     purpose,
+                    agent_id,
+                    workspace_id,
                     write_dir,
                     codex_home_root,
                     docker_socket,
@@ -756,52 +756,52 @@ pub fn run() -> anyhow::Result<()> {
             );
         }
         Command::Notifications(NotificationsCommand::Poll {
-            session_id,
+            agent_id,
             workspace_id,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (session_id, workspace_id) =
-                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let (agent_id, workspace_id) =
+                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
             let response = post_json(
                 &runtime,
                 "/v1/notifications/poll",
                 &serde_json::json!({
-                    "session_id": session_id,
+                    "agent_id": agent_id,
                     "workspace_id": workspace_id,
                 }),
             )?;
             print_http_response(response)?;
         }
         Command::Resume(ResumeCommand::Next {
-            session_id,
+            agent_id,
             workspace_id,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (session_id, workspace_id) =
-                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let (agent_id, workspace_id) =
+                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
             let response = post_json(
                 &runtime,
                 "/v1/resume/next",
                 &serde_json::json!({
-                    "session_id": session_id,
+                    "agent_id": agent_id,
                     "workspace_id": workspace_id,
                 }),
             )?;
             print_http_response(response)?;
         }
         Command::Reservation(ReservationCommand::Declare {
-            session_id,
+            agent_id,
             workspace_id,
             purpose,
             files_planned,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (session_id, workspace_id) =
-                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let (agent_id, workspace_id) =
+                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
             let response = declare_reservation_via_http(
                 &runtime,
                 ReservationDeclareArgs {
-                    session_id,
+                    agent_id,
                     workspace_id,
                     purpose,
                     files_planned,
@@ -813,7 +813,7 @@ pub fn run() -> anyhow::Result<()> {
             print_http_response(response)?;
         }
         Command::Reservation(ReservationCommand::Request {
-            session_id,
+            agent_id,
             workspace_id,
             request_id,
             reservation_id,
@@ -822,12 +822,12 @@ pub fn run() -> anyhow::Result<()> {
             purpose,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (session_id, workspace_id) =
-                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let (agent_id, workspace_id) =
+                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
             let response = request_reservation_via_http(
                 &runtime,
                 ReservationRequestArgs {
-                    session_id,
+                    agent_id,
                     workspace_id,
                     request_id,
                     reservation_id,
@@ -842,18 +842,18 @@ pub fn run() -> anyhow::Result<()> {
             print_http_response(response)?;
         }
         Command::Reservation(ReservationCommand::Claim {
-            session_id,
+            agent_id,
             workspace_id,
             wait_id,
             reservation_id,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (session_id, workspace_id) =
-                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let (agent_id, workspace_id) =
+                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
             claim_reservation_via_http(
                 &runtime,
                 ReservationClaimArgs {
-                    session_id,
+                    agent_id,
                     workspace_id,
                     wait_id,
                     reservation_id,
@@ -865,17 +865,17 @@ pub fn run() -> anyhow::Result<()> {
             println!("claimed stateful reservation");
         }
         Command::Reservation(ReservationCommand::Cancel {
-            session_id,
+            agent_id,
             workspace_id,
             request_id,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (session_id, workspace_id) =
-                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let (agent_id, workspace_id) =
+                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
             cancel_reservation_via_http(
                 &runtime,
                 ReservationCancelArgs {
-                    session_id,
+                    agent_id,
                     workspace_id,
                     request_id,
                     identity: GlobalPaths::from_env()
@@ -884,21 +884,6 @@ pub fn run() -> anyhow::Result<()> {
                 },
             )?;
             println!("canceled stateful reservation");
-        }
-        Command::Mcp(McpCommand::Call {
-            tool_name,
-            arguments_json,
-        }) => {
-            let arguments = parse_json_arguments(arguments_json)?;
-            let response = call_mcp_tool_in_repo(std::env::current_dir()?, tool_name, arguments)?;
-            print_http_response(response)?;
-        }
-        Command::Mcp(McpCommand::Serve) => {
-            serve_mcp_stdio_in_repo(
-                std::env::current_dir()?,
-                std::io::stdin().lock(),
-                std::io::stdout().lock(),
-            )?;
         }
         Command::Hook(hook) => hook::run_hook(hook)?,
     }
@@ -917,48 +902,24 @@ fn current_repo_root_or_current_dir() -> anyhow::Result<PathBuf> {
     Ok(detect_git_root(&cwd).unwrap_or(cwd))
 }
 
-fn resolve_session_workspace(
+fn resolve_agent_workspace(
     repo_root: &Path,
     runtime: &ServerRuntime,
-    session_id: Option<String>,
+    agent_id: Option<String>,
     workspace_id: Option<String>,
 ) -> anyhow::Result<(String, String)> {
-    let current_session = if session_id.is_none() || workspace_id.is_none() {
-        read_current_session_file(repo_root).ok()
-    } else {
-        None
-    };
-    let session_id = session_id
-        .or_else(|| {
-            current_session
-                .as_ref()
-                .map(|session| session.session_id.clone())
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "session id not provided and no current stateful session file was found"
-            )
-        })?;
-    let workspace_id = workspace_id
-        .or_else(|| current_session.map(|session| session.workspace_id))
-        .unwrap_or_else(|| {
-            GlobalPaths::from_env()
-                .ok()
-                .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok())
-                .map(|identity| {
-                    effective_workspace_id_for_repo(&runtime.workspace_id, Some(&identity))
-                })
-                .unwrap_or_else(|| runtime.workspace_id.clone())
-        });
+    let agent_id =
+        agent_id.ok_or_else(|| anyhow::anyhow!("agent id not provided; pass --agent-id"))?;
+    validate_agent_id(&agent_id, "agent_id")?;
+    let workspace_id = workspace_id.unwrap_or_else(|| {
+        GlobalPaths::from_env()
+            .ok()
+            .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok())
+            .map(|identity| effective_workspace_id_for_repo(&runtime.workspace_id, Some(&identity)))
+            .unwrap_or_else(|| runtime.workspace_id.clone())
+    });
 
-    Ok((session_id, workspace_id))
-}
-
-fn parse_json_arguments(arguments_json: Option<String>) -> anyhow::Result<serde_json::Value> {
-    match arguments_json {
-        Some(arguments_json) => Ok(serde_json::from_str(&arguments_json)?),
-        None => Ok(serde_json::json!({})),
-    }
+    Ok((agent_id, workspace_id))
 }
 
 fn print_http_response(response: HttpResponse) -> anyhow::Result<()> {

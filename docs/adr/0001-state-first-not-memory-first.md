@@ -30,7 +30,7 @@ integration target is:
 
 ```text
 Codex lifecycle hooks
-+ MCP tools
++ native Stateful coordination tools
 + state server
 ```
 
@@ -60,10 +60,10 @@ use
 so disposable artifacts stay under `/tmp/stateful/<session>/<purpose>/`.
 
 Overrides are never automatic. A blocked write can proceed only when the user
-explicitly instructs the current session to allow a specific resource override.
+explicitly instructs the current agent to allow a specific resource override.
 The user owns the judgment and responsibility for that exception.
 Overrides apply only to active claim conflicts and are scoped to the current
-session, current turn, and specific resource.
+agent, current turn, and specific resource.
 
 Subagents may write only within the parent session's active valid reservation scope,
 but their activity and claims are attributed to the subagent actor.

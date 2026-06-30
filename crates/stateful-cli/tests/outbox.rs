@@ -44,8 +44,8 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
     fs::write(
         &outbox_file,
-        r#"{"outbox_id":"outbox-2","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
-{"outbox_id":"outbox-1","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-2","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
+{"outbox_id":"outbox-1","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("outbox file should write");
@@ -81,7 +81,7 @@ fn sync_outbox_refuses_symlinked_outbox_directory() {
     let victim_file = victim_outbox.join("s1.jsonl");
     fs::write(
         &victim_file,
-        r#"{"outbox_id":"outbox-victim","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-victim","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("victim outbox file should write");
@@ -127,7 +127,7 @@ fn sync_outbox_refuses_symlinked_outbox_file() {
     let victim_file = victim_dir.join("victim.jsonl");
     fs::write(
         &victim_file,
-        r#"{"outbox_id":"outbox-victim","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-victim","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("victim file should write");
@@ -166,7 +166,7 @@ fn sync_outbox_refuses_hard_linked_outbox_file() {
     let victim_file = victim_dir.join("victim.jsonl");
     fs::write(
         &victim_file,
-        r#"{"outbox_id":"outbox-victim","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-victim","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("victim file should write");
@@ -211,7 +211,7 @@ fn sync_outbox_skips_malformed_lines_and_posts_valid_pending_records() {
     fs::write(
         &outbox_file,
         r#"not-json
-{"outbox_id":"outbox-valid","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+{"outbox_id":"outbox-valid","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("outbox file should write");
@@ -251,7 +251,7 @@ fn sync_outbox_recovers_stale_lock_before_wait_timeout() {
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     fs::write(
         paths.outbox_dir.join("s1.jsonl"),
-        r#"{"outbox_id":"outbox-lock","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-lock","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("outbox file should write");
@@ -292,7 +292,7 @@ fn sync_outbox_command_discovers_global_runtime_file() {
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
     fs::write(
         &outbox_file,
-        r#"{"outbox_id":"outbox-global","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"global-w","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-global","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"global-w","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("outbox file should write");
@@ -338,7 +338,7 @@ fn sync_outbox_preserves_records_queued_while_file_is_in_flight() {
         let _request = read_http_request(&mut stream);
         fs::write(
             &outbox_file_for_server,
-            r#"{"outbox_id":"outbox-late","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
+            r#"{"outbox_id":"outbox-late","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
 "#,
         )
         .expect("late queued record should write");
@@ -348,7 +348,7 @@ fn sync_outbox_preserves_records_queued_while_file_is_in_flight() {
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     fs::write(
         &outbox_file,
-        r#"{"outbox_id":"outbox-1","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-1","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("outbox file should write");
@@ -392,8 +392,8 @@ fn sync_outbox_requeues_only_unsent_records_after_failure() {
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
     fs::write(
         &outbox_file,
-        r#"{"outbox_id":"outbox-1","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
-{"outbox_id":"outbox-2","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-1","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+{"outbox_id":"outbox-2","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
 "#,
     )
     .expect("outbox file should write");
@@ -432,13 +432,13 @@ fn sync_outbox_recovers_stranded_claimed_files() {
     let claimed_file = paths.outbox_dir.join("s1.jsonl.syncing-old");
     fs::write(
         &outbox_file,
-        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
 "#,
     )
     .expect("base outbox file should write");
     fs::write(
         &claimed_file,
-        r#"{"outbox_id":"outbox-claimed","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-claimed","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("claimed outbox file should write");
@@ -485,13 +485,13 @@ fn sync_outbox_does_not_trust_symlinked_active_claim_marker() {
     let active_marker = paths.outbox_dir.join("s1.jsonl.syncing-old.active");
     fs::write(
         &outbox_file,
-        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
 "#,
     )
     .expect("base outbox file should write");
     fs::write(
         &claimed_file,
-        r#"{"outbox_id":"outbox-claimed","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-claimed","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("claimed outbox file should write");
@@ -537,7 +537,7 @@ fn sync_outbox_does_not_let_fake_active_claim_block_base_file() {
     let active_marker = paths.outbox_dir.join("s1.jsonl.syncing-spoof.active");
     fs::write(
         &outbox_file,
-        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("base outbox file should write");
@@ -581,7 +581,7 @@ fn sync_outbox_does_not_trust_symlinked_lock_heartbeat() {
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
     fs::write(
         &outbox_file,
-        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("outbox file should write");
@@ -624,7 +624,7 @@ fn sync_outbox_does_not_trust_symlinked_lock_directory() {
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
     fs::write(
         &outbox_file,
-        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
+        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
 "#,
     )
     .expect("outbox file should write");
@@ -662,11 +662,11 @@ fn sync_outbox_deduplicates_claimed_records_already_merged_into_base() {
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
     let claimed_file = paths.outbox_dir.join("s1.jsonl.syncing-old");
-    let claimed_record = r#"{"outbox_id":"outbox-claimed","event_type":"HeartbeatObserved","session_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}"#;
+    let claimed_record = r#"{"outbox_id":"outbox-claimed","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}"#;
     fs::write(
         &outbox_file,
         format!(
-            "{claimed_record}\n{{\"outbox_id\":\"outbox-base\",\"event_type\":\"HeartbeatObserved\",\"session_id\":\"s1\",\"actor_id\":\"a1\",\"workspace_id\":\"w1\",\"sequence\":2,\"created_at\":\"2026-05-31T00:00:02Z\",\"payload\":{{\"n\":2}},\"sync_status\":\"pending\"}}\n"
+            "{claimed_record}\n{{\"outbox_id\":\"outbox-base\",\"event_type\":\"HeartbeatObserved\",\"agent_id\":\"s1\",\"actor_id\":\"a1\",\"workspace_id\":\"w1\",\"sequence\":2,\"created_at\":\"2026-05-31T00:00:02Z\",\"payload\":{{\"n\":2}},\"sync_status\":\"pending\"}}\n"
         ),
     )
     .expect("base outbox file should write");

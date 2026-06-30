@@ -1070,7 +1070,6 @@ dependencies = [
  "serde_yaml",
  "signal-hook",
  "stateful-core",
- "stateful-mcp",
  "stateful-server",
  "stateful-store",
  "time",
@@ -1089,15 +1088,6 @@ dependencies = [
  "thiserror",
  "time",
  "uuid",
-]
-
-[[package]]
-name = "stateful-mcp"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "stateful-core",
 ]
 
 [[package]]

@@ -13,43 +13,42 @@ semantics.
 V1 is Rust-only.
 
 The state server, pure policy primitives, store-backed authorization service,
-SQLite persistence, CLI, hook adapter commands, MCP adapter, sandbox wrapper,
-and implemented prompt/context endpoints live in the same Rust codebase.
-Watcher-driven human observation and richer store-backed prompt rendering remain
-design targets unless a section below says they are implemented.
+SQLite persistence, CLI, hook adapter commands, native Stateful tool handlers,
+sandbox wrapper, and implemented prompt/context endpoints live in the same Rust
+codebase. Watcher-driven human observation and richer store-backed prompt
+rendering remain design targets unless a section below says they are implemented.
 
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --yes` installs stateful global files only. `stateful install
---agent codex --yes` configures global Codex hooks and MCP, and writes
+--agent codex --yes` configures global Codex hooks and writes
 `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
 `sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`) and
 `skills/dispatching-parallel-agents/SKILL.md`. `stateful install
 --agent omp --yes` configures the isolated OMP `stateful` profile with stateful
-hooks, MCP, built-in Bash preflight for strict trusted `stateful sandbox run ...`
-and `stateful sandbox process find ...` commands, OMP native `edit`/`write`
-pre-tool recovery that can auto-declare exact file scope, acquire
-same-reservation claims, and retry authorization when the only denial is missing
-reservation/scope without an explicit reservation id, `lazy_edit_resume` for
-strict replay of queued/conflicting line-based OMP edits, `lazy_write_resume`
-for queued full OMP writes with a stale-target guard, `lazy_bash_resume` for
-queued external Bash commands waiting on scoped grants, and approval entries
-that deny arbitrary raw Bash while setting Python/JavaScript/JS/Ruby/Julia eval
-tools to false. External write/create/write-dir/socket/signal scope asks for a
-scoped OMP UI grant by default; `stateful.autoApprove: true` skips only that
-Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim
-checks, and grant limits still apply. The OMP installer also writes
-`rules/stateful-required.md` and `skills/stateful-command-policy/`
-(`SKILL.md`, `omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
-`subagent-write-recovery.md`) under that isolated agent directory: the
-always-apply rule owns model-facing activation, the
-`stateful-command-policy` manual owns detailed procedure, and hooks remain the
-boundary. `stateful enable` opts the
-current repo into enforcement.
-For OMP, the extension stores `process.env.STATEFUL_SESSION_ID` from explicit
-event/ctx ids (`event.sessionId`, `event.session_id`, session fields), falling
-back to the `ctx.sessionManager.getSessionFile()` header/stem and then
-`getLeafId()`; `stateful hook omp session-start` persists current-session files
-so session-aware MCP tools resolve the same session.
+hooks, native Stateful tool injection, built-in Bash preflight for strict
+trusted `stateful sandbox run ...` and `stateful sandbox process find ...`
+commands, OMP native `edit`/`write` pre-tool recovery that can auto-declare
+exact file scope, acquire same-reservation claims, and retry authorization when
+the only denial is missing reservation/scope without an explicit reservation id,
+`lazy_edit_resume` for strict replay of queued/conflicting line-based OMP edits,
+`lazy_write_resume` for queued full OMP writes with a stale-target guard,
+`lazy_bash_resume` for queued external Bash commands waiting on scoped grants,
+and approval entries that deny arbitrary raw Bash while setting
+Python/JavaScript/JS/Ruby/Julia eval tools to false. External
+write/create/write-dir/socket/signal scope asks for a scoped OMP UI grant by
+default; `stateful.autoApprove: true` skips only that Stateful-owned prompt while
+sandbox scope validation, hooks, reservation/claim checks, and grant limits
+still apply. The OMP installer also writes `rules/stateful-required.md` and
+`skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
+`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`) under
+that isolated agent directory: the always-apply rule owns model-facing
+activation, the `stateful-command-policy` manual owns detailed procedure, and
+hooks remain the boundary. `stateful enable` opts the current repo into
+enforcement.
+For OMP, the extension/native tool bridge injects the active `agent_id` and
+`workspace_id` into hook and state operations. Agent-facing identity does not
+depend on current-session files, session environment variables, or runtime file
+repair.
 
 Hook adapters should invoke the compiled `stateful` binary instead of embedding
 policy or adapter logic in separate scripts. Hook configuration may reference
@@ -87,13 +86,13 @@ endpoint accepts or requires the envelope until those routes are migrated.
 protocol_version
 request_id
 observed_at
-session:
-  session_id
+identity:
+  agent_id
   turn_id
   actor_id
   actor_type: agent | subagent | human | system
   owner_id
-  parent_session_id
+  parent_agent_id
   parent_actor_id
 workspace:
   root
@@ -102,7 +101,7 @@ workspace:
   worktree_id
   branch
 source:
-  kind: hook | mcp | cli | watcher | ide | server
+  kind: hook | native_tool | cli | watcher | ide | server
   event
   tool_name
   source_ref
@@ -149,7 +148,7 @@ GET  /v1/runtime/identity
 `/v1/conflicts/check` is a read-only dry-run wrapper around the same policy
 engine and must not create claims or write-authorizing state.
 `/v1/notifications/poll` returns pending coordination notifications for a
-session and marks returned notifications as delivered so a later poll does not
+target agent and marks returned notifications as delivered so a later poll does not
 redeliver the same notification. Reservation notification payloads include the
 stored, non-empty reservation purpose. `/v1/resume/next` is the durable recovery
 path: it returns the first claimable reservation for the session, including its
@@ -174,18 +173,16 @@ requests owned by the caller.
 `stateful server stop` to verify that the runtime file and process id describe
 the same stateful server.
 
-MCP tools map directly onto these endpoints. MCP handlers do not implement
-policy branches; they validate tool arguments, resolve the current session from
-explicit arguments, `STATEFUL_SESSION_ID`, or hook-persisted current-session
-files as appropriate, call the HTTP API, and return the server result. The
-single adapter-only exception is duplicate cleanup:
-`state_claim_release` maps a server `404 claim_not_found` into a successful
-no-op result when the same-session claim is already gone, while the direct HTTP
-route still returns `404`. The OMP
-current-session path supports `state_session_register` ->
-`state_reservation_declare` -> `state_claim_acquire` without a caller-supplied env
-override after `stateful hook omp session-start` has persisted the active
-session.
+Native Stateful tools map directly onto these endpoints. Native tool handlers do
+not implement policy branches; they validate tool arguments, receive or derive
+the active `agent_id` and `workspace_id` from the runtime integration, call the
+HTTP API, and return the server result. The single adapter-only exception is
+duplicate cleanup: `state_claim_release` maps a server `404 claim_not_found`
+into a successful no-op result when the same-agent claim is already gone, while
+the direct HTTP route still returns `404`. The OMP identity path supports
+`state_session_register` -> `state_reservation_declare` ->
+`state_claim_acquire` without a caller-supplied environment override because the
+extension injects the active identity.
 
 Current envelope enforcement is limited to `/v1/authorize` and
 `/v1/reservation/declare`, `/v1/reservation/request`, `/v1/reservation/claim`, and
@@ -240,18 +237,18 @@ including `write_file`, `delete_file`, and `move_file` with source `path` /
 workspace file state. PostToolUse observes completed native edits and sandbox
 `write-targets` transactions, records the result, and releases the
 same-reservation claims that authorized the completed write boundary. Released claims leave the
-live context render and do not authorize a later write; the session must reread
+live context render and do not authorize a later write; the agent must reread
 and reacquire a claim, or lazy-claim a claimable reservation, before retrying.
 For OMP `edit` and `write`, the generated extension first handles the common
 missing-scope case inside pre-tool authorization: if `/v1/authorize` denies only
 because reservation/scope is missing and the tool call did not supply an
 explicit reservation id, it declares the exact file scope, acquires
 same-reservation claims, and retries authorization. Remaining OMP `edit`
-denials are captured as live-session lazy edit operations when the patch has
+denials are captured as live-agent lazy edit operations when the patch has
 safe repo-relative line targets. Remaining OMP `write` denials are captured as
-live-session lazy write operations with the original full write content. Denials
+live-agent lazy write operations with the original full write content. Denials
 with a wait id reuse that id; other retryable lazy operations receive a generated
-live-session operation id. `lazy_edit_resume` re-authorizes the original edit
+live-agent operation id. `lazy_edit_resume` re-authorizes the original edit
 after the agent fixes scope, receives a claimable reservation, or recovers from
 another fallback denial, verifies the file content still matches the queued base
 text, and applies only line-based edit patch operations; block operations or
@@ -341,15 +338,15 @@ integration risk rather than immediate physical file overwrite.
 
 Queued requests are promoted FIFO. The shipped queue stores one requested path
 per wait request, and a request is reservable only when that requested resource
-is available. Promotion is triggered by explicit claim release, session or
+is available. Promotion is triggered by explicit claim release, agent or
 activity finalization, claim/reservation expiry, or current-state materialization
 that finds an already-unblocked queued waiter. Promotion creates short claimable
 reservations and pending notifications whose payloads carry the waiting row's
 stored, non-empty purpose.
 
 Promotion creates claimable reservations first. A claimable reservation is not
-active write authority. Each waiting session must reread the target. Manual
-MCP/CLI flows then explicitly claim with `state_reservation_claim` or
+active write authority. Each waiting agent must reread the target. Manual
+native-tool or CLI flows then explicitly claim with `state_reservation_claim` or
 `stateful reservation claim --wait-id <id>`; claim uses the stored reservation
 purpose and clients do not provide a claim purpose. Hook and sandbox
 authorization sources may lazy-claim the claimable reservation at the retried
@@ -369,8 +366,8 @@ reservation and claim before writing.
 Full scheduling APIs return immediately with request state. Blocking waits can
 be implemented as a future client convenience by polling notifications or resume
 endpoints. Queued and claimable (`reserved`) request cancellation is explicit
-through `reservation/cancel`; shipped session or activity finalization also
-cancels that session's queued and claimable (`reserved`) requests. Explicit user
+through `reservation/cancel`; shipped stop or activity finalization also
+cancels that agent's queued and claimable (`reserved`) requests. Explicit user
 overrides do not reorder the wait queue or transfer reservations.
 
 ## SQLite Storage
@@ -408,7 +405,7 @@ outbox
 ```
 
 `events` is append-only audit history for shipped coordination events. Accepted
-session and reservation declaration events materialize current-state rows in the same
+agent registration and reservation declaration events materialize current-state rows in the same
 transaction as the event append. Lifecycle mutation APIs such as claim release,
 reservation claim, reservation cancel, and activity finalize update materialized tables
 directly and append their audit events in the same transaction. If the audit
@@ -419,25 +416,28 @@ Required indexes:
 
 ```text
 events(workspace_id, created_at)
-events(session_id, created_at)
-sessions(workspace_id, session_id)
+events(agent_id, created_at)
+events(agent_id, sequence)
+agents(workspace_id, agent_id)
 activities(workspace_id, expires_at)
-reservations(session_id, status, expires_at)
+activities(agent_id, workspace_id, expires_at)
+reservations(agent_id, status, expires_at)
 claims(workspace_id, relative_path, status)
 claims(repo_id, relative_path, status, expires_at)
 wait_queue(workspace_id, relative_path, status)
-wait_queue(session_id, status)
-notifications(target_session_id, status)
-conflicts(session_id, checked_at)
-reconciliations(session_id, created_at)
-outbox(session_id, sequence, sync_status)
+wait_queue(agent_id, status)
+notifications(target_agent_id, status)
+conflicts(agent_id, checked_at)
+reconciliations(agent_id, created_at)
+outbox(agent_id, sequence, sync_status)
 ```
 
-The shipped schema may retain legacy or target-model columns and indexes such
-as `events.sequence` and `claims.absolute_path`; current v1 authorization and
-event queries must not rely on them until those columns are populated.
+The shipped schema may retain legacy or target-model index names such as
+`idx_events_session_created_at` and columns such as `events.sequence` or
+`claims.absolute_path`; current v1 authorization and event queries must not rely
+on target-model columns until those columns are populated.
 
-`SessionHeartbeat` materialization refreshes the session timestamp, active claim
+`AgentHeartbeat` materialization refreshes the agent timestamp, active claim
 expiry, active activity expiry, and active reservation expiry. Reservation refresh is
 capped at 60 minutes from `declared_at`.
 
@@ -492,8 +492,8 @@ repo-local .stateful_core/runtime/server.json compatibility fallback
 user read/write permissions (`0600`) on Unix platforms where file modes are
 available.
 When the runtime workspace id is a default placeholder (`local`, `shared`, or
-`unknown`), enabled-repo hooks, MCP calls, and CLI fallbacks derive the effective
-request workspace id from the enabled repo's canonical git root
+`unknown`), enabled-repo hooks, native tool calls, and CLI fallbacks derive the
+effective request workspace id from the enabled repo's canonical git root
 (`workspace-...`) so two different enabled repos do not share one conflict
 domain. Explicit non-default runtime or command `--workspace-id` values are
 preserved.
@@ -503,9 +503,8 @@ preserved.
 LAN-reachable, but printed join commands target loopback so remote machines use
 an SSH tunnel before joining. `stateful server join` rejects non-loopback plain
 `http://` base URLs before runtime validation or config writes, validates the
-host runtime, installs global stateful/Codex MCP configuration, writes global
-runtime discovery for the host server, and only enables the current repo when
-`--enable-repo` is supplied.
+host runtime, writes global runtime discovery for the host server, and only
+enables the current repo when `--enable-repo` is supplied.
 
 ## Local HTTP Trust
 
@@ -565,8 +564,7 @@ The file format is newline-delimited JSON. Each line carries:
 ```text
 outbox_id
 event_type
-session_id
-actor_id
+agent_id
 workspace_id
 sequence
 created_at
@@ -576,7 +574,7 @@ sync_status: pending
 
 `outbox_id` is the idempotency key. The server must treat repeated sync attempts
 for the same `outbox_id` as the same event. Sync preserves sequence order per
-session.
+agent.
 
 The outbox cannot authorize writes, clear reconciliation blocks, or extend
 claims while the state server is unavailable.
@@ -602,20 +600,18 @@ stateful events
 stateful doctor
 stateful sandbox run --fs read-only|write-targets|build|git|github-pr ...
 stateful sandbox process find <selector>
-stateful reservation declare [--session-id <id>] [--workspace-id <id>] --purpose <purpose> <paths...>
-stateful notifications poll [--session-id <id>] [--workspace-id <id>]
-stateful resume next [--session-id <id>] [--workspace-id <id>]
-stateful mcp call <tool> [arguments-json]
-stateful mcp serve
+stateful reservation declare [--agent-id <id>] [--workspace-id <id>] --purpose <purpose> <paths...>
+stateful notifications poll [--agent-id <id>] [--workspace-id <id>]
+stateful resume next [--agent-id <id>] [--workspace-id <id>]
 stateful hook <codex|omp> <event>
 stateful sync-outbox
 ```
 
-`stateful install --agent codex --yes` configures global Codex hooks, MCP, MCP
-tool approval policy, and external sandbox approval rules. Codex installs wire
-`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`.
-Stateful MCP tools default to automatic approval; `stateful sandbox run --fs
-external --purpose ... --command ...` is gated by a Codex execpolicy prompt
+`stateful install --agent codex --yes` configures global Codex hooks, generated
+skills, and external sandbox approval rules. Codex installs wire `SessionStart`,
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`. `stateful sandbox
+run --fs external --purpose ... --command ...` is gated by a Codex execpolicy
+prompt
 before it runs the external sandbox command. Purpose-and-command-only operations
 are allowed for read-only/no-declared-scope use; supplied external write scopes
 are validated before the sandbox starts. On macOS, that external profile also
@@ -653,12 +649,11 @@ Before publishing or releasing a build, run:
 
 ```text
 cargo fmt --all --check
-env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo test --workspace
+cargo test --workspace
 ```
 
-Unset `STATEFUL_CODEX_RUN_ID` and `CODEX_THREAD_ID` when running workspace tests
-from an active Codex session so tests do not inherit a run-bound session file
-from the caller.
+Run workspace tests from a clean shell when possible so test behavior is not
+influenced by active agent runtime state.
 `stateful doctor` remains the local installation health check after installing
 or enabling a repository.
 
@@ -733,12 +728,12 @@ pieces into `stateful-core` without duplicating product policy in adapters.
 
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --yes` installs stateful global files only. `stateful install
---agent codex --yes` configures global Codex hooks and MCP, and writes
+--agent codex --yes` configures global Codex hooks and writes
 `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
 `sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`) and
 `skills/dispatching-parallel-agents/SKILL.md`. `stateful install
---agent omp --yes` installs the OMP extension entry point, MCP config,
-always-apply `rules/stateful-required.md` rule, `skills/stateful-command-policy/`
+--agent omp --yes` installs the OMP extension entry point, always-apply
+`rules/stateful-required.md` rule, `skills/stateful-command-policy/`
 (`SKILL.md`, `omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
 `subagent-write-recovery.md`) manual files, and OMP config under the
 `stateful` profile agent directory (`~/.omp/profiles/stateful/agent`) with

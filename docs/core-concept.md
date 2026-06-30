@@ -62,12 +62,12 @@ Current state is a scoped, time-bound summary of active work.
 
 Examples:
 
-- An agent session is exploring auth validation.
-- A subagent is editing under its own session identity while sharing the
+- An agent is exploring auth validation.
+- A subagent is editing under its own agent identity while sharing the
   workspace-level coordination model.
-- A session plans to edit `src/auth.ts`.
+- An agent plans to edit `src/auth.ts`.
 - A file has an active advisory claim.
-- A session is testing after a change.
+- An agent is testing after a change.
 - A file changed after an agent acquired its exact file claim, or a future
   observer/IDE integration reports nearby human editing activity.
 - A session finalized as `done`, `failed`, or `blocked`.
@@ -76,8 +76,8 @@ Current state must be compact enough to render into an agent prompt and precise
 enough to drive conflict checks before important tool calls.
 
 The shipped v1 prototype observes Codex and OMP sessions, supported tool
-effects, MCP calls, exact file claim freshness, and explicit reconciliation
-acknowledgements.
+effects, native Stateful tool calls, exact file claim freshness, and explicit
+reconciliation acknowledgements.
 It does not automatically watch human editor buffers or filesystem saves.
 
 ## Freshness
@@ -127,7 +127,7 @@ after important action  -> observe effects and refresh state
 before turn stops       -> require final status
 ```
 
-For v1, supported write actions are blocked unless the session has an active
+For v1, supported write actions are blocked unless the active agent has an active
 task reservation whose file or directory set covers the target, plus a fresh
 same-reservation claim on the exact resource being written. Abstract task, test,
 port, or migration resources can provide context but do not permit writes by

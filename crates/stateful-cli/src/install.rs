@@ -1421,8 +1421,8 @@ fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Resu
     let contents = format!(
         r#"import {{ spawnSync }} from "node:child_process";
 import {{ createHash }} from "node:crypto";
-import {{ closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync }} from "node:fs";
-import {{ basename, delimiter, dirname, extname, resolve }} from "node:path";
+import {{ existsSync, mkdirSync, readFileSync, statSync, writeFileSync }} from "node:fs";
+import {{ delimiter, dirname, resolve }} from "node:path";
 import {{ fileURLToPath }} from "node:url";
 
 const STATEFUL = {binary_json};
@@ -1518,65 +1518,55 @@ function firstString(...values) {{
   return undefined;
 }}
 
-function sessionIdFromString(value, prefix = "omp") {{
+function agentIdFromString(value) {{
   if (typeof value !== "string") return undefined;
   const id = value.trim();
   if (!id) return undefined;
-  if (/^[A-Za-z0-9_-]+$/.test(id)) return id;
-  return prefix + "-" + createHash("sha256").update(id).digest("hex").slice(0, 32);
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) return undefined;
+  return id;
 }}
 
-function readFirstLine(path) {{
-  const fd = openSync(path, "r");
-  try {{
-    const buffer = Buffer.alloc(4096);
-    const bytes = readSync(fd, buffer, 0, buffer.length, 0);
-    return buffer.toString("utf8", 0, bytes).split(/\r?\n/, 1)[0];
-  }} finally {{
-    closeSync(fd);
-  }}
+function workspaceIdFromString(value) {{
+  if (typeof value !== "string") return undefined;
+  const id = value.trim();
+  return id.length > 0 ? id : undefined;
 }}
 
-function sessionIdFromSessionFile(sessionFile) {{
-  const path = firstString(sessionFile);
-  if (!path) return undefined;
-  try {{
-    const id = sessionIdFromString(JSON.parse(readFirstLine(path))?.id);
-    if (id) return id;
-  }} catch (_) {{}}
-  return sessionIdFromString(basename(path, extname(path))) || sessionIdFromString(path);
-}}
 
-function sessionIdFromSessionManager(sessionManager) {{
+function detectAgentId(event, ctx) {{
   return firstString(
-    sessionIdFromSessionFile(sessionManager?.getSessionFile?.()),
-    sessionIdFromString(sessionManager?.getLeafId?.(), "omp-leaf")
+    agentIdFromString(event?.agentId),
+    agentIdFromString(event?.agent_id),
+    agentIdFromString(event?.agent?.id),
+    agentIdFromString(event?.agent?.agentId),
+    agentIdFromString(event?.agent?.agent_id),
+    agentIdFromString(ctx?.agentId),
+    agentIdFromString(ctx?.agent_id),
+    agentIdFromString(ctx?.agent?.id),
+    agentIdFromString(ctx?.agent?.agentId),
+    agentIdFromString(ctx?.agent?.agent_id)
   );
 }}
 
-function detectSessionId(event, ctx) {{
+function detectWorkspaceId(event, ctx) {{
   return firstString(
-    sessionIdFromString(event?.sessionId),
-    sessionIdFromString(event?.session_id),
-    sessionIdFromString(event?.session?.id),
-    sessionIdFromString(event?.session?.sessionId),
-    sessionIdFromString(event?.session?.session_id),
-    sessionIdFromString(ctx?.sessionId),
-    sessionIdFromString(ctx?.session_id),
-    sessionIdFromString(ctx?.session?.id),
-    sessionIdFromString(ctx?.session?.sessionId),
-    sessionIdFromString(ctx?.session?.session_id),
-    sessionIdFromSessionManager(ctx?.sessionManager)
+    workspaceIdFromString(event?.workspaceId),
+    workspaceIdFromString(event?.workspace_id),
+    workspaceIdFromString(event?.workspace?.id),
+    workspaceIdFromString(event?.workspace?.workspaceId),
+    workspaceIdFromString(event?.workspace?.workspace_id),
+    workspaceIdFromString(ctx?.workspaceId),
+    workspaceIdFromString(ctx?.workspace_id),
+    workspaceIdFromString(ctx?.workspace?.id),
+    workspaceIdFromString(ctx?.workspace?.workspaceId),
+    workspaceIdFromString(ctx?.workspace?.workspace_id)
   );
 }}
 
-function sessionId(event, ctx) {{
-  const id = detectSessionId(event, ctx);
-  if (id) {{
-    process.env.STATEFUL_SESSION_ID = id;
-  }} else {{
-    delete process.env.STATEFUL_SESSION_ID;
-  }}
+
+function agentId(event, ctx) {{
+  const id = detectAgentId(event, ctx);
+  if (!id) throw new Error("Stateful requires adapter-provided agent_id for the active agent");
   return id;
 }}
 
@@ -1624,7 +1614,7 @@ function sleepWithAbort(ms, signal) {{
 
 function reservationStreamUrl(stream) {{
   const base = String(stream.base_url || "").replace(/\/+$/, "");
-  return base + "/v1/notifications/stream?session_id=" + encodeURIComponent(stream.session_id) + "&workspace_id=" + encodeURIComponent(stream.workspace_id);
+  return base + "/v1/notifications/stream?agent_id=" + encodeURIComponent(stream.agent_id) + "&workspace_id=" + encodeURIComponent(stream.workspace_id);
 }}
 
 function reservationResumeUrl(stream) {{
@@ -1652,17 +1642,17 @@ function reservationMessage(notification) {{
   return lines.join("\n");
 }}
 
-function notificationTargetsStreamSession(notification, stream) {{
-  const targetSessionId = property(notification, "target_session_id")
-    || property(notification, "session_id")
-    || propertyPath(notification, "payload", "session_id");
-  if (!targetSessionId) return true;
-  return targetSessionId === property(stream, "session_id");
+function notificationTargetsStreamAgent(notification, stream) {{
+  const targetAgentId = property(notification, "target_agent_id")
+    || property(notification, "agent_id")
+    || propertyPath(notification, "payload", "agent_id");
+  if (!targetAgentId) return true;
+  return targetAgentId === property(stream, "agent_id");
 }}
 
 
 function deliverReservationNotification(pi, notification, stream) {{
-  if (!notificationTargetsStreamSession(notification, stream)) return;
+  if (!notificationTargetsStreamAgent(notification, stream)) return;
   const payload = notification?.payload || {{}};
   const waitId = payload.wait_id;
   if (!waitId || seenReservationWaitIds.has(waitId)) {{
@@ -1695,7 +1685,7 @@ async function checkReservationResume(pi, stream, signal) {{
         authorization: stream.authorization,
         "content-type": "application/json",
       }},
-      body: JSON.stringify({{ session_id: stream.session_id, workspace_id: stream.workspace_id }}),
+      body: JSON.stringify({{ agent_id: stream.agent_id, workspace_id: stream.workspace_id }}),
       signal,
     }});
     if (!response.ok) return;
@@ -1746,7 +1736,7 @@ function processReservationSseBuffer(pi, buffer, stream) {{
 }}
 
 function startReservationStream(pi, stream) {{
-  if (!stream?.base_url || !stream?.authorization || !stream?.session_id || !stream?.workspace_id) return;
+  if (!stream?.base_url || !stream?.authorization || !stream?.agent_id || !stream?.workspace_id) return;
   if (typeof fetch !== "function" || typeof TextDecoder !== "function") return;
   stopReservationStream();
   const controller = new AbortController();
@@ -1891,7 +1881,7 @@ function rememberLazyEditOperation(event, ctx, decision) {{
   const operationId = structuredLazyEditOperationId(decision) || nextLazyEditOperationId();
   lazyEditOperations.set(operationId, {{
     operation_id: operationId,
-    session_id: sessionId(event, ctx),
+    agent_id: agentId(event, ctx),
     reservation_id: structuredLazyReservationId(event, decision),
     cwd: ctx.cwd,
     tool_name: event.toolName,
@@ -1916,7 +1906,7 @@ function rememberLazyWriteOperation(event, ctx, decision) {{
   const targets = [target];
   lazyWriteOperations.set(operationId, {{
     operation_id: operationId,
-    session_id: sessionId(event, ctx),
+    agent_id: agentId(event, ctx),
     reservation_id: structuredLazyReservationId(event, decision),
     cwd: ctx.cwd,
     tool_name: event.toolName,
@@ -1940,7 +1930,7 @@ function rememberLazyBashOperation(event, ctx, decision) {{
   const operationId = nextLazyBashOperationId();
   lazyBashOperations.set(operationId, {{
     operation_id: operationId,
-    session_id: sessionId(event, ctx),
+    agent_id: agentId(event, ctx),
     cwd: ctx.cwd,
     tool_name: event.toolName,
     tool_input: event.input || {{}},
@@ -2320,6 +2310,52 @@ async function ensureExternalBashGrant(ctx, params, signal) {{
   return true;
 }}
 
+function quoteStatefulCommandWord(word) {{
+  const value = String(word || "");
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}}
+
+function commandWordsToShell(words) {{
+  return words.map(quoteStatefulCommandWord).join(" ");
+}}
+
+function flagValue(words, flag) {{
+  const index = words.indexOf(flag);
+  if (index < 0) return undefined;
+  return words[index + 1];
+}}
+
+function insertSandboxIdentityFlag(words, flag, value) {{
+  if (flagValue(words, flag) !== undefined) return words;
+  words.splice(3, 0, flag, value);
+  return words;
+}}
+
+function commandWithActiveSandboxIdentity(words, event, ctx) {{
+  if (!Array.isArray(words) || words[1] !== "sandbox" || words[2] !== "run") {{
+    return {{ words, command: undefined }};
+  }}
+  const activeAgentId = agentId(event, ctx);
+  const suppliedAgentId = flagValue(words, "--agent-id");
+  if (suppliedAgentId !== undefined && suppliedAgentId !== activeAgentId) {{
+    throw new Error("stateful sandbox run --agent-id must match the active agent_id");
+  }}
+  const rewritten = [...words];
+  insertSandboxIdentityFlag(rewritten, "--agent-id", activeAgentId);
+
+  const activeWorkspaceId = detectWorkspaceId(event, ctx);
+  const suppliedWorkspaceId = flagValue(words, "--workspace-id");
+  if (activeWorkspaceId) {{
+    if (suppliedWorkspaceId !== undefined && suppliedWorkspaceId !== activeWorkspaceId) {{
+      throw new Error("stateful sandbox run --workspace-id must match the active workspace_id");
+    }}
+    insertSandboxIdentityFlag(rewritten, "--workspace-id", activeWorkspaceId);
+  }}
+  return {{ words: rewritten, command: commandWordsToShell(rewritten) }};
+}}
+
+
 function splitStatefulCommandWords(command) {{
   const words = [];
   let current = "";
@@ -2374,6 +2410,8 @@ function parseStatefulSandboxRunWords(words) {{
     connect_sockets: [],
     allow_signal: false,
     network: undefined,
+    agent_id: undefined,
+    workspace_id: undefined,
     command: "",
   }};
   for (let index = 3; index < words.length; index += 1) {{
@@ -2393,6 +2431,8 @@ function parseStatefulSandboxRunWords(words) {{
     else if (arg === "--timeout-seconds") nextValue("--timeout-seconds");
     else if (arg === "--stream-events") continue;
     else if (arg === "--allow-signal") params.allow_signal = true;
+    else if (arg === "--agent-id") params.agent_id = nextValue("--agent-id");
+    else if (arg === "--workspace-id") params.workspace_id = nextValue("--workspace-id");
     else if (arg === "--command") params.command = nextValue("--command");
     else throw new Error("unsupported stateful sandbox run argument `" + arg + "`");
   }}
@@ -2438,6 +2478,13 @@ export default function statefulOmpExtension(pi) {{
     if (event?.toolName !== "bash" && event?.toolName !== "functions.bash") return;
     const decision = statefulBashPassthroughDecision(event?.input?.command);
     if (!decision.allow) return {{ block: true, reason: decision.reason }};
+    try {{
+      const rewritten = commandWithActiveSandboxIdentity(decision.words, event, ctx);
+      decision.words = rewritten.words;
+      if (rewritten.command && event?.input) event.input.command = rewritten.command;
+    }} catch (error) {{
+      return {{ block: true, reason: error instanceof Error ? error.message : String(error) }};
+    }}
     if (decision.externalGrantParams) {{
       const params = decision.externalGrantParams;
       if (shouldAutoApproveStatefulPrompt(ctx, params)) {{
@@ -2474,7 +2521,7 @@ export default function statefulOmpExtension(pi) {{
         return lazyToolResult("failed", "lazy edit operation not found in this live OMP extension session", {{ operation_id: operationId }});
       }}
       const authorization = runStatefulHook("pre-tool-use", {{
-        session_id: operation.session_id,
+        agent_id: operation.agent_id,
         reservation_id: operation.reservation_id || undefined,
         cwd: operation.cwd || ctx.cwd,
         yolo: true,
@@ -2493,7 +2540,7 @@ export default function statefulOmpExtension(pi) {{
       if (result.status === "applied") {{
         lazyEditOperations.delete(operationId);
         runStatefulHook("post-tool-use", {{
-          session_id: operation.session_id,
+          agent_id: operation.agent_id,
           cwd: operation.cwd || ctx.cwd,
           tool_name: operation.tool_name,
           tool_input: operation.tool_input,
@@ -2520,7 +2567,7 @@ export default function statefulOmpExtension(pi) {{
         return lazyToolResult("failed", "lazy write operation not found in this live OMP extension session", {{ operation_id: operationId }});
       }}
       const authorization = runStatefulHook("pre-tool-use", {{
-        session_id: operation.session_id,
+        agent_id: operation.agent_id,
         reservation_id: operation.reservation_id || undefined,
         cwd: operation.cwd || ctx.cwd,
         yolo: true,
@@ -2539,7 +2586,7 @@ export default function statefulOmpExtension(pi) {{
       if (result.status === "applied") {{
         lazyWriteOperations.delete(operationId);
         runStatefulHook("post-tool-use", {{
-          session_id: operation.session_id,
+          agent_id: operation.agent_id,
           cwd: operation.cwd || ctx.cwd,
           tool_name: operation.tool_name,
           tool_input: operation.tool_input,
@@ -2575,7 +2622,7 @@ export default function statefulOmpExtension(pi) {{
         return lazyToolResult("failed", "user denied stateful external sandbox grant", {{ operation_id: operationId }});
       }}
       const authorization = runStatefulHook("pre-tool-use", {{
-        session_id: operation.session_id,
+        agent_id: operation.agent_id,
         cwd: operation.cwd || ctx.cwd,
         yolo: true,
         tool_name: operation.tool_name,
@@ -2592,7 +2639,7 @@ export default function statefulOmpExtension(pi) {{
       if (result.status === 0) {{
         lazyBashOperations.delete(operationId);
         runStatefulHook("post-tool-use", {{
-          session_id: operation.session_id,
+          agent_id: operation.agent_id,
           cwd: operation.cwd || ctx.cwd,
           tool_name: operation.tool_name,
           tool_input: operation.tool_input,
@@ -2604,7 +2651,7 @@ export default function statefulOmpExtension(pi) {{
   pi.on("session_start", async (event, ctx) => {{
     verifyBareStateful(ctx.cwd);
     const result = runStatefulHook("session-start", {{
-      session_id: sessionId(event, ctx),
+      agent_id: agentId(event, ctx),
       cwd: ctx.cwd,
     }});
     startReservationStream(pi, result?.notifications_stream);
@@ -2613,7 +2660,7 @@ export default function statefulOmpExtension(pi) {{
     const benchmarkBlockReason = benchmarkSourceBlockReason(event);
     if (benchmarkBlockReason) return {{ block: true, reason: benchmarkBlockReason }};
     const decision = runStatefulHook("pre-tool-use", {{
-      session_id: sessionId(event, ctx),
+      agent_id: agentId(event, ctx),
       reservation_id: reservationId(event),
       cwd: ctx.cwd,
       yolo: isYolo(event, ctx),
@@ -2648,7 +2695,7 @@ export default function statefulOmpExtension(pi) {{
   }});
   pi.on("tool_result", async (event, ctx) => {{
     runStatefulHook("post-tool-use", {{
-      session_id: sessionId(event, ctx),
+      agent_id: agentId(event, ctx),
       cwd: ctx.cwd,
       tool_name: event.toolName,
       tool_input: event.input || {{}},
@@ -2657,7 +2704,7 @@ export default function statefulOmpExtension(pi) {{
   pi.on("session_shutdown", async (event, ctx) => {{
     stopReservationStream();
     runStatefulHook("stop", {{
-      session_id: sessionId(event, ctx),
+      agent_id: agentId(event, ctx),
       cwd: ctx.cwd,
     }});
   }});
@@ -2666,7 +2713,6 @@ export default function statefulOmpExtension(pi) {{
     );
     write_or_replace_text_file_with_mode(extension_path, &contents, private_file_mode())
 }
-
 
 fn shell_quote_posix(value: &str) -> anyhow::Result<String> {
     validate_no_control_chars(value)?;

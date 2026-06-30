@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_SESSION_SCOPE_SOURCE_REF: &str = "CurrentSessionScope";
+pub const AGENT_CONTEXT_SCOPE_SOURCE_REF: &str = "AgentContextScope";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -11,7 +11,7 @@ pub enum RenderMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CurrentItemKind {
-    Session,
+    Agent,
     Reservation,
     Claim,
     WaitQueue,
@@ -85,7 +85,7 @@ pub struct CurrentItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence_kind: Option<CurrentEvidenceKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -117,7 +117,7 @@ impl CurrentItem {
             next_action: None,
             evidence: None,
             evidence_kind: None,
-            session_id: None,
+            agent_id: None,
             workspace_id: None,
             source_refs: Vec::new(),
             observed_at: None,
@@ -141,8 +141,8 @@ impl CurrentItem {
         self
     }
 
-    pub fn with_session(mut self, session_id: impl Into<String>) -> Self {
-        self.session_id = Some(session_id.into());
+    pub fn with_agent(mut self, agent_id: impl Into<String>) -> Self {
+        self.agent_id = Some(agent_id.into());
         self
     }
 
@@ -239,7 +239,7 @@ impl ContextPackage {
         summary: impl Into<String>,
     ) -> Self {
         self.items.push(CurrentItem::new(
-            CurrentItemKind::Session,
+            CurrentItemKind::Agent,
             CurrentSeverity::Info,
             CurrentFreshness::Live,
             resource,
@@ -290,7 +290,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         .items
         .iter()
         .filter(|item| {
-            item.freshness == CurrentFreshness::Live && is_current_session_scope_item(item)
+            item.freshness == CurrentFreshness::Live && is_current_agent_scope_item(item)
         })
         .collect::<Vec<_>>();
     render_section(
@@ -309,7 +309,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         .filter(|item| {
             item.freshness == CurrentFreshness::Live
                 && item.severity == CurrentSeverity::Block
-                && !is_current_session_scope_item(item)
+                && !is_current_agent_scope_item(item)
         })
         .collect::<Vec<_>>();
     render_section(
@@ -332,7 +332,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         .filter(|item| {
             item.freshness == CurrentFreshness::Live
                 && item.severity == CurrentSeverity::Warn
-                && !is_current_session_scope_item(item)
+                && !is_current_agent_scope_item(item)
         })
         .collect::<Vec<_>>();
     render_section(
@@ -351,7 +351,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         .filter(|item| {
             item.freshness == CurrentFreshness::Live
                 && item.severity == CurrentSeverity::Info
-                && !is_current_session_scope_item(item)
+                && !is_current_agent_scope_item(item)
         })
         .collect::<Vec<_>>();
     render_section(
@@ -372,7 +372,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         .items
         .iter()
         .filter(|item| {
-            item.freshness != CurrentFreshness::Live && !is_current_session_scope_item(item)
+            item.freshness != CurrentFreshness::Live && !is_current_agent_scope_item(item)
         })
         .take(stale_limit)
         .collect::<Vec<_>>();
@@ -417,10 +417,10 @@ fn render_brief_summary(output: &mut String, items: &[CurrentItem]) {
     ));
 }
 
-fn is_current_session_scope_item(item: &CurrentItem) -> bool {
+fn is_current_agent_scope_item(item: &CurrentItem) -> bool {
     item.source_refs
         .iter()
-        .any(|source_ref| source_ref == CURRENT_SESSION_SCOPE_SOURCE_REF)
+        .any(|source_ref| source_ref == AGENT_CONTEXT_SCOPE_SOURCE_REF)
 }
 
 fn package_status(items: &[CurrentItem]) -> ContextStatus {

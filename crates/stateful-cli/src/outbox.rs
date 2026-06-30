@@ -23,7 +23,7 @@ use crate::{GlobalPaths, ServerRuntime, discover_runtime_with_global, post_json}
 struct LocalOutboxRecord {
     outbox_id: String,
     event_type: String,
-    session_id: String,
+    agent_id: String,
     workspace_id: String,
     sequence: u64,
     payload: Value,
@@ -84,8 +84,8 @@ pub fn sync_outbox_with_runtime(
         let mut records = read_pending_records(&claimed_path)?;
         records.sort_by(|left, right| {
             left.record
-                .session_id
-                .cmp(&right.record.session_id)
+                .agent_id
+                .cmp(&right.record.agent_id)
                 .then(left.record.sequence.cmp(&right.record.sequence))
         });
 
@@ -96,7 +96,7 @@ pub fn sync_outbox_with_runtime(
                 "/v1/outbox/sync",
                 &json!({
                     "outbox_id": record.outbox_id,
-                    "session_id": record.session_id,
+                    "agent_id": record.agent_id,
                     "workspace_id": record.workspace_id,
                     "sequence": record.sequence,
                     "event_type": record.event_type,
@@ -138,19 +138,19 @@ pub fn sync_outbox_with_runtime(
 pub(crate) fn queue_session_heartbeat_outbox(
     paths: &GlobalPaths,
     runtime_workspace_id: &str,
-    session_id: &str,
+    agent_id: &str,
     reason: &str,
 ) -> anyhow::Result<()> {
     let outbox_dir = ensure_trusted_outbox_dir(paths)?;
     let _lock = acquire_outbox_lock(&outbox_dir)?;
     recover_claimed_outbox_files(&outbox_dir)?;
-    let stem = safe_file_stem(session_id);
+    let stem = safe_file_stem(agent_id);
     let path = outbox_dir.join(format!("{stem}.jsonl"));
     let sequence = next_sequence(&outbox_dir, &stem)?;
     let record = json!({
         "outbox_id": uuid::Uuid::new_v4().to_string(),
-        "event_type": "SessionHeartbeatQueued",
-        "session_id": session_id,
+        "event_type": "AgentHeartbeatQueued",
+        "agent_id": agent_id,
         "actor_id": "unknown",
         "workspace_id": runtime_workspace_id,
         "sequence": sequence,

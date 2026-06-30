@@ -59,11 +59,12 @@ An agent activity state should be compact, fresh, and directly useful for
 coordination.
 
 ```text
-session_id
+agent_id
+workspace_id
 actor_id
 actor_type: agent | subagent | human | system
 owner_id
-parent_session_id
+parent_agent_id
 parent_actor_id
 workspace
 branch
@@ -170,8 +171,8 @@ Each promoted waiter receives a short claimable reservation (the shipped API
 state is `reserved`). Claimable reservations prevent a later session from taking
 the same resource ahead of an earlier conflicting waiter, but they are not active
 write authority. The promotion records a pending notification payload containing
-the wait queue row's stored, non-empty purpose. The session with the claimable
-reservation must reread the target. Manual MCP/CLI flows then call
+the wait queue row's stored, non-empty purpose. The agent with the claimable
+reservation must reread the target. Manual native-tool or CLI flows then call
 `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or
 `stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>` before writing;
 the claim uses the stored reservation purpose, and clients do not provide a new
@@ -196,7 +197,7 @@ Full scheduling works through immediate request/response plus polling. Reservati
 request APIs return `queued`, `reserved` (claimable reservation), `claimed`,
 `canceled`, or `expired` state without blocking indefinitely. Immediate
 availability creates a claimable reservation with API state `reserved`; the
-session must still reread the target. Manual MCP/CLI flows claim with
+agent must still reread the target. Manual native-tool or CLI flows claim with
 `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or
 `stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>` before retrying;
 the server uses the stored reservation purpose. Native edit hooks and sandbox
@@ -215,8 +216,8 @@ replace the original purpose. Repeating an expired request requeues the same
 waiter in place, preserving its original FIFO row while requiring a new
 reservation and claim before writing. A queued or claimable (`reserved`) request can be
 canceled explicitly with `state_reservation_cancel` /
-`stateful reservation cancel --request-id <id>`. Session or activity finalization
-releases that session's active claims, cancels that session's queued and
+`stateful reservation cancel --request-id <id>`. Stop or activity finalization
+releases that agent's active claims, cancels that agent's queued and
 claimable (`reserved`) requests, and promotes the next eligible waiter for any
 released or canceled resource.
 
@@ -231,11 +232,11 @@ Instead, important actions should pass through a state protocol:
 ```text
 before important action -> authorize against current state
 after important action  -> observe and update current state
-before session stops    -> require final status
+before active agent stops    -> require final status
 ```
 
 For the first implementation, supported write actions are blocked unless the
-session has active reservation. Conflict enforcement is advisory but blocking where
+active agent has active reservation. Conflict enforcement is advisory but blocking where
 supported runtime adapters expose a hookable action. Hard global locks are a
 later policy decision.
 
@@ -245,7 +246,7 @@ The chosen MVP direction is:
 
 ```text
 Codex lifecycle hooks and OMP extension hooks
-+ MCP tools
++ native Stateful coordination tools
 + state server
 ```
 
@@ -253,8 +254,8 @@ This gives useful control without forking Codex or changing the default OMP
 profile.
 
 The prototype supports user-level installation with repo allowlist gating.
-`stateful install --agent codex --yes` configures global Codex hooks and MCP,
-and writes `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
+`stateful install --agent codex --yes` configures global Codex hooks and writes
+`skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
 `sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`) and
 `skills/dispatching-parallel-agents/SKILL.md`.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
@@ -294,7 +295,7 @@ global/default profile is not modified.
 install and repo allowlist.
 
 ```text
-global Codex hooks and MCP config
+global Codex hooks and generated skills
 isolated OMP `stateful` profile config
 repo allowlist entry
 optional <repo>/.codex/hooks.json compatibility fallback
@@ -307,14 +308,13 @@ share the Codex lifecycle model: `SessionStart`, `UserPromptSubmit`,
 `PreToolUse`, `PostToolUse`, and `Stop`. The isolated OMP `stateful` profile
 uses OMP extension entry points for `SessionStart`, `PreToolUse`,
 `PostToolUse`, and `Stop`; OMP does not expose `UserPromptSubmit`. OMP
-`session-start` stores `STATEFUL_SESSION_ID` from explicit event/ctx ids
-(`event.sessionId`, `event.session_id`, session fields), falling back to the
-`ctx.sessionManager.getSessionFile()` header/stem and then `getLeafId()`, and
-persists the same current-session files used by
-session-aware CLI and MCP callers. With that state in place,
-`state_session_register` -> `state_reservation_declare` ->
-`state_claim_acquire` resolves the active OMP session without a caller-supplied
-environment override. OMP native `edit` and `write` pre-tool authorization can
+`session-start` injects the active `agent_id` and `workspace_id` into Stateful
+hook and tool operations. OMP native tools use that explicit identity; agents do
+not repair or select current-session files, environment variables, or runtime
+session aliases. With that state in place, `state_session_register` ->
+`state_reservation_declare` -> `state_claim_acquire` resolves the active OMP
+agent identity without a caller-supplied environment override. OMP native `edit`
+and `write` pre-tool authorization can
 also auto-declare the exact file scope, acquire same-reservation claims, and
 retry when the only denial is missing reservation/scope and no explicit
 reservation id was supplied; queued conflicts, unavailable runtime,
@@ -354,8 +354,8 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 `SessionStart`:
 
-- register the session
-- record workspace, branch, and session id
+- register the active agent
+- record agent id, workspace, and branch
 - inject relevant active state into the model context
 
 `UserPromptSubmit`:
@@ -366,7 +366,7 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 `PreToolUse`:
 
 - intercept supported tool calls before execution
-- deny supported write calls when the session has no active reservation
+- deny supported write calls when the active agent has no active reservation
 - deny Codex raw Bash with sandbox guidance. For OMP, built-in Bash may run
   only strict trusted `stateful sandbox run ...` and `stateful sandbox process
   find ...` commands after Stateful preflight; arbitrary raw Bash and the
@@ -396,19 +396,20 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 Subagents:
 
-- coordinate in the same workspace state but use their own effective session
-  identity when the adapter exposes one
+- coordinate in the same workspace state but use their own effective `agent_id`
+  when the adapter exposes one
 - record activity and claims with their own `actor_id`
 - do not receive automatic override authority from a shared owner
 
-### MCP Responsibilities
+### Native Stateful Tool Responsibilities
 
-The MCP surface should expose structured tools for the agent and hooks. Canonical
-callable tool names map to dotted protocol names:
+The native Stateful tool surface should expose structured tools for agents and
+hooks. Agent identity tools use native names directly; other canonical callable
+tool names map to dotted protocol names:
 
 ```text
-state_session_register (state.session.register)
-state_session_heartbeat (state.session.heartbeat)
+state_session_register
+state_session_heartbeat
 state_reservation_declare (state.reservation.declare)
 state_reservation_request (state.reservation.request)
 state_reservation_claim (state.reservation.claim)
@@ -444,10 +445,10 @@ resources, not child file writes. Legacy server requests with `path` remain
 accepted for compatibility, while `state_claim_release` still accepts one
 `path`.
 
-Hooks should call the same state server API as MCP tools so policy remains
-centralized. Native edit tools with hook-visible targets are the repo file edit
-path after reservation and claim; sandbox-run remains the Bash wrapper for
-command-shaped shell writes.
+Hooks should call the same state server API as native Stateful tools so policy
+remains centralized. Native edit tools with hook-visible targets are the repo
+file edit path after reservation and claim; sandbox-run remains the Bash wrapper
+for command-shaped shell writes.
 
 ### State Server Responsibilities
 
@@ -470,9 +471,9 @@ V1 persistence is SQLite with append-only event tables and materialized
 current-state views. JSONL may be used for debugging exports, but not as the
 primary store.
 
-V1 transport is local HTTP. Codex hooks, OMP hooks, MCP tools, filesystem
-watchers, and the future IDE extension should call the same local HTTP API. MCP
-remains an adapter, not a separate policy implementation.
+V1 transport is local HTTP. Codex hooks, OMP hooks, native Stateful tools,
+filesystem watchers, and the future IDE extension should call the same local
+HTTP API. Native tools remain adapters, not separate policy implementations.
 
 Policy evaluation should use one entry point:
 
@@ -583,7 +584,7 @@ Initial policy should prefer advisory claims:
 - delete without exact file scope: deny
 - rename or move without exact file scope for both source and destination: deny
 - active claim in the hard conflict domain by another actor: deny unless the
-  current session has an explicit user override for that resource
+  current agent has an explicit user override for that resource
 - same `workspace_id` and same normalized `relative_path`: shipped hard conflict
   domain for active claim and wait-queue checks
 - same normalized `absolute_path`: target physical-file hard conflict domain
@@ -776,7 +777,7 @@ claims while the server is unavailable.
 
 Outbox sync uses `outbox_id` as an idempotency key. Replaying the same outbox
 entry must not create duplicate state events. Pending events should be synced in
-local creation order per session; failed entries stay in the outbox with failure
+local creation order per agent; failed entries stay in the outbox with failure
 metadata for later retry or inspection.
 
 V1 has no cached write grace period. A recent successful claim or reservation check is
@@ -786,9 +787,9 @@ not enough to continue writing while the state server is down.
 
 Agent runtime hooks are a practical guardrail, not a complete enforcement
 boundary. They can intercept important supported paths such as shell commands,
-`apply_patch`, and MCP calls, but they do not make the state protocol a full
-security boundary. Post-action hooks also cannot undo side effects that already
-happened.
+`apply_patch`, and native Stateful tool calls, but they do not make the state
+protocol a full security boundary. Post-action hooks also cannot undo side
+effects that already happened.
 
 For OMP, yolo metadata does not downgrade a stateful denial to a warning; deny
 and unavailable-state decisions remain hard blocks.
@@ -821,12 +822,12 @@ authorization orchestration in `stateful-server::policy_service` and uses
 
 ## Initial Decision
 
-Build the first version with Codex lifecycle hooks, OMP extension hooks, MCP
-tools, and a `stateful_core` state server.
+Build the first version with Codex lifecycle hooks, OMP extension hooks, native
+Stateful coordination tools, and a `stateful_core` state server.
 
-The v1 MVP includes Codex and OMP hooks, MCP tools, the state server, sandboxed
-test execution, and explicit reconciliation acknowledgements. Automatic
-human-write observation and reconciliation blocks remain target behavior.
+The v1 MVP includes Codex and OMP hooks, native Stateful tools, the state server,
+sandboxed test execution, and explicit reconciliation acknowledgements.
+Automatic human-write observation and reconciliation blocks remain target behavior.
 
 V1 is local-only. It coordinates one machine/workspace boundary. Team-shared,
 cross-machine, or hosted state sync is deferred to v1.5/v2.
@@ -869,15 +870,14 @@ repo-relative conflicts remain warning context in v1.
 
 Explicit overrides and phase-aware authorization are target policy and are not
 implemented in the current server. When implemented, an explicit override can
-allow a direct write
-authorization exception for the current session and resource, but it must not
-reorder existing waiters, steal a claimable reservation, or move the overriding session to
-the head of a queue.
+allow a direct write authorization exception for the current agent and resource,
+but it must not reorder existing waiters, steal a claimable reservation, or move
+the overriding agent to the head of a queue.
 
-A v1 task reservation must be active, unexpired, belong to the same
-session, and include matching exact file or directory scope. Abstract task,
-test, port, or migration reservation can be stored as context but does not permit
-writes. Directory scope authorizes `write_directory` for the exact directory
+A v1 task reservation must be active, unexpired, belong to the same agent, and
+include matching exact file or directory scope. Abstract task, test, port, or
+migration reservation can be stored as context but does not permit writes.
+Directory scope authorizes `write_directory` for the exact directory
 resource; file writes, deletes, renames, and moves require exact file scope.
 
 Resource authorization classes:
@@ -919,7 +919,7 @@ Override policy:
 ```text
 automatic override: never allowed
 override authority: explicit user instruction only
-scope: current session + current turn + specific resource
+scope: current agent + current turn + specific resource
 applies to: active claim conflict only
 does not bypass: missing reservation, expired reservation, target blocked/finalized state
 does not bypass: file/directory scope matching
@@ -934,7 +934,7 @@ record and authorization path.
 Prompt context rendering:
 
 ```text
-state_context_render(workspace, session_id, resource?, mode)
+state_context_render(workspace, agent_id, resource?, mode)
 mode: brief | detailed
 sections: Blocking, Required Next Action, Warnings, Nearby Activity, Stale/Expired
 ```

@@ -18,7 +18,7 @@ pub struct CommitRequest {
     pub repo_root: PathBuf,
     pub message: String,
     pub paths: Vec<String>,
-    pub session_id: Option<String>,
+    pub agent_id: Option<String>,
     pub workspace_id: Option<String>,
     pub authorize: Option<AuthorizePath>,
 }
@@ -199,10 +199,10 @@ fn authorize_path(request: &CommitRequest, target: &CommitTarget) -> anyhow::Res
         return authorize(target.action, &target.path);
     }
 
-    let session_id = request
-        .session_id
+    let agent_id = request
+        .agent_id
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("stateful commit requires a current session id"))?;
+        .ok_or_else(|| anyhow::anyhow!("stateful commit requires a current agent id"))?;
     let runtime = discover_runtime_with_optional_global(&request.repo_root)?;
     let identity = GlobalPaths::from_env()
         .ok()
@@ -215,7 +215,7 @@ fn authorize_path(request: &CommitRequest, target: &CommitTarget) -> anyhow::Res
     let body = protocol_envelope(ProtocolEnvelopeArgs {
         runtime: &runtime,
         request_id: uuid::Uuid::new_v4().to_string(),
-        session_id: session_id.to_string(),
+        agent_id: agent_id.to_string(),
         workspace_id,
         identity,
         source_kind: "cli",

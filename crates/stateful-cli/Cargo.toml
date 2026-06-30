@@ -1,7 +1,7 @@
 [package]
 name = "stateful-cli"
 version = "0.1.0"
-description = "Command-line, hook, and MCP integration entry points for stateful_core."
+description = "Command-line and hook integration entry points for stateful_core."
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -22,7 +22,6 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 signal-hook.workspace = true
 stateful-core = { path = "../stateful-core" }
-stateful-mcp = { path = "../stateful-mcp" }
 stateful-server = { path = "../stateful-server" }
 stateful-store = { path = "../stateful-store" }
 time = { workspace = true, features = ["formatting", "parsing"] }

@@ -19,8 +19,9 @@ other coordination-sensitive actions.
 This repository is an early Rust implementation and local-first, macOS-first
 prototype. The current implementation is Codex-first with OMP support. It
 includes a CLI, global user-level installation, repo allowlist gating, a local
-HTTP state server, MCP adapter, Codex and OMP hook adapters, SQLite-backed state
-store, sandboxed command profiles, outbox sync, and benchmark tooling.
+HTTP state server, native Stateful coordination tools, Codex and OMP hook
+adapters, SQLite-backed state store, sandboxed command profiles, outbox sync,
+and benchmark tooling.
 
 It does not ship a filesystem watcher or IDE save gate for automatic human edit
 observation. Human editing signals remain part of the target coordination model,
@@ -74,13 +75,13 @@ here right now?"
 ## What It Provides
 
 - A `stateful` CLI for installation, repo enablement, status/current-state
-  inspection, reservation declaration, MCP, hooks, sandboxed command profiles, outbox
+  inspection, reservation declaration, hooks, sandboxed command profiles, outbox
   sync, and server lifecycle management.
 - A local HTTP state server with token-protected non-health endpoints.
 - A SQLite event store and materialized current-state summary.
 - Codex and OMP lifecycle hook integration for observing and gating important
   actions.
-- An MCP adapter exposing the current-state protocol to compatible tools.
+- Native Stateful coordination tools exposed by the active agent harness.
 - Sandboxed profiles for build/test output, command-shaped repo writes, git
   operations, GitHub PR commands, and repo-external shell work.
 - Benchmark tooling for SWE-bench pair runs, reports, comparisons, synthetic
@@ -130,7 +131,7 @@ stateful install --yes
 
 ### Codex
 
-Install Codex integration when you want global Codex hooks, MCP,
+Install Codex integration when you want global Codex hooks,
 `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
 `sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`), and
 `skills/dispatching-parallel-agents/SKILL.md`:
@@ -144,10 +145,10 @@ stateful codex
 ### OMP
 
 Install OMP integration when you want the isolated OMP `stateful` profile,
-stateful hooks, MCP, built-in Bash preflight, OMP edit/write auto-declare/claim
-for missing scope, lazy resume fallbacks, and `skills/stateful-command-policy/`
-(`SKILL.md`, `omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
-`subagent-write-recovery.md`):
+stateful hooks, native Stateful tool injection, built-in Bash preflight, OMP
+edit/write auto-declare/claim for missing scope, lazy resume fallbacks, and
+`skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
+`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`):
 
 ```bash
 stateful install --agent omp --yes
@@ -163,10 +164,11 @@ stateful doctor
 
 ## Day-To-Day Coordination
 
-In normal `stateful codex` or OMP `stateful` profile use, lifecycle hooks and MCP
-bind the active session. In OMP, `session-start` uses explicit event/ctx ids
-(`event.sessionId`, `event.session_id`) or the `ctx.sessionManager` session-file
-header to set it. Hook messages tell the agent when an explicit
+In normal `stateful codex` or OMP `stateful` profile use, lifecycle hooks bind
+the active `agent_id` and `workspace_id` for state operations. OMP's supported
+agent-facing path is explicit identity injection by the extension/native tools;
+there is no current-session file repair or environment-variable fallback path
+for agents to maintain. Hook messages tell the agent when an explicit
 coordination step is needed.
 
 Manual CLI use outside an active agent session can declare scope, keep the
@@ -177,9 +179,9 @@ reservation_id=$(stateful reservation declare --purpose "Update README content r
 stateful current
 ```
 
-Inside an active Codex or OMP session, use the Stateful MCP tools directly
-instead of routing `stateful reservation declare` or `stateful mcp call` through a
-shell. The usual write flow is:
+Inside an active Codex or OMP session, use the active Stateful coordination tools
+directly instead of shelling out to `stateful reservation declare`. The usual
+write flow is:
 
 ```text
 read current state -> declare task reservation with known file set -> keep reservation_id -> acquire exact same-reservation claims for reserved paths -> reread targets -> write with the same reservation_id
@@ -187,10 +189,10 @@ read current state -> declare task reservation with known file set -> keep reser
 
 Reservation and claim are separate on purpose. A reservation groups the task's
 known file and directory scopes under one purpose and one `reservation_id`, and
-can be expanded when the task discovers another target. MCP claim acquisition
-uses `reservation_id` plus `paths: string[]` so callers can acquire a batch from
-that reservation in one request. Each resulting claim still owns one exact file
-or directory resource and expires when the session stops being fresh.
+can be expanded when the task discovers another target. Claim acquisition uses
+`reservation_id` plus `paths: string[]` so callers can acquire a batch from that
+reservation in one request. Each resulting claim still owns one exact file or
+directory resource and expires when the agent stops being fresh.
 
 For native OMP `edit` and `write`, pre-tool authorization can recover when the
 only denial is missing reservation/scope and the tool call did not supply an
@@ -266,8 +268,8 @@ observe session or tool activity
 ```
 
 The state server owns policy, persistence, TTLs, and conflict checks. Codex/OMP
-hooks observe and gate important agent actions. MCP tools give agents a
-structured way to read and update coordination state. See
+hooks observe and gate important agent actions. Native Stateful tools give
+agents a structured way to read and update coordination state. See
 [Architecture](docs/architecture.md) and
 [Implementation contract](docs/implementation-contract.md) for the concrete API,
 hook, runtime, storage, and test contracts.
@@ -312,8 +314,7 @@ local generated state.
 - `crates/stateful-store`: SQLite event store and current-state persistence.
 - `crates/stateful-server`: local HTTP API and store-backed policy service.
 - `crates/stateful-cli`: CLI, hook adapter, runtime discovery, repo registry,
-  outbox sync, and sandbox wrappers.
-- `crates/stateful-mcp`: MCP tool surface.
+  outbox sync, native-tool guidance assets, and sandbox wrappers.
 - `crates/stateful-bench`: benchmark tooling for paired-agent, synthetic,
   DeNovoSWE, and ProgramBench experiments.
 - `docs/`: concept, state model, architecture, implementation contract,
@@ -348,7 +349,7 @@ Run formatting and tests:
 
 ```bash
 cargo fmt --all --check
-env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo test --workspace
+cargo test --workspace
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution expectations and

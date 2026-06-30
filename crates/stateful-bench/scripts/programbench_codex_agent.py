@@ -236,7 +236,7 @@ def docker_exec_command(args, *inner: str) -> list[str]:
 def airlock_env(airlock: str) -> dict[str, str]:
     env = os.environ.copy()
     for key in list(env):
-        if key.startswith("STATEFUL_") or key == "CODEX_THREAD_ID":
+        if key.startswith("STATEFUL_"):
             env.pop(key)
     env["HOME"] = airlock
     env["STATEFUL_HOME"] = str(Path(airlock) / ".stateful")

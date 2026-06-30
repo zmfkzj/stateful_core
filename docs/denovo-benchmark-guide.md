@@ -127,7 +127,7 @@ The adapter's built-in benchmark isolation prompt is an integrity guardrail, not
 a strategy hint. Keep it enabled for normal scored runs so agents are evaluated
 only on the provided workspace and package specification.
 
-Stateful lifecycle enforcement belongs in hooks, extensions, MCP/tool policy,
+Stateful lifecycle enforcement belongs in hooks, extensions, native-tool policy,
 installed skills, and runtime configuration rather than in benchmark task
 prompt text.
 

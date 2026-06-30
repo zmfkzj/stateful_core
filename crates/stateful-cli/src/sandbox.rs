@@ -28,14 +28,14 @@ use std::os::unix::fs::FileTypeExt;
 use std::os::unix::process::CommandExt;
 
 use crate::{
-    CurrentSession, GlobalPaths, HttpResponse, ProtocolEnvelopeArgs, RepoGate, ServerRuntime,
+    AgentContext, GlobalPaths, HttpResponse, ProtocolEnvelopeArgs, RepoGate, ServerRuntime,
     discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server, post_json,
-    protocol_envelope, read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
-    runtime::{current_stateful_session_id, write_current_session_file_for_explicit_session},
+    protocol_envelope, repo_gate, repo_identity_for_enabled_repo,
     runtime_env_override_is_configured, shadow_guard,
     shell_command::{
         first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
     },
+    validate_agent_id,
 };
 
 pub(crate) const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
@@ -66,6 +66,8 @@ pub struct SandboxRunRequest {
     pub network: SandboxNetworkPolicy,
     pub purpose: Option<String>,
     pub reservation_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub workspace_id: Option<String>,
     pub write_targets: Vec<String>,
     pub create_targets: Vec<String>,
     pub write_dirs: Vec<String>,
@@ -335,18 +337,20 @@ pub fn run_sandbox_in_repo(
                 let runtime = runtime
                     .as_ref()
                     .expect("external sandbox repo targets require runtime");
-                let current_session = current_session_for_sandbox_profile(
+                let agent_context = agent_context_for_sandbox_profile(
                     &repo_root,
                     paths,
                     runtime,
-                    "sandbox external repo targets require a current stateful session",
+                    request.agent_id.as_deref(),
+                    request.workspace_id.as_deref(),
+                    "sandbox external repo targets require --agent-id",
                 )?;
                 let authorize_context = SandboxAuthorizeContext {
                     runtime,
                     repo_root: &repo_root,
                     paths,
-                    session_id: &current_session.session_id,
-                    workspace_id: &current_session.workspace_id,
+                    agent_id: &agent_context.agent_id,
+                    workspace_id: &agent_context.workspace_id,
                     network: request.network,
                     fs_profile: sandbox_fs_profile_name(request.fs),
                     reservation_id: request.reservation_id.as_deref(),
@@ -390,8 +394,8 @@ pub fn run_sandbox_in_repo(
                 }
 
                 release_after_run = Some(SandboxLeaseReleaseContext {
-                    session_id: current_session.session_id.clone(),
-                    workspace_id: current_session.workspace_id.clone(),
+                    agent_id: agent_context.agent_id.clone(),
+                    workspace_id: agent_context.workspace_id.clone(),
                     paths: external_scope
                         .repo_write_targets
                         .iter()
@@ -431,18 +435,20 @@ pub fn run_sandbox_in_repo(
             let runtime = runtime
                 .as_ref()
                 .expect("write-targets sandbox profile requires runtime");
-            let current_session = current_session_for_sandbox_profile(
+            let agent_context = agent_context_for_sandbox_profile(
                 &repo_root,
                 paths,
                 runtime,
-                "sandbox write-targets requires a current stateful session",
+                request.agent_id.as_deref(),
+                request.workspace_id.as_deref(),
+                "sandbox write-targets requires --agent-id",
             )?;
             let authorize_context = SandboxAuthorizeContext {
                 runtime,
                 repo_root: &repo_root,
                 paths,
-                session_id: &current_session.session_id,
-                workspace_id: &current_session.workspace_id,
+                agent_id: &agent_context.agent_id,
+                workspace_id: &agent_context.workspace_id,
                 network: request.network,
                 fs_profile: sandbox_fs_profile_name(request.fs),
                 reservation_id: request.reservation_id.as_deref(),
@@ -482,8 +488,8 @@ pub fn run_sandbox_in_repo(
             }
 
             release_after_run = Some(SandboxLeaseReleaseContext {
-                session_id: current_session.session_id.clone(),
-                workspace_id: current_session.workspace_id.clone(),
+                agent_id: agent_context.agent_id.clone(),
+                workspace_id: agent_context.workspace_id.clone(),
                 paths: write_targets
                     .iter()
                     .chain(create_targets.iter())
@@ -517,17 +523,19 @@ pub fn run_sandbox_in_repo(
             let runtime = runtime
                 .as_ref()
                 .expect("build sandbox profile requires runtime");
-            let current_session = current_session_for_sandbox_profile(
+            let agent_context = agent_context_for_sandbox_profile(
                 &repo_root,
                 paths,
                 runtime,
-                "sandbox build profile requires a current stateful session",
+                request.agent_id.as_deref(),
+                request.workspace_id.as_deref(),
+                "sandbox build profile requires --agent-id",
             )?;
             let build_write_dir = write_dirs
                 .first()
                 .expect("build profile validation requires one write dir");
             let (display_path, writable_paths) =
-                prepare_build_profile_writable_paths(&current_session.session_id, build_write_dir)?;
+                prepare_build_profile_writable_paths(&agent_context.agent_id, build_write_dir)?;
             allowed_write_targets.push(sandbox_write_dir_display_path(&display_path));
             writable_paths
         }
@@ -628,6 +636,8 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
     let mut network = SandboxNetworkPolicy::Disabled;
     let mut purpose = None;
     let mut reservation_id = None;
+    let mut agent_id = None;
+    let mut workspace_id = None;
     let mut write_targets = Vec::new();
     let mut create_targets = Vec::new();
     let mut write_dirs = Vec::new();
@@ -671,6 +681,26 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
                     &words,
                     index,
                     "--reservation-id",
+                )?);
+            }
+            "--agent-id" => {
+                if agent_id.is_some() {
+                    return Err("stateful sandbox run accepts at most one --agent-id".to_string());
+                }
+                index += 1;
+                agent_id = Some(parse_sandbox_run_arg_value(&words, index, "--agent-id")?);
+            }
+            "--workspace-id" => {
+                if workspace_id.is_some() {
+                    return Err(
+                        "stateful sandbox run accepts at most one --workspace-id".to_string()
+                    );
+                }
+                index += 1;
+                workspace_id = Some(parse_sandbox_run_arg_value(
+                    &words,
+                    index,
+                    "--workspace-id",
                 )?);
             }
             "--write-target" => {
@@ -740,6 +770,8 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -966,27 +998,24 @@ fn parse_sandbox_fs_profile(value: &str) -> Result<SandboxFsProfile, String> {
     }
 }
 
-pub(crate) fn current_session_for_sandbox_profile(
+pub(crate) fn agent_context_for_sandbox_profile(
     repo_root: &Path,
     paths: &GlobalPaths,
     runtime: &ServerRuntime,
+    agent_id: Option<&str>,
+    workspace_id: Option<&str>,
     missing_message: &'static str,
-) -> anyhow::Result<CurrentSession> {
-    match read_current_session_file(repo_root) {
-        Ok(session) => Ok(session),
-        Err(_) => {
-            let Some(session_id) = current_stateful_session_id()? else {
-                anyhow::bail!(missing_message);
-            };
+) -> anyhow::Result<AgentContext> {
+    let agent_id = agent_id.ok_or_else(|| anyhow::anyhow!(missing_message))?;
+    validate_agent_id(agent_id, "agent_id")?;
+    let workspace_id = match workspace_id {
+        Some(workspace_id) => workspace_id.to_string(),
+        None => {
             let identity = repo_identity_for_enabled_repo(paths, repo_root).ok();
-            let workspace_id =
-                effective_workspace_id_for_repo(&runtime.workspace_id, identity.as_ref());
-            let session = CurrentSession::new(session_id, workspace_id);
-            write_current_session_file_for_explicit_session(repo_root, &session)
-                .map_err(|error| anyhow::anyhow!("{missing_message}: {error}"))?;
-            Ok(session)
+            effective_workspace_id_for_repo(&runtime.workspace_id, identity.as_ref())
         }
-    }
+    };
+    Ok(AgentContext::new(agent_id, workspace_id))
 }
 
 fn parse_sandbox_network_policy(value: &str) -> Result<SandboxNetworkPolicy, String> {
@@ -1817,12 +1846,12 @@ fn prepare_sandbox_writable_paths(
 }
 
 fn prepare_build_profile_writable_paths(
-    session_id: &str,
+    agent_id: &str,
     scratch_purpose: &str,
 ) -> anyhow::Result<(String, Vec<SandboxWritablePath>)> {
     ensure_build_scratch_purpose_target(scratch_purpose)?;
 
-    let session_fragment = sandbox_tmp_fragment(session_id);
+    let session_fragment = sandbox_tmp_fragment(agent_id);
     let scratch_root = PathBuf::from(SANDBOX_TMP_ROOT);
     let scratch_relative = PathBuf::from(&session_fragment).join(scratch_purpose);
     let scratch_dir = scratch_root.join(&scratch_relative);
@@ -3288,7 +3317,7 @@ pub(crate) struct SandboxAuthorizeContext<'a> {
     pub(crate) runtime: &'a ServerRuntime,
     pub(crate) repo_root: &'a Path,
     pub(crate) paths: &'a GlobalPaths,
-    pub(crate) session_id: &'a str,
+    pub(crate) agent_id: &'a str,
     pub(crate) workspace_id: &'a str,
     pub(crate) network: SandboxNetworkPolicy,
     pub(crate) fs_profile: &'static str,
@@ -3297,7 +3326,7 @@ pub(crate) struct SandboxAuthorizeContext<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SandboxLeaseReleaseContext {
-    session_id: String,
+    agent_id: String,
     workspace_id: String,
     paths: Vec<String>,
 }
@@ -3333,7 +3362,7 @@ pub(crate) fn authorize_sandbox_write(
     let body = protocol_envelope(ProtocolEnvelopeArgs {
         runtime: context.runtime,
         request_id: uuid::Uuid::new_v4().to_string(),
-        session_id: context.session_id.to_string(),
+        agent_id: context.agent_id.to_string(),
         workspace_id: context.workspace_id.to_string(),
         identity: repo_identity_for_enabled_repo(context.paths, context.repo_root).ok(),
         source_kind: "cli",
@@ -3383,7 +3412,7 @@ fn release_sandbox_write_claims(runtime: &ServerRuntime, context: &SandboxLeaseR
 
     for path in paths {
         let body = serde_json::json!({
-            "session_id": context.session_id,
+            "agent_id": context.agent_id,
             "workspace_id": context.workspace_id,
             "path": path,
         });
@@ -4229,53 +4258,10 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    const SANDBOX_SESSION_CHILD_CASE: &str = "STATEFUL_SANDBOX_SESSION_CHILD_CASE";
-    const SANDBOX_SESSION_CHILD_ROOT: &str = "STATEFUL_SANDBOX_SESSION_CHILD_ROOT";
-
     #[test]
-    #[ignore]
-    fn sandbox_current_session_child_probe() {
-        let Ok(child_case) = std::env::var(SANDBOX_SESSION_CHILD_CASE) else {
-            return;
-        };
-        let repo_root = PathBuf::from(
-            std::env::var_os(SANDBOX_SESSION_CHILD_ROOT)
-                .expect("sandbox session child root must be configured"),
-        );
-
-        match child_case.as_str() {
-            "bootstrap_from_codex_thread_id" => {
-                let paths = GlobalPaths::new(repo_root.join("home"));
-                let runtime =
-                    ServerRuntime::new("http://127.0.0.1:9", "secret-token", "workspace-a", 42);
-                let session = current_session_for_sandbox_profile(
-                    &repo_root,
-                    &paths,
-                    &runtime,
-                    "missing session",
-                )
-                .expect("sandbox current session should bootstrap");
-
-                assert_eq!(session, CurrentSession::new("thread-a", "workspace-a"));
-                assert_eq!(
-                    crate::read_current_session_file_for_session(&repo_root, "thread-a")
-                        .expect("session-bound current session should read"),
-                    CurrentSession::new("thread-a", "workspace-a")
-                );
-                assert_eq!(
-                    read_current_session_file(&repo_root)
-                        .expect("legacy current session alias should read"),
-                    CurrentSession::new("thread-a", "workspace-a")
-                );
-            }
-            other => panic!("unknown sandbox session child case `{other}`"),
-        }
-    }
-
-    #[test]
-    fn sandbox_current_session_bootstraps_from_codex_thread_id_when_missing() {
+    fn sandbox_agent_context_requires_explicit_agent_id_when_missing() {
         let temp_root = std::env::temp_dir().join(format!(
-            "stateful-sandbox-session-bootstrap-test-{}",
+            "stateful-sandbox-agent-id-required-test-{}",
             std::process::id()
         ));
         if temp_root.exists() {
@@ -4283,24 +4269,64 @@ mod tests {
         }
         fs::create_dir_all(&temp_root).expect("temp root should create");
 
-        let output = Command::new(std::env::current_exe().expect("current test binary path"))
-            .arg("sandbox::tests::sandbox_current_session_child_probe")
-            .arg("--ignored")
-            .arg("--exact")
-            .arg("--nocapture")
-            .env_clear()
-            .env(SANDBOX_SESSION_CHILD_CASE, "bootstrap_from_codex_thread_id")
-            .env(SANDBOX_SESSION_CHILD_ROOT, &temp_root)
-            .env("CODEX_THREAD_ID", "thread-a")
-            .output()
-            .expect("sandbox session child test should run");
+        let paths = GlobalPaths::new(temp_root.join("home"));
+        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret-token", "workspace-a", 42);
+        let error = agent_context_for_sandbox_profile(
+            &temp_root,
+            &paths,
+            &runtime,
+            None,
+            None,
+            "sandbox write-targets requires --agent-id",
+        )
+        .expect_err("missing agent id should fail");
 
         assert!(
-            output.status.success(),
-            "sandbox session child failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            error
+                .to_string()
+                .contains("sandbox write-targets requires --agent-id"),
+            "unexpected error: {error}"
         );
+        assert!(
+            !temp_root
+                .join(".stateful_core/runtime/session.json")
+                .exists()
+        );
+        assert!(!temp_root.join(".stateful_core/runtime/sessions").exists());
+
+        fs::remove_dir_all(&temp_root).expect("temp root should remove");
+    }
+
+    #[test]
+    fn sandbox_agent_context_uses_explicit_agent_identity() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "stateful-sandbox-agent-id-explicit-test-{}",
+            std::process::id()
+        ));
+        if temp_root.exists() {
+            fs::remove_dir_all(&temp_root).expect("old temp root should remove");
+        }
+        fs::create_dir_all(&temp_root).expect("temp root should create");
+
+        let paths = GlobalPaths::new(temp_root.join("home"));
+        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret-token", "workspace-a", 42);
+        let session = agent_context_for_sandbox_profile(
+            &temp_root,
+            &paths,
+            &runtime,
+            Some("agent-a"),
+            Some("workspace-b"),
+            "sandbox write-targets requires --agent-id",
+        )
+        .expect("explicit agent identity should resolve");
+
+        assert_eq!(session, AgentContext::new("agent-a", "workspace-b"));
+        assert!(
+            !temp_root
+                .join(".stateful_core/runtime/session.json")
+                .exists()
+        );
+        assert!(!temp_root.join(".stateful_core/runtime/sessions").exists());
 
         fs::remove_dir_all(&temp_root).expect("temp root should remove");
     }
@@ -4528,6 +4554,8 @@ mod tests {
             fs: SandboxFsProfile::ReadOnly,
             network: SandboxNetworkPolicy::Disabled,
             purpose: None,
+            agent_id: None,
+            workspace_id: None,
             reservation_id: None,
             write_targets: Vec::new(),
             create_targets: Vec::new(),
@@ -4556,6 +4584,8 @@ mod tests {
             fs: SandboxFsProfile::ReadOnly,
             network: SandboxNetworkPolicy::Disabled,
             purpose: None,
+            agent_id: None,
+            workspace_id: None,
             reservation_id: None,
             write_targets: Vec::new(),
             create_targets: Vec::new(),
@@ -4598,6 +4628,8 @@ mod tests {
                 fs: SandboxFsProfile::ReadOnly,
                 network: SandboxNetworkPolicy::Disabled,
                 purpose: None,
+                agent_id: None,
+                workspace_id: None,
                 reservation_id: None,
                 write_targets: Vec::new(),
                 create_targets: Vec::new(),
@@ -4628,6 +4660,8 @@ mod tests {
             fs: SandboxFsProfile::ReadOnly,
             network: SandboxNetworkPolicy::Disabled,
             purpose: None,
+            agent_id: None,
+            workspace_id: None,
             reservation_id: None,
             write_targets: Vec::new(),
             create_targets: Vec::new(),
@@ -5200,7 +5234,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_tmp_fragment_sanitizes_session_ids_for_path_components() {
+    fn sandbox_tmp_fragment_sanitizes_agent_ids_for_path_components() {
         assert_eq!(sandbox_tmp_fragment("session/id"), "session-id");
         assert_eq!(sandbox_tmp_fragment(".."), "session");
         assert_eq!(sandbox_tmp_fragment(""), "session");
@@ -5417,6 +5451,8 @@ mod tests {
             fs: SandboxFsProfile::External,
             network: SandboxNetworkPolicy::Enabled,
             purpose: None,
+            agent_id: None,
+            workspace_id: None,
             reservation_id: None,
             write_targets: vec!["/tmp/stateful-outside.txt".to_string()],
             create_targets: Vec::new(),

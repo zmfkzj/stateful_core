@@ -77,7 +77,7 @@ pub fn build_router(config: ServerConfig) -> Router {
         .route("/v1/events", get(events))
         .route("/v1/runtime/identity", get(runtime_identity))
         .route("/v1/session/register", post(session_register))
-        .route("/v1/session/heartbeat", post(session_heartbeat))
+        .route("/v1/session/heartbeat", post(agent_heartbeat))
         .route("/v1/reservation/declare", post(reservation_declare))
         .route("/v1/reservation/request", post(reservation_request))
         .route("/v1/reservation/claim", post(reservation_claim))
@@ -234,17 +234,20 @@ async fn session_register(
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+    if let Err(response) = require_agent_id(&input.agent_id) {
+        return response;
+    }
 
     append_event_response(
         &config.store,
         with_request_identity(
-            Event::session_registered(input.session_id, input.workspace_id),
+            Event::agent_registered(input.agent_id, input.workspace_id),
             input.identity,
         ),
     )
 }
 
-async fn session_heartbeat(
+async fn agent_heartbeat(
     State(config): State<ServerConfig>,
     headers: HeaderMap,
     Json(input): Json<SessionRequest>,
@@ -252,11 +255,14 @@ async fn session_heartbeat(
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+    if let Err(response) = require_agent_id(&input.agent_id) {
+        return response;
+    }
 
     append_event_response(
         &config.store,
         with_request_identity(
-            Event::session_heartbeat(input.session_id, input.workspace_id),
+            Event::agent_heartbeat(input.agent_id, input.workspace_id),
             input.identity,
         ),
     )
@@ -285,11 +291,15 @@ async fn authorize(
         Err(_) => return protocol::protocol_mismatch_response(),
     };
     let stateful_core::RequestEnvelope {
-        session,
+        agent,
         workspace,
         source,
         ..
     } = envelope.request;
+    if let Err(response) = require_agent_id(&agent.agent_id) {
+        return response;
+    }
+
     let queue_purpose = if payload.queue_on_conflict {
         let Some(purpose) = payload.purpose else {
             return missing_purpose_response();
@@ -303,7 +313,7 @@ async fn authorize(
     };
 
     let input = AuthorizeWriteInput {
-        session_id: session.session_id,
+        agent_id: agent.agent_id,
         reservation_id: payload.reservation_id,
         workspace_id: Some(workspace.workspace_id),
         repo_id: non_empty_identity(workspace.repo_id),
@@ -360,6 +370,10 @@ async fn reservation_declare(
         Ok(envelope) => envelope,
         Err(error) => return error.response(),
     };
+    if let Err(response) = require_agent_id(&envelope.request.agent.agent_id) {
+        return response;
+    }
+
     let payload: ReservationDeclarePayload = match serde_json::from_value(envelope.payload) {
         Ok(payload) => payload,
         Err(_) => return protocol::protocol_mismatch_response(),
@@ -381,7 +395,7 @@ async fn reservation_declare(
 
     let event = with_request_identity(
         Event::reservation_declared(
-            envelope.request.session.session_id,
+            envelope.request.agent.agent_id,
             envelope.request.workspace.workspace_id,
             purpose,
             files_planned,
@@ -414,6 +428,10 @@ async fn reservation_request(
         Ok(envelope) => envelope,
         Err(error) => return error.response(),
     };
+    if let Err(response) = require_agent_id(&envelope.request.agent.agent_id) {
+        return response;
+    }
+
     let payload: ReservationRequestPayload = match serde_json::from_value(envelope.payload) {
         Ok(payload) => payload,
         Err(_) => return protocol::protocol_mismatch_response(),
@@ -428,7 +446,7 @@ async fn reservation_request(
     };
 
     let input = RequestReservationInput {
-        session_id: envelope.request.session.session_id,
+        agent_id: envelope.request.agent.agent_id,
         workspace_id: envelope.request.workspace.workspace_id,
         request_id: payload.request_id,
         repo_id: non_empty_identity(envelope.request.workspace.repo_id),
@@ -474,13 +492,17 @@ async fn reservation_claim(
         Ok(envelope) => envelope,
         Err(error) => return error.response(),
     };
+    if let Err(response) = require_agent_id(&envelope.request.agent.agent_id) {
+        return response;
+    }
+
     let payload: IntentClaimPayload = match serde_json::from_value(envelope.payload) {
         Ok(payload) => payload,
         Err(_) => return protocol::protocol_mismatch_response(),
     };
 
     let input = ClaimReservationInput {
-        session_id: envelope.request.session.session_id,
+        agent_id: envelope.request.agent.agent_id,
         workspace_id: envelope.request.workspace.workspace_id,
         wait_id: payload.wait_id,
         repo_id: non_empty_identity(envelope.request.workspace.repo_id),
@@ -515,13 +537,17 @@ async fn reservation_cancel(
         Ok(envelope) => envelope,
         Err(error) => return error.response(),
     };
+    if let Err(response) = require_agent_id(&envelope.request.agent.agent_id) {
+        return response;
+    }
+
     let payload: IntentCancelPayload = match serde_json::from_value(envelope.payload) {
         Ok(payload) => payload,
         Err(_) => return protocol::protocol_mismatch_response(),
     };
 
     let input = CancelReservationInput {
-        session_id: envelope.request.session.session_id,
+        agent_id: envelope.request.agent.agent_id,
         workspace_id: envelope.request.workspace.workspace_id,
         request_id: payload.request_id,
     };
@@ -545,6 +571,32 @@ fn non_empty_identity(value: String) -> Option<String> {
 
 fn non_empty_str(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
+}
+
+fn require_agent_id(agent_id: &str) -> Result<(), (StatusCode, Json<Value>)> {
+    if agent_id.is_empty() {
+        return Err(invalid_agent_id_response("agent_id is required"));
+    }
+    if !agent_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(invalid_agent_id_response(
+            "agent_id contains unsupported characters",
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_agent_id_response(message: &str) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "status": "error",
+            "reason_code": "invalid_agent_id",
+            "message": message
+        })),
+    )
 }
 
 fn missing_purpose_response() -> (StatusCode, Json<Value>) {
@@ -598,7 +650,7 @@ fn lease_already_held_response() -> (StatusCode, Json<Value>) {
         Json(json!({
             "status": "ok",
             "claim_state": "already_held",
-            "message": "Session already holds an active claim for this path."
+            "message": "Agent already holds an active claim for this path."
         })),
     )
 }
@@ -625,15 +677,15 @@ fn batch_acquire_success_response(success: BatchAcquireSuccess) -> (StatusCode, 
 
 fn first_claimable_reservation(
     store: &Store,
-    session_id: &str,
+    agent_id: &str,
     workspace_id: &str,
     paths: &[String],
 ) -> Result<Option<WaitRecord>, StoreError> {
     for path in paths {
         let reservation = if path.ends_with('/') {
-            store.active_reservation_for_directory_by_session(workspace_id, path, session_id)?
+            store.active_reservation_for_directory_by_agent(workspace_id, path, agent_id)?
         } else {
-            store.active_reservation_for_path_by_session(workspace_id, path, session_id)?
+            store.active_reservation_for_path_by_agent(workspace_id, path, agent_id)?
         };
         if reservation.is_some() {
             return Ok(reservation);
@@ -648,7 +700,7 @@ fn reservation_claim_required_response(reservation: WaitRecord) -> (StatusCode, 
         Json(json!({
             "status": "error",
             "reason_code": "reservation_claim_required",
-            "message": "A reservation for this session must be claimed before acquiring the claim.",
+            "message": "A reservation for this agent must be claimed before acquiring the claim.",
             "reservation": reservation_json(reservation),
             "required_next_action": "Reread the target, then call state.reservation.claim with the reservation_id before retrying the write."
         })),
@@ -661,7 +713,7 @@ fn claim_owner_mismatch_response() -> (StatusCode, Json<Value>) {
         Json(json!({
             "status": "error",
             "reason_code": "claim_owner_mismatch",
-            "message": "Cannot release a claim owned by another session; wait for the claim to release, or coordinate with the claim owner."
+            "message": "Cannot release a claim owned by another agent; wait for the claim to release, or coordinate with the claim owner."
         })),
     )
 }
@@ -672,7 +724,7 @@ fn claim_not_found_response() -> (StatusCode, Json<Value>) {
         Json(json!({
             "status": "error",
             "reason_code": "claim_not_found",
-            "message": "No active same-session claim matched the requested path, workspace, and claim type."
+            "message": "No active same-agent claim matched the requested path, workspace, and claim type."
         })),
     )
 }
@@ -725,6 +777,9 @@ async fn lease_acquire(
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+    if let Err(response) = require_agent_id(&input.agent_id) {
+        return response;
+    }
 
     let result = match config.store.lock() {
         Ok(store) => {
@@ -732,7 +787,7 @@ async fn lease_acquire(
                 Ok(paths) => paths,
                 Err(response) => return response,
             };
-            let session_id = input.session_id;
+            let agent_id = input.agent_id;
             let workspace_id = input.workspace_id;
             let reservation_id = input.reservation_id;
             if paths.len() == 1 {
@@ -748,13 +803,13 @@ async fn lease_acquire(
                     Some(reservation_id) => store
                         .acquire_claim_for_reservation_with_observation_and_event(
                             reservation_id,
-                            &session_id,
+                            &agent_id,
                             &workspace_id,
                             &path,
                             observation,
                         ),
                     None => store.acquire_claim_with_observation_and_event(
-                        &session_id,
+                        &agent_id,
                         &workspace_id,
                         &path,
                         observation,
@@ -764,16 +819,16 @@ async fn lease_acquire(
                     Ok(()) => Ok(LeaseAcquireOutcome::Acquired),
                     Err(StoreError::ClaimConflict) => {
                         let reservation = if path.ends_with('/') {
-                            store.active_reservation_for_directory_by_session(
+                            store.active_reservation_for_directory_by_agent(
                                 &workspace_id,
                                 &path,
-                                &session_id,
+                                &agent_id,
                             )
                         } else {
-                            store.active_reservation_for_path_by_session(
+                            store.active_reservation_for_path_by_agent(
                                 &workspace_id,
                                 &path,
-                                &session_id,
+                                &agent_id,
                             )
                         };
                         match reservation {
@@ -812,12 +867,12 @@ async fn lease_acquire(
                     Some(reservation_id) => store
                         .acquire_claims_for_reservation_with_observations_and_events(
                             reservation_id,
-                            &session_id,
+                            &agent_id,
                             &workspace_id,
                             claims,
                         ),
                     None => store.acquire_claims_with_observations_and_events(
-                        &session_id,
+                        &agent_id,
                         &workspace_id,
                         claims,
                     ),
@@ -828,12 +883,8 @@ async fn lease_acquire(
                         result,
                     })),
                     Err(StoreError::ClaimConflict) => {
-                        match first_claimable_reservation(
-                            &store,
-                            &session_id,
-                            &workspace_id,
-                            &paths,
-                        ) {
+                        match first_claimable_reservation(&store, &agent_id, &workspace_id, &paths)
+                        {
                             Ok(Some(reservation)) => {
                                 Ok(LeaseAcquireOutcome::Reservation(reservation))
                             }
@@ -871,6 +922,9 @@ async fn lease_refresh_observation(
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+    if let Err(response) = require_agent_id(&input.agent_id) {
+        return response;
+    }
 
     let root = match input.root.as_deref().filter(|root| !root.is_empty()) {
         Some(root) => root,
@@ -887,7 +941,7 @@ async fn lease_refresh_observation(
 
     let result = match config.store.lock() {
         Ok(store) => store.refresh_exact_file_claim_observation(
-            input.session_id,
+            input.agent_id,
             input.workspace_id,
             input.path,
             observation,
@@ -911,9 +965,12 @@ async fn lease_release(
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+    if let Err(response) = require_agent_id(&input.agent_id) {
+        return response;
+    }
 
     let result = match config.store.lock() {
-        Ok(store) => store.release_claim(input.session_id, input.workspace_id, input.path),
+        Ok(store) => store.release_claim(input.agent_id, input.workspace_id, input.path),
         Err(_) => return status_response(Err("store lock poisoned".to_string())),
     };
 
@@ -933,6 +990,9 @@ async fn activity_observe(
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+    if let Err(response) = require_agent_id(&input.agent_id) {
+        return response;
+    }
 
     append_activity_response(&config.store, input)
 }
@@ -945,6 +1005,9 @@ async fn activity_finalize(
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+    if let Err(response) = require_agent_id(&input.agent_id) {
+        return response;
+    }
 
     let result = config
         .store
@@ -953,7 +1016,7 @@ async fn activity_finalize(
         .and_then(|store| {
             store
                 .finalize_session_activity_with_phase(
-                    &input.session_id,
+                    &input.agent_id,
                     &input.workspace_id,
                     input.phase.unwrap_or(ActivityPhase::Done),
                 )
@@ -1000,6 +1063,12 @@ async fn context_render(
             })),
         );
     };
+    if let Some(agent_id) = input.agent_id.as_deref() {
+        if let Err(response) = require_agent_id(agent_id) {
+            return response;
+        }
+    }
+
     let result = config
         .store
         .lock()
@@ -1009,7 +1078,7 @@ async fn context_render(
                 repo_id: input.repo_id.as_deref().and_then(non_empty_str),
                 worktree_id: input.worktree_id.as_deref().and_then(non_empty_str),
                 root: input.root.as_deref().and_then(non_empty_str),
-                exclude_session_id: input.session_id.as_deref().and_then(non_empty_str),
+                exclude_agent_id: input.agent_id.as_deref().and_then(non_empty_str),
             };
             store
                 .live_current_state_for_workspace_identity(
@@ -1058,9 +1127,12 @@ async fn conflicts_check(
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+    if let Err(response) = require_agent_id(&input.agent_id) {
+        return response;
+    }
 
     let input = AuthorizeWriteInput {
-        session_id: input.session_id,
+        agent_id: input.agent_id,
         reservation_id: input.reservation_id,
         workspace_id: input.workspace_id,
         repo_id: None,
@@ -1099,6 +1171,9 @@ async fn reconcile_ack(
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+    if let Err(response) = require_agent_id(&input.agent_id) {
+        return response;
+    }
 
     let decision = match input.decision.parse::<ReconciliationDecision>() {
         Ok(decision) => decision,
@@ -1118,7 +1193,7 @@ async fn reconcile_ack(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .append_reconciliation_ack(&input.session_id)
+                .append_reconciliation_ack(&input.agent_id)
                 .map_err(|error| error.to_string())
         });
     if let Err(message) = result {
@@ -1134,7 +1209,7 @@ async fn reconcile_ack(
         StatusCode::OK,
         Json(json!({
             "status": "ok",
-            "session_id": input.session_id,
+            "agent_id": input.agent_id,
             "workspace_id": input.workspace_id,
             "files_reread": input.files_reread,
             "human_change_summary": input.human_change_summary,
@@ -1151,6 +1226,9 @@ async fn outbox_sync(
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+    if let Err(response) = require_agent_id(&input.agent_id) {
+        return response;
+    }
 
     let result = config
         .store
@@ -1161,7 +1239,7 @@ async fn outbox_sync(
                 .append_outbox(
                     OutboxEntry::synced(
                         input.outbox_id.clone(),
-                        input.session_id.clone(),
+                        input.agent_id.clone(),
                         input.sequence,
                     )
                     .with_workspace_id(input.workspace_id.clone())
@@ -1199,6 +1277,9 @@ async fn notifications_poll(
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+    if let Err(response) = require_agent_id(&input.agent_id) {
+        return response;
+    }
 
     let result = config
         .store
@@ -1206,7 +1287,7 @@ async fn notifications_poll(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .pending_notifications(&input.session_id, &input.workspace_id)
+                .pending_notifications(&input.agent_id, &input.workspace_id)
                 .map_err(|error| error.to_string())
         });
 
@@ -1236,6 +1317,9 @@ async fn notifications_stream(
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized().into_response();
     }
+    if let Err(response) = require_agent_id(&input.agent_id) {
+        return response.into_response();
+    }
 
     Sse::new(notification_sse_stream(config.store.clone(), input))
         .keep_alive(KeepAlive::default())
@@ -1262,7 +1346,7 @@ fn notification_sse_stream(
                     .map_err(|_| "store lock poisoned".to_string())
                     .and_then(|store| {
                         store
-                            .pending_notifications(&input.session_id, &input.workspace_id)
+                            .pending_notifications(&input.agent_id, &input.workspace_id)
                             .map_err(|error| error.to_string())
                     })
                 {
@@ -1308,6 +1392,9 @@ async fn resume_next(
     if !has_valid_bearer_token(&headers, &config.bearer_token) {
         return unauthorized();
     }
+    if let Err(response) = require_agent_id(&input.agent_id) {
+        return response;
+    }
 
     let result = config
         .store
@@ -1315,7 +1402,7 @@ async fn resume_next(
         .map_err(|_| "store lock poisoned".to_string())
         .and_then(|store| {
             store
-                .next_reservation_for_session(&input.session_id, &input.workspace_id)
+                .next_reservation_for_agent(&input.agent_id, &input.workspace_id)
                 .map_err(|error| error.to_string())
         });
 
@@ -1385,7 +1472,7 @@ fn authorize_with_policy_and_audit(
 fn authorize_heartbeat_event(input: &AuthorizeWriteInput) -> Option<Event> {
     let workspace_id = input.workspace_id.as_ref()?;
     Some(with_request_identity(
-        Event::session_heartbeat(input.session_id.clone(), workspace_id.clone()),
+        Event::agent_heartbeat(input.agent_id.clone(), workspace_id.clone()),
         WorkspaceIdentityRequest {
             repo_id: input.repo_id.clone(),
             worktree_id: input.worktree_id.clone(),
@@ -1494,7 +1581,7 @@ fn append_activity_response(
         .and_then(|store| {
             store
                 .append_activity_with_phase(
-                    input.session_id,
+                    input.agent_id,
                     input.workspace_id,
                     input.phase.unwrap_or(ActivityPhase::Exploring),
                 )
@@ -1535,20 +1622,20 @@ fn reservation_requested_audit_event(
                 .map(|reservation| reservation.wait_id.clone())
         });
     let queue_position = outcome.wait.as_ref().and_then(|wait| wait.queue_position);
-    let blocking_session_id = outcome
+    let blocking_agent_id = outcome
         .wait
         .as_ref()
-        .and_then(|wait| wait.record.blocking_session_id.clone())
+        .and_then(|wait| wait.record.blocking_agent_id.clone())
         .or_else(|| {
             outcome
                 .reservation
                 .as_ref()
-                .and_then(|reservation| reservation.blocking_session_id.clone())
+                .and_then(|reservation| reservation.blocking_agent_id.clone())
         });
 
     with_request_identity(
         Event::reservation_requested(
-            input.session_id.clone(),
+            input.agent_id.clone(),
             input.workspace_id.clone(),
             outcome.request_id.clone(),
             input.action.clone(),
@@ -1557,7 +1644,7 @@ fn reservation_requested_audit_event(
             outcome.request_state.clone(),
             wait_id,
             queue_position,
-            blocking_session_id,
+            blocking_agent_id,
         ),
         WorkspaceIdentityRequest {
             repo_id: input.repo_id.clone(),
@@ -1572,7 +1659,7 @@ fn reservation_claimed_audit_event(outcome: &ClaimReservationOutcome) -> Event {
     let reservation = &outcome.reservation;
     with_wait_identity(
         Event::reservation_claimed(
-            reservation.session_id.clone(),
+            reservation.agent_id.clone(),
             reservation.workspace_id.clone(),
             reservation.wait_id.clone(),
             reservation.action.clone(),
@@ -1587,7 +1674,7 @@ fn reservation_canceled_audit_event(request_id: &str, outcome: &CancelReservatio
     let wait = &outcome.wait;
     with_wait_identity(
         Event::reservation_canceled(
-            wait.session_id.clone(),
+            wait.agent_id.clone(),
             wait.workspace_id.clone(),
             request_id.to_string(),
             wait.wait_id.clone(),
@@ -1605,7 +1692,7 @@ fn authorization_denied_audit_event(
 ) -> Event {
     let mut event = with_request_identity(
         Event::authorization_denied(
-            input.session_id.clone(),
+            input.agent_id.clone(),
             input.workspace_id.clone().unwrap_or_default(),
             input.action.clone(),
             input.path.clone(),
@@ -1626,14 +1713,14 @@ fn authorization_denied_audit_event(
         event.payload["wait"] = json!({
             "wait_id": wait.record.wait_id,
             "reservation_id": wait.record.wait_id,
-            "session_id": wait.record.session_id,
+            "agent_id": wait.record.agent_id,
             "workspace_id": wait.record.workspace_id,
             "relative_path": wait.record.relative_path,
             "action": wait.record.action,
             "status": wait.record.status,
             "purpose": wait.record.purpose,
             "queue_position": wait.queue_position,
-            "blocking_session_id": wait.record.blocking_session_id,
+            "blocking_agent_id": wait.record.blocking_agent_id,
         });
     }
 
@@ -1726,13 +1813,13 @@ fn wait_record_json(record: WaitRecord, queue_position: Option<u64>) -> Value {
     json!({
         "reservation_id": reservation_id,
         "wait_id": record.wait_id,
-        "session_id": record.session_id,
+        "agent_id": record.agent_id,
         "workspace_id": record.workspace_id,
         "relative_path": record.relative_path,
         "action": record.action,
         "status": record.status,
         "queue_position": queue_position,
-        "blocking_session_id": record.blocking_session_id,
+        "blocking_agent_id": record.blocking_agent_id,
         "purpose": record.purpose,
     })
 }
@@ -1742,7 +1829,7 @@ fn reservation_json(reservation: WaitRecord) -> Value {
     json!({
         "reservation_id": reservation_id,
         "wait_id": reservation.wait_id,
-        "session_id": reservation.session_id,
+        "agent_id": reservation.agent_id,
         "workspace_id": reservation.workspace_id,
         "relative_path": reservation.relative_path,
         "action": reservation.action,
@@ -1804,7 +1891,7 @@ struct IntentCancelPayload {
 
 #[derive(Debug, Deserialize)]
 struct SessionRequest {
-    session_id: String,
+    agent_id: String,
     workspace_id: String,
     #[serde(flatten)]
     identity: WorkspaceIdentityRequest,
@@ -1823,7 +1910,7 @@ struct BatchAcquireSuccess {
 
 #[derive(Debug, Deserialize)]
 struct LeaseAcquireRequest {
-    session_id: String,
+    agent_id: String,
     workspace_id: String,
     #[serde(default)]
     reservation_id: Option<String>,
@@ -1848,7 +1935,7 @@ impl LeaseAcquireRequest {
 
 #[derive(Debug, Deserialize)]
 struct LeaseRequest {
-    session_id: String,
+    agent_id: String,
     workspace_id: String,
     path: String,
     #[serde(default)]
@@ -1857,7 +1944,7 @@ struct LeaseRequest {
 
 #[derive(Debug, Deserialize)]
 struct ActivityRequest {
-    session_id: String,
+    agent_id: String,
     workspace_id: String,
     #[serde(default)]
     phase: Option<ActivityPhase>,
@@ -1877,13 +1964,13 @@ struct WorkspaceIdentityRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 struct NotificationsPollRequest {
-    session_id: String,
+    agent_id: String,
     workspace_id: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct ResumeNextRequest {
-    session_id: String,
+    agent_id: String,
     workspace_id: String,
 }
 
@@ -1925,7 +2012,7 @@ impl From<BaseObservationPayload> for BaseObservation {
 
 #[derive(Debug, Deserialize)]
 struct AuthorizeRequest {
-    session_id: String,
+    agent_id: String,
     #[serde(default)]
     workspace_id: Option<String>,
     #[serde(default)]
@@ -1946,7 +2033,7 @@ struct ContextRenderRequest {
     resource: Option<String>,
     workspace_id: Option<String>,
     #[serde(default)]
-    session_id: Option<String>,
+    agent_id: Option<String>,
     #[serde(default)]
     repo_id: Option<String>,
     #[serde(default)]
@@ -1957,7 +2044,7 @@ struct ContextRenderRequest {
 
 #[derive(Debug, Deserialize)]
 struct ReconcileAckRequest {
-    session_id: String,
+    agent_id: String,
     workspace_id: String,
     decision: String,
     files_reread: Vec<String>,
@@ -1967,7 +2054,7 @@ struct ReconcileAckRequest {
 #[derive(Debug, Deserialize)]
 struct OutboxSyncRequest {
     outbox_id: String,
-    session_id: String,
+    agent_id: String,
     workspace_id: String,
     sequence: u64,
     event_type: String,

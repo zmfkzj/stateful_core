@@ -1,12 +1,11 @@
 [workspace]
 resolver = "3"
 members = [
-  "crates/stateful-core",
-  "crates/stateful-store",
-  "crates/stateful-server",
-  "crates/stateful-cli",
-  "crates/stateful-mcp",
-  "crates/stateful-bench",
+    "crates/stateful-core",
+    "crates/stateful-store",
+    "crates/stateful-server",
+    "crates/stateful-cli",
+    "crates/stateful-bench",
 ]
 
 [workspace.package]
@@ -14,7 +13,7 @@ edition = "2024"
 license = "AGPL-3.0-only"
 rust-version = "1.85"
 readme = "README.md"
-keywords = ["agents", "coordination", "state", "codex", "mcp"]
+keywords = ["agents", "coordination", "state", "codex"]
 categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]

@@ -31,8 +31,7 @@ Installs global stateful files, writes global `skills/stateful-command-policy/`
 `subagent-write-recovery.md`) and
 `skills/dispatching-parallel-agents/SKILL.md`, writes Codex external sandbox
 prompt rules under the Codex config directory's `rules/stateful.rules`, and
-merges the stateful block into Codex
-config. The merged config enables hooks, registers the `stateful` MCP server, and
+merges the stateful block into Codex config. The merged config enables hooks and
 adds lifecycle hooks for:
 
 - `SessionStart` for `startup`, `resume`, `clear`, and `compact`
@@ -124,8 +123,8 @@ stateful repos list
 ```
 
 Global hooks are gated by the repo allowlist. Disabled repos are left alone:
-hooks do not start the server or append outbox records, and MCP calls report
-that the repo is not enabled.
+hooks do not start the server or append outbox records, and native state calls
+report that the repo is not enabled.
 
 ## Server Lifecycle
 
@@ -144,9 +143,9 @@ form.
 ## LAN Runtime Sharing
 
 Use LAN mode when one Mac should host the stateful HTTP runtime for another Mac.
-The MCP adapter still runs locally inside each Codex process, and the remote Mac
-should reach the runtime through an SSH tunnel so the bearer token is not sent to
-a non-loopback `http://` address.
+Agent-facing native tools and hooks on the remote Mac should reach the runtime
+through an SSH tunnel so the bearer token is not sent to a non-loopback
+`http://` address.
 
 On the host Mac:
 
@@ -162,7 +161,7 @@ ssh -L 43873:127.0.0.1:43873 <host-mac>
 stateful server join http://127.0.0.1:43873 --token <token>
 ```
 
-This installs global stateful/Codex MCP configuration and writes remote runtime
+This installs global stateful/Codex configuration and writes remote runtime
 discovery under `$STATEFUL_HOME/runtime/server.json`. It does not enable the
 current repo. To enable the current repo on the remote Mac, pass:
 
@@ -177,17 +176,17 @@ run the printed join command as-is; it includes the matching workspace id.
 
 ## Manual Coordination Commands
 
-In active Codex or OMP sessions, prefer MCP tools over shelling out to
-`stateful reservation ...` or `stateful mcp call ...`; lifecycle hooks bind the active
-runtime session as the Stateful session id.
+In active Codex or OMP sessions, prefer the active Stateful coordination tools
+over shelling out to `stateful reservation ...`; lifecycle hooks bind the active
+`agent_id` and `workspace_id`.
 
-Manual CLI use outside active hooks can pass session and workspace explicitly.
+Manual CLI use outside active hooks can pass an explicit agent and workspace.
 Capture the returned `reservation_id` and pass it through later write
 authorization steps:
 
 ```bash
 reservation_id=$(stateful reservation declare \
-  --session-id demo \
+  --agent-id demo-agent \
   --workspace-id <workspace> \
   --purpose "Update README content requested by the user." \
   README.md | jq -r '.reservation_id')
@@ -209,8 +208,8 @@ Notes:
 - Declarations add to the session's active scope under that `reservation_id`.
 - Re-declaring the same path updates the purpose used for future claim
   acquisition.
-- MCP `state_claim_acquire` uses `reservation_id` plus `paths: string[]` to
-  acquire one or more exact file or directory resources from that reservation.
+- `state_claim_acquire` uses `reservation_id` plus `paths: string[]` to acquire
+  one or more exact file or directory resources from that reservation.
 - Writes must carry the same `reservation_id` through native edit/write
   integration or `stateful sandbox run --reservation-id <reservation_id>`.
 - `request` creates or returns an idempotent queued or claimable (`reserved`)
@@ -247,8 +246,6 @@ Common commands:
 - `stateful sandbox run ...`
 - `stateful sandbox process find ...`
 - `stateful codex ...`
-- `stateful mcp serve`
-- `stateful mcp call <tool> [arguments_json]`
 - `stateful sync-outbox`
 - `stateful hook codex <event>`
 - `stateful hook omp <event>`
@@ -265,31 +262,27 @@ entries; both hooks record unknown tool names into this list.
 This allowlist does not bypass hard-denied write or execution classifications.
 Write/execute paths still require the normal stateful authorization flow.
 
-## Hooks And Sessions
+## Hooks And Identity
 
-`SessionStart` registers the active session and writes the current-session file
-used by CLI and MCP calls. In OMP, `stateful hook omp session-start` stores
-`process.env.STATEFUL_SESSION_ID` from explicit event/ctx ids
-(`event.sessionId`, `event.session_id`, session fields), falling back to the
-`ctx.sessionManager.getSessionFile()` header/stem and then `getLeafId()` before
-session-aware MCP tools run. In Codex,
-`UserPromptSubmit` renders current-state context.
+`SessionStart` registers the active `agent_id` and `workspace_id` for hook and
+state operations. In OMP, the extension/native tool bridge injects those
+identifiers explicitly; agents do not maintain current-session files or select
+coordination identity through environment variables. In Codex, `UserPromptSubmit`
+renders current-state context.
 
 `PreToolUse` authorizes supported tool actions. Server-side authorization records
-an implicit session heartbeat for the checked session. `PostToolUse` records
+an implicit agent heartbeat for the checked agent. `PostToolUse` records
 activity or heartbeats; Codex `PostToolUse` also releases authorizing
 same-reservation repo-write claims after completed native edit and
 `write-targets` transactions. `Stop` posts
-`state_activity_finalize`, finalizing activity and releasing the session's
+`state_activity_finalize`, finalizing activity and releasing the agent's
 claims.
 
-Hooks write `.stateful_core/runtime/sessions/<session_id>.json` plus the current
-session alias `.stateful_core/runtime/session.json`. Session-bound callers use
-`STATEFUL_SESSION_ID` to select the matching session-bound file, except Codex MCP
-callers prefer `CODEX_THREAD_ID` when it is present. If no session environment
-variable is present, callers fall back to `.stateful_core/runtime/session.json`
-only after verifying that its `session_id` has a matching session-bound file with
-identical contents.
+Stateful no longer exposes an agent-facing current-session fallback. The removed
+legacy path wrote `.stateful_core/runtime/sessions/<session_id>.json` plus the
+alias `.stateful_core/runtime/session.json` and allowed callers to choose state
+through session environment variables. Active integrations now pass explicit
+identity into hooks and native tools instead.
 
 ## Write Authorization
 
@@ -312,7 +305,7 @@ when the `reservation_id` has active scope for the target and an active claim
 under the same `reservation_id` covers the target. Conflicting claims outside
 the authorizing reservation block writes. A blocked writer can queue with
 `queue_on_conflict`; after promotion, the reservation notification and resume
-payload carry the stored request purpose, and the session with the claimable
+payload carry the stored request purpose, and the agent with the claimable
 reservation must reread the target.
 
 Repo file edits should use native edit tools with hook-visible targets after
@@ -367,19 +360,19 @@ includes safe process metadata fields: `pid`, `ppid`, `pgid`, `user`, `uid`,
 `tty`, and `comm`. Command strings, argv, and environment data are never exposed
 in result JSON.
 
-## HTTP And MCP Surface
+## HTTP And Native Tool Surface
 
 The HTTP server exposes `/health`, `/v1/current`, `/v1/events`,
-`/v1/runtime/identity`, and POST endpoints for session registration,
+`/v1/runtime/identity`, and POST endpoints for agent registration,
 heartbeats, reservation declaration, reservation request, reservation claim, reservation cancel,
 claims, activity observation/finalization, authorization, conflict checks,
 context rendering, reconciliation ack, notifications, resume, and outbox sync.
 
-The MCP adapter exposes agent-friendly tool names mapped to dotted protocol
-names:
+Native Stateful tools expose agent-friendly tool names. Agent identity tools use
+native names directly; other tools map to dotted protocol names:
 
-- `state_session_register` / `state.session.register`
-- `state_session_heartbeat` / `state.session.heartbeat`
+- `state_session_register` — registers the injected `agent_id`/`workspace_id`
+- `state_session_heartbeat` — heartbeats the injected `agent_id`/`workspace_id`
 - `state_reservation_declare` / `state.reservation.declare`
 - `state_reservation_request` / `state.reservation.request`
 - `state_reservation_claim` / `state.reservation.claim`
@@ -434,9 +427,7 @@ when `STATEFUL_HOME` is unset. That directory can contain `config.yml`,
 and repo metadata under `repos/`.
 
 Repo hook runtime state lives under `.stateful_core/`. That directory can contain
-`runtime/server.json`, `runtime/session.json`, session-bound
-`runtime/sessions/*.json` files, local `state.db`, and outbox JSONL files under
-`outbox/`.
+`runtime/server.json`, local `state.db`, and outbox JSONL files under `outbox/`.
 
 Commit reusable documentation and source code, not local generated state. For
 public source archives, prefer `git archive` or a clean clone instead of a
@@ -449,13 +440,10 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
 - `STATEFUL_SERVER_URL` and `STATEFUL_SERVER_TOKEN` override runtime discovery
   when both are set. The referenced server must expose the current runtime
   capabilities.
-- `STATEFUL_SESSION_ID` selects the session-bound current-session file at
-  `.stateful_core/runtime/sessions/<session_id>.json` for MCP tools and other
-  session-bound callers. The OMP extension sets it from explicit event/ctx ids
-  (`event.sessionId`, `event.session_id`, session fields), or from the
-  `ctx.sessionManager.getSessionFile()` header/stem and then `getLeafId()`
-  when those are absent; Codex MCP resolution prefers
-  `CODEX_THREAD_ID` when present.
+- Legacy agent-facing identity environment variables were removed. Active Codex and OMP
+  integrations inject `agent_id` and `workspace_id` into hooks and native tools;
+  agents should not set environment variables or repair runtime session files to
+  select coordination identity.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
   authorize Bash. Bash authorization goes through a trusted
   `<absolute-stateful-binary> sandbox run` wrapper command.
@@ -503,7 +491,7 @@ Use these PR title forms:
 ```text
 fix(hook): reject stateful coordination through Bash
 feat(cli): add sandboxed git status support
-feat(mcp)!: rename the claim acquisition method
+feat(native-tools)!: rename the claim acquisition method
 docs: clarify sandbox write targets
 chore: update release automation
 ```
@@ -522,9 +510,8 @@ configured release rules are:
 
 The release configuration uses manifest-driven `release-please` with the Rust
 `cargo-workspace` plugin and a linked version group for the public crates:
-`stateful-core`, `stateful-store`, `stateful-server`, `stateful-cli`, and
-`stateful-mcp`. The benchmark crate is `publish = false` and is not a release
-component.
+`stateful-core`, `stateful-store`, `stateful-server`, and `stateful-cli`. The
+benchmark crate is `publish = false` and is not a release component.
 
 The release workflow uses `GITHUB_TOKEN` by default. Configure a repository
 secret named `RELEASE_PLEASE_TOKEN` with a suitable personal access token when

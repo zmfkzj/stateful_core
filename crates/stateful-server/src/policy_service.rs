@@ -22,7 +22,7 @@ pub struct WaitQueueInfo {
 
 #[derive(Debug, Clone)]
 pub struct AuthorizeWriteInput {
-    pub session_id: String,
+    pub agent_id: String,
     pub reservation_id: Option<String>,
     pub workspace_id: Option<String>,
     pub repo_id: Option<String>,
@@ -49,7 +49,7 @@ pub struct BaseObservation {
 
 #[derive(Debug, Clone)]
 pub struct ClaimReservationInput {
-    pub session_id: String,
+    pub agent_id: String,
     pub workspace_id: String,
     pub wait_id: String,
     pub repo_id: Option<String>,
@@ -65,7 +65,7 @@ pub struct ClaimReservationOutcome {
 
 #[derive(Debug, Clone)]
 pub struct RequestReservationInput {
-    pub session_id: String,
+    pub agent_id: String,
     pub workspace_id: String,
     pub request_id: String,
     pub repo_id: Option<String>,
@@ -87,7 +87,7 @@ pub struct RequestReservationOutcome {
 
 #[derive(Debug, Clone)]
 pub struct CancelReservationInput {
-    pub session_id: String,
+    pub agent_id: String,
     pub workspace_id: String,
     pub request_id: String,
 }
@@ -142,8 +142,8 @@ fn can_queue_after_policy_denial(decision: &Decision) -> bool {
 fn active_claim_conflict_decision() -> Decision {
     Decision::deny(
         "active_claim_conflict",
-        "Write target is covered by another active session claim.",
-        "Refresh current state, coordinate with the claim owner, or wait for the claim to release. Do not redeclare reservation or change session_id; that does not release another session's claim.",
+        "Write target is covered by another active agent claim.",
+        "Refresh current state, coordinate with the claim owner, or wait for the claim to release. Do not redeclare reservation or change agent_id; that does not release another agent's claim.",
     )
 }
 
@@ -189,19 +189,19 @@ impl<'a> PolicyService<'a> {
 
         let mut lazy_claimed_reservation = None;
         if let Some(workspace_id) = &input.workspace_id {
-            let current_session_reservation =
+            let current_agent_reservation =
                 if let Some(reservation_id) = input.reservation_id.as_deref() {
-                    self.supplied_session_reservation(&input, workspace_id, reservation_id)?
+                    self.supplied_agent_reservation(&input, workspace_id, reservation_id)?
                 } else {
-                    self.current_session_reservation(&input, workspace_id)?
+                    self.current_agent_reservation(&input, workspace_id)?
                 };
-            if let Some(reservation) = current_session_reservation {
+            if let Some(reservation) = current_agent_reservation {
                 if self.allows_lazy_claim_on_authorize(&input)
                     && matches!(input.action.as_str(), "write_file" | "write_directory")
                     && reservation.action == input.action
                 {
                     let claimed = self.claim_intent(ClaimReservationInput {
-                        session_id: input.session_id.clone(),
+                        agent_id: input.agent_id.clone(),
                         workspace_id: workspace_id.clone(),
                         wait_id: reservation.wait_id.clone(),
                         repo_id: input.repo_id.clone(),
@@ -232,7 +232,7 @@ impl<'a> PolicyService<'a> {
                 .map_err(|error| error.to_string())?
         } else if let Some(workspace_id) = &input.workspace_id {
             self.store
-                .policy_state_for_session(&input.session_id, workspace_id)
+                .policy_state_for_agent(&input.agent_id, workspace_id)
                 .map_err(|error| error.to_string())?
         } else {
             Default::default()
@@ -279,8 +279,8 @@ impl<'a> PolicyService<'a> {
             return Ok(AuthorizationOutcome {
                 decision: Decision::deny(
                     "reservation_conflict",
-                    "Write target is reserved for the next waiting session.",
-                    "Wait for the active reservation to be claimed or expire. Do not redeclare reservation or change session_id; that does not release another session's reservation.",
+                    "Write target is reserved for the next waiting agent.",
+                    "Wait for the active reservation to be claimed or expire. Do not redeclare reservation or change agent_id; that does not release another agent's reservation.",
                 ),
                 wait: None,
                 reservation: Some(reservation),
@@ -392,7 +392,7 @@ impl<'a> PolicyService<'a> {
             return Ok(());
         };
         let _ = self.store.release_claim(
-            &input.session_id,
+            &input.agent_id,
             &reservation.workspace_id,
             &reservation.relative_path,
         );
@@ -431,7 +431,7 @@ impl<'a> PolicyService<'a> {
         &self,
         input: &AuthorizeWriteInput,
         workspace_id: &str,
-        blocking_session_id: &str,
+        blocking_agent_id: &str,
         allow_queue_side_effects: bool,
     ) -> Result<Option<WaitQueueInfo>, String> {
         if !allow_queue_side_effects
@@ -448,12 +448,12 @@ impl<'a> PolicyService<'a> {
         let waiter = self
             .store
             .enqueue_waiter_with_identity(
-                &input.session_id,
+                &input.agent_id,
                 workspace_id,
                 &input.path,
                 &input.action,
                 purpose,
-                Some(blocking_session_id),
+                Some(blocking_agent_id),
                 workspace_identity(
                     &input.repo_id,
                     &input.worktree_id,
@@ -519,7 +519,7 @@ impl<'a> PolicyService<'a> {
         for path in self.affected_paths(input) {
             if !self
                 .store
-                .active_exact_file_intent_by_session(workspace_id, path, &input.session_id)
+                .active_exact_file_intent_by_agent(workspace_id, path, &input.agent_id)
                 .map_err(|error| error.to_string())?
             {
                 return Ok(false);
@@ -549,7 +549,7 @@ impl<'a> PolicyService<'a> {
         for path in self.affected_paths(input) {
             if !self
                 .store
-                .active_exact_file_lease_by_session(workspace_id, path, &input.session_id)
+                .active_exact_file_lease_by_agent(workspace_id, path, &input.agent_id)
                 .map_err(|error| error.to_string())?
             {
                 return Ok(false);
@@ -578,10 +578,10 @@ impl<'a> PolicyService<'a> {
                     .map_err(|error| error.to_string())?
             } else {
                 self.store
-                    .active_exact_file_claim_observation_by_session(
+                    .active_exact_file_claim_observation_by_agent(
                         workspace_id,
                         path,
-                        &input.session_id,
+                        &input.agent_id,
                     )
                     .map_err(|error| error.to_string())?
             };
@@ -662,15 +662,11 @@ impl<'a> PolicyService<'a> {
         match input.action.as_str() {
             "write_directory" => self
                 .store
-                .active_claim_covers_directory_by_session(
-                    workspace_id,
-                    &input.path,
-                    &input.session_id,
-                )
+                .active_claim_covers_directory_by_agent(workspace_id, &input.path, &input.agent_id)
                 .map_err(|error| error.to_string()),
             "write_file" | "delete_file" => self
                 .store
-                .active_exact_file_lease_by_session(workspace_id, &input.path, &input.session_id)
+                .active_exact_file_lease_by_agent(workspace_id, &input.path, &input.agent_id)
                 .map_err(|error| error.to_string()),
             "rename_file" | "move_file" => {
                 let Some((old_path, new_path)) = self.rename_or_move_paths(input) else {
@@ -678,13 +674,13 @@ impl<'a> PolicyService<'a> {
                 };
                 let old_lease = self
                     .store
-                    .active_exact_file_lease_by_session(workspace_id, old_path, &input.session_id)
+                    .active_exact_file_lease_by_agent(workspace_id, old_path, &input.agent_id)
                     .map_err(|error| error.to_string())?;
                 if !old_lease {
                     return Ok(false);
                 }
                 self.store
-                    .active_exact_file_lease_by_session(workspace_id, new_path, &input.session_id)
+                    .active_exact_file_lease_by_agent(workspace_id, new_path, &input.agent_id)
                     .map_err(|error| error.to_string())
             }
             _ => Ok(false),
@@ -778,7 +774,7 @@ impl<'a> PolicyService<'a> {
                 .active_reservation_conflict_for_directory(
                     workspace_id,
                     &input.path,
-                    &input.session_id,
+                    &input.agent_id,
                 )
                 .map_err(|error| error.to_string());
         }
@@ -786,7 +782,7 @@ impl<'a> PolicyService<'a> {
         for path in self.affected_paths(input) {
             if let Some(reservation) = self
                 .store
-                .active_reservation_conflict_for_path(workspace_id, path, &input.session_id)
+                .active_reservation_conflict_for_path(workspace_id, path, &input.agent_id)
                 .map_err(|error| error.to_string())?
             {
                 return Ok(Some(reservation));
@@ -795,7 +791,7 @@ impl<'a> PolicyService<'a> {
         Ok(None)
     }
 
-    fn supplied_session_reservation(
+    fn supplied_agent_reservation(
         &self,
         input: &AuthorizeWriteInput,
         workspace_id: &str,
@@ -809,7 +805,7 @@ impl<'a> PolicyService<'a> {
             return Ok(None);
         };
 
-        if reservation.session_id != input.session_id
+        if reservation.agent_id != input.agent_id
             || reservation.workspace_id != workspace_id
             || reservation.action != input.action
         {
@@ -828,7 +824,7 @@ impl<'a> PolicyService<'a> {
         Ok(covers_target.then_some(reservation))
     }
 
-    fn current_session_reservation(
+    fn current_agent_reservation(
         &self,
         input: &AuthorizeWriteInput,
         workspace_id: &str,
@@ -836,10 +832,10 @@ impl<'a> PolicyService<'a> {
         if input.action == "write_directory" {
             return self
                 .store
-                .active_reservation_for_directory_by_session(
+                .active_reservation_for_directory_by_agent(
                     workspace_id,
                     &input.path,
-                    &input.session_id,
+                    &input.agent_id,
                 )
                 .map_err(|error| error.to_string());
         }
@@ -847,7 +843,7 @@ impl<'a> PolicyService<'a> {
         for path in self.affected_paths(input) {
             if let Some(reservation) = self
                 .store
-                .active_reservation_for_path_by_session(workspace_id, path, &input.session_id)
+                .active_reservation_for_path_by_agent(workspace_id, path, &input.agent_id)
                 .map_err(|error| error.to_string())?
             {
                 return Ok(Some(reservation));
@@ -867,7 +863,7 @@ impl<'a> PolicyService<'a> {
                 .active_claim_conflict_owner_for_directory(
                     workspace_id,
                     &input.path,
-                    &input.session_id,
+                    &input.agent_id,
                 )
                 .map_err(|error| error.to_string());
         }
@@ -875,7 +871,7 @@ impl<'a> PolicyService<'a> {
         for path in self.affected_paths(input) {
             if let Some(owner) = self
                 .store
-                .active_claim_conflict_owner_for_path(workspace_id, path, &input.session_id)
+                .active_claim_conflict_owner_for_path(workspace_id, path, &input.agent_id)
                 .map_err(|error| error.to_string())?
             {
                 return Ok(Some(owner));
@@ -893,8 +889,7 @@ impl<'a> PolicyService<'a> {
             .reservation_by_id(&input.wait_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "reservation not found".to_string())?;
-        if reservation.session_id != input.session_id
-            || reservation.workspace_id != input.workspace_id
+        if reservation.agent_id != input.agent_id || reservation.workspace_id != input.workspace_id
         {
             return Err("reservation owner mismatch".to_string());
         }
@@ -909,7 +904,7 @@ impl<'a> PolicyService<'a> {
         };
         let lease_path = scope.clone();
         let mut event = Event::reservation_declared(
-            &input.session_id,
+            &input.agent_id,
             &input.workspace_id,
             reservation.purpose.clone(),
             [scope],
@@ -934,7 +929,7 @@ impl<'a> PolicyService<'a> {
             .store
             .claim_reservation_with_intent_and_lease(
                 &input.wait_id,
-                &input.session_id,
+                &input.agent_id,
                 &input.workspace_id,
                 event,
                 &lease_path,
@@ -963,9 +958,7 @@ impl<'a> PolicyService<'a> {
             .waiter_by_request_id(&input.request_id)
             .map_err(|error| error.to_string())?
         {
-            if existing.session_id != input.session_id
-                || existing.workspace_id != input.workspace_id
-            {
+            if existing.agent_id != input.agent_id || existing.workspace_id != input.workspace_id {
                 return Err("reservation request owner mismatch".to_string());
             }
             let existing = self
@@ -988,7 +981,7 @@ impl<'a> PolicyService<'a> {
                 .active_reservation_conflict_for_directory(
                     &input.workspace_id,
                     &input.path,
-                    &input.session_id,
+                    &input.agent_id,
                 )
                 .map_err(|error| error.to_string())?
         } else {
@@ -996,13 +989,13 @@ impl<'a> PolicyService<'a> {
                 .active_reservation_conflict_for_path(
                     &input.workspace_id,
                     &input.path,
-                    &input.session_id,
+                    &input.agent_id,
                 )
                 .map_err(|error| error.to_string())?
         };
-        let blocking_session_id = reservation_conflict
+        let blocking_agent_id = reservation_conflict
             .as_ref()
-            .map(|reservation| reservation.session_id.as_str());
+            .map(|reservation| reservation.agent_id.as_str());
 
         let claim_owner = if reservation_conflict.is_none() {
             if input.action == "write_directory" {
@@ -1010,7 +1003,7 @@ impl<'a> PolicyService<'a> {
                     .active_claim_conflict_owner_for_directory(
                         &input.workspace_id,
                         &input.path,
-                        &input.session_id,
+                        &input.agent_id,
                     )
                     .map_err(|error| error.to_string())?
             } else {
@@ -1018,26 +1011,26 @@ impl<'a> PolicyService<'a> {
                     .active_claim_conflict_owner_for_path(
                         &input.workspace_id,
                         &input.path,
-                        &input.session_id,
+                        &input.agent_id,
                     )
                     .map_err(|error| error.to_string())?
             }
         } else {
             None
         };
-        let blocking_session_id = blocking_session_id.or(claim_owner.as_deref());
+        let blocking_agent_id = blocking_agent_id.or(claim_owner.as_deref());
 
         let waiter = self
             .store
             .enqueue_reservation_request_with_identity(
                 ReservationRequestInput {
                     request_id: &input.request_id,
-                    session_id: &input.session_id,
+                    agent_id: &input.agent_id,
                     workspace_id: &input.workspace_id,
                     relative_path: &input.path,
                     action: &input.action,
                     purpose: &input.purpose,
-                    blocking_session_id,
+                    blocking_agent_id,
                 },
                 workspace_identity(
                     &input.repo_id,
@@ -1068,7 +1061,7 @@ impl<'a> PolicyService<'a> {
     ) -> Result<CancelReservationOutcome, String> {
         let wait = self
             .store
-            .cancel_reservation_request(&input.request_id, &input.session_id, &input.workspace_id)
+            .cancel_reservation_request(&input.request_id, &input.agent_id, &input.workspace_id)
             .map_err(|error| error.to_string())?;
         Ok(CancelReservationOutcome {
             request_id: input.request_id,

@@ -2,7 +2,7 @@
 
 ## Use OMP-Native Stateful Tools
 
-- If Stateful MCP tools are missing from the active OMP tool list, use `search_tool_bm25` once with a query such as `stateful state current read`, then call the activated runtime-specific tool names.
+- If Stateful native tools are missing from the active OMP tool list, use `search_tool_bm25` once with a query such as `stateful state current read`, then call the activated runtime-specific tool names.
 - Never fall back to Bash for Stateful coordination.
 - OMP built-in Bash may run strict trusted `stateful sandbox run ...` and `stateful sandbox process find ...` commands: bare `stateful` is trusted only after session-start preflight hash-verifies the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted. Arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied.
 - Use built-in Bash for sandboxed command execution via a single trusted `stateful sandbox run ...` command with the narrowest valid sandbox profile and any required Stateful reservation/claim preflight.
@@ -31,4 +31,4 @@ The installer merges an existing `config.yml` and rejects invalid YAML. Without 
 
 ## DeNovo OMP Runs
 
-Stateful-bench DeNovo OMP runs use isolated per-instance OMP homes. `stateful:on` conditions install the integration into that isolated home. Docker-backed stateful OMP runs use `/home/stateful` as the container runtime home so the mounted integration path is visible inside the agent. `stateful:off` / no-state conditions may still use an isolated OMP home, but must not be treated as Stateful sessions or repaired with Stateful MCP/sandbox guidance unless the benchmark prompt explicitly enables Stateful.
+Stateful-bench DeNovo OMP runs use isolated per-instance OMP homes. `stateful:on` conditions install the integration into that isolated home. Docker-backed stateful OMP runs use `/home/stateful` as the container runtime home so the mounted integration path is visible inside the agent. `stateful:off` / no-state conditions may still use an isolated OMP home, but must not be treated as Stateful sessions or repaired with Stateful native-tool/sandbox guidance unless the benchmark prompt explicitly enables Stateful.

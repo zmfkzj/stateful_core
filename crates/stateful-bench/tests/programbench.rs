@@ -779,7 +779,7 @@ print(json.dumps(calls[-1]))
 }
 
 #[test]
-fn programbench_airlock_env_scrubs_parent_stateful_session() {
+fn programbench_airlock_env_scrubs_parent_stateful_values() {
     let output = run_python_adapter(
         &programbench_codex_agent_path(),
         r#"import json
@@ -788,9 +788,6 @@ import os
 for key in [
     "STATEFUL_SERVER_URL",
     "STATEFUL_SERVER_TOKEN",
-    "STATEFUL_SESSION_ID",
-    "STATEFUL_CODEX_RUN_ID",
-    "CODEX_THREAD_ID",
 ]:
     os.environ[key] = "parent"
 
@@ -803,9 +800,6 @@ print(json.dumps({
         "CODEX_HOME",
         "STATEFUL_SERVER_URL",
         "STATEFUL_SERVER_TOKEN",
-        "STATEFUL_SESSION_ID",
-        "STATEFUL_CODEX_RUN_ID",
-        "CODEX_THREAD_ID",
     ]
 }, sort_keys=True))
 "#,
@@ -821,9 +815,6 @@ print(json.dumps({
     assert_eq!(observed["CODEX_HOME"], "/tmp/programbench-airlock/.codex");
     assert_eq!(observed["STATEFUL_SERVER_URL"], serde_json::Value::Null);
     assert_eq!(observed["STATEFUL_SERVER_TOKEN"], serde_json::Value::Null);
-    assert_eq!(observed["STATEFUL_SESSION_ID"], serde_json::Value::Null);
-    assert_eq!(observed["STATEFUL_CODEX_RUN_ID"], serde_json::Value::Null);
-    assert_eq!(observed["CODEX_THREAD_ID"], serde_json::Value::Null);
 }
 
 #[test]

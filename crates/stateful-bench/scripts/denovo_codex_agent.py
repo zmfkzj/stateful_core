@@ -972,18 +972,9 @@ def denovo_codex_environment(
     task_path: Path,
     workspace: Path,
     base_env: dict[str, str] | None = None,
-    preserve_stateful_session: bool = False,
-    stateful_session_id: str | None = None,
 ) -> dict[str, str]:
     source_env = os.environ if base_env is None else base_env
     env = dict(source_env)
-    _ = preserve_stateful_session
-    env.pop("CODEX_THREAD_ID", None)
-    env.pop("STATEFUL_CODEX_RUN_ID", None)
-    env.pop("STATEFUL_SESSION_ID", None)
-    if stateful_session_id:
-        env["STATEFUL_CODEX_RUN_ID"] = stateful_session_id
-        env["STATEFUL_SESSION_ID"] = stateful_session_id
     nested_root = source_env.get(NESTED_CODEX_HOME_ROOT_ENV)
     if nested_root:
         output_scope_parts = output.parts[-4:] if len(output.parts) >= 4 else output.parts
@@ -1010,19 +1001,10 @@ def denovo_omp_environment(
     task_path: Path,
     workspace: Path,
     base_env: dict[str, str] | None = None,
-    stateful_session_id: str | None = None,
 ) -> dict[str, str]:
     source_env = os.environ if base_env is None else base_env
     env = dict(source_env)
-    for key in (
-        "CODEX_HOME",
-        "CODEX_THREAD_ID",
-        "STATEFUL_CODEX_RUN_ID",
-        "STATEFUL_SESSION_ID",
-    ):
-        env.pop(key, None)
-    if stateful_session_id is not None:
-        env["STATEFUL_SESSION_ID"] = stateful_session_id
+    env.pop("CODEX_HOME", None)
     home = output / "omp-homes" / path_fragment(instance_id) / "home"
     auth_source_agent = source_env.get("OMP_AUTH_SOURCE_AGENT_DIR")
     if not auth_source_agent:
@@ -1245,7 +1227,7 @@ def rewrite_omp_config_for_runtime_home(env: dict[str, str], runtime_omp_home: s
     config_path.write_text(rewritten, encoding="utf-8")
 
 
-def stateful_session_fragment(value: str) -> str:
+def stateful_agent_id_fragment(value: str) -> str:
     fragment = "".join(
         character if character.isalnum() or character in "_-" else "-"
         for character in str(value)
@@ -1253,14 +1235,14 @@ def stateful_session_fragment(value: str) -> str:
     return fragment or "item"
 
 
-def denovo_stateful_session_id(
+def denovo_stateful_agent_id(
     output: Path,
     instance_id: str,
     task_path: Path,
     workspace: Path,
 ) -> str:
     return (
-        f"denovo-{stateful_session_fragment(instance_id)}-"
+        f"denovo-{stateful_agent_id_fragment(instance_id)}-"
         f"{path_scope_digest(output, task_path, workspace)}"
     )
 
@@ -2168,7 +2150,7 @@ def top_counts(counter: Counter[str], limit: int) -> dict[str, int]:
 
 def heartbeat_key(event: dict[str, Any]) -> tuple[Any, ...]:
     return (
-        event.get("session_id"),
+        event.get("agent_id"),
         event.get("workspace_id"),
         event.get("repo_id"),
         event.get("worktree_id"),
@@ -2183,7 +2165,7 @@ def heartbeat_summary(events: list[dict[str, Any]]) -> dict[str, int | None]:
     previous_time: datetime | None = None
     in_window = False
     for event in events:
-        if event.get("event_type") != "SessionHeartbeat":
+        if event.get("event_type") != "AgentHeartbeat":
             in_window = False
             continue
         count += 1
@@ -2206,7 +2188,7 @@ def heartbeat_summary(events: list[dict[str, Any]]) -> dict[str, int | None]:
 
 def summarize_orchestration_events(
     events: list[dict[str, Any]],
-    session_id: str | None,
+    agent_id: str | None,
     workspace_id: str | None = None,
 ) -> dict[str, Any]:
     if workspace_id:
@@ -2217,7 +2199,7 @@ def summarize_orchestration_events(
         matching = [
             event
             for event in events
-            if not session_id or event.get("session_id") == session_id
+            if not agent_id or event.get("agent_id") == agent_id
         ]
     event_types = Counter(str(event.get("event_type", "")) for event in matching)
     denial_paths: Counter[str] = Counter()
@@ -2257,7 +2239,7 @@ def write_orchestration_trace(
     instance_dir: Path,
     env: dict[str, str],
     instance_id: str,
-    session_id: str | None,
+    stateful_agent_id: str | None,
     subagent_usage: dict[str, Any],
     patch_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -2265,7 +2247,7 @@ def write_orchestration_trace(
     relative_trace_path = trace_path.relative_to(instance_dir.parent).as_posix()
     trace: dict[str, Any] = {
         "instance_id": instance_id,
-        "session_id": session_id,
+        "stateful_agent_id": stateful_agent_id,
         "trace_captured": False,
         "trace_path": relative_trace_path,
         "subagent_usage": subagent_usage,
@@ -2281,7 +2263,7 @@ def write_orchestration_trace(
         workspace_id = env.get("STATEFUL_WORKSPACE_ID")
         if workspace_id:
             trace["workspace_id"] = workspace_id
-        trace.update(summarize_orchestration_events(events, session_id, workspace_id))
+        trace.update(summarize_orchestration_events(events, stateful_agent_id, workspace_id))
         trace["trace_captured"] = True
         trace["current"] = current.get("current", current)
         trace["events"] = events
@@ -2290,7 +2272,7 @@ def write_orchestration_trace(
                 env,
                 "/v1/context/render",
                 {
-                    "session_id": session_id,
+                    "agent_id": stateful_agent_id,
                     "workspace_id": workspace_id,
                     "mode": "brief",
                 },
@@ -2517,6 +2499,16 @@ async def run_one_instance_async(
                 eval_data,
             )
 
+        stateful_agent_id = (
+            denovo_stateful_agent_id(
+                output=output,
+                instance_id=inst.id,
+                task_path=Path(args.data_file),
+                workspace=workspace,
+            )
+            if args.agent_mode == "stateful"
+            else None
+        )
         if args.cli_runtime == "omp":
             env = denovo_omp_environment(
                 output=output,
@@ -2524,16 +2516,6 @@ async def run_one_instance_async(
                 task_path=Path(args.data_file),
                 workspace=workspace,
                 base_env=source_env,
-                stateful_session_id=(
-                    denovo_stateful_session_id(
-                        output=output,
-                        instance_id=inst.id,
-                        task_path=Path(args.data_file),
-                        workspace=workspace,
-                    )
-                    if args.agent_mode == "stateful"
-                    else None
-                ),
             )
             codex_home = Path(env["PI_CODING_AGENT_DIR"])
         else:
@@ -2555,16 +2537,6 @@ async def run_one_instance_async(
                 task_path=Path(args.data_file),
                 workspace=workspace,
                 base_env=source_env,
-                stateful_session_id=(
-                    denovo_stateful_session_id(
-                        output=output,
-                        instance_id=inst.id,
-                        task_path=Path(args.data_file),
-                        workspace=workspace,
-                    )
-                    if args.agent_mode == "stateful"
-                    else None
-                ),
             )
             codex_env = env
             codex_home = Path(env["CODEX_HOME"])
@@ -2703,7 +2675,7 @@ async def run_one_instance_async(
                 instance_dir=instance_dir,
                 env=env,
                 instance_id=inst.id,
-                session_id=env.get("STATEFUL_SESSION_ID"),
+                stateful_agent_id=stateful_agent_id,
                 subagent_usage=subagent_usage,
                 patch_path=patch_path if patch_path.exists() else None,
             )

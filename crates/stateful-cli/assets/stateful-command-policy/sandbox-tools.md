@@ -52,7 +52,7 @@ For OMP entries below, strict trusted bare `stateful` means session-start prefli
 
 - Raw Bash/eval for repo-internal commands, including quick `rg`, `git status`, `sed`, or language snippets.
 - Shell wrappers around sandbox commands: environment assignments, command substitutions, outer redirects/pipelines, multiple commands, duplicate `--command`, or untrusted executable paths.
-- Session-repair probes such as `stateful hook codex session-start`, `stateful hook omp session-start`, `stateful current`, `stateful notifications`, `stateful resume`, `stateful reservation declare/request/claim`, `strings <stateful>`, shell snapshots, or manual `STATEFUL_SESSION_ID`.
+- Session-repair probes such as `stateful hook codex session-start`, `stateful hook omp session-start`, `stateful current`, `stateful notifications`, `stateful resume`, `stateful reservation declare/request/claim`, `strings <stateful>`, shell snapshots, or manual legacy session environment variables.
 - Shell writes outside sandbox `--command`: `>`, `>>`, heredocs, and `| tee`.
 - Direct mutation through raw `rm`, `mv`, `cp`, `mkdir`, `touch`, `chmod`, or `chown`.
 - Raw process inspection (`ps`, `pgrep`, `ps auxww`, `ps -ef`, `ps -eo ...`) inside sandbox commands.

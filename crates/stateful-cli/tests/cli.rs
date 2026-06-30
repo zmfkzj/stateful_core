@@ -1,10 +1,9 @@
 use clap::Parser;
 use stateful_cli::{
     Cli, CodexSandboxMode, Command, GlobalPaths, HookCommand, HookRuntime, InstallAgent,
-    McpCommand, NotificationsCommand, OmpInstallOptions, ReposCommand, ResumeCommand,
-    SandboxCommand, SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, ToolsCommand,
-    allow_tool_for_repo, apply_omp_install, doctor_report_with_global, enable_repo,
-    record_unclassified_tool_for_repo,
+    NotificationsCommand, OmpInstallOptions, ReposCommand, ResumeCommand, SandboxCommand,
+    SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, ToolsCommand, allow_tool_for_repo,
+    apply_omp_install, doctor_report_with_global, enable_repo, record_unclassified_tool_for_repo,
 };
 use std::{fs, path::PathBuf, process::Command as ProcessCommand};
 
@@ -19,6 +18,8 @@ fn parses_sandbox_run_read_only_defaults() {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -32,6 +33,8 @@ fn parses_sandbox_run_read_only_defaults() {
             assert_eq!(fs, SandboxFsProfile::ReadOnly);
             assert_eq!(network, SandboxNetworkPolicy::Disabled);
             assert_eq!(purpose, None);
+            assert_eq!(agent_id, None);
+            assert_eq!(workspace_id, None);
             assert_eq!(reservation_id, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
@@ -131,6 +134,8 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -145,6 +150,8 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(purpose, None);
             assert_eq!(reservation_id, None);
+            assert_eq!(agent_id, None);
+            assert_eq!(workspace_id, None);
             assert_eq!(write_targets, vec!["README.md"]);
             assert_eq!(create_targets, vec!["docs/new.md"]);
             assert_eq!(write_dirs, vec!["tmp"]);
@@ -182,6 +189,8 @@ fn parses_sandbox_run_git_profile() {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -196,6 +205,8 @@ fn parses_sandbox_run_git_profile() {
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(purpose, None);
             assert_eq!(reservation_id, None);
+            assert_eq!(agent_id, None);
+            assert_eq!(workspace_id, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
@@ -233,6 +244,8 @@ fn parses_sandbox_run_github_pr_profile() {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -247,6 +260,8 @@ fn parses_sandbox_run_github_pr_profile() {
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(purpose, None);
             assert_eq!(reservation_id, None);
+            assert_eq!(agent_id, None);
+            assert_eq!(workspace_id, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
@@ -284,6 +299,8 @@ fn parses_sandbox_run_build_profile() {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -298,6 +315,8 @@ fn parses_sandbox_run_build_profile() {
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(purpose, None);
             assert_eq!(reservation_id, None);
+            assert_eq!(agent_id, None);
+            assert_eq!(workspace_id, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
@@ -328,6 +347,8 @@ fn parses_nested_codex_benchmark_sandbox_command() {
         "run-nested-codex-benchmark",
         "--purpose",
         "run nested Codex chaos benchmark",
+        "--agent-id",
+        "agent-a",
         "--write-dir",
         "target",
         "--codex-home-root",
@@ -342,6 +363,8 @@ fn parses_nested_codex_benchmark_sandbox_command() {
     match cli.command {
         Command::Sandbox(SandboxCommand::RunNestedCodexBenchmark {
             purpose,
+            agent_id,
+            workspace_id,
             write_dir,
             codex_home_root,
             docker_socket,
@@ -349,6 +372,8 @@ fn parses_nested_codex_benchmark_sandbox_command() {
             timeout_seconds,
         }) => {
             assert_eq!(purpose, "run nested Codex chaos benchmark");
+            assert_eq!(agent_id, "agent-a");
+            assert_eq!(workspace_id, None);
             assert_eq!(write_dir, "target");
             assert_eq!(codex_home_root, "target/nested-codex-homes/run-1");
             assert_eq!(docker_socket, None);
@@ -367,6 +392,8 @@ fn parses_nested_codex_benchmark_sandbox_command_with_docker_socket() {
         "run-nested-codex-benchmark",
         "--purpose",
         "run nested Codex chaos benchmark",
+        "--agent-id",
+        "agent-a",
         "--write-dir",
         "target",
         "--codex-home-root",
@@ -464,6 +491,8 @@ fn parses_sandbox_run_external_profile() {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
@@ -477,6 +506,8 @@ fn parses_sandbox_run_external_profile() {
             assert_eq!(fs, SandboxFsProfile::External);
             assert_eq!(purpose, Some("install rebuilt binaries".to_string()));
             assert_eq!(reservation_id, None);
+            assert_eq!(agent_id, None);
+            assert_eq!(workspace_id, None);
             assert_eq!(write_targets, vec!["/opt/stateful/bin/stateful"]);
             assert_eq!(create_targets, vec!["/opt/stateful/bin/stateful-bench"]);
             assert_eq!(write_dirs, vec!["/opt/stateful/bin"]);
@@ -842,7 +873,7 @@ fn parses_notifications_poll_command() {
         "stateful",
         "notifications",
         "poll",
-        "--session-id",
+        "--agent-id",
         "s1",
         "--workspace-id",
         "w1",
@@ -852,9 +883,9 @@ fn parses_notifications_poll_command() {
     assert!(matches!(
         cli.command,
         Command::Notifications(NotificationsCommand::Poll {
-            ref session_id,
+            ref agent_id,
             ref workspace_id,
-        }) if session_id.as_deref() == Some("s1")
+        }) if agent_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
     ));
 }
@@ -865,7 +896,7 @@ fn parses_resume_next_command() {
         "stateful",
         "resume",
         "next",
-        "--session-id",
+        "--agent-id",
         "s1",
         "--workspace-id",
         "w1",
@@ -875,9 +906,9 @@ fn parses_resume_next_command() {
     assert!(matches!(
         cli.command,
         Command::Resume(ResumeCommand::Next {
-            ref session_id,
+            ref agent_id,
             ref workspace_id,
-        }) if session_id.as_deref() == Some("s1")
+        }) if agent_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
     ));
 }
@@ -919,7 +950,7 @@ fn reservation_declare_command_parses_file_scopes() {
         "stateful",
         "reservation",
         "declare",
-        "--session-id",
+        "--agent-id",
         "s1",
         "--workspace-id",
         "w1",
@@ -933,11 +964,11 @@ fn reservation_declare_command_parses_file_scopes() {
     assert!(matches!(
         cli.command,
         Command::Reservation(stateful_cli::ReservationCommand::Declare {
-            ref session_id,
+            ref agent_id,
             ref workspace_id,
             ref purpose,
             ref files_planned,
-        }) if session_id.as_deref() == Some("s1")
+        }) if agent_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
             && purpose == "Fix auth validation behavior."
             && files_planned == &vec!["src/auth.ts".to_string(), "src/session/".to_string()]
@@ -945,7 +976,7 @@ fn reservation_declare_command_parses_file_scopes() {
 }
 
 #[test]
-fn reservation_declare_command_can_default_session_and_workspace() {
+fn reservation_declare_command_can_default_agent_and_workspace() {
     let cli = Cli::try_parse_from([
         "stateful",
         "reservation",
@@ -954,12 +985,12 @@ fn reservation_declare_command_can_default_session_and_workspace() {
         "Fix auth validation behavior.",
         "src/auth.ts",
     ])
-    .expect("reservation declare command should parse without explicit session flags");
+    .expect("reservation declare command should parse without explicit identity flags");
 
     assert!(matches!(
         cli.command,
         Command::Reservation(stateful_cli::ReservationCommand::Declare {
-            session_id: None,
+            agent_id: None,
             workspace_id: None,
             ref purpose,
             ref files_planned,
@@ -991,8 +1022,8 @@ fn reservation_claim_command_parses_wait_id() {
         "stateful",
         "reservation",
         "claim",
-        "--session-id",
-        "s1",
+        "--agent-id",
+        "agent-a",
         "--workspace-id",
         "w1",
         "--wait-id",
@@ -1003,11 +1034,11 @@ fn reservation_claim_command_parses_wait_id() {
     assert!(matches!(
         cli.command,
         Command::Reservation(stateful_cli::ReservationCommand::Claim {
-            ref session_id,
+            ref agent_id,
             ref workspace_id,
             ref wait_id,
             ..
-        }) if session_id.as_deref() == Some("s1")
+        }) if agent_id.as_deref() == Some("agent-a")
             && workspace_id.as_deref() == Some("w1")
             && wait_id == "wait-1"
     ));
@@ -1042,7 +1073,7 @@ fn reservation_request_command_parses_request_id_action_and_path() {
         "stateful",
         "reservation",
         "request",
-        "--session-id",
+        "--agent-id",
         "s1",
         "--workspace-id",
         "w1",
@@ -1060,14 +1091,14 @@ fn reservation_request_command_parses_request_id_action_and_path() {
     assert!(matches!(
         cli.command,
         Command::Reservation(stateful_cli::ReservationCommand::Request {
-            ref session_id,
+            ref agent_id,
             ref workspace_id,
             ref request_id,
             reservation_id: _,
             ref action,
             ref path,
             ref purpose,
-        }) if session_id.as_deref() == Some("s1")
+        }) if agent_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
             && request_id == "request-1"
             && action == "write_file"
@@ -1082,7 +1113,7 @@ fn reservation_cancel_command_parses_request_id() {
         "stateful",
         "reservation",
         "cancel",
-        "--session-id",
+        "--agent-id",
         "s1",
         "--workspace-id",
         "w1",
@@ -1094,10 +1125,10 @@ fn reservation_cancel_command_parses_request_id() {
     assert!(matches!(
         cli.command,
         Command::Reservation(stateful_cli::ReservationCommand::Cancel {
-            ref session_id,
+            ref agent_id,
             ref workspace_id,
             ref request_id,
-        }) if session_id.as_deref() == Some("s1")
+        }) if agent_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
             && request_id == "request-1"
     ));
@@ -1335,25 +1366,4 @@ fn parses_server_restart_subcommand() {
         } => {}
         other => panic!("expected server restart command, got {other:?}"),
     }
-}
-
-#[test]
-fn mcp_call_command_parses_tool_and_arguments() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "mcp",
-        "call",
-        "state.session.heartbeat",
-        r#"{"session_id":"s1","workspace_id":"w1"}"#,
-    ])
-    .expect("mcp call command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Mcp(McpCommand::Call {
-            ref tool_name,
-            ref arguments_json
-        }) if tool_name == "state.session.heartbeat"
-            && arguments_json.as_deref() == Some(r#"{"session_id":"s1","workspace_id":"w1"}"#)
-    ));
 }
