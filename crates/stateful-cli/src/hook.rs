@@ -526,82 +526,225 @@ fn authorize_omp_targets(
         .workspace_id
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, identity));
-    for target in targets {
-        let purpose = omp_hook_authorize_purpose(input, runtime, &target, &workspace_id)
-            .unwrap_or_else(|| format!("Queue OMP {} for {}.", input.tool_name, target.path));
-        let mut payload = json!({
-            "action": target.action,
-            "path": target.path,
-        });
-        if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
-            payload["base_observations"] = json!([observation]);
-        }
-        payload["queue_on_conflict"] = json!(true);
-        payload["purpose"] = json!(purpose);
-        if let Some(new_path) = &target.new_path {
-            payload["old_path"] = json!(target.path);
-            payload["new_path"] = json!(new_path);
-        }
-        if let Some(reservation_id) = input.reservation_id() {
-            payload["reservation_id"] = json!(reservation_id);
-        }
-        let mut body = protocol_envelope(ProtocolEnvelopeArgs {
-            runtime,
-            request_id: uuid::Uuid::new_v4().to_string(),
-            session_id: input.session_id.clone(),
-            workspace_id: workspace_id.clone(),
-            identity: identity.cloned(),
-            source_kind: "hook",
-            event: "omp_pre_tool_use",
-            source_ref: "hook:omp_pre_tool_use",
-            source_tool_name: Some(input.tool_name.as_str()),
-            payload,
-        });
-        body["metadata"] = input.audit_metadata();
+    let mut reservation_id = input.reservation_id().map(str::to_string);
+    let mut auto_declared = false;
 
-        let response = match post_json(runtime, "/v1/authorize", &body) {
-            Ok(response) => response,
-            Err(error) => {
-                let reason = authorization_unavailable_reason(&error);
-                return Ok(OmpHookOutcome::Block { reason });
-            }
-        };
+    'authorize: loop {
+        for target in &targets {
+            let purpose = omp_hook_authorize_purpose(input, runtime, target, &workspace_id)
+                .unwrap_or_else(|| format!("Queue OMP {} for {}.", input.tool_name, target.path));
+            let decision = match post_omp_authorize_target(
+                input,
+                runtime,
+                repo_root,
+                identity,
+                target,
+                &workspace_id,
+                reservation_id.as_deref(),
+                &purpose,
+            ) {
+                Ok(decision) => decision,
+                Err(outcome) => return Ok(outcome),
+            };
+            if decision.decision != "allow" {
+                if !auto_declared
+                    && reservation_id.is_none()
+                    && should_auto_declare_omp_tool_reservation(input, &decision, &targets)
+                {
+                    reservation_id = Some(
+                        match declare_and_claim_omp_pre_tool_reservation(
+                            input,
+                            runtime,
+                            identity,
+                            &workspace_id,
+                            &targets,
+                            &purpose,
+                        ) {
+                            Ok(reservation_id) => reservation_id,
+                            Err(outcome) => return Ok(outcome),
+                        },
+                    );
+                    auto_declared = true;
+                    continue 'authorize;
+                }
 
-        if !(200..300).contains(&response.status_code) {
-            let reason = format!(
-                "stateful authorization failed with HTTP {}: {}",
-                response.status_code, response.body
-            );
-            return Ok(OmpHookOutcome::Block { reason });
-        }
-
-        let decision: AuthorizeDecision = match serde_json::from_str(&response.body) {
-            Ok(decision) => decision,
-            Err(error) => {
-                let reason = authorization_unavailable_reason(&error);
-                return Ok(OmpHookOutcome::Block { reason });
-            }
-        };
-        if decision.decision != "allow" {
-            let reason = if let Some(repo_root) = repo_root {
-                if repeated_denial_seen(
-                    repo_root,
-                    &input.session_id,
-                    &target.path,
-                    &decision.reason_code,
-                ) {
-                    repeated_denial_reason(&target.path)
+                let reason = if let Some(repo_root) = repo_root {
+                    if repeated_denial_seen(
+                        repo_root,
+                        &input.session_id,
+                        &target.path,
+                        &decision.reason_code,
+                    ) {
+                        repeated_denial_reason(&target.path)
+                    } else {
+                        authorization_denial_reason(decision)
+                    }
                 } else {
                     authorization_denial_reason(decision)
-                }
-            } else {
-                authorization_denial_reason(decision)
-            };
-            return Ok(OmpHookOutcome::Block { reason });
+                };
+                return Ok(OmpHookOutcome::Block { reason });
+            }
         }
+
+        return Ok(OmpHookOutcome::Allow);
+    }
+}
+
+fn post_omp_authorize_target(
+    input: &OmpPreToolUseInput,
+    runtime: &ServerRuntime,
+    repo_root: Option<&Path>,
+    identity: Option<&RepoIdentity>,
+    target: &PatchTarget,
+    workspace_id: &str,
+    reservation_id: Option<&str>,
+    purpose: &str,
+) -> Result<AuthorizeDecision, OmpHookOutcome> {
+    let mut payload = json!({
+        "action": target.action,
+        "path": target.path,
+    });
+    if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
+        payload["base_observations"] = json!([observation]);
+    }
+    payload["queue_on_conflict"] = json!(true);
+    payload["purpose"] = json!(purpose);
+    if let Some(new_path) = &target.new_path {
+        payload["old_path"] = json!(target.path);
+        payload["new_path"] = json!(new_path);
+    }
+    if let Some(reservation_id) = reservation_id {
+        payload["reservation_id"] = json!(reservation_id);
+    }
+    let mut body = protocol_envelope(ProtocolEnvelopeArgs {
+        runtime,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        session_id: input.session_id.clone(),
+        workspace_id: workspace_id.to_string(),
+        identity: identity.cloned(),
+        source_kind: "hook",
+        event: "omp_pre_tool_use",
+        source_ref: "hook:omp_pre_tool_use",
+        source_tool_name: Some(input.tool_name.as_str()),
+        payload,
+    });
+    body["metadata"] = input.audit_metadata();
+
+    let response =
+        post_json(runtime, "/v1/authorize", &body).map_err(|error| OmpHookOutcome::Block {
+            reason: authorization_unavailable_reason(&error),
+        })?;
+
+    if !(200..300).contains(&response.status_code) {
+        return Err(OmpHookOutcome::Block {
+            reason: format!(
+                "stateful authorization failed with HTTP {}: {}",
+                response.status_code, response.body
+            ),
+        });
     }
 
-    Ok(OmpHookOutcome::Allow)
+    serde_json::from_str(&response.body).map_err(|error| OmpHookOutcome::Block {
+        reason: authorization_unavailable_reason(&error),
+    })
+}
+
+fn should_auto_declare_omp_tool_reservation(
+    input: &OmpPreToolUseInput,
+    decision: &AuthorizeDecision,
+    targets: &[PatchTarget],
+) -> bool {
+    matches!(
+        runtime_tool_name_leaf(&input.tool_name),
+        tool_name if tool_name.eq_ignore_ascii_case("edit")
+            || tool_name.eq_ignore_ascii_case("write")
+    ) && matches!(
+        decision.reason_code.as_str(),
+        "missing_reservation" | "scope_mismatch"
+    ) && targets.iter().all(|target| target.action == "write_file")
+}
+
+fn declare_and_claim_omp_pre_tool_reservation(
+    input: &OmpPreToolUseInput,
+    runtime: &ServerRuntime,
+    identity: Option<&RepoIdentity>,
+    workspace_id: &str,
+    targets: &[PatchTarget],
+    purpose: &str,
+) -> Result<String, OmpHookOutcome> {
+    let files_planned = targets
+        .iter()
+        .map(|target| target.path.clone())
+        .collect::<Vec<_>>();
+    let mut body = protocol_envelope(ProtocolEnvelopeArgs {
+        runtime,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        session_id: input.session_id.clone(),
+        workspace_id: workspace_id.to_string(),
+        identity: identity.cloned(),
+        source_kind: "hook",
+        event: "reservation_declare",
+        source_ref: "hook:omp_pre_tool_use",
+        source_tool_name: Some(input.tool_name.as_str()),
+        payload: json!({
+            "purpose": purpose,
+            "files_planned": files_planned,
+        }),
+    });
+    body["metadata"] = input.audit_metadata();
+
+    let response = post_json(runtime, "/v1/reservation/declare", &body).map_err(|error| {
+        OmpHookOutcome::Block {
+            reason: authorization_unavailable_reason(&error),
+        }
+    })?;
+    if !(200..300).contains(&response.status_code) {
+        return Err(OmpHookOutcome::Block {
+            reason: format!(
+                "stateful reservation declaration failed with HTTP {}: {}",
+                response.status_code, response.body
+            ),
+        });
+    }
+
+    let body: serde_json::Value =
+        serde_json::from_str(&response.body).map_err(|error| OmpHookOutcome::Block {
+            reason: authorization_unavailable_reason(&error),
+        })?;
+    let reservation_id = body
+        .get("reservation_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|reservation_id| !reservation_id.is_empty())
+        .ok_or_else(|| OmpHookOutcome::Block {
+            reason: "stateful reservation declaration response did not include reservation_id"
+                .to_string(),
+        })?;
+
+    let response = post_json(
+        runtime,
+        "/v1/claim/acquire",
+        &json!({
+            "session_id": input.session_id.clone(),
+            "workspace_id": workspace_id,
+            "reservation_id": reservation_id.clone(),
+            "paths": files_planned,
+            "root": identity.map(|identity| identity.root.as_str()).unwrap_or(""),
+        }),
+    )
+    .map_err(|error| OmpHookOutcome::Block {
+        reason: authorization_unavailable_reason(&error),
+    })?;
+    if !(200..300).contains(&response.status_code) {
+        return Err(OmpHookOutcome::Block {
+            reason: format!(
+                "stateful claim acquire failed with HTTP {}: {}",
+                response.status_code, response.body
+            ),
+        });
+    }
+
+    Ok(reservation_id)
 }
 
 fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {

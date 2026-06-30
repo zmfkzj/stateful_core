@@ -144,9 +144,10 @@ stateful codex
 ### OMP
 
 Install OMP integration when you want the isolated OMP `stateful` profile,
-stateful hooks, MCP, built-in Bash preflight, lazy edit/write resume, and
-`skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
-`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`):
+stateful hooks, MCP, built-in Bash preflight, OMP edit/write auto-declare/claim
+for missing scope, lazy resume fallbacks, and `skills/stateful-command-policy/`
+(`SKILL.md`, `omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
+`subagent-write-recovery.md`):
 
 ```bash
 stateful install --agent omp --yes
@@ -191,17 +192,22 @@ uses `reservation_id` plus `paths: string[]` so callers can acquire a batch from
 that reservation in one request. Each resulting claim still owns one exact file
 or directory resource and expires when the session stops being fresh.
 
-When another active claim blocks a write, the writer can queue for that resource.
-When the resource is released or expires, the server reserves it for the next
-eligible waiter and sends a resume notification. During queued-reservation
-compatibility, wait records expose the same id as both `wait_id` and
-`reservation_id`; use that id for the eventual claim and write. In OMP, blocked
-line-based `edit` patches, captured full `write` payloads, and external Bash
-commands waiting on a scoped grant are kept as live-session lazy operations.
-Agents call `lazy_edit_resume` for strict line-based patch replay,
-`lazy_write_resume` for captured write replay, or `lazy_bash_resume` to rerun a
-blocked external Bash command after approving its grant. Write replay fails if
-the target changed since the operation was queued.
+For native OMP `edit` and `write`, pre-tool authorization can recover when the
+only denial is missing reservation/scope and the tool call did not supply an
+explicit reservation id: the extension declares the exact file scope, acquires
+same-reservation claims, and retries authorization. When another active claim
+blocks a write, the writer can queue for that resource. When the resource is
+released or expires, the server reserves it for the next eligible waiter and
+sends a resume notification. During queued-reservation compatibility, wait
+records expose the same id as both `wait_id` and `reservation_id`; use that id
+for the eventual claim and write. In OMP, queued/conflicting edits, writes whose
+target changed before replay, unavailable authorization runtime, unsupported
+targets, explicit bad reservation ids, other denials, and external Bash commands
+waiting on a scoped grant remain lazy-resume cases. Agents call
+`lazy_edit_resume` for strict line-based patch replay, `lazy_write_resume` for
+captured write replay, or `lazy_bash_resume` to rerun a blocked external Bash
+command after approving its grant. Write replay fails if the target changed
+since the operation was queued.
 
 Detailed queue states, claim expiry behavior, and promotion rules are documented
 in [State model](docs/state-model.md),
@@ -231,10 +237,12 @@ absolute binary path. External write/create/write-dir/socket/signal scope still
 asks for a Stateful OMP UI grant by default; `stateful.autoApprove: true` skips
 only that Stateful-owned prompt while sandbox scope validation, hooks,
 reservation/claim checks, and grant limits still apply. When auto-approval is
-enabled, no prompt is shown. Use `lazy_edit_resume` for strict replay of blocked
-line-based OMP `edit` patches, `lazy_write_resume` for captured full OMP `write`
-replay with a stale-target guard, and `lazy_bash_resume` to rerun a queued
-external Bash command after the scoped grant is approved.
+enabled, no prompt is shown. For native OMP `edit` and `write`, missing
+reservation/scope can be auto-declared and claimed before authorization is
+retried. Use `lazy_edit_resume` for queued/conflicting line-based OMP `edit`
+patches, `lazy_write_resume` for captured full OMP `write` replay with a
+stale-target guard, and `lazy_bash_resume` to rerun a queued external Bash
+command after the scoped grant is approved.
 
 See [Usage reference](docs/usage-reference.md) for detailed CLI, hook, sandbox,
 LAN sharing, generated-file, and release notes.

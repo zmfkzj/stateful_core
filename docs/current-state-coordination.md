@@ -272,10 +272,11 @@ tools are denied at the host approval and hook levels. The installer also writes
 always-apply rule tells the model when
 Stateful policy applies, the `stateful-command-policy` manual keeps the detailed
 procedure, and hooks remain the enforcement boundary. The
-generated extension keeps built-in Bash preflight plus lazy edit/write resume
-tools. Built-in Bash may run only strict trusted `stateful sandbox run ...` and
-`stateful sandbox process find ...` commands after Stateful preflight; command
-execution and process inspection are not generated tool calls. External
+generated extension keeps built-in Bash preflight, edit/write auto-declare/claim,
+and lazy resume tools. Built-in Bash may run only strict trusted
+`stateful sandbox run ...` and `stateful sandbox process find ...` commands
+after Stateful preflight; command execution and process inspection are not
+generated tool calls. External
 write/create/write-dir/socket/signal scope asks for a scoped OMP UI grant by
 default; `stateful.autoApprove: true` skips only that Stateful-owned prompt
 while sandbox scope validation, hooks, reservation/claim checks, and grant
@@ -311,9 +312,14 @@ persists the same current-session files used by
 session-aware CLI and MCP callers. With that state in place,
 `state_session_register` -> `state_reservation_declare` ->
 `state_claim_acquire` resolves the active OMP session without a caller-supplied
-environment override. Plugin packaging is deferred to
-team beta for distribution and update UX, while managed hooks remain the
-long-term organization-enforcement path.
+environment override. OMP native `edit` and `write` pre-tool authorization can
+also auto-declare the exact file scope, acquire same-reservation claims, and
+retry when the only denial is missing reservation/scope and no explicit
+reservation id was supplied; queued conflicts, unavailable runtime,
+changed-target replay, unsupported targets, explicit bad reservation ids, and
+other denials still use lazy resume or normal denial recovery. Plugin packaging
+is deferred to team beta for distribution and update UX, while managed hooks
+remain the long-term organization-enforcement path.
 
 Hook scripts are thin integration adapters. They parse runtime hook input,
 classify runtime-specific tool calls, extract action and targets when supported,

@@ -2944,6 +2944,139 @@ fn omp_edit_authorize_includes_lazy_queue_metadata_when_scope_exists() {
 }
 
 #[test]
+fn omp_write_pre_tool_declares_missing_file_reservation_and_retries_authorize() {
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{
+            "decision": "deny",
+            "message": "Supported writes require active file or directory reservation.",
+            "reason_code": "missing_reservation",
+            "required_next_action": "Call state.reservation.declare with file scope before writing."
+        }"#,
+        r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
+        r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
+        r#"{"decision":"allow","message":"ok"}"#,
+    ]);
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "write",
+        "tool_input": { "path": "docs/a.md", "content": "hello" }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        Some(&runtime),
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp write should auto-declare missing reservation before blocking");
+
+    assert_eq!(outcome, OmpHookOutcome::Allow);
+    let first_authorize = request_json_body(&rx.recv().expect("first authorize should arrive"));
+    assert_eq!(first_authorize["payload"]["action"], "write_file");
+    assert_eq!(first_authorize["payload"]["path"], "docs/a.md");
+    let declare = request_json_body(&rx.recv().expect("reservation declare should arrive"));
+    assert_eq!(declare["source"]["event"], "reservation_declare");
+    assert_eq!(
+        declare["payload"]["files_planned"],
+        serde_json::json!(["docs/a.md"])
+    );
+    let claim = request_json_body(&rx.recv().expect("claim acquire should arrive"));
+    assert_eq!(claim["session_id"], "omp-parent");
+    assert_eq!(claim["reservation_id"], "auto-reservation");
+    assert_eq!(claim["paths"], serde_json::json!(["docs/a.md"]));
+    let retry_authorize = request_json_body(&rx.recv().expect("retry authorize should arrive"));
+    assert_eq!(
+        retry_authorize["payload"]["reservation_id"],
+        "auto-reservation"
+    );
+    assert_eq!(retry_authorize["payload"]["path"], "docs/a.md");
+}
+
+#[test]
+fn omp_write_uses_tool_input_reservation_when_top_level_reservation_is_blank() {
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"deny","message":"missing","reason_code":"missing_reservation"}"#,
+    );
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "reservation_id": "   ",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "write",
+        "tool_input": {
+            "reservation_id": "explicit-reservation",
+            "path": "docs/a.md",
+            "content": "hello"
+        }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        Some(&runtime),
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp write should parse");
+
+    assert!(matches!(outcome, OmpHookOutcome::Block { .. }));
+    let authorize = request_json_body(&rx.recv().expect("authorize should arrive"));
+    assert_eq!(authorize["payload"]["reservation_id"], "explicit-reservation");
+    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+}
+
+#[test]
+fn omp_write_releases_auto_claim_when_retry_authorization_blocks() {
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{
+            "decision": "deny",
+            "message": "Supported writes require active file or directory reservation.",
+            "reason_code": "missing_reservation"
+        }"#,
+        r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
+        r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
+        r#"{
+            "decision": "deny",
+            "message": "Write target is covered by another active session claim.",
+            "reason_code": "active_claim_conflict"
+        }"#,
+        r#"{"status":"ok"}"#,
+    ]);
+    let input = serde_json::json!({
+        "session_id": "omp-parent",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "write",
+        "tool_input": { "path": "docs/a.md", "content": "hello" }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        Some(&runtime),
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp write should parse");
+
+    assert!(matches!(outcome, OmpHookOutcome::Block { .. }));
+    let _first_authorize = rx.recv().expect("first authorize should arrive");
+    let _declare = rx.recv().expect("reservation declare should arrive");
+    let _claim = rx.recv().expect("claim acquire should arrive");
+    let _retry_authorize = rx.recv().expect("retry authorize should arrive");
+    let release = request_json_body(&rx.recv().expect("claim release should arrive"));
+    assert_eq!(release["session_id"], "omp-parent");
+    assert_eq!(release["workspace_id"], runtime.workspace_id);
+    assert_eq!(release["path"], "docs/a.md");
+}
+
+#[test]
 fn omp_raw_bash_authorizes_trusted_write_target_sandbox_run() {
     let stateful = trusted_stateful_path();
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);

@@ -26,12 +26,19 @@ The prototype supports user-level installation with repo allowlist gating.
 `skills/dispatching-parallel-agents/SKILL.md`. `stateful install
 --agent omp --yes` configures the isolated OMP `stateful` profile with stateful
 hooks, MCP, built-in Bash preflight for strict trusted `stateful sandbox run ...`
-and `stateful sandbox process find ...` commands, `lazy_edit_resume` for strict
-replay of queued line-based OMP edits, `lazy_write_resume` for queued full OMP
-writes with a stale-target guard, `lazy_bash_resume` for queued external Bash
-commands waiting on scoped grants, and approval entries that deny arbitrary raw
-Bash while setting Python/JavaScript/JS/Ruby/Julia eval tools to false.
-External write/create/write-dir/socket/signal scope asks for a scoped OMP UI grant by default; `stateful.autoApprove: true` skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. The OMP installer also writes `rules/stateful-required.md` and `skills/stateful-command-policy/`
+and `stateful sandbox process find ...` commands, OMP native `edit`/`write`
+pre-tool recovery that can auto-declare exact file scope, acquire
+same-reservation claims, and retry authorization when the only denial is missing
+reservation/scope without an explicit reservation id, `lazy_edit_resume` for
+strict replay of queued/conflicting line-based OMP edits, `lazy_write_resume`
+for queued full OMP writes with a stale-target guard, `lazy_bash_resume` for
+queued external Bash commands waiting on scoped grants, and approval entries
+that deny arbitrary raw Bash while setting Python/JavaScript/JS/Ruby/Julia eval
+tools to false. External write/create/write-dir/socket/signal scope asks for a
+scoped OMP UI grant by default; `stateful.autoApprove: true` skips only that
+Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim
+checks, and grant limits still apply. The OMP installer also writes
+`rules/stateful-required.md` and `skills/stateful-command-policy/`
 (`SKILL.md`, `omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
 `subagent-write-recovery.md`) under that isolated agent directory: the
 always-apply rule owns model-facing activation, the
@@ -231,18 +238,23 @@ workspace file state. PostToolUse observes completed native edits and sandbox
 same-reservation claims that authorized the completed write boundary. Released claims leave the
 live context render and do not authorize a later write; the session must reread
 and reacquire a claim, or lazy-claim a claimable reservation, before retrying.
-OMP `edit` denials are captured by the generated extension as live-session lazy
-edit operations when the patch has safe repo-relative line targets. OMP `write`
-denials are captured as live-session lazy write operations with the original
-full write content. Denials with a wait id reuse that id; missing reservation or
-missing claim denials receive a generated live-session operation id.
-`lazy_edit_resume` re-authorizes the original edit after the agent fixes the
-missing scope or receives a claimable reservation, verifies the file content
-still matches the queued base text, and applies only line-based edit patch
-operations; block operations or changed files require regenerating the patch.
-`lazy_write_resume` re-authorizes the original write after the same scope repair
-or claimable reservation, verifies the target still matches the queued state,
-and writes the captured full content; changed targets require retrying the write.
+For OMP `edit` and `write`, the generated extension first handles the common
+missing-scope case inside pre-tool authorization: if `/v1/authorize` denies only
+because reservation/scope is missing and the tool call did not supply an
+explicit reservation id, it declares the exact file scope, acquires
+same-reservation claims, and retries authorization. Remaining OMP `edit`
+denials are captured as live-session lazy edit operations when the patch has
+safe repo-relative line targets. Remaining OMP `write` denials are captured as
+live-session lazy write operations with the original full write content. Denials
+with a wait id reuse that id; other retryable lazy operations receive a generated
+live-session operation id. `lazy_edit_resume` re-authorizes the original edit
+after the agent fixes scope, receives a claimable reservation, or recovers from
+another fallback denial, verifies the file content still matches the queued base
+text, and applies only line-based edit patch operations; block operations or
+changed files require regenerating the patch. `lazy_write_resume` re-authorizes
+the original write after the same recovery, verifies the target still matches the
+queued state, and writes the captured full content; changed targets require
+retrying the write.
 `lazy_bash_resume` stores a trusted external `stateful sandbox run ...` command
 when the original OMP Bash call cannot display the scoped grant prompt, asks for
 the same grant during resume, re-authorizes the original Bash tool call, and
