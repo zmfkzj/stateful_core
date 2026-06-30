@@ -1321,39 +1321,91 @@ async fn notifications_stream(
         return response.into_response();
     }
 
-    Sse::new(notification_sse_stream(config.store.clone(), input))
-        .keep_alive(KeepAlive::default())
-        .into_response()
+    let last_seen_sequence = notification_last_event_sequence(&headers).unwrap_or(0);
+    if last_seen_sequence > 0 {
+        let result = config
+            .store
+            .lock()
+            .map_err(|_| "store lock poisoned".to_string())
+            .and_then(|store| {
+                store
+                    .mark_notifications_delivered_through(
+                        &input.agent_id,
+                        &input.workspace_id,
+                        last_seen_sequence,
+                    )
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(message) = result {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": message })),
+            )
+                .into_response();
+        }
+    }
+
+    Sse::new(notification_sse_stream(
+        config.store.clone(),
+        input,
+        last_seen_sequence,
+    ))
+    .keep_alive(KeepAlive::default())
+    .into_response()
+}
+
+fn notification_last_event_sequence(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
 fn notification_sse_stream(
     store: SharedStore,
     input: NotificationsPollRequest,
+    initial_after_sequence: u64,
 ) -> impl Stream<Item = Result<SseEvent, Infallible>> {
     let pending = Arc::new(Mutex::new(VecDeque::<NotificationRecord>::new()));
+    let last_sent_sequence = Arc::new(Mutex::new(initial_after_sequence));
     let interval = tokio::time::interval(Duration::from_secs(1));
     IntervalStream::new(interval).filter_map(move |_| {
         let store = store.clone();
         let input = input.clone();
         let pending = pending.clone();
+        let last_sent_sequence = last_sent_sequence.clone();
         let next = {
             let mut queued = pending
                 .lock()
                 .expect("notification queue lock should not poison");
             if queued.is_empty() {
+                let after_sequence = *last_sent_sequence
+                    .lock()
+                    .expect("notification sequence lock should not poison");
                 if let Ok(notifications) = store
                     .lock()
                     .map_err(|_| "store lock poisoned".to_string())
                     .and_then(|store| {
                         store
-                            .pending_notifications(&input.agent_id, &input.workspace_id)
+                            .pending_notifications_after(
+                                &input.agent_id,
+                                &input.workspace_id,
+                                after_sequence,
+                            )
                             .map_err(|error| error.to_string())
                     })
                 {
                     queued.extend(notifications);
                 }
             }
-            queued.pop_front()
+            let notification = queued.pop_front();
+            if let Some(notification) = &notification {
+                let mut sequence = last_sent_sequence
+                    .lock()
+                    .expect("notification sequence lock should not poison");
+                *sequence = (*sequence).max(notification.sequence);
+            }
+            notification
         };
 
         next.map(|notification| Ok(notification_sse_event(notification)))
@@ -1369,12 +1421,13 @@ fn notification_sse_event(notification: NotificationRecord) -> SseEvent {
         None
     };
     SseEvent::default()
-        .id(notification.notification_id.clone())
+        .id(notification.sequence.to_string())
         .event(notification.kind.clone())
         .data(
             json!({
                 "status": "ok",
                 "notification_id": notification.notification_id,
+                "sequence": notification.sequence,
                 "workspace_id": notification.workspace_id,
                 "kind": notification.kind,
                 "payload": notification.payload,

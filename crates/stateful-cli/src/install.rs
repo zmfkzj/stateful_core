@@ -1604,6 +1604,8 @@ function reservationId(event, decision) {{
 }}
 
 let reservationStreamAbort;
+let reservationStreamKey = "";
+let reservationStreamLastEventId = "";
 const seenReservationWaitIds = new Set();
 
 function stopReservationStream() {{
@@ -1665,14 +1667,14 @@ function notificationTargetsStreamAgent(notification, stream) {{
 
 
 function deliverReservationNotification(pi, notification, stream) {{
-  if (!notificationTargetsStreamAgent(notification, stream)) return;
+  if (!notificationTargetsStreamAgent(notification, stream)) return true;
   const payload = notification?.payload || {{}};
   const waitId = payload.wait_id;
   if (!waitId || seenReservationWaitIds.has(waitId)) {{
-    return;
+    return true;
   }}
   if (typeof pi?.sendMessage !== "function") {{
-    return;
+    return false;
   }}
   const text = reservationMessage(notification);
   try {{
@@ -1686,7 +1688,10 @@ function deliverReservationNotification(pi, notification, stream) {{
       {{ triggerTurn: true, deliverAs: "nextTurn" }}
     );
     seenReservationWaitIds.add(waitId);
-  }} catch (_) {{}}
+    return true;
+  }} catch (_) {{
+    return false;
+  }}
 }}
 
 async function checkReservationResume(pi, stream, signal) {{
@@ -1724,15 +1729,19 @@ async function checkReservationResume(pi, stream, signal) {{
 
 function processReservationSseBlock(pi, block, stream) {{
   let event = "message";
+  let id = "";
   const data = [];
   for (const rawLine of block.split(/\r?\n/)) {{
     const line = rawLine.trimEnd();
+    if (line.startsWith("id:")) id = line.slice(3).trim();
     if (line.startsWith("event:")) event = line.slice(6).trim();
     if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
   }}
   if (event !== "reservation_granted" || data.length === 0) return;
   try {{
-    deliverReservationNotification(pi, JSON.parse(data.join("\n")), stream);
+    if (deliverReservationNotification(pi, JSON.parse(data.join("\n")), stream) && id) {{
+      reservationStreamLastEventId = id;
+    }}
   }} catch (_) {{}}
 }}
 
@@ -1752,6 +1761,11 @@ function startReservationStream(pi, stream) {{
   if (!stream?.base_url || !stream?.authorization || !stream?.agent_id || !stream?.workspace_id) return;
   if (typeof fetch !== "function" || typeof TextDecoder !== "function") return;
   stopReservationStream();
+  const streamKey = stream.agent_id + "\u0000" + stream.workspace_id;
+  if (reservationStreamKey !== streamKey) {{
+    reservationStreamKey = streamKey;
+    reservationStreamLastEventId = "";
+  }}
   const controller = new AbortController();
   reservationStreamAbort = controller;
   const signal = controller.signal;
@@ -1760,8 +1774,10 @@ function startReservationStream(pi, stream) {{
     await checkReservationResume(pi, stream, signal);
     while (!signal.aborted) {{
       try {{
+        const headers = {{ authorization: stream.authorization, accept: "text/event-stream" }};
+        if (reservationStreamLastEventId) headers["last-event-id"] = reservationStreamLastEventId;
         const response = await fetch(reservationStreamUrl(stream), {{
-          headers: {{ authorization: stream.authorization, accept: "text/event-stream" }},
+          headers,
           signal,
         }});
         if (!response.ok || !response.body?.getReader) throw new Error("reservation stream unavailable");

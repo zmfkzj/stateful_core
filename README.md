@@ -206,12 +206,18 @@ explicit reservation id: the extension declares the exact file scope, acquires
 same-reservation claims, and retries authorization. When another active claim
 blocks a write, the writer can queue for that resource. When the resource is
 released or expires, the server reserves it for the next eligible waiter and
-sends a resume notification. During queued-reservation compatibility, wait
-records expose the same id as both `wait_id` and `reservation_id`; use that id
-for the eventual claim and write. In OMP, queued/conflicting edits, writes whose
-target changed before replay, unavailable authorization runtime, unsupported
-targets, explicit bad reservation ids, other denials, and external Bash commands
-waiting on a scoped grant remain lazy-resume cases. Agents call
+stores a resume notification with a monotonic sequence for that target agent in
+that workspace. Polling returns pending notifications and marks the returned
+rows delivered. The SSE stream sends `id: <sequence>` plus the same `sequence`
+in JSON data without marking the notification delivered immediately; on
+reconnect, `Last-Event-ID` / `last-event-id` acknowledges notifications through
+that sequence and the server streams later pending notifications. During
+queued-reservation compatibility, wait records expose the same id as both
+`wait_id` and `reservation_id`; use that id for the eventual claim and write. In
+OMP, queued/conflicting edits, writes whose target changed before replay,
+unavailable authorization runtime, unsupported targets, explicit bad reservation
+ids, other denials, and external Bash commands waiting on a scoped grant remain
+lazy-resume cases. Agents call
 `lazy_edit_resume` for strict line-based patch replay, `lazy_write_resume` for
 captured write replay, or `lazy_bash_resume` to rerun a blocked external Bash
 command after approving its grant. Write replay fails if the target changed

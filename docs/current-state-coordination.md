@@ -183,27 +183,35 @@ claimable reservation TTL is 120 seconds. If a claimable reservation expires
 without being claimed, the server may promote the next eligible FIFO waiter.
 
 Resume is notification-driven rather than process-driven. The state server
-records a pending notification with the stored purpose when it promotes a
-claimable reservation. Agents and orchestrators discover that signal by polling
-notifications, asking for the next claimable reservation, or receiving that
-context from a lifecycle hook. Polling returns each pending notification once and
-marks it delivered; callers that miss or discard a poll response should use
+records a pending notification with the stored purpose and a monotonic
+per-target-agent/workspace `sequence` when it promotes a claimable reservation.
+Agents and orchestrators discover that signal by polling notifications,
+subscribing to the SSE stream, asking for the next claimable reservation, or
+receiving that context from a lifecycle hook. Polling returns each pending
+notification once and marks returned notifications delivered. The SSE stream
+sends each notification as `id: <sequence>` with the same `sequence` in the JSON
+event data, and stream delivery alone does not mark the notification delivered.
+On reconnect, `Last-Event-ID` / `last-event-id` acknowledges all notifications
+through that sequence, then the server replays later pending notifications.
+Callers that miss or discard a poll response or SSE event should use
 `stateful resume next` / `state_resume_next` to rediscover any still-active
-claimable reservation and its stored purpose. The state server does not wake a sleeping
-Codex process by itself; external orchestration can build on the notification
-and resume APIs.
+claimable reservation and its stored purpose. The state server does not wake a
+sleeping Codex process by itself; external orchestration can build on the
+notification and resume APIs.
 
-Full scheduling works through immediate request/response plus polling. Reservation
-request APIs return `queued`, `reserved` (claimable reservation), `claimed`,
-`canceled`, or `expired` state without blocking indefinitely. Immediate
-availability creates a claimable reservation with API state `reserved`; the
-agent must still reread the target. Manual native-tool or CLI flows claim with
+Full scheduling works through immediate request/response plus replayable
+notification delivery. Reservation request APIs return `queued`, `reserved`
+(claimable reservation), `claimed`, `canceled`, or `expired` state without
+blocking indefinitely. Immediate availability creates a claimable reservation
+with API state `reserved`; the agent must still reread the target. Manual
+native-tool or CLI flows claim with
 `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or
 `stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>` before retrying;
 the server uses the stored reservation purpose. Native edit hooks and sandbox
 `write-targets` authorization can lazy-claim at the retry write boundary.
-Waiting is handled by polling `stateful notifications poll` or `stateful resume
-next`; both reservation surfaces expose the stored purpose.
+Waiting is handled by polling `stateful notifications poll`, subscribing to the
+SSE stream, or using `stateful resume next`; all reservation surfaces expose the
+stored purpose.
 `stateful reservation wait --timeout` is not part of the v1 hardening implementation.
 
 `request_id` and non-empty `purpose` are required for idempotency and live state

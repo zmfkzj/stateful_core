@@ -444,7 +444,8 @@ The state server is responsible for:
 - evaluating conflict policy
 - promoting FIFO wait queue requests into claimable reservations after explicit
   claim release, session/activity finalization, or claim expiry, and emitting
-  notification payloads that carry the stored reservation purpose
+  notification payloads that carry the stored reservation purpose with monotonic
+  per-target-agent/workspace sequence ids for poll and SSE replay
 - requiring reservation claim before creating active reservation scope and active
   claims from that stored purpose
 - rendering concise prompt context

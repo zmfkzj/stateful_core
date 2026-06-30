@@ -18,7 +18,7 @@ Use file claims for file writes, deletes, renames, and moves. Directory claims o
 If `state_claim_acquire` reports `claim_conflict`, do not retry acquisition or steal the claim.
 
 - To wait for a path, call `state_reservation_request` with a stable `request_id`, denied `action`, `path`, and `purpose`.
-- Poll `state_notifications_poll` or `state_resume_next` for the reservation.
+- Use the next-turn notification or `state_notifications_poll` to learn when the reservation is claimable; polling marks returned notifications delivered. Use `state_resume_next` as durable recovery for still-active claimable reservations if a notice was missed or already delivered.
 - When reserved, reread the target.
 - Native edits and write-target sandbox writes can lazy-claim the reservation at the next write boundary; manual native-tool/CLI flows should first call `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or `stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>`.
 

@@ -154,16 +154,23 @@ GET  /v1/runtime/identity
 `/v1/conflicts/check` is a read-only dry-run wrapper around the same policy
 engine and must not create claims or write-authorizing state.
 `/v1/notifications/poll` returns pending coordination notifications for a
-target agent and marks returned notifications as delivered so a later poll does not
-redeliver the same notification. Reservation notification payloads include the
-stored, non-empty reservation purpose. `/v1/resume/next` is the durable recovery
-path: it returns the first claimable reservation for the session, including its
-stored purpose, after rereading the target, even if the reservation notification
-was already delivered or the client missed the poll response. `/v1/reservation/claim`
-is the explicit reservation claim path; it takes a `wait_id`, uses the stored
-reservation purpose, and creates active reservation scope plus an active
-claim for the reservation owner. `/v1/authorize` may lazy-claim a claimable
-reservation for hook and sandbox authorization sources after the client rereads
+target agent and marks returned notifications as delivered so a later poll does
+not redeliver the same notification. `/v1/notifications/stream` returns an SSE
+stream for a target agent in a workspace: each event uses `id: <sequence>` from
+that target agent/workspace's monotonic notification sequence, and the JSON data
+includes the same `sequence`. Stream delivery does not mark notifications
+delivered immediately. On reconnect, `Last-Event-ID` / `last-event-id`
+acknowledges notifications through that sequence as delivered, and the stream
+then replays later pending notifications. Reservation notification payloads
+include the stored, non-empty reservation purpose. `/v1/resume/next` is the
+durable recovery path: it returns the first claimable reservation for the
+session, including its stored purpose, after rereading the target, even if the
+reservation notification was already delivered or the client missed the poll or
+SSE response. `/v1/reservation/claim` is the explicit reservation claim path; it
+takes a `wait_id`, uses the stored reservation purpose, and creates active
+reservation scope plus an active claim for the reservation owner. `/v1/authorize`
+may lazy-claim a claimable reservation for hook and sandbox authorization sources
+after the client rereads
 and retries the write boundary; read-only conflict checks must not claim reservations.
 `/v1/claim/acquire` records the target existence and content hash when `root` is
 supplied; hook-originated native file writes compare that observation before
@@ -436,6 +443,7 @@ claims(repo_id, relative_path, status, expires_at)
 wait_queue(workspace_id, relative_path, status)
 wait_queue(agent_id, status)
 notifications(target_agent_id, status)
+notifications(target_agent_id, workspace_id, status, sequence)
 conflicts(agent_id, checked_at)
 reconciliations(agent_id, created_at)
 outbox(agent_id, sequence, sync_status)

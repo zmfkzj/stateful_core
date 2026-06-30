@@ -330,11 +330,19 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(extension.contains(".omp/profiles/stateful/agent/config.yml"));
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?agent_id="));
+    assert!(extension.contains("let reservationStreamLastEventId = \"\";"));
+    assert!(extension.contains("if (line.startsWith(\"id:\")) id = line.slice(3).trim();"));
+    assert!(extension.contains("headers[\"last-event-id\"] = reservationStreamLastEventId;"));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));
     assert!(extension.contains("function notificationTargetsStreamAgent(notification, stream)"));
     assert!(
-        extension.contains("if (!notificationTargetsStreamAgent(notification, stream)) return;")
+        extension
+            .contains("if (!notificationTargetsStreamAgent(notification, stream)) return true;")
     );
+    assert!(extension.contains("return false;"));
+    assert!(extension.contains(
+        "deliverReservationNotification(pi, JSON.parse(data.join(\"\\n\")), stream) && id"
+    ));
     assert!(extension.contains("purpose: \" + purpose.trim()"));
     assert!(extension.contains("const purpose = payload.purpose"));
     assert!(extension.contains("typeof purpose === \"string\" && purpose.trim().length > 0"));

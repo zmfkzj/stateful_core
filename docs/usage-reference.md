@@ -227,7 +227,15 @@ stateful notifications poll
 stateful resume next
 ```
 
-Reservation notifications and resume payloads include the stored request purpose.
+`stateful notifications poll` returns pending notifications and marks returned
+notifications delivered. The `/v1/notifications/stream` SSE endpoint sends
+replayable reservation notifications with `id: <sequence>` and the same
+per-agent/workspace `sequence` in JSON data. Stream delivery is not marked
+delivered until the next connection sends `Last-Event-ID` / `last-event-id`;
+then the server acknowledges notifications through that sequence and replays
+later pending notifications. `stateful resume next` remains the
+durable recovery path for still-active claimable reservations. Reservation
+notifications and resume payloads include the stored request purpose.
 
 ## CLI Overview
 
@@ -311,9 +319,9 @@ Writes without matching active reservation are denied. A write is allowed only
 when the `reservation_id` has active scope for the target and an active claim
 under the same `reservation_id` covers the target. Conflicting claims outside
 the authorizing reservation block writes. A blocked writer can queue with
-`queue_on_conflict`; after promotion, the reservation notification and resume
-payload carry the stored request purpose, and the agent with the claimable
-reservation must reread the target.
+`queue_on_conflict`; after promotion, poll and SSE reservation notifications and
+resume payloads carry the stored request purpose, and the agent with the
+claimable reservation must reread the target.
 
 Repo file edits should use native edit tools with hook-visible targets after
 task-level reservation covers the target and a successful same-reservation file

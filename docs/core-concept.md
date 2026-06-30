@@ -154,10 +154,13 @@ Auto-approval skips only the Stateful-owned UI prompt; sandbox scope validation,
 hooks, reservation/claim checks, and grant limits still apply. When prompted,
 the prompt shows purpose, declared scope, examples, max uses, and expiry rather
 than raw command text, and matching calls reuse the grant until it expires or
-reaches its use limit. The generated extension subscribes to Stateful SSE
-reservation notifications and injects a next-turn OMP message when a queued
-`wait_id` becomes a claimable reservation (API state `reserved`); the claim and
-write still use normal Stateful tools.
+reaches its use limit. The generated extension subscribes to replayable
+Stateful SSE reservation notifications: each event uses the per-agent/workspace
+notification sequence as the SSE `id` and JSON `sequence`, and reconnecting with
+`Last-Event-ID` / `last-event-id` acknowledges delivered events before later
+pending notifications are replayed. The extension injects a next-turn OMP
+message when a queued `wait_id` becomes a claimable reservation (API state
+`reserved`); the claim and write still use normal Stateful tools.
 Ordinary read work should use agent-native read, search, or diff tools when
 available.
 Read-only inspection that genuinely needs a shell must use a single trusted

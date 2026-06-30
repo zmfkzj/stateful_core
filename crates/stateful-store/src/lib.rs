@@ -3081,30 +3081,11 @@ impl Store {
         self.expire_stale()?;
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> StoreResult<Vec<NotificationRecord>> {
-            let mut statement = self.conn.prepare(
-                "SELECT
-                    notification_id,
-                    target_agent_id,
-                    workspace_id,
-                    kind,
-                    payload_json,
-                    status,
-                    created_at,
-                    expires_at
-                 FROM notifications
-                 WHERE target_agent_id = ?1
-                    AND workspace_id = ?2
-                    AND status = 'pending'
-                 ORDER BY rowid ASC",
+            let notifications = self.pending_notifications_after_in_transaction(
+                target_agent_id.as_ref(),
+                workspace_id.as_ref(),
+                0,
             )?;
-            let rows = statement.query_map(
-                params![target_agent_id.as_ref(), workspace_id.as_ref()],
-                notification_from_row,
-            )?;
-            let notifications = rows
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(StoreError::from)?;
-            drop(statement);
 
             for notification in &notifications {
                 self.conn.execute(
@@ -3126,18 +3107,53 @@ impl Store {
         result
     }
 
-    fn append_notification(
+    pub fn pending_notifications_after(
+        &self,
+        target_agent_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        after_sequence: u64,
+    ) -> StoreResult<Vec<NotificationRecord>> {
+        self.expire_stale()?;
+        self.pending_notifications_after_in_transaction(
+            target_agent_id.as_ref(),
+            workspace_id.as_ref(),
+            after_sequence,
+        )
+    }
+
+    pub fn mark_notifications_delivered_through(
+        &self,
+        target_agent_id: impl AsRef<str>,
+        workspace_id: impl AsRef<str>,
+        sequence: u64,
+    ) -> StoreResult<()> {
+        if sequence == 0 {
+            return Ok(());
+        }
+        let sequence = i64::try_from(sequence).unwrap_or(i64::MAX);
+        self.conn.execute(
+            "UPDATE notifications
+             SET status = 'delivered'
+             WHERE target_agent_id = ?1
+                AND workspace_id = ?2
+                AND status = 'pending'
+                AND sequence <= ?3",
+            params![target_agent_id.as_ref(), workspace_id.as_ref(), sequence],
+        )?;
+        Ok(())
+    }
+
+    fn pending_notifications_after_in_transaction(
         &self,
         target_agent_id: &str,
         workspace_id: &str,
-        kind: &str,
-        payload: serde_json::Value,
-    ) -> StoreResult<()> {
-        let now = now_timestamp();
-        let expires_at = timestamp_after(&now, CLAIMABLE_RESERVATION_TTL_SECONDS)?;
-        self.conn.execute(
-            "INSERT INTO notifications (
+        after_sequence: u64,
+    ) -> StoreResult<Vec<NotificationRecord>> {
+        let after_sequence = i64::try_from(after_sequence).unwrap_or(i64::MAX);
+        let mut statement = self.conn.prepare(
+            "SELECT
                 notification_id,
+                sequence,
                 target_agent_id,
                 workspace_id,
                 kind,
@@ -3145,9 +3161,52 @@ impl Store {
                 status,
                 created_at,
                 expires_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7)",
+             FROM notifications
+             WHERE target_agent_id = ?1
+                AND workspace_id = ?2
+                AND status = 'pending'
+                AND sequence > ?3
+             ORDER BY sequence ASC, rowid ASC",
+        )?;
+        let rows = statement.query_map(
+            params![target_agent_id, workspace_id, after_sequence],
+            notification_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    fn append_notification(
+        &self,
+        target_agent_id: &str,
+        workspace_id: &str,
+        kind: &str,
+        payload: serde_json::Value,
+    ) -> StoreResult<()> {
+        let sequence = self.conn.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1
+             FROM notifications
+             WHERE target_agent_id = ?1 AND workspace_id = ?2",
+            params![target_agent_id, workspace_id],
+            |row| row.get::<_, u64>(0),
+        )?;
+        let now = now_timestamp();
+        let expires_at = timestamp_after(&now, CLAIMABLE_RESERVATION_TTL_SECONDS)?;
+        self.conn.execute(
+            "INSERT INTO notifications (
+                notification_id,
+                sequence,
+                target_agent_id,
+                workspace_id,
+                kind,
+                payload_json,
+                status,
+                created_at,
+                expires_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8)",
             params![
                 Uuid::new_v4().to_string(),
+                sequence,
                 target_agent_id,
                 workspace_id,
                 kind,
@@ -3772,6 +3831,7 @@ impl Store {
 
             CREATE TABLE IF NOT EXISTS notifications (
                 notification_id TEXT PRIMARY KEY,
+                sequence INTEGER NOT NULL DEFAULT 0,
                 target_agent_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
@@ -3783,6 +3843,9 @@ impl Store {
 
             CREATE INDEX IF NOT EXISTS idx_notifications_agent_status
                 ON notifications(target_agent_id, status);
+
+            CREATE INDEX IF NOT EXISTS idx_notifications_agent_workspace_status_sequence
+                ON notifications(target_agent_id, workspace_id, status, sequence);
 
             CREATE TABLE IF NOT EXISTS conflicts (
                 conflict_id TEXT PRIMARY KEY,
@@ -3929,6 +3992,21 @@ impl Store {
             "outbox",
             "payload_json",
             "ALTER TABLE outbox ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}';",
+        )?;
+        self.add_column_if_missing(
+            "notifications",
+            "sequence",
+            "ALTER TABLE notifications ADD COLUMN sequence INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        self.conn.execute_batch(
+            "
+            UPDATE notifications
+            SET sequence = rowid
+            WHERE sequence = 0;
+
+            CREATE INDEX IF NOT EXISTS idx_notifications_agent_workspace_status_sequence
+                ON notifications(target_agent_id, workspace_id, status, sequence);
+            ",
         )?;
         self.remove_legacy_rows_without_required_purpose()?;
         self.conn.execute_batch(
@@ -4919,19 +4997,20 @@ fn wait_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WaitRecord>
 }
 
 fn notification_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NotificationRecord> {
-    let payload_json: String = row.get(4)?;
+    let payload_json: String = row.get(5)?;
     let payload: serde_json::Value = serde_json::from_str(&payload_json).map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(err))
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(err))
     })?;
     Ok(NotificationRecord {
         notification_id: row.get(0)?,
-        target_agent_id: row.get(1)?,
-        workspace_id: row.get(2)?,
-        kind: row.get(3)?,
+        sequence: row.get(1)?,
+        target_agent_id: row.get(2)?,
+        workspace_id: row.get(3)?,
+        kind: row.get(4)?,
         payload,
-        status: row.get(5)?,
-        created_at: row.get(6)?,
-        expires_at: row.get(7)?,
+        status: row.get(6)?,
+        created_at: row.get(7)?,
+        expires_at: row.get(8)?,
     })
 }
 
@@ -5411,6 +5490,7 @@ pub struct WaitRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NotificationRecord {
     pub notification_id: String,
+    pub sequence: u64,
     pub target_agent_id: String,
     pub workspace_id: String,
     pub kind: String,

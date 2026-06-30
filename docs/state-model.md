@@ -400,10 +400,16 @@ The default claimable reservation TTL is 120 seconds. If a claimable reservation
 expires, the server may promote the next eligible FIFO waiter.
 
 Reservation notifications are delivery hints, not the durable reservation
-record. `stateful notifications poll` / `state_notifications_poll` returns each
-pending notification once and marks it delivered. If the client misses that
-response, `stateful resume next` / `state_resume_next` can still rediscover the
-claimable reservation until it is claimed or expires.
+record. Each pending notification has a monotonic `sequence` for its target
+agent in that workspace. `stateful notifications poll` /
+`state_notifications_poll` returns pending notifications and marks the returned
+rows delivered. The SSE stream sends each notification as `id: <sequence>` with
+the same `sequence` in JSON data, but stream delivery alone does not mark it
+delivered. Reconnecting clients send `Last-Event-ID` / `last-event-id`; the
+server marks notifications through that sequence delivered and replays later
+pending notifications. If the client misses that response, `stateful resume next`
+/ `state_resume_next` can still rediscover the claimable reservation until it is
+claimed or expires.
 
 For target multi-resource requests, a request is eligible only when it is at the
 head of every resource queue it participates in and every requested resource has

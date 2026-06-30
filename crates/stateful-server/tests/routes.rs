@@ -4086,9 +4086,154 @@ async fn notifications_stream_emits_reservation_granted_sse() {
         .expect("stream chunk should read");
     let text = String::from_utf8(chunk.to_vec()).expect("chunk should be utf8");
     assert!(text.contains("event: reservation_granted"));
+    assert!(text.contains("id: 1"));
+    assert!(text.contains("\"sequence\":1"));
     assert!(text.contains("\"relative_path\":\"src/auth.ts\""));
     assert!(text.contains("\"purpose\":\"Queue requested write after blocker clears.\""));
     assert!(text.contains("state.reservation.claim"));
+}
+
+#[tokio::test]
+async fn notifications_stream_replays_until_last_event_id_acknowledges() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    ensure_test_reservation_via_http(&app, "s1", "w1", "src/replay.ts").await;
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/replay.ts"
+            }),
+        ))
+        .await
+        .expect("claim acquire should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/reservation/declare",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "purpose": "Test replayable SSE notification.",
+                "files_planned": ["src/replay.ts"]
+            }),
+        ))
+        .await
+        .expect("reservation declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let queued = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/replay.ts",
+                "queue_on_conflict": true,
+                "purpose": "Queue replay test after blocker clears."
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(queued.status(), StatusCode::OK);
+
+    let finalize = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/activity/finalize",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("finalize should complete");
+    assert_eq!(finalize.status(), StatusCode::OK);
+
+    let first_stream = app
+        .clone()
+        .oneshot(authorized_get(
+            "/v1/notifications/stream?agent_id=s2&workspace_id=w1",
+        ))
+        .await
+        .expect("first stream should complete");
+    assert_eq!(first_stream.status(), StatusCode::OK);
+    let mut first_body = first_stream.into_body().into_data_stream();
+    let first_chunk = tokio::time::timeout(Duration::from_secs(2), first_body.next())
+        .await
+        .expect("first stream should emit notification")
+        .expect("first stream item should exist")
+        .expect("first stream chunk should read");
+    let first_text = String::from_utf8(first_chunk.to_vec()).expect("first chunk should be utf8");
+    assert!(first_text.contains("id: 1"));
+    assert!(first_text.contains("\"relative_path\":\"src/replay.ts\""));
+    drop(first_body);
+
+    let replay_stream = app
+        .clone()
+        .oneshot(authorized_get(
+            "/v1/notifications/stream?agent_id=s2&workspace_id=w1",
+        ))
+        .await
+        .expect("replay stream should complete");
+    assert_eq!(replay_stream.status(), StatusCode::OK);
+    let mut replay_body = replay_stream.into_body().into_data_stream();
+    let replay_chunk = tokio::time::timeout(Duration::from_secs(2), replay_body.next())
+        .await
+        .expect("replay stream should emit notification")
+        .expect("replay stream item should exist")
+        .expect("replay stream chunk should read");
+    let replay_text =
+        String::from_utf8(replay_chunk.to_vec()).expect("replay chunk should be utf8");
+    assert!(replay_text.contains("id: 1"));
+    assert!(replay_text.contains("\"relative_path\":\"src/replay.ts\""));
+    drop(replay_body);
+
+    let acked_stream = app
+        .clone()
+        .oneshot(authorized_get_with_last_event_id(
+            "/v1/notifications/stream?agent_id=s2&workspace_id=w1",
+            "1",
+        ))
+        .await
+        .expect("acked stream should complete");
+    assert_eq!(acked_stream.status(), StatusCode::OK);
+    let mut acked_body = acked_stream.into_body().into_data_stream();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), acked_body.next())
+            .await
+            .is_err(),
+        "acked stream should not replay sequence 1"
+    );
+    drop(acked_body);
+
+    let poll = app
+        .oneshot(json_request(
+            "/v1/notifications/poll",
+            serde_json::json!({
+                "agent_id": "s2",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("notification poll should complete");
+    assert_eq!(poll.status(), StatusCode::OK);
+    let json = response_json(poll, 2048).await;
+    assert_eq!(
+        json["notifications"]
+            .as_array()
+            .expect("notifications array")
+            .len(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -7104,6 +7249,16 @@ fn authorized_get(path: &str) -> Request<Body> {
         .method("GET")
         .uri(path)
         .header("authorization", "Bearer secret-token")
+        .body(Body::empty())
+        .expect("get request should build")
+}
+
+fn authorized_get_with_last_event_id(path: &str, last_event_id: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("authorization", "Bearer secret-token")
+        .header("last-event-id", last_event_id)
         .body(Body::empty())
         .expect("get request should build")
 }
