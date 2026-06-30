@@ -165,12 +165,14 @@ stateful doctor
 ## Day-To-Day Coordination
 
 In normal `stateful codex` or OMP `stateful` profile use, lifecycle hooks bind
-the active `agent_id` and `workspace_id` for state operations. OMP's supported
-agent-facing path is identity injection by the extension/native tools: it uses
-adapter-provided agent/session identity when OMP exposes it. If the active
-agent id cannot be obtained, Stateful actions fail closed instead of inventing a
-process, environment, or current-session-file identity. Codex hooks map Codex's
-hook `session_id` parameter to Stateful `agent_id`. There is no
+the active `agent_id` and `workspace_id` for state operations. OMP derives its
+Stateful `agent_id` only from `ctx.sessionManager`: `getSessionId()` supplies the
+required session UUID and `getLeafId()`, when present, supplies the active branch.
+Stateful uses `omp-${sessionId}-${leafId}` when a leaf id exists and
+`omp-${sessionId}` otherwise. If `getSessionId()` is unavailable or invalid, OMP
+Stateful actions fail closed instead of reading event/ctx identity fields or
+inventing process, environment, or current-session-file identity. Codex hooks map
+Codex's hook `session_id` parameter to Stateful `agent_id`. There is no
 environment-variable fallback path for agents to maintain. Hook messages tell
 the agent when an explicit
 coordination step is needed.

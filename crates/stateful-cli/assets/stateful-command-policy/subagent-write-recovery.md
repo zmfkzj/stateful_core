@@ -8,7 +8,14 @@ When a subagent hits `apply_patch writes require ... same-reservation file claim
 
 1. Stop retrying command variants; denials are the API.
 2. Re-read the exact target if it exists.
-3. Use active Stateful native tools in the same subagent tool context: `state_session_register` if needed, then `state_reservation_declare(purpose=<task purpose>, files_planned=[...])` for the complete known file set, then `state_claim_acquire(reservation_id=<reservation_id>, paths=[...])` for the exact file path set being written.
+3. Use active Stateful native tools in the same subagent tool context. Codex
+   contexts may call `state_session_register` when the denial asks for session
+   registration. OMP contexts do not supply or repair identity: OMP derives the
+   active Stateful `agent_id` from `ctx.sessionManager.getSessionId()` and
+   `ctx.sessionManager.getLeafId()` when present, producing
+   `omp-${sessionId}-${leafId}` or `omp-${sessionId}`. If `getSessionId()` is
+   unavailable or invalid, OMP Stateful actions fail closed and the subagent
+   should report the denial.
 4. For new files, reserve and claim every exact new file path, not only the parent directory.
 5. Edit with native tools such as `apply_patch`/`edit`, or use `sandbox run --fs write-targets` with matching targets for command-shaped writes.
 6. If another agent owns the claim, do not retry or steal it. Follow the wait queue when available; otherwise report the path, `blocking_agent_id`, and wait/reservation id to the parent.

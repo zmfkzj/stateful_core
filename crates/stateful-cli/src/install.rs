@@ -1518,11 +1518,19 @@ function firstString(...values) {{
   return undefined;
 }}
 
-function agentIdFromString(value) {{
+function agentIdFragmentFromString(value) {{
   if (typeof value !== "string") return undefined;
   const id = value.trim();
   if (!id) return undefined;
   if (!/^[A-Za-z0-9_-]+$/.test(id)) return undefined;
+  return id;
+}}
+
+function sessionIdFromString(value) {{
+  if (typeof value !== "string") return undefined;
+  const id = value.trim();
+  if (!id) return undefined;
+  if (!/^[0-9A-Fa-f]{{8}}-[0-9A-Fa-f]{{4}}-[0-9A-Fa-f]{{4}}-[0-9A-Fa-f]{{4}}-[0-9A-Fa-f]{{12}}$/.test(id)) return undefined;
   return id;
 }}
 
@@ -1532,51 +1540,21 @@ function workspaceIdFromString(value) {{
   return id.length > 0 ? id : undefined;
 }}
 
-function agentIdFromOmpSessionValue(value) {{
-  const id = agentIdFromString(value);
-  if (!id) return undefined;
-  return id.startsWith("omp-") ? id : "omp-" + id;
+function sessionManagerString(ctx, method, parse) {{
+  const sessionManager = ctx?.sessionManager;
+  if (!sessionManager || typeof sessionManager[method] !== "function") return undefined;
+  try {{
+    return parse(sessionManager[method]());
+  }} catch {{
+    return undefined;
+  }}
 }}
 
-
-function detectOmpSessionAgentId(event, ctx) {{
-  return firstString(
-    agentIdFromOmpSessionValue(event?.sessionId),
-    agentIdFromOmpSessionValue(event?.session_id),
-    agentIdFromOmpSessionValue(event?.session?.id),
-    agentIdFromOmpSessionValue(event?.session?.sessionId),
-    agentIdFromOmpSessionValue(event?.session?.session_id),
-    agentIdFromOmpSessionValue(ctx?.sessionId),
-    agentIdFromOmpSessionValue(ctx?.session_id),
-    agentIdFromOmpSessionValue(ctx?.session?.id),
-    agentIdFromOmpSessionValue(ctx?.session?.sessionId),
-    agentIdFromOmpSessionValue(ctx?.session?.session_id),
-    agentIdFromOmpSessionValue(ctx?.runtime?.sessionId),
-    agentIdFromOmpSessionValue(ctx?.runtime?.session_id),
-    agentIdFromOmpSessionValue(ctx?.runtime?.session?.id),
-    agentIdFromOmpSessionValue(ctx?.runtime?.session?.sessionId),
-    agentIdFromOmpSessionValue(ctx?.runtime?.session?.session_id)
-  );
-}}
-
-function detectAdapterAgentId(event, ctx) {{
-  return firstString(
-    agentIdFromString(event?.agentId),
-    agentIdFromString(event?.agent_id),
-    agentIdFromString(event?.agent?.id),
-    agentIdFromString(event?.agent?.agentId),
-    agentIdFromString(event?.agent?.agent_id),
-    agentIdFromString(ctx?.agentId),
-    agentIdFromString(ctx?.agent_id),
-    agentIdFromString(ctx?.agent?.id),
-    agentIdFromString(ctx?.agent?.agentId),
-    agentIdFromString(ctx?.agent?.agent_id)
-  );
-}}
-
-function detectAgentId(event, ctx) {{
-  return detectAdapterAgentId(event, ctx)
-    || detectOmpSessionAgentId(event, ctx);
+function detectAgentId(_event, ctx) {{
+  const sessionId = sessionManagerString(ctx, "getSessionId", sessionIdFromString);
+  if (!sessionId) return undefined;
+  const leafId = sessionManagerString(ctx, "getLeafId", agentIdFragmentFromString);
+  return leafId ? `omp-${{sessionId}}-${{leafId}}` : `omp-${{sessionId}}`;
 }}
 
 function detectWorkspaceId(event, ctx) {{
@@ -1595,7 +1573,7 @@ function detectWorkspaceId(event, ctx) {{
 }}
 
 function missingAgentIdReason() {{
-  return "Stateful requires OMP-provided agent/session identity for the active agent; no agent_id was available, so Stateful actions are disabled for this agent.";
+  return "Stateful requires OMP ctx.sessionManager.getSessionId() to derive the active agent_id; no session id was available, so Stateful actions are disabled for this agent.";
 }}
 
 
@@ -2939,7 +2917,7 @@ mod tests {
     }
 
     #[test]
-    fn omp_extension_uses_adapter_or_session_agent_id_only() {
+    fn omp_extension_derives_agent_id_from_session_manager_only() {
         let temp_dir = std::env::temp_dir().join(format!(
             "stateful-omp-extension-agent-id-test-{}",
             std::process::id()
@@ -2960,7 +2938,7 @@ mod tests {
             .map(|offset| helper_start + offset)
             .expect("identity helpers should end before reservationIdFromValue");
         let script = format!(
-            "{}\nlet missing;\ntry {{ agentId({{}}, {{}}); }} catch (error) {{ missing = error.message; }}\nconst values = [agentId({{ agent_id: 'adapter-agent' }}, {{}}), agentId({{ session: {{ id: '019f1a33-e3c1-7000-b2a6-d16cc4f05a52' }} }}, {{}}), agentId({{}}, {{ runtime: {{ session: {{ id: 'session_x' }} }} }}), missing];\nconsole.log(JSON.stringify(values));",
+            "{}\nlet missing;\ntry {{ agentId({{ agent_id: 'adapter-agent', session: {{ id: 'legacy-session' }} }}, {{}}); }} catch (error) {{ missing = error.message; }}\nconst branchCtx = {{ sessionManager: {{ getSessionId: () => '019f1a33-e3c1-7000-b2a6-d16cc4f05a52', getLeafId: () => 'leaf_42' }} }};\nconst sessionCtx = {{ sessionManager: {{ getSessionId: () => '019f1a33-e3c1-7000-b2a6-d16cc4f05a53', getLeafId: () => undefined }} }};\nconst values = [agentId({{ agent_id: 'ignored-adapter' }}, branchCtx), agentId({{ session: {{ id: 'ignored-session' }} }}, sessionCtx), missing];\nconsole.log(JSON.stringify(values));",
             &contents[helper_start..helper_end]
         );
         let output = std::process::Command::new("node")
@@ -2976,7 +2954,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(output.stdout).expect("stdout should be utf8"),
-            "[\"adapter-agent\",\"omp-019f1a33-e3c1-7000-b2a6-d16cc4f05a52\",\"omp-session_x\",\"Stateful requires OMP-provided agent/session identity for the active agent; no agent_id was available, so Stateful actions are disabled for this agent.\"]\n"
+            "[\"omp-019f1a33-e3c1-7000-b2a6-d16cc4f05a52-leaf_42\",\"omp-019f1a33-e3c1-7000-b2a6-d16cc4f05a53\",\"Stateful requires OMP ctx.sessionManager.getSessionId() to derive the active agent_id; no session id was available, so Stateful actions are disabled for this agent.\"]\n"
         );
 
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");

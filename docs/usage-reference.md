@@ -265,12 +265,15 @@ Write/execute paths still require the normal stateful authorization flow.
 ## Hooks And Identity
 
 `SessionStart` registers the active `agent_id` and `workspace_id` for hook and
-state operations. In OMP, the extension/native tool bridge injects those
-identifiers explicitly, using OMP-provided agent/session identity and failing
-closed when no active agent id is available; agents do not maintain
-current-session files or select coordination identity through environment
-variables. In Codex, hooks receive Codex's `session_id` parameter and map it to
-Stateful `agent_id`; `UserPromptSubmit` renders current-state context.
+state operations. In OMP, the extension/native tool bridge derives the Stateful
+`agent_id` from `ctx.sessionManager.getSessionId()` plus
+`ctx.sessionManager.getLeafId()` when present. The generated id is
+`omp-${sessionId}-${leafId}` with a leaf id and `omp-${sessionId}` without one;
+if `getSessionId()` is unavailable or invalid, OMP Stateful actions fail closed.
+Agents do not maintain current-session files, select coordination identity
+through environment variables, or provide event/ctx agent and session fields. In
+Codex, hooks receive Codex's `session_id` parameter and map it to Stateful
+`agent_id`; `UserPromptSubmit` renders current-state context.
 
 `PreToolUse` authorizes supported tool actions. Server-side authorization records
 an implicit agent heartbeat for the checked agent. `PostToolUse` records
@@ -284,7 +287,9 @@ Stateful no longer exposes an agent-facing current-session fallback. The removed
 legacy path wrote `.stateful_core/runtime/sessions/<session_id>.json` plus the
 alias `.stateful_core/runtime/session.json` and allowed callers to choose state
 through session environment variables. Active integrations now pass explicit
-identity into hooks and native tools instead.
+identity into hooks and native tools; OMP derives that identity from
+`ctx.sessionManager` instead of legacy session files or event/ctx identity
+fields.
 
 ## Write Authorization
 
@@ -442,11 +447,13 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
 - `STATEFUL_SERVER_URL` and `STATEFUL_SERVER_TOKEN` override runtime discovery
   when both are set. The referenced server must expose the current runtime
   capabilities.
-- Legacy agent-facing identity environment variables were removed. Active Codex and
-  OMP integrations inject `agent_id` and `workspace_id` into hooks and native
-  tools; OMP fails closed when adapter identity is unavailable. Agents should
-  not set environment variables, use process ids, or repair runtime session
-  files to select coordination identity.
+- Legacy agent-facing identity environment variables were removed. Active Codex
+  and OMP integrations inject `agent_id` and `workspace_id` into hooks and
+  native tools; OMP derives `agent_id` from `ctx.sessionManager.getSessionId()`
+  plus `getLeafId()` when present and fails closed when the session id is
+  unavailable or invalid. Agents should not set environment variables, use
+  process ids, repair runtime session files, or provide event/ctx agent and
+  session fields to select coordination identity.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
   authorize Bash. Bash authorization goes through a trusted
   `<absolute-stateful-binary> sandbox run` wrapper command.

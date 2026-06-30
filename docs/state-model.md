@@ -53,14 +53,18 @@ agent_id + workspace_id
 ```
 
 For v1, agent-facing coordination identity is the active `agent_id` scoped by
-`workspace_id`. Codex hooks and the OMP extension/native tools inject that
-identity into hook and state operations. The OMP bridge uses adapter-provided
-agent/session identity and fails closed when no active agent id is available.
+`workspace_id`. Codex hooks and native tools inject that identity into hook and
+state operations. OMP derives its Stateful `agent_id` only from
+`ctx.sessionManager`: `getSessionId()` supplies the required session UUID and
+`getLeafId()`, when present, supplies the active branch. The generated id is
+`omp-${sessionId}-${leafId}` with a leaf id and `omp-${sessionId}` without one;
+if `getSessionId()` is unavailable or invalid, OMP Stateful actions fail closed.
 Agents do not repair current-session files, choose session environment
-variables, use process ids, or fall back to runtime session aliases.
-Reservation declaration may omit low-level storage identifiers when the runtime
-integration provides the active `agent_id` and `workspace_id`; write
-authorization uses the `reservation_id` attached to that identity.
+variables, read event/ctx agent or session fields, use process ids, or fall back
+to runtime session aliases. Reservation declaration may omit low-level storage
+identifiers when the runtime integration provides the active `agent_id` and
+`workspace_id`; write authorization uses the `reservation_id` attached to that
+identity.
 
 ## Activity Record
 
@@ -462,9 +466,11 @@ parent_actor_id
 ```
 
 Subagent-specific `actor_type`, `parent_agent_id`, and `parent_actor_id` fields
-are protocol vocabulary for native subagent-aware adapters. The Codex
-integration records each native subagent under its own effective agent identity
-when Codex exposes one. Parent and child agents coordinate
+are protocol vocabulary for native subagent-aware adapters. For OMP,
+branch-specific work uses the Stateful `agent_id` derived from
+`ctx.sessionManager.getSessionId()` plus `ctx.sessionManager.getLeafId()` when
+present. The Codex integration records each native subagent under its own
+effective agent identity when Codex exposes one. Parent and child agents coordinate
 through the same workspace state, but a child does not inherit the parent's
 same-reservation claim authority. Same-owner agents do not receive automatic
 override authority.

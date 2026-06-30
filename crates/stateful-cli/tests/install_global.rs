@@ -238,19 +238,35 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(!extension.contains("Type.Object"));
     assert!(extension.contains("export default function statefulOmpExtension"));
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
-    assert!(extension.contains("function detectAdapterAgentId(event, ctx)"));
-    assert!(extension.contains("function detectOmpSessionAgentId(event, ctx)"));
-    assert!(extension.contains("function detectAgentId(event, ctx)"));
-    assert!(extension.contains("event?.agentId"));
-    assert!(extension.contains("event?.agent_id"));
-    assert!(extension.contains("ctx?.agentId"));
-    assert!(extension.contains("ctx?.agent_id"));
-    assert!(extension.contains("event?.sessionId"));
-    assert!(extension.contains("ctx?.runtime?.session?.id"));
+    assert!(extension.contains("function agentIdFragmentFromString(value)"));
+    assert!(extension.contains("function sessionIdFromString(value)"));
+    assert!(extension.contains("function sessionManagerString(ctx, method, parse)"));
+    assert!(extension.contains("function detectAgentId(_event, ctx)"));
+    assert!(extension.contains("sessionManagerString(ctx, \"getSessionId\", sessionIdFromString)"));
+    assert!(
+        extension.contains("sessionManagerString(ctx, \"getLeafId\", agentIdFragmentFromString)")
+    );
+    assert!(extension.contains("`omp-${sessionId}-${leafId}`"));
+    assert!(!extension.contains("function detectAdapterAgentId"));
+    assert!(!extension.contains("function detectOmpSessionAgentId"));
+    assert!(!extension.contains("event?.agentId"));
+    assert!(!extension.contains("event?.agent_id"));
+    assert!(!extension.contains("event?.agent?.id"));
+    assert!(!extension.contains("ctx?.agentId"));
+    assert!(!extension.contains("ctx?.agent_id"));
+    assert!(!extension.contains("ctx?.agent?.id"));
+    assert!(!extension.contains("event?.sessionId"));
+    assert!(!extension.contains("event?.session_id"));
+    assert!(!extension.contains("event?.session?.id"));
+    assert!(!extension.contains("ctx?.sessionId"));
+    assert!(!extension.contains("ctx?.session_id"));
+    assert!(!extension.contains("ctx?.session?.id"));
+    assert!(!extension.contains("ctx?.runtime?.sessionId"));
+    assert!(!extension.contains("ctx?.runtime?.session?.id"));
     assert!(!extension.contains("function processAgentId()"));
     assert!(!extension.contains("omp-pid-"));
     assert!(extension.contains("function agentId(event, ctx)"));
-    assert!(extension.contains("Stateful requires OMP-provided agent/session identity"));
+    assert!(extension.contains("Stateful requires OMP ctx.sessionManager.getSessionId()"));
     assert!(
         extension.contains(
             "if (!activeAgentId) return { block: true, reason: missingAgentIdReason() };"

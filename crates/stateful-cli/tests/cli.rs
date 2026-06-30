@@ -739,9 +739,29 @@ fn omp_extension_uses_strict_agent_id_identity() {
     let extension = fs::read_to_string(agent_dir.join("extensions/stateful-omp-extension.js"))
         .expect("generated OMP extension should be readable");
 
-    assert!(extension.contains("function agentIdFromString"));
-    assert!(extension.contains("function detectAgentId"));
+    assert!(extension.contains("function agentIdFragmentFromString"));
+    assert!(extension.contains("function sessionManagerString"));
+    assert!(extension.contains("function detectAgentId(_event, ctx)"));
+    assert!(extension.contains("sessionManagerString(ctx, \"getSessionId\", sessionIdFromString)"));
+    assert!(
+        extension.contains("sessionManagerString(ctx, \"getLeafId\", agentIdFragmentFromString)")
+    );
+    assert!(extension.contains("`omp-${sessionId}-${leafId}`"));
     assert!(extension.contains("agent_id"));
+    assert!(!extension.contains("event?.agentId"));
+    assert!(!extension.contains("event?.agent_id"));
+    assert!(!extension.contains("event?.agent?.id"));
+    assert!(!extension.contains("ctx?.agentId"));
+    assert!(!extension.contains("ctx?.agent_id"));
+    assert!(!extension.contains("ctx?.agent?.id"));
+    assert!(!extension.contains("event?.sessionId"));
+    assert!(!extension.contains("event?.session_id"));
+    assert!(!extension.contains("event?.session?.id"));
+    assert!(!extension.contains("ctx?.sessionId"));
+    assert!(!extension.contains("ctx?.session_id"));
+    assert!(!extension.contains("ctx?.session?.id"));
+    assert!(!extension.contains("ctx?.runtime?.sessionId"));
+    assert!(!extension.contains("ctx?.runtime?.session?.id"));
     assert!(!extension.contains("process.env.STATEFUL_SESSION_ID"));
     assert!(!extension.contains("sessionIdFromSessionManager"));
     assert!(!extension.contains("function processAgentId"));

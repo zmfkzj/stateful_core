@@ -9,6 +9,12 @@
 - Use built-in Bash for process inspection via a single trusted `stateful sandbox process find ...` command.
 - External sandbox write/create/write-dir, socket, or signal scope prompts for a scoped OMP UI grant unless the profile sets `stateful.autoApprove: true`.
 
+## OMP Agent Identity
+
+- OMP derives the active Stateful `agent_id` from `ctx.sessionManager.getSessionId()` and, when present, `ctx.sessionManager.getLeafId()`.
+- The generated id is `omp-${sessionId}-${leafId}` when a leaf id exists; otherwise it is `omp-${sessionId}`.
+- If `getSessionId()` is unavailable or invalid, OMP Stateful actions fail closed. Do not repair identity through event fields, context fields, environment variables, or current-session shell probes.
+
 ## Installed OMP Profile
 
 OMP installs the integration into the live OMP profile agent directory, defaulting to `~/.omp/profiles/stateful/agent`, with:

@@ -45,11 +45,14 @@ that isolated agent directory: the always-apply rule owns model-facing
 activation, the `stateful-command-policy` manual owns detailed procedure, and
 hooks remain the boundary. `stateful enable` opts the current repo into
 enforcement.
-For OMP, the extension/native tool bridge injects the active `agent_id` and
-`workspace_id` into hook and state operations. The bridge uses OMP-provided
-agent/session identity and fails closed when no active agent id is available.
-Agent-facing identity does not depend on current-session files, session
-environment variables, process ids, or runtime file repair.
+For OMP, the extension/native tool bridge derives the active Stateful `agent_id`
+from `ctx.sessionManager`: `getSessionId()` supplies the required session UUID
+and `getLeafId()`, when present, supplies the active branch. The generated id is
+`omp-${sessionId}-${leafId}` with a leaf id and `omp-${sessionId}` without one.
+If `getSessionId()` is unavailable or invalid, OMP Stateful actions fail closed.
+Agent-facing OMP identity does not read event/ctx agent or session fields and
+does not depend on current-session files, session environment variables, process
+ids, or runtime file repair.
 Codex hooks use Codex's hook `session_id` parameter as the Stateful `agent_id`;
 this is a hook payload parameter, not an environment-variable fallback.
 
@@ -177,15 +180,18 @@ requests owned by the caller.
 the same stateful server.
 
 Native Stateful tools map directly onto these endpoints. Native tool handlers do
-not implement policy branches; they validate tool arguments, receive or derive
-the active `agent_id` and `workspace_id` from the runtime integration, call the
-HTTP API, and return the server result. The single adapter-only exception is
-duplicate cleanup: `state_claim_release` maps a server `404 claim_not_found`
-into a successful no-op result when the same-agent claim is already gone, while
-the direct HTTP route still returns `404`. The OMP identity path supports
+not implement policy branches; they validate tool arguments, receive the active
+`agent_id` and `workspace_id` from the runtime integration, call the HTTP API,
+and return the server result. For OMP, the bridge first derives that `agent_id`
+from `ctx.sessionManager.getSessionId()` plus the current
+`ctx.sessionManager.getLeafId()` when present, failing closed when the session id
+is unavailable or invalid. The single adapter-only exception is duplicate
+cleanup: `state_claim_release` maps a server `404 claim_not_found` into a
+successful no-op result when the same-agent claim is already gone, while the
+direct HTTP route still returns `404`. The OMP identity path supports
 `state_session_register` -> `state_reservation_declare` ->
 `state_claim_acquire` without a caller-supplied environment override because the
-extension injects the active identity.
+extension injects the derived active identity.
 
 Current envelope enforcement is limited to `/v1/authorize` and
 `/v1/reservation/declare`, `/v1/reservation/request`, `/v1/reservation/claim`, and

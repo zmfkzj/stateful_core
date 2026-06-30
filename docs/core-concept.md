@@ -63,8 +63,8 @@ Current state is a scoped, time-bound summary of active work.
 Examples:
 
 - An agent is exploring auth validation.
-- A subagent is editing under its own agent identity while sharing the
-  workspace-level coordination model.
+- An OMP subagent branch is editing under the `agent_id` derived for that branch
+  while sharing the workspace-level coordination model.
 - An agent plans to edit `src/auth.ts`.
 - A file has an active advisory claim.
 - An agent is testing after a change.

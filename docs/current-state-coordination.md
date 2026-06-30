@@ -308,14 +308,16 @@ share the Codex lifecycle model: `SessionStart`, `UserPromptSubmit`,
 `PreToolUse`, `PostToolUse`, and `Stop`. The isolated OMP `stateful` profile
 uses OMP extension entry points for `SessionStart`, `PreToolUse`,
 `PostToolUse`, and `Stop`; OMP does not expose `UserPromptSubmit`. OMP
-`session-start` injects the active `agent_id` and `workspace_id` into Stateful
-hook and tool operations. The extension uses OMP-provided agent/session identity;
-if OMP does not expose an active agent id, Stateful actions fail closed. OMP
-native tools use that injected identity; agents do not repair or select
-current-session files, environment variables, or runtime session aliases.
-With that state in place, `state_session_register` ->
-`state_reservation_declare` -> `state_claim_acquire` resolves the active OMP
-agent identity without a caller-supplied environment override. OMP native `edit`
+`session-start` derives the active Stateful `agent_id` from
+`ctx.sessionManager.getSessionId()` plus `ctx.sessionManager.getLeafId()` when
+present. The generated id is `omp-${sessionId}-${leafId}` with a leaf id and
+`omp-${sessionId}` without one; if `getSessionId()` is unavailable or invalid,
+Stateful actions fail closed. OMP native tools use that derived identity; agents
+do not repair or select current-session files, environment variables, runtime
+session aliases, or event/ctx agent and session fields. With that state in place,
+`state_session_register` -> `state_reservation_declare` ->
+`state_claim_acquire` resolves the active OMP agent identity without a
+caller-supplied environment override. OMP native `edit`
 and `write` pre-tool authorization can
 also auto-declare the exact file scope, acquire same-reservation claims, and
 retry when the only denial is missing reservation/scope and no explicit
@@ -398,8 +400,8 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 Subagents:
 
-- coordinate in the same workspace state but use their own effective `agent_id`
-  when the adapter exposes one
+- coordinate in the same workspace state; in OMP, branch-specific subagent work
+  uses the `agent_id` derived from the current `getLeafId()` when present
 - record activity and claims with their own `actor_id`
 - do not receive automatic override authority from a shared owner
 
