@@ -308,6 +308,10 @@ fn install_omp_yes_creates_extension_and_mcp_config() {
     assert!(extension.contains("function startReservationStream(pi, stream)"));
     assert!(extension.contains("/v1/notifications/stream?session_id="));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));
+    assert!(extension.contains("function notificationTargetsStreamSession(notification, stream)"));
+    assert!(
+        extension.contains("if (!notificationTargetsStreamSession(notification, stream)) return;")
+    );
     assert!(extension.contains("purpose: \" + purpose.trim()"));
     assert!(extension.contains("const purpose = payload.purpose"));
     assert!(extension.contains("typeof purpose === \"string\" && purpose.trim().length > 0"));

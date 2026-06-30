@@ -1668,7 +1668,17 @@ function reservationMessage(notification) {{
   return lines.join("\n");
 }}
 
-function deliverReservationNotification(pi, notification) {{
+function notificationTargetsStreamSession(notification, stream) {{
+  const targetSessionId = property(notification, "target_session_id")
+    || property(notification, "session_id")
+    || propertyPath(notification, "payload", "session_id");
+  if (!targetSessionId) return true;
+  return targetSessionId === property(stream, "session_id");
+}}
+
+
+function deliverReservationNotification(pi, notification, stream) {{
+  if (!notificationTargetsStreamSession(notification, stream)) return;
   const payload = notification?.payload || {{}};
   const waitId = payload.wait_id;
   if (!waitId || seenReservationWaitIds.has(waitId)) {{
@@ -1720,12 +1730,12 @@ async function checkReservationResume(pi, stream, signal) {{
           reservation_expires_at: body.reservation.reservation_expires_at,
         }},
         required_next_action: body.required_next_action,
-      }});
+      }}, stream);
     }}
   }} catch (_) {{}}
 }}
 
-function processReservationSseBlock(pi, block) {{
+function processReservationSseBlock(pi, block, stream) {{
   let event = "message";
   const data = [];
   for (const rawLine of block.split(/\r?\n/)) {{
@@ -1735,17 +1745,17 @@ function processReservationSseBlock(pi, block) {{
   }}
   if (event !== "reservation_granted" || data.length === 0) return;
   try {{
-    deliverReservationNotification(pi, JSON.parse(data.join("\n")));
+    deliverReservationNotification(pi, JSON.parse(data.join("\n")), stream);
   }} catch (_) {{}}
 }}
 
-function processReservationSseBuffer(pi, buffer) {{
+function processReservationSseBuffer(pi, buffer, stream) {{
   buffer = buffer.replace(/\r\n/g, "\n");
   let cursor = 0;
   for (;;) {{
     const next = buffer.indexOf("\n\n", cursor);
     if (next === -1) break;
-    processReservationSseBlock(pi, buffer.slice(cursor, next));
+    processReservationSseBlock(pi, buffer.slice(cursor, next), stream);
     cursor = next + 2;
   }}
   return buffer.slice(cursor);
@@ -1775,7 +1785,7 @@ function startReservationStream(pi, stream) {{
         for (;;) {{
           const {{ done, value }} = await reader.read();
           if (done || signal.aborted) break;
-          buffer = processReservationSseBuffer(pi, buffer + decoder.decode(value, {{ stream: true }}));
+          buffer = processReservationSseBuffer(pi, buffer + decoder.decode(value, {{ stream: true }}), stream);
         }}
       }} catch (_) {{
         if (signal.aborted) return;
