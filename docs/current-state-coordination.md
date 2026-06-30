@@ -172,7 +172,8 @@ the same resource ahead of an earlier conflicting waiter, but they are not activ
 write authority. The promotion records a pending notification payload containing
 the wait queue row's stored, non-empty purpose. The session with the claimable
 reservation must reread the target. Manual MCP/CLI flows then call
-`state_reservation_claim` / `stateful reservation claim --wait-id <id>` before writing;
+`state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or
+`stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>` before writing;
 the claim uses the stored reservation purpose, and clients do not provide a new
 claim purpose. Native edit hooks and sandbox `write-targets` authorization can
 lazy-claim the claimable reservation when the write is retried. Claiming creates
@@ -196,7 +197,8 @@ request APIs return `queued`, `reserved` (claimable reservation), `claimed`,
 `canceled`, or `expired` state without blocking indefinitely. Immediate
 availability creates a claimable reservation with API state `reserved`; the
 session must still reread the target. Manual MCP/CLI flows claim with
-`state_reservation_claim` / `stateful reservation claim --wait-id <id>` before retrying;
+`state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or
+`stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>` before retrying;
 the server uses the stored reservation purpose. Native edit hooks and sandbox
 `write-targets` authorization can lazy-claim at the retry write boundary.
 Waiting is handled by polling `stateful notifications poll` or `stateful resume
@@ -329,11 +331,11 @@ limited to fail-closed classification and trusted wrapper validation for
 command-shaped execution. V1 implementation is Rust-only, so hooks invoke the
 compiled `stateful` binary.
 
-Envelope-enforced write authorization, reservation, and reconciliation requests
-include `protocol_version`; a major protocol mismatch fails closed on those
-paths. OMP `SessionStart`, `PostToolUse`, and `Stop` lifecycle posts use flat
-session-event bodies with `metadata` and `source`, while OMP `PreToolUse`
-authorization still uses the v1 envelope.
+Envelope-enforced write authorization and reservation requests include
+`protocol_version`; a major protocol mismatch fails closed on those paths.
+Reconciliation acknowledgements and OMP `SessionStart`, `PostToolUse`, and
+`Stop` lifecycle posts use flat route-specific bodies with `metadata` and
+`source`, while OMP `PreToolUse` authorization still uses the v1 envelope.
 
 OMP adapters preserve stateful hard blocks: built-in Bash may run only strict
 trusted `stateful sandbox run ...` and `stateful sandbox process find ...`
@@ -432,8 +434,8 @@ empty or normalized-empty entries are rejected with `missing_scope`.
 `state_reservation_request` also requires a non-empty `path`; empty or
 normalized-empty request paths are rejected with `missing_scope`.
 `state_reservation_request` and `state_reservation_cancel` expose the explicit scheduling
-queue. `state_reservation_claim` takes a `wait_id` only and uses the stored
-reservation purpose; callers must not send a claim purpose.
+queue. `state_reservation_claim` takes `reservation_id` and `wait_id`, then uses
+the stored reservation purpose; callers must not send a claim purpose.
 
 `state_claim_acquire` accepts `paths: string[]` for batch acquisition from
 active reservation scope. Each entry still becomes a claim on one exact file or
@@ -893,7 +895,7 @@ Reservation freshness defaults:
 ```text
 default reservation TTL: 15 minutes
 default claim TTL: 5 minutes
-default reservation TTL: 120 seconds
+default claimable reservation TTL: 120 seconds
 heartbeat extension: shipped for explicit heartbeats and implicit authorize-time
 heartbeat events on active unexpired reservation rows
 maximum rolling reservation lifetime: 60 minutes from declared_at

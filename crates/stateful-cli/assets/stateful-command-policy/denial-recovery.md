@@ -8,7 +8,7 @@ If the denial says `missing_reservation`, `missing_claim`, `Target is outside ac
 
 1. Re-read the target if it exists.
 2. Add the missing exact file or directory scopes to the task reservation with `state_reservation_declare(purpose=<task purpose>, files_planned=[...])`.
-3. Acquire exact same-reservation claims with `state_claim_acquire(paths=[...])`.
+3. Acquire exact same-reservation claims with `state_claim_acquire(reservation_id=<reservation_id>, paths=[...])`.
 4. Use native edit tools for repo edits, or `sandbox run --fs write-targets` / OMP built-in Bash with a strict trusted `stateful sandbox run --fs write-targets ...` command and matching targets for command-shaped writes.
 
 Use file claims for file writes, deletes, renames, and moves. Directory claims only authorize directory writes.
@@ -20,7 +20,7 @@ If `state_claim_acquire` reports `claim_conflict`, do not retry acquisition or s
 - To wait for a path, call `state_reservation_request` with a stable `request_id`, denied `action`, `path`, and `purpose`.
 - Poll `state_notifications_poll` or `state_resume_next` for the reservation.
 - When reserved, reread the target.
-- Native edits and write-target sandbox writes can lazy-claim the reservation at the next write boundary; manual MCP/CLI flows should call `state_reservation_claim(wait_id=...)` first.
+- Native edits and write-target sandbox writes can lazy-claim the reservation at the next write boundary; manual MCP/CLI flows should first call `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or `stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>`.
 
 If a denial already includes `wait_id`, `queue_position`, or reservation guidance, follow that wait queue protocol.
 

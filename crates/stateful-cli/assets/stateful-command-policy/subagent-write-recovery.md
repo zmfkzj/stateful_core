@@ -8,7 +8,7 @@ When a subagent hits `apply_patch writes require ... same-reservation file claim
 
 1. Stop retrying command variants; denials are the API.
 2. Re-read the exact target if it exists.
-3. Use MCP in the same subagent session: `state_session_register` if needed, then `state_reservation_declare(purpose=<task purpose>, files_planned=[...])` for the complete known file set, then `state_claim_acquire(paths=[...])` for the exact file path set being written.
+3. Use MCP in the same subagent session: `state_session_register` if needed, then `state_reservation_declare(purpose=<task purpose>, files_planned=[...])` for the complete known file set, then `state_claim_acquire(reservation_id=<reservation_id>, paths=[...])` for the exact file path set being written.
 4. For new files, reserve and claim every exact new file path, not only the parent directory.
 5. Edit with native tools such as `apply_patch`/`edit`, or use `sandbox run --fs write-targets` with matching targets for command-shaped writes.
 6. If another session owns the claim, do not retry or steal it. Follow the wait queue when available; otherwise report the path, blocking session, and wait/reservation id to the parent.

@@ -320,22 +320,23 @@ clear that the user accepted responsibility for that exception.
 
 ## Authorization Decision
 
-The policy engine owns one decision shape:
+The shipped policy engine returns the current `Decision` shape:
 
 ```text
 authorize_action(input) -> decision
 ```
 
-The output should include:
+The output includes:
 
 ```text
 decision: allow | warn | deny | error
-reason
-conflicts[]
+reason_code
+message
 required_next_action
-context_items[]
-audit_event
 ```
+
+Target richer context may add `conflicts[]`, `context_items[]`, and
+`audit_event`.
 
 The decision order is:
 

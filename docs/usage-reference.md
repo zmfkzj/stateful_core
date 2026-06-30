@@ -236,7 +236,7 @@ Common commands:
 
 - `stateful install [--yes]`
 - `stateful install --agent codex [--yes] [--codex-config <path>] [--binary <path>]`
-- `stateful install --agent omp [--yes] [--update]`
+- `stateful install --agent omp [--yes] [--update] [--binary <path>]`
 - `stateful enable [--repo <path>]`, `stateful disable`, `stateful repos list`
 - `stateful tools list`, `stateful tools allow <tool>`, `stateful tools deny <tool>`
 - `stateful server start|restart|status|stop|join`

@@ -517,21 +517,18 @@ work and releases the session's claims.
 A reconciliation record acknowledges that an agent has reread and accounted for a
 human write before resuming work on the affected file.
 
+The shipped `reconcile_ack` API records the flat acknowledgement payload:
+
 ```text
-reconciliation_id
 session_id
-turn_id
-actor_id
-target_resources
-trigger_event_id
+workspace_id
 files_reread
 human_change_summary
-conflict_with_plan: yes | no | unknown
 decision: adopt | reapply | ask_user | abandon
-next_action
-created_at
-source_ref
 ```
+
+Future richer reconciliation records may add actor/turn metadata, target
+resources, trigger event ids, and next-action fields.
 
 Only `adopt` and `reapply` can clear an unreconciled-human-write block. `ask_user`
 keeps writes blocked until the user provides direction. `abandon` keeps writes
@@ -575,7 +572,6 @@ The target model also includes these explicit coordination events:
 - `HumanWriteObserved`
 - `ReconciliationAcknowledged`
 - `ActivityUpdated`
-- `ActivityFinalized`
 - `OutboxEventQueued`
 - `OutboxEventSynced`
 - `StateExpired`

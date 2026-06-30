@@ -31,16 +31,17 @@ in place instead of creating a duplicate or permanently consuming the key.
 `reservation/claim` is the manual reservation claim path. It creates
 active reservation scope and active claims only for the reservation owner.
 Clients must reread the target for the claimable reservation before writing.
-Manual MCP/CLI flows then call `state_reservation_claim` or
-`stateful reservation claim --wait-id <id>`; native edit hooks and sandbox
-`write-targets` authorization may lazy-claim the reservation at the retried write boundary.
+Manual MCP/CLI flows then call `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or
+`stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>`;
+native edit hooks and sandbox `write-targets` authorization may lazy-claim the reservation at the retried write boundary.
 
 Current implementation status: `/v1/reservation/request`, `/v1/reservation/claim`, and
 `/v1/reservation/cancel` are implemented with MCP tools and CLI commands. Immediate
 availability returns a `reserved` request state, which is the current API spelling
 for a claimable reservation; that session must still reread the target. Manual
-MCP/CLI flows call `state_reservation_claim`; hook and sandbox authorization
-sources may lazy-claim the reservation when the write is retried.
+MCP/CLI flows call `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or
+`stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>`;
+hook and sandbox authorization sources may lazy-claim the reservation when the write is retried.
 
 `reservation/cancel` cancels queued or claimable (`reserved`) requests owned by
 the caller. It must not cancel another session's reservation or reorder waiters.
@@ -69,8 +70,8 @@ exact `--write-target <file>` or `--create-target <file>` entries.
 
 ## Protocol Envelope
 
-Envelope-enforced write authorization, reservation, and reconciliation HTTP requests
-must use a v1 envelope:
+Envelope-enforced write authorization and reservation HTTP requests must use a
+v1 envelope:
 
 ```json
 {
@@ -97,10 +98,10 @@ must use a v1 envelope:
 }
 ```
 
-Lifecycle session events are intentionally smaller in the shipped OMP adapter:
-`SessionStart`, `PostToolUse`, and `Stop`/finalize post flat session-event
-bodies with `session_id`, `workspace_id`, `source`, and `metadata`. OMP
-`PreToolUse` authorization remains envelope-based.
+Lifecycle session events and reconciliation acknowledgements are intentionally
+smaller in shipped adapters/server routes: `SessionStart`, `PostToolUse`,
+`Stop`/finalize, and `reconcile_ack` post flat bodies with their route-specific
+fields. OMP `PreToolUse` authorization remains envelope-based.
 
 Recommended rollout:
 
