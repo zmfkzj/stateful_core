@@ -169,7 +169,7 @@ unless deliberately testing another model:
   --omp-bin "$OMP_BIN" \
   --stateful-binary "$STATEFUL_BIN" \
   --benchmark-model deepseek-v4-flash \
-  --benchmark-reasoning-effort low \
+  --benchmark-reasoning-effort high \
   --benchmark-model-context-window 256000 \
   --benchmark-temperature 1 \
   --benchmark-max-turns 500 \
@@ -196,7 +196,7 @@ matrix:
   --omp-bin "$OMP_BIN" \
   --stateful-binary "$STATEFUL_BIN" \
   --benchmark-model deepseek-v4-flash \
-  --benchmark-reasoning-effort low \
+  --benchmark-reasoning-effort high \
   --benchmark-model-context-window 256000 \
   --benchmark-temperature 1 \
   --benchmark-max-turns 500 \
@@ -232,7 +232,7 @@ default in-image `stateful` path explicitly; omit
   --agent-docker-stateful-binary "$DOCKER_STATEFUL_BIN" \
   --agent-docker-sandbox off \
   --benchmark-model deepseek-v4-flash \
-  --benchmark-reasoning-effort low \
+  --benchmark-reasoning-effort high \
   --benchmark-model-context-window 256000 \
   --benchmark-temperature 1 \
   --benchmark-max-turns 500 \
@@ -302,7 +302,7 @@ for trial in 1 2 3; do
     --agent-docker-stateful-binary "$DOCKER_STATEFUL_BIN" \
     --agent-docker-sandbox off \
     --benchmark-model deepseek-v4-flash \
-    --benchmark-reasoning-effort low \
+    --benchmark-reasoning-effort high \
     --benchmark-model-context-window 256000 \
     --benchmark-temperature 1 \
     --benchmark-max-turns 500 \

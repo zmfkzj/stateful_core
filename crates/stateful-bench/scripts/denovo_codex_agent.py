@@ -50,6 +50,7 @@ from codex_pair_agent import (  # noqa: E402
 OFFICIAL_BENCHMARK_PROTOCOL = "denovo_swe_single_rollout"
 RESUME_POLICY_CONTEXT_OR_TOKEN_ONLY = "context_or_token_failure_only"
 DEFAULT_SUBAGENT_MIN_COUNT = 3
+DEFAULT_OMP_REASONING_EFFORT = "high"
 CODEX_EMPTY_STOP_EXIT_CODE = 2
 
 
@@ -200,9 +201,9 @@ def native_subagent_prompt_instruction(subagent: str, subagent_min_count: int) -
 
 Native Codex/OMP subagent requirements:
 - MUST use native subagents for this benchmark condition before making the final answer.
-- Before implementation or broad repository exploration, and after any narrow setup needed to read this prompt, inspect tool availability, or initialize stateful coordination, spawn at least {subagent_min_count} native subagents unless the runtime does not expose any native subagent tool.
-- In OMP, the current native subagent tool is `task`: call it with a `tasks` array containing at least {subagent_min_count} implementation subagents. Older OMP multi-agent builds may expose `multi_agent_v1spawn_agent` instead.
-- Use all {subagent_min_count} native subagents for repository editing; each subagent must inspect, edit, and verify a distinct implementation slice.
+- Before implementation or broad repository exploration, and after any narrow setup needed to read this prompt, inspect tool availability, or initialize stateful coordination, spawn exactly {subagent_min_count} native subagents unless the runtime does not expose any native subagent tool.
+- In OMP, the current native subagent tool is `task`: call it with a `tasks` array containing exactly {subagent_min_count} implementation subagents. Older OMP multi-agent builds may expose `multi_agent_v1spawn_agent` instead.
+- Use exactly {subagent_min_count} native subagents for repository editing; each subagent must inspect, edit, and verify a distinct implementation slice.
 - Do not leave any native subagent as analysis-only, documentation-only, or idle.
 - Wait for each spawned subagent and incorporate its work or findings into the final workspace.
 - If the runtime does not expose subagent tools, explicitly report that blocker instead of silently completing as if subagents were used.
@@ -424,14 +425,14 @@ def codex_token_usage_from_output(output: str) -> dict[str, int]:
 
 
 def omp_token_usage_from_output(output: str) -> dict[str, int]:
-    total = empty_codex_token_usage()
+    latest = None
     for event in iter_json_events(output):
         if not isinstance(event, dict):
             continue
         usage = omp_usage_from_event(event)
         if usage is not None:
-            add_codex_token_usage(total, usage)
-    return total
+            latest = usage
+    return latest or empty_codex_token_usage()
 
 
 def omp_usage_from_event(event: dict[str, Any]) -> dict[str, int] | None:
@@ -867,6 +868,7 @@ def omp_command_for_profile(
     prompt_path: Path,
     omp_bin: str,
     benchmark_model: str,
+    benchmark_reasoning_effort: str = DEFAULT_OMP_REASONING_EFFORT,
     enable_native_subagent: bool = False,
     subagent_min_count: int = DEFAULT_SUBAGENT_MIN_COUNT,
 ) -> list[str]:
@@ -877,19 +879,15 @@ def omp_command_for_profile(
         "json",
         "--model",
         benchmark_model,
+        "--thinking",
+        benchmark_reasoning_effort,
         "--cwd",
         str(workspace),
         "--approval-mode",
         "yolo",
+        "--no-title",
+        f"@{prompt_path.resolve()}",
     ]
-    if enable_native_subagent:
-        command.extend(
-            [
-                "--append-system-prompt",
-                native_subagent_prompt_instruction("on", subagent_min_count),
-            ]
-        )
-    command.append(f"@{prompt_path.resolve()}")
     return command
 
 def docker_host_url(value: str) -> str:
@@ -924,6 +922,7 @@ def docker_omp_command_for_profile(
     benchmark_model: str,
     docker_image: str,
     base_env: dict[str, str],
+    benchmark_reasoning_effort: str = DEFAULT_OMP_REASONING_EFFORT,
     docker_bin: str = "docker",
     enable_native_subagent: bool = False,
     subagent_min_count: int = DEFAULT_SUBAGENT_MIN_COUNT,
@@ -959,6 +958,7 @@ def docker_omp_command_for_profile(
             prompt_path=Path(OMP_AGENT_DOCKER_PROMPT),
             omp_bin=omp_bin,
             benchmark_model=benchmark_model,
+            benchmark_reasoning_effort=benchmark_reasoning_effort,
             enable_native_subagent=enable_native_subagent,
             subagent_min_count=subagent_min_count,
         )
@@ -2607,6 +2607,7 @@ async def run_one_instance_async(
                     home=Path(env["HOME"]),
                     omp_bin=args.omp_bin,
                     benchmark_model=args.benchmark_model,
+                    benchmark_reasoning_effort=args.benchmark_reasoning_effort,
                     docker_image=args.agent_docker_image,
                     base_env=env,
                     enable_native_subagent=args.subagent == "on",
@@ -2619,6 +2620,7 @@ async def run_one_instance_async(
                     prompt_path=prompt_path,
                     omp_bin=args.omp_bin,
                     benchmark_model=args.benchmark_model,
+                    benchmark_reasoning_effort=args.benchmark_reasoning_effort,
                     enable_native_subagent=args.subagent == "on",
                     subagent_min_count=args.subagent_min_count,
                 )

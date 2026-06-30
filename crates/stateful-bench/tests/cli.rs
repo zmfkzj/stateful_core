@@ -312,6 +312,7 @@ fn denovo_run_command_parses_omp_cli_agent_options() {
                 ref agent_docker_stateful_binary,
                 agent_docker_sandbox,
                 ref benchmark_model,
+                ref benchmark_reasoning_effort,
                 ..
             }
         } if run_id == "dev-denovo-omp"
@@ -324,6 +325,7 @@ fn denovo_run_command_parses_omp_cli_agent_options() {
             && agent_docker_stateful_binary == "/usr/local/bin/stateful"
             && agent_docker_sandbox == DeNovoAgentDockerSandbox::Off
             && benchmark_model.as_deref() == Some("deepseek-v4-flash")
+            && benchmark_reasoning_effort == "high"
     ));
 }
 
@@ -1506,14 +1508,14 @@ spec.loader.exec_module(mod)
 
 usage = mod.omp_token_usage_from_output(
     '{{"type":"message","message":{{"role":"assistant","usage":{{"input":100,"output":12,"cacheRead":40,"reasoningTokens":5,"totalTokens":152}}}}}}\n'
-    '{{"type":"message","message":{{"role":"assistant","usage":{{"input":10,"output":3,"cacheRead":4,"reasoningTokens":2,"totalTokens":17}}}}}}\n'
+    '{{"type":"message","message":{{"role":"assistant","usage":{{"input":110,"output":15,"cacheRead":44,"reasoningTokens":7,"totalTokens":169}}}}}}\n'
 )
 print(json.dumps(usage, sort_keys=True))
 "#,
         agent_path = denovo_codex_agent_path_json(),
     );
     let output = run_python_json(&script);
-    assert_eq!(output["turns"], 2);
+    assert_eq!(output["turns"], 1);
     assert_eq!(output["input_tokens"], 154);
     assert_eq!(output["cached_input_tokens"], 44);
     assert_eq!(output["output_tokens"], 15);
@@ -1565,6 +1567,31 @@ print(json.dumps({{"returncode": summary.returncode, "token_usage": summary.toke
     assert_eq!(output["calls"][0]["stdin_is_devnull"], true);
 }
 
+#[test]
+fn denovo_codex_agent_uses_exact_subagent_instruction() {
+    let script = format!(
+        r#"
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("denovo_exact_subagent_prompt_test", {agent_path})
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+prompt = module.native_subagent_prompt_instruction("on", 3)
+print(json.dumps({{"prompt": prompt}}))
+"#,
+        agent_path = denovo_codex_agent_path_json(),
+    );
+    let output = run_python_json(&script);
+    let prompt = output["prompt"]
+        .as_str()
+        .expect("prompt should be a string");
+    assert!(prompt.contains("spawn exactly 3 native subagents"));
+    assert!(!prompt.contains("at least 3 native subagents"));
+}
 #[test]
 fn denovo_codex_agent_docker_omp_command_disables_inner_sandbox_when_requested() {
     let script = format!(
@@ -1961,18 +1988,21 @@ command = module.omp_command_for_profile(
     prompt_path=Path("/tmp/instance/prompt.txt"),
     omp_bin="/opt/homebrew/bin/omp",
     benchmark_model="deepseek-v4-flash",
+    benchmark_reasoning_effort="high",
 )
 relative_command = module.omp_command_for_profile(
     workspace=Path("/tmp/workspace"),
     prompt_path=Path("relative/prompt.txt"),
     omp_bin="/opt/homebrew/bin/omp",
     benchmark_model="deepseek-v4-flash",
+    benchmark_reasoning_effort="high",
 )
 native_command = module.omp_command_for_profile(
     workspace=Path("/tmp/workspace"),
     prompt_path=Path("/tmp/instance/prompt.txt"),
     omp_bin="/opt/homebrew/bin/omp",
     benchmark_model="deepseek-v4-flash",
+    benchmark_reasoning_effort="high",
     enable_native_subagent=True,
 )
 relative_prompt_arg = next(arg for arg in relative_command if arg.startswith("@"))
@@ -2036,15 +2066,11 @@ print(json.dumps({{"command": command, "native_command": native_command, "comman
         native_command,
         "features.multi_agent=true"
     ));
+    assert_eq!(command_arg_after(command, "--thinking"), Some("high"));
+    assert!(command_contains(command, "--no-title"));
     assert!(
-        command_arg_after(native_command, "--append-system-prompt")
-            .expect("native system prompt should exist")
-            .contains("Before implementation or broad repository exploration")
-    );
-    assert!(
-        !command_arg_after(native_command, "--append-system-prompt")
-            .expect("native system prompt should exist")
-            .contains("dispatching-parallel-agents")
+        !command_contains(native_command, "--append-system-prompt"),
+        "native OMP subagent instruction should live in prompt.txt only"
     );
     assert!(
         command_contains(native_command, "@/tmp/instance/prompt.txt")
@@ -2092,6 +2118,7 @@ command = module.docker_omp_command_for_profile(
     home=home,
     omp_bin="omp",
     benchmark_model="deepseek-v4-flash",
+    benchmark_reasoning_effort="high",
     docker_image="ghcr.io/stateful/omp-agent:latest",
     base_env={{
         "HOME": "host-home",
@@ -2140,15 +2167,11 @@ print(json.dumps({{
     assert!(command_contains(command, "--approval-mode"));
     assert!(command_contains(command, "yolo"));
     assert!(!command_contains(command, "features.multi_agent=true"));
+    assert_eq!(command_arg_after(command, "--thinking"), Some("high"));
+    assert!(command_contains(command, "--no-title"));
     assert!(
-        command_arg_after(command, "--append-system-prompt")
-            .expect("docker system prompt should exist")
-            .contains("Before implementation or broad repository exploration")
-    );
-    assert!(
-        !command_arg_after(command, "--append-system-prompt")
-            .expect("docker system prompt should exist")
-            .contains("dispatching-parallel-agents")
+        !command_contains(command, "--append-system-prompt"),
+        "docker OMP command should not duplicate the prompt subagent instruction"
     );
 
     assert!(
@@ -4154,9 +4177,9 @@ print(json.dumps({{"off": off, "on": on}}, sort_keys=True))
     assert!(!on.contains("dispatching-parallel-agents"));
     assert!(!on.contains("FIRST ACTION"));
     assert!(on.contains("the current native subagent tool is `task`"));
-    assert!(on.contains("tasks` array containing at least 3 implementation subagents"));
+    assert!(on.contains("tasks` array containing exactly 3 implementation subagents"));
     assert!(on.contains("multi_agent_v1spawn_agent"));
-    assert!(on.contains("Use all 3 native subagents for repository editing"));
+    assert!(on.contains("Use exactly 3 native subagents for repository editing"));
     assert!(off.contains("Benchmark isolation requirements"));
     assert!(on.contains("Benchmark isolation requirements"));
     assert!(on.contains("Do not fetch, clone, open, or inspect the upstream repository"));
