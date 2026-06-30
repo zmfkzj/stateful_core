@@ -218,6 +218,77 @@ fn migration_adds_sync_status_before_outbox_index_for_legacy_outbox() {
 }
 
 #[test]
+fn migration_adds_notification_sequence_before_notification_index_for_legacy_notifications() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-legacy-notifications-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE notifications (
+                notification_id TEXT PRIMARY KEY,
+                target_agent_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT
+            );
+
+            INSERT INTO notifications (
+                notification_id,
+                target_agent_id,
+                workspace_id,
+                kind,
+                payload_json,
+                status,
+                created_at,
+                expires_at
+            ) VALUES (
+                'legacy-notification-1',
+                'legacy-agent',
+                'legacy-workspace',
+                'reservation_available',
+                '{"wait_id":"legacy-wait"}',
+                'pending',
+                '2026-05-31T00:00:00Z',
+                NULL
+            );
+            "#,
+        )
+        .expect("legacy notifications table should be created");
+    }
+
+    let store = Store::open(&db_path).expect("store should migrate old notifications");
+
+    assert!(
+        store
+            .has_index("idx_notifications_agent_workspace_status_sequence")
+            .expect("index check should run")
+    );
+    let notifications = store
+        .pending_notifications_after("legacy-agent", "legacy-workspace", 0)
+        .expect("legacy notifications should load");
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].notification_id, "legacy-notification-1");
+    assert_eq!(notifications[0].sequence, 1);
+    assert_eq!(notifications[0].payload, json!({"wait_id":"legacy-wait"}));
+
+    drop(store);
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn reservation_declared_materializes_active_policy_state() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 

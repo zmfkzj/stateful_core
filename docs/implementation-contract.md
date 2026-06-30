@@ -460,6 +460,12 @@ Legacy outbox tables missing `workspace_id`, `event_type`, `payload_json`, or
 `sync_status` must be migrated before startup relies on indexed outbox reads.
 Missing `sync_status` values are backfilled as `TEXT NOT NULL DEFAULT 'pending'`
 so pre-migration rows remain eligible for sync.
+SQLite notification setup and migration must add and backfill the `sequence`
+column before creating the canonical
+`notifications(target_agent_id, workspace_id, status, sequence)` index. Legacy
+notification rows missing `sequence` are backfilled with their SQLite `rowid`
+as the legacy insertion-order sequence so detached server startup and health
+checks can open older databases before indexed notification reads run.
 
 `AgentHeartbeat` materialization refreshes the agent timestamp, active claim
 expiry, active activity expiry, and active reservation expiry. Reservation refresh is

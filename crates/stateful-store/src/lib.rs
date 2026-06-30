@@ -3844,9 +3844,6 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_notifications_agent_status
                 ON notifications(target_agent_id, status);
 
-            CREATE INDEX IF NOT EXISTS idx_notifications_agent_workspace_status_sequence
-                ON notifications(target_agent_id, workspace_id, status, sequence);
-
             CREATE TABLE IF NOT EXISTS conflicts (
                 conflict_id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
@@ -4255,7 +4252,8 @@ impl Store {
                     column,
                     "request_id" | "purpose" | "repo_id" | "worktree_id" | "root" | "branch"
                 ))
-            || (table == "activities" && column == "phase");
+            || (table == "activities" && column == "phase")
+            || (table == "notifications" && column == "sequence");
         if !supported {
             return Ok(());
         }
