@@ -310,10 +310,15 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
         "lazy operation base reads should go through an unreadable-file guard"
     );
     assert!(
-        !extension.contains(
-            "bases.set(target, existsSync(path) ? readFileSync(path, \"utf8\") : null);"
-        ),
+        !extension
+            .contains("bases.set(target, existsSync(path) ? readFileSync(path, \"utf8\") : null);"),
         "readOperationBases must not read targets directly because EACCES crashes lazy capture"
+    );
+    assert!(
+        !extension.contains(
+            "const current = existsSync(filePath) ? readFileSync(filePath, \"utf8\") : null;"
+        ),
+        "lazy resume patch application must not read targets directly because EACCES crashes extension callbacks"
     );
     assert!(
         extension.contains("if (!base.ok) return null;"),

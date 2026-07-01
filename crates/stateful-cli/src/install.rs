@@ -2066,8 +2066,9 @@ function applyOmpLinePatch(cwd, patch, bases) {{
   if (stale) return stale;
   for (const [target, edits] of editsByFile.entries()) {{
     const filePath = resolve(cwd, target);
-    const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : null;
-    const text = current || "";
+    const current = readOperationBase(filePath);
+    if (!current.ok) return {{ status: "stale", message: target + " cannot be read for patch application" }};
+    const text = current.value || "";
     const split = textToLines(text);
     const applied = split.lines.slice();
     const ordered = edits.slice().sort((a, b) => {{
