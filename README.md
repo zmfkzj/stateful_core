@@ -326,7 +326,8 @@ local generated state.
 
 - `crates/stateful-core`: domain types, resource scope matching, current-state
   rendering, reconciliation, and pure policy primitives.
-- `crates/stateful-store`: SQLite event store and current-state persistence.
+- `crates/stateful-store`: SQLite event store and current-state persistence,
+  split by mutation domain for claims, reservations, notifications, and activity.
 - `crates/stateful-server`: local HTTP API and store-backed policy service.
 - `crates/stateful-cli`: CLI, hook adapter, runtime discovery, repo registry,
   outbox sync, native-tool guidance assets, and sandbox wrappers.
