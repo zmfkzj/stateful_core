@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import subprocess  # noqa: E402
 import sys
-import tempfile
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -17,21 +17,18 @@ from programbench_codex_agent import (  # noqa: E402
     add_token_usage,
     airlock_env,
     build_base_parser,
-    archive_airlock_workspace,
     copy_workspace_from_container,
     enable_stateful_repo,
     install_stateful_for_agent,
     iter_json_events,
     output_text,
     prompt_for_args,
-    resolve_host_binary,
     run_main,
-    stop_stateful_server,
     smoke_compile_airlock,
+    stop_stateful_server,
     token_usage_from_value,
 )
 
-import subprocess  # noqa: E402
 
 
 def usage_at(value, path: tuple[str, ...]):
@@ -151,59 +148,54 @@ def run_omp_command(command, *, cwd: str, env: dict[str, str], timeout_seconds: 
 
 
 def run_agent(args, prompt):
-    with tempfile.TemporaryDirectory(prefix="programbench-airlock-") as airlock:
-        env = airlock_env(airlock)
-        if args.stateful:
-            inherit_parent_stateful_runtime(env, os.environ)
-        env["PI_CODING_AGENT_DIR"] = str(Path(airlock) / ".omp" / "profiles" / "stateful" / "agent")
-        auth_source_agent = omp_auth_source_agent_dir(os.environ)
-        if auth_source_agent:
-            env["OMP_AUTH_SOURCE_AGENT_DIR"] = auth_source_agent
+    airlock = getattr(args, "airlock", "/tmp/programbench-airlock")
+    env = airlock_env(airlock)
+    env.pop("OMP_AUTH_SOURCE_AGENT_DIR", None)
+    if hasattr(args, "airlock") and hasattr(args, "container_id"):
         copy_workspace_from_container(args, airlock)
-        try:
-            if args.stateful:
-                install_stateful_for_agent(args, airlock, "omp")
-            seed_omp_auth_credentials(env)
-            if args.stateful:
-                enable_stateful_repo(args, airlock)
+    env["PI_CODING_AGENT_DIR"] = str(Path(airlock) / ".omp" / "profiles" / "stateful" / "agent")
+    auth_source_agent = omp_auth_source_agent_dir(os.environ)
+    if args.stateful:
+        inherit_parent_stateful_runtime(env, os.environ)
+    try:
+        if args.stateful:
+            install_stateful_for_agent(args, airlock, "omp")
+        seed_env = {**env, **({"OMP_AUTH_SOURCE_AGENT_DIR": auth_source_agent} if auth_source_agent else {})}
+        seed_omp_auth_credentials(seed_env)
+        if args.stateful:
+            enable_stateful_repo(args, airlock)
 
-            command = [
-                resolve_host_binary(args.omp_bin),
-                "--cwd",
-                airlock,
-                "--mode",
-                "json",
-                "--no-session",
-                "--approval-mode",
-                "yolo",
-            ]
-            if args.stateful:
-                command.extend(["--profile", "stateful"])
-            if args.model:
-                command.extend(["--model", args.model])
-            command.extend(["-p", prompt])
-            try:
-                return run_omp_command(
-                    command,
-                    cwd=airlock,
-                    env=env,
-                    timeout_seconds=args.timeout_seconds,
-                )
-            finally:
-                if hasattr(args, "condition_dir"):
-                    instance_dir = Path(args.condition_dir) / args.instance_id
-                    try:
-                        smoke_compile_airlock(airlock, args)
-                    except Exception as exc:  # noqa: BLE001 - preserve submission for failed compile diagnostics.
-                        args.smoke_compile_error = str(exc)
-                    try:
-                        args.submission_path = str(archive_airlock_workspace(airlock, instance_dir))
-                    except Exception as exc:  # noqa: BLE001 - preserve OMP logs before reporting archive failure.
-                        args.submission_path = str(instance_dir / "submission.tar.gz")
-                        args.archive_error = str(exc)
+        command = [
+            args.omp_bin,
+            "--cwd",
+            airlock,
+            "--mode",
+            "json",
+            "--no-session",
+            "--approval-mode",
+            "yolo",
+        ]
+        if args.stateful:
+            command.extend(["--profile", "stateful"])
+        if args.model:
+            command.extend(["--model", args.model])
+        command.extend(["-p", prompt])
+        try:
+            return run_omp_command(
+                command,
+                cwd=airlock,
+                env=env,
+                timeout_seconds=args.timeout_seconds,
+            )
         finally:
-            if args.stateful:
-                stop_stateful_server(args, airlock)
+            if hasattr(args, "condition_dir"):
+                try:
+                    smoke_compile_airlock(airlock, args)
+                except Exception as exc:  # noqa: BLE001 - preserve submission for failed compile diagnostics.
+                    args.smoke_compile_error = str(exc)
+    finally:
+        if args.stateful:
+            stop_stateful_server(args, airlock)
 
 
 def parse_args(argv: list[str] | None = None):

@@ -13,17 +13,18 @@ host.
 `stateful-bench` keeps each ProgramBench Docker container alive until the run
 finishes, then removes it explicitly. The Codex and OMP adapters copy the
 container's `/workspace` into an empty temporary host airlock, run the host CLI
-there, smoke-run `./compile.sh` before archiving/reporting metadata, and archive
-that airlock as the ProgramBench submission. Adapter runtime state uses
-`STATEFUL_HOME` under the airlock's `.stateful` directory.
+there, and sync that airlock back into the live container only for the smoke
+`./compile.sh`. The host airlock is then archived/reported as the ProgramBench
+submission. Adapter runtime state uses `STATEFUL_HOME` under the airlock's
+`.stateful` directory.
 
 For OMP runs, the adapter mirrors DeNovoSWE auth seeding: it copies only the
 `openai-codex` OAuth provider credential from `OMP_AUTH_SOURCE_AGENT_DIR`,
 `~/.omp/profiles/stateful/agent`, or `~/.omp/agent` into the isolated airlock
 profile. Submission archives exclude agent/runtime/cache directories and files
-such as `.omp`, `.codex`, `.stateful*`, `.config`, `.cache`, `.git`,
-`config.yml`, `state.db`, `repos`, `runtime`, `Library/Caches`, `__pycache__`,
-`.pytest_cache`, and Python bytecode files.
+such as the provided top-level `executable`, `.omp`, `.codex`, `.stateful*`,
+`.config`, `.cache`, `.git`, `Library/Caches`, `__pycache__`, `.pytest_cache`,
+and Python bytecode files.
 
 Install the official `programbench` CLI with one of:
 
@@ -48,8 +49,8 @@ policy across compared conditions. Explicit `subagent:off` conditions still
 parse for diagnostic or backwards-compatible runs.
 
 For `stateful:on`, the adapter installs and enables Stateful in the host
-airlock used by that agent run. The ProgramBench container seeds the airlock and
-stays available for bundled `./executable` behavior checks.
+airlock used by that agent run. The ProgramBench container stays available for
+bundled `./executable` behavior checks and smoke compile.
 
 ## Inference Rules
 
@@ -58,8 +59,8 @@ internet, clone repositories, fetch target source from package registries, wrap
 the provided binary, decompile it, or run `strace`/`ltrace` on it.
 
 Agents may run `./executable` normally and read bundled documentation from the
-airlock seeded from the target container. The airlock should not be used for
-internet, package-manager, source-control, or unrelated host filesystem work.
+target container's `/workspace`. They should not use it for internet,
+package-manager, source-control, or unrelated host filesystem work.
 
 ## Commands
 
