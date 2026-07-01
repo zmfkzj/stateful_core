@@ -148,6 +148,13 @@ impl Store {
         result
     }
 
+    fn store_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Self) -> StoreResult<T>,
+    ) -> StoreResult<T> {
+        self.transaction(operation, |error| error)
+    }
+
     pub fn open_in_memory() -> StoreResult<Self> {
         let conn = Connection::open_in_memory()?;
         configure_connection(&conn)?;
@@ -1138,35 +1145,15 @@ impl Store {
         let agent_id = agent_id.as_ref().to_string();
         let workspace_id = workspace_id.as_ref().to_string();
         let relative_path = relative_path.as_ref().to_string();
-        if !self.conn.is_autocommit() {
-            return self.acquire_claim_with_observation_inner(
+        self.store_transaction(move |store| {
+            store.acquire_claim_with_observation_inner(
                 None,
                 &agent_id,
                 &workspace_id,
                 &relative_path,
                 observation,
-            );
-        }
-
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-
-        let result = (|| -> StoreResult<()> {
-            self.acquire_claim_with_observation_inner(
-                None,
-                &agent_id,
-                &workspace_id,
-                &relative_path,
-                observation,
-            )?;
-            self.conn.execute_batch("COMMIT")?;
-            Ok(())
-        })();
-
-        if result.is_err() {
-            let _ = self.conn.execute_batch("ROLLBACK");
-        }
-
-        result
+            )
+        })
     }
 
     pub fn acquire_claim_for_reservation(
@@ -1197,35 +1184,15 @@ impl Store {
         let agent_id = agent_id.as_ref().to_string();
         let workspace_id = workspace_id.as_ref().to_string();
         let relative_path = relative_path.as_ref().to_string();
-        if !self.conn.is_autocommit() {
-            return self.acquire_claim_with_observation_and_event_inner(
+        self.store_transaction(move |store| {
+            store.acquire_claim_with_observation_and_event_inner(
                 Some(&reservation_id),
                 &agent_id,
                 &workspace_id,
                 &relative_path,
                 observation,
-            );
-        }
-
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-
-        let result = (|| -> StoreResult<()> {
-            self.acquire_claim_with_observation_and_event_inner(
-                Some(&reservation_id),
-                &agent_id,
-                &workspace_id,
-                &relative_path,
-                observation,
-            )?;
-            self.conn.execute_batch("COMMIT")?;
-            Ok(())
-        })();
-
-        if result.is_err() {
-            let _ = self.conn.execute_batch("ROLLBACK");
-        }
-
-        result
+            )
+        })
     }
 
     pub fn acquire_claim_with_observation_and_event(
@@ -1238,35 +1205,15 @@ impl Store {
         let agent_id = agent_id.as_ref().to_string();
         let workspace_id = workspace_id.as_ref().to_string();
         let relative_path = relative_path.as_ref().to_string();
-        if !self.conn.is_autocommit() {
-            return self.acquire_claim_with_observation_and_event_inner(
+        self.store_transaction(move |store| {
+            store.acquire_claim_with_observation_and_event_inner(
                 None,
                 &agent_id,
                 &workspace_id,
                 &relative_path,
                 observation,
-            );
-        }
-
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-
-        let result = (|| -> StoreResult<()> {
-            self.acquire_claim_with_observation_and_event_inner(
-                None,
-                &agent_id,
-                &workspace_id,
-                &relative_path,
-                observation,
-            )?;
-            self.conn.execute_batch("COMMIT")?;
-            Ok(())
-        })();
-
-        if result.is_err() {
-            let _ = self.conn.execute_batch("ROLLBACK");
-        }
-
-        result
+            )
+        })
     }
 
     pub fn acquire_claims_with_observations_and_events(
@@ -1277,33 +1224,14 @@ impl Store {
     ) -> StoreResult<ClaimBatchAcquireResult> {
         let agent_id = agent_id.as_ref().to_string();
         let workspace_id = workspace_id.as_ref().to_string();
-        if !self.conn.is_autocommit() {
-            return self.acquire_claims_with_observations_and_events_inner(
+        self.store_transaction(move |store| {
+            store.acquire_claims_with_observations_and_events_inner(
                 None,
                 &agent_id,
                 &workspace_id,
                 claims,
-            );
-        }
-
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-
-        let result = (|| -> StoreResult<ClaimBatchAcquireResult> {
-            let result = self.acquire_claims_with_observations_and_events_inner(
-                None,
-                &agent_id,
-                &workspace_id,
-                claims,
-            )?;
-            self.conn.execute_batch("COMMIT")?;
-            Ok(result)
-        })();
-
-        if result.is_err() {
-            let _ = self.conn.execute_batch("ROLLBACK");
-        }
-
-        result
+            )
+        })
     }
 
     pub fn acquire_claims_for_reservation_with_observations_and_events(
@@ -1316,33 +1244,14 @@ impl Store {
         let reservation_id = reservation_id.as_ref().to_string();
         let agent_id = agent_id.as_ref().to_string();
         let workspace_id = workspace_id.as_ref().to_string();
-        if !self.conn.is_autocommit() {
-            return self.acquire_claims_with_observations_and_events_inner(
+        self.store_transaction(move |store| {
+            store.acquire_claims_with_observations_and_events_inner(
                 Some(&reservation_id),
                 &agent_id,
                 &workspace_id,
                 claims,
-            );
-        }
-
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-
-        let result = (|| -> StoreResult<ClaimBatchAcquireResult> {
-            let result = self.acquire_claims_with_observations_and_events_inner(
-                Some(&reservation_id),
-                &agent_id,
-                &workspace_id,
-                claims,
-            )?;
-            self.conn.execute_batch("COMMIT")?;
-            Ok(result)
-        })();
-
-        if result.is_err() {
-            let _ = self.conn.execute_batch("ROLLBACK");
-        }
-
-        result
+            )
+        })
     }
 
     fn acquire_claims_with_observations_and_events_inner(
