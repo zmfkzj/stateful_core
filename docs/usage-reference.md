@@ -323,12 +323,14 @@ the authorizing reservation block writes. A blocked writer can queue with
 resume payloads carry the stored request purpose, and the agent with the
 claimable reservation must reread the target.
 
-Repo file edits should use native edit tools with hook-visible targets after
-task-level reservation covers the target and a successful same-reservation file
-claim. Hooks extract the native tool target, call `/v1/authorize` with the
-operation-specific action and `reservation_id`, allow the edit only after an
-allow decision, and release the authorizing claim after the completed write
-transaction.
+OMP native `edit` and `write` use auto-declare/claim as the default simple-write
+path when no explicit reservation id is supplied and the only denial is missing
+reservation/scope. Other repo file edits should use native edit tools with
+hook-visible targets after task-level reservation covers the target and a
+successful same-reservation file claim. Hooks extract the native tool target,
+call `/v1/authorize` with the operation-specific action and `reservation_id`,
+allow the edit only after an allow decision, and release the authorizing claim
+after the completed write transaction.
 
 ## Sandbox Profiles
 
@@ -419,9 +421,10 @@ server requests with `path` are still accepted for compatibility.
 `state_claim_release` remains single-resource and takes `path: string`.
 
 `state_file_write` / `state.file.write` and `state_bash_write` /
-`state.bash.write` were removed. Use native edit tools with hook-visible targets
-for file edits after task-level reservation and exact same-reservation claim,
-and use `stateful sandbox run --fs write-targets --reservation-id <reservation_id> ...`
+`state.bash.write` were removed. Use OMP native `edit`/`write` auto-declare/claim
+for the default simple-write path, native edit tools with hook-visible targets
+after task-level reservation and exact same-reservation claim for other file
+edits, and `stateful sandbox run --fs write-targets --reservation-id <reservation_id> ...`
 for command-shaped writes.
 
 The `/v1/authorize` endpoint and the reservation declare/request/claim/cancel

@@ -496,12 +496,14 @@ the scratch `target` child. Other tool-specific build directories should be
 configured under the same external scratch root.
 
 Source-tree edits should use native edit tools with hook-visible targets, such
-as Codex `apply_patch` or Edit, after task-level reservation covers the target
-and a successful same-reservation file claim is active. Native edit hooks and
-`sandbox run --fs write-targets` release their authorized same-reservation claims
-after the write transaction completes; subsequent writes must reread and
-reacquire a claim or claim a
-claimable reservation. Command-shaped source writes must use exact
+as Codex `apply_patch` or Edit. OMP native `edit`/`write` can auto-declare/claim
+the exact tool-visible file scope for the default simple-write path when no
+explicit reservation id is supplied and the only denial is missing
+reservation/scope; other native edit paths require task-level reservation and an
+active same-reservation file claim. Native edit hooks and `sandbox run --fs
+write-targets` release their authorized same-reservation claims after the write
+transaction completes; subsequent writes must reread and reacquire a claim or
+claim a claimable reservation. Command-shaped source writes must use exact
 `--write-target` or `--create-target` entries, not the `tmp/` artifact directory
 scope.
 

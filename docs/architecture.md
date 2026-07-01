@@ -363,10 +363,12 @@ classification, so `functions.bash` is Bash,
 `functions.search` remain native read/search tools.
 
 - Native edit tools such as Codex `apply_patch`, `Edit`, and `Write` or OMP
-  `edit` and `write`: enforce by inspecting hook-exposed targets after
-  task-level reservation covers the target and a successful same-reservation file
-  claim is active. The completed write transaction releases the claim that
-  authorized it.
+  `edit` and `write`: enforce by inspecting hook-exposed targets. OMP `edit`
+  and `write` auto-declare/claim the exact tool-visible file scope for the
+  default simple-write path when no explicit reservation id is supplied and the
+  only denial is missing reservation/scope. Other native edit flows require the
+  target to be covered by a task-level reservation and active same-reservation
+  claim. The completed write transaction releases the claim that authorized it.
 - Command execution: Codex raw Bash is denied with sandbox guidance. OMP built-in
   Bash may run only strict trusted `stateful sandbox run ...` and
   `stateful sandbox process find ...` commands after Stateful preflight;

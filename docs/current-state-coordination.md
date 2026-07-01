@@ -458,9 +458,10 @@ accepted for compatibility, while `state_claim_release` still accepts one
 `path`.
 
 Hooks should call the same state server API as native Stateful tools so policy
-remains centralized. Native edit tools with hook-visible targets are the repo
-file edit path after reservation and claim; sandbox-run remains the Bash wrapper
-for command-shaped shell writes.
+remains centralized. OMP native `edit`/`write` can auto-declare and claim exact
+tool-visible file scope for the default simple-write path; explicit reservation
+and claim remain the repo edit path for other native writes and command-shaped
+shell writes.
 
 ### State Server Responsibilities
 
@@ -511,8 +512,10 @@ namespaced runtime tool names -> classify by leaf
   (functions.bash as Bash; functions.python/javascript/js/ruby/julia as eval
   tools; functions.read / functions.search as native read/search)
 native read/search/diff tools -> preferred path for ordinary read work
-native edit tools with hook-visible targets -> enforce by inspecting targets
-  after task-level reservation covers the target and a same-reservation claim; release the claim after the
+OMP native edit/write without explicit reservation_id -> auto-declare/claim
+  exact tool-visible file scope when only missing reservation/scope blocks it
+other native edit tools with hook-visible targets -> require task-level reservation
+  covering the target and a same-reservation claim; release the claim after the
   completed write transaction
 Codex Bash read-only inspection that genuinely needs a shell -> require a strict
   trusted wrapper:
@@ -541,8 +544,9 @@ OMP built-in Bash with strict trusted `stateful sandbox run ...` commands for
 sandbox runs and repo-external work. External write/create/write-dir,
 socket, or signal scope asks for a scoped OMP UI grant by default;
 `stateful.autoApprove: true` skips only that Stateful-owned prompt while
-sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. Use
-native edit tools for repo file edits.
+sandbox scope validation, hooks, reservation/claim checks, and grant limits still
+apply. Use OMP native `edit`/`write` auto-declare/claim for the default
+simple-write path and native edit tools for other repo file edits.
 
 The read-only sandbox profile is a write-confinement profile. It does not
 provide full process containment, and it cannot be combined with
@@ -552,9 +556,10 @@ There is no command-text authorization path. Command text alone does not
 authorize `rg`, `git diff`, test runners, stateful operational commands, or any
 other Bash command. Test commands should run through the trusted
 `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
---command <cmd>` wrapper. Repo writes require task-level reservation covering
-the target plus a matching same-reservation claim and must use native edit tools or
-`--fs write-targets` with explicit targets.
+--command <cmd>` wrapper. OMP native `edit`/`write` can auto-declare/claim the
+default simple-write path; other repo writes require task-level reservation
+covering the target plus a matching same-reservation claim and must use native
+edit tools or `--fs write-targets` with explicit targets.
 
 Minimum sandboxed test shape:
 
@@ -563,11 +568,12 @@ stateful sandbox run --fs build --network enabled --write-dir test-run --command
 ```
 
 The build profile writes disposable artifacts under
-`/tmp/stateful/<session>/<scratch-purpose>/`. Source-tree edits use native edit tools
-with hook-visible targets, such as Codex `apply_patch` or Edit, after exact
-reservation declaration and a successful same-reservation file claim; the completed write
-transaction releases the authorizing claim. Command-shaped source writes must
-use exact `--write-target <file>` or `--create-target <file>` entries.
+`/tmp/stateful/<session>/<scratch-purpose>/`. OMP native `edit`/`write` can
+auto-declare/claim exact tool-visible file scope for the default simple-write
+path; other source-tree edits use native edit tools with hook-visible targets
+after exact reservation declaration and a successful same-reservation file claim.
+The completed write transaction releases the authorizing claim. Command-shaped
+source writes must use exact `--write-target <file>` or `--create-target <file>` entries.
 
 ## Conflict Policy
 

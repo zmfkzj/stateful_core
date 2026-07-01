@@ -63,10 +63,12 @@ stateful sandbox run --fs build --network enabled --write-dir test-run --command
 Hook-mediated Bash must be a single strict invocation of the trusted absolute
 `stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
 <cmd>`. The build profile writes disposable artifacts under
-`/tmp/stateful/<session>/<scratch-purpose>/`; source-tree edits use native edit tools
-with hook-visible targets, such as Codex `apply_patch` or Edit, after exact
-reservation declaration and a successful same-reservation file claim. The completed write
-transaction releases the authorizing claim. Command-shaped source writes require
+`/tmp/stateful/<session>/<scratch-purpose>/`; OMP native `edit`/`write` can
+auto-declare/claim exact tool-visible file scope for the default simple-write
+path. Other source-tree edits use native edit tools with hook-visible targets,
+such as Codex `apply_patch` or Edit, after exact reservation declaration and a
+successful same-reservation file claim. The completed write transaction releases
+the authorizing claim. Command-shaped source writes require
 exact `--write-target <file>` or `--create-target <file>` entries.
 
 ## Protocol Envelope
@@ -157,13 +159,15 @@ Filesystem watcher inference remains out of scope for this pass.
 
 ## Repo File Edits
 
-Native Stateful file-write tools are not the current repo edit path. Repo file
-edits should use native edit tools with hook-visible targets, such as Codex
-`apply_patch` or Edit, after task-level reservation covers the target and a
-successful same-reservation file claim. Hooks normalize hook-exposed targets,
-call the same policy service as native tools and CLI, fail closed on missing
-state, protocol mismatch, or denied authorization, record activity after
-successful edits, and release the authorizing claim after the completed write transaction.
+OMP native `edit`/`write` can auto-declare/claim exact tool-visible file scope
+for the default simple-write path when no explicit reservation id is supplied and
+the only denial is missing reservation/scope. Other repo file edits should use
+native edit tools with hook-visible targets, such as Codex `apply_patch` or
+Edit, after task-level reservation covers the target and a successful
+same-reservation file claim. Hooks normalize hook-exposed targets, call the same
+policy service as native tools and CLI, fail closed on missing state, protocol
+mismatch, or denied authorization, record activity after successful edits, and
+release the authorizing claim after the completed write transaction.
 
 Command-shaped writes remain outside native tools and must use
 `stateful sandbox run --fs write-targets` with exact `--write-target <file>` or

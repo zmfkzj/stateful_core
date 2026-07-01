@@ -186,8 +186,10 @@ stateful current
 ```
 
 Inside an active Codex or OMP session, use the active Stateful coordination tools
-directly instead of shelling out to `stateful reservation declare`. The usual
-write flow is:
+directly instead of shelling out to `stateful reservation declare`. Simple OMP
+native `edit`/`write` calls can rely on auto-declare/claim when no explicit
+reservation id is supplied and the only denial is missing reservation/scope. The
+explicit multi-resource write flow remains:
 
 ```text
 read current state -> declare task reservation with known file set -> keep reservation_id -> acquire exact same-reservation claims for reserved paths -> reread targets -> write with the same reservation_id
@@ -200,9 +202,9 @@ can be expanded when the task discovers another target. Claim acquisition uses
 reservation in one request. Each resulting claim still owns one exact file or
 directory resource and expires when the agent stops being fresh.
 
-For native OMP `edit` and `write`, pre-tool authorization can recover when the
-only denial is missing reservation/scope and the tool call did not supply an
-explicit reservation id: the extension declares the exact file scope, acquires
+For native OMP `edit` and `write`, this fallback is the default simple-write
+path: when no explicit reservation id is supplied and the only denial is missing
+reservation/scope, the extension declares the exact file scope, acquires
 same-reservation claims, and retries authorization. When another active claim
 blocks a write, the writer can queue for that resource. When the resource is
 released or expires, the server reserves it for the next eligible waiter and
@@ -235,7 +237,8 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 
 | Need | Use |
 | --- | --- |
-| Repo file edit | Native edit/write tools after task-level reservation and exact same-reservation file claim |
+| Simple OMP repo file edit | Native `edit`/`write`; auto-declare/claim handles missing reservation/scope when no explicit reservation id is supplied |
+| Other repo file edit | Native edit/write tools after task-level reservation and exact same-reservation file claim |
 | Build or test command | `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` |
 | Command-shaped repo write | `stateful sandbox run --fs write-targets --reservation-id <reservation_id> --write-target <file> --command <cmd>` |
 | Local git operation | `stateful sandbox run --fs git --network disabled --command 'git <args>'` |
@@ -256,12 +259,12 @@ absolute binary path. External write/create/write-dir/socket/signal scope still
 asks for a Stateful OMP UI grant by default; `stateful.autoApprove: true` skips
 only that Stateful-owned prompt while sandbox scope validation, hooks,
 reservation/claim checks, and grant limits still apply. When auto-approval is
-enabled, no prompt is shown. For native OMP `edit` and `write`, missing
-reservation/scope can be auto-declared and claimed before authorization is
-retried. Use `lazy_edit_resume` for queued/conflicting line-based OMP `edit`
-patches, `lazy_write_resume` for captured full OMP `write` replay with a
-stale-target guard, and `lazy_bash_resume` to rerun a queued external Bash
-command after the scoped grant is approved.
+enabled, no prompt is shown. Native OMP `edit` and `write` use auto-declare/claim
+as the default simple-write path when no explicit reservation id is supplied and
+the only denial is missing reservation/scope. Use `lazy_edit_resume` for
+queued/conflicting line-based OMP `edit` patches, `lazy_write_resume` for
+captured full OMP `write` replay with a stale-target guard, and `lazy_bash_resume`
+to rerun a queued external Bash command after the scoped grant is approved.
 
 See [Usage reference](docs/usage-reference.md) for detailed CLI, hook, sandbox,
 LAN sharing, generated-file, and release notes.

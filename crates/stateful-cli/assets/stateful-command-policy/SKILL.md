@@ -16,10 +16,10 @@ This is the procedural manual for Stateful hooks. Rules decide when the skill ap
 ## Default Write Flow
 
 1. For planning, inspect context once only when active coordination may affect the plan. When target paths are known, `state_context_render(mode="brief", resource="<target>")` is optional planning/manual inspection; use broad `state_current_read` only before targets are known or when assigning parallel work.
-2. Declare the task file set with `state_reservation_declare(purpose=<task purpose>, files_planned=[...])`; the active `reservation_id` is the write authorization batch boundary.
-3. Acquire exact same-reservation file claims with `state_claim_acquire(reservation_id=<reservation_id>, paths=[...])` before native edits, deletes, moves, renames, or repo-relative command writes.
+2. For simple OMP native `edit` and `write`, rely on the write boundary: if no explicit `reservation_id` is supplied and the only denial is missing reservation/scope, the OMP extension declares the exact tool-visible file scope, acquires same-reservation claims, and retries authorization.
+3. Use explicit `state_reservation_declare(purpose=<task purpose>, files_planned=[...])` plus `state_claim_acquire(reservation_id=<reservation_id>, paths=[...])` for command-shaped writes, directory writes, multi-resource intent, queued conflict recovery, deletes/moves/renames, or whenever a specific reservation boundary matters.
 4. Keep paths narrow. Directory claims authorize only `write_directory`; exact file writes still need exact file reservation scope and a same-reservation claim.
-5. Re-read files immediately before native edits. Native edits and write-target sandbox writes release authorized claims after the transaction; reacquire before another write under the active reservation.
+5. Re-read files immediately before native edits. Native edits and write-target sandbox writes release authorized claims after the transaction; reacquire before another explicit write under the active reservation.
 6. For hook denials, follow the denial's next action or `denial-recovery.md`; do not call `state_context_render` unless you need to revise the plan.
 7. Use active Stateful native tool names in guidance: `state_context_render`, `state_current_read`, `state_session_register`, `state_reservation_declare`, `state_claim_acquire`, `state_reservation_request`, `state_notifications_poll`, `state_resume_next`, and `state_reservation_claim`. If the active tool list exposes runtime-specific names, call the exact shown equivalent.
 

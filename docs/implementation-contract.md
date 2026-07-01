@@ -244,22 +244,22 @@ from `/v1/authorize` does not queue `rename_file` or `move_file`, because those
 actions affect multiple paths and need the target all-or-nothing scheduler.
 
 Native edit tools such as Codex `apply_patch`, `Edit`, and `Write` or OMP
-`edit` and `write` expose targets to hooks. After a task-level reservation covers
-the target and a successful same-reservation file claim is active, hooks call
-`/v1/authorize` with the operation-specific action before allowing the edit,
-including `write_file`, `delete_file`, and `move_file` with source `path` /
-`old_path` and destination `new_path`. PreToolUse authorization sends current
-`base_observations` for each affected target when the hook can read the
-workspace file state. PostToolUse observes completed native edits and sandbox
-`write-targets` transactions, records the result, and releases the
-same-reservation claims that authorized the completed write boundary. Released claims leave the
-live context render and do not authorize a later write; the agent must reread
-and reacquire a claim, or lazy-claim a claimable reservation, before retrying.
-For OMP `edit` and `write`, the generated extension first handles the common
-missing-scope case inside pre-tool authorization: if `/v1/authorize` denies only
-because reservation/scope is missing and the tool call did not supply an
-explicit reservation id, it declares the exact file scope, acquires
-same-reservation claims, and retries authorization. Remaining OMP `edit`
+`edit` and `write` expose targets to hooks. OMP `edit` and `write` use
+auto-declare/claim as the default simple-write path: if `/v1/authorize` denies
+only because reservation/scope is missing and the tool call did not supply an
+explicit reservation id, the extension declares the exact file scope, acquires
+same-reservation claims, and retries authorization. Other native edit flows
+require task-level reservation covering the target and an active
+same-reservation file claim before hooks call `/v1/authorize` with the
+operation-specific action, including `write_file`, `delete_file`, and
+`move_file` with source `path` / `old_path` and destination `new_path`.
+PreToolUse authorization sends current `base_observations` for each affected
+target when the hook can read the workspace file state. PostToolUse observes
+completed native edits and sandbox `write-targets` transactions, records the
+result, and releases the same-reservation claims that authorized the completed
+write boundary. Released claims leave the live context render and do not
+authorize a later write; the agent must reread and reacquire a claim, or
+lazy-claim a claimable reservation, before retrying. Remaining OMP `edit`
 denials are captured as live-agent lazy edit operations when the patch has
 safe repo-relative line targets. Remaining OMP `write` denials are captured as
 live-agent lazy write operations with the original full write content. Denials

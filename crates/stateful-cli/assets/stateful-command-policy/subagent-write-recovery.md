@@ -16,9 +16,10 @@ When a subagent hits `apply_patch writes require ... same-reservation file claim
    `omp-${sessionId}-${leafId}` or `omp-${sessionId}`. If `getSessionId()` is
    unavailable or invalid, OMP Stateful actions fail closed and the subagent
    should report the denial.
-4. For new files, reserve and claim every exact new file path, not only the parent directory.
-5. Edit with native tools such as `apply_patch`/`edit`, or use `sandbox run --fs write-targets` with matching targets for command-shaped writes.
-6. If another agent owns the claim, do not retry or steal it. Follow the wait queue when available; otherwise report the path, `blocking_agent_id`, and wait/reservation id to the parent.
+4. For simple OMP native `edit`/`write` with no explicit `reservation_id`, let the extension auto-declare and claim the exact tool-visible file scope when the only denial is missing reservation/scope.
+5. For new files outside that simple path, reserve and claim every exact new file path, not only the parent directory.
+6. Edit with native tools such as `apply_patch`/`edit`, or use `sandbox run --fs write-targets` with matching targets for command-shaped writes.
+7. If another agent owns the claim, do not retry or steal it. Follow the wait queue when available; otherwise report the path, `blocking_agent_id`, and wait/reservation id to the parent.
 
 If the active tool list exposes runtime-specific native Stateful names, use the exact shown equivalent. If no native Stateful coordination tool is visible, report the missing tool and denial. If the first recovery call returns `unsupported call`, stop and report the exact call name, active tool list if visible, and denial.
 
