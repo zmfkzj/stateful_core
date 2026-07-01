@@ -397,6 +397,7 @@ fn is_omp_safe_without_repo_write_authorization(tool_name: &str) -> bool {
         "search_tool_bm25",
         "task",
         "yield",
+        "parallel_tool_calls",
         "todo",
         "web_search",
     ]
@@ -1710,6 +1711,7 @@ fn is_builtin_safe_tool(tool_name: &str) -> bool {
         "view_image",
         "task",
         "yield",
+        "parallel_tool_calls",
         "spawn_agent",
         "multi_agent_v1spawn_agent",
         "wait_agent",

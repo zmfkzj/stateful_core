@@ -2887,6 +2887,70 @@ fn omp_glob_is_allowed_for_repo_with_stale_tool_allowlist() {
 }
 
 #[test]
+fn omp_parallel_tool_calls_is_allowed_for_repo_with_stale_tool_allowlist() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-hook-omp-stale-parallel-tool-calls-allowlist-test-{}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(&repo_root).expect("repo root should be creatable");
+    enable_test_repo(&paths, &repo_root);
+    deny_tool_for_repo(&paths, &repo_root, "parallel_tool_calls")
+        .expect("stale tool list should omit parallel_tool_calls");
+    let list = tool_list_for_repo(&paths, &repo_root).expect("tool list should load");
+    assert!(
+        !list
+            .allowed_tools
+            .iter()
+            .any(|tool| tool == "parallel_tool_calls")
+    );
+    let (runtime, _rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "agent_id": "omp-parent",
+        "cwd": repo_root,
+        "yolo": false,
+        "tool_name": "parallel_tool_calls",
+        "tool_input": {"tool_uses": []}
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "pre-tool-use"],
+        &input,
+    );
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
+    assert_eq!(
+        stdout["decision"], "allow",
+        "parallel_tool_calls should be intrinsically allowed, got {stdout}"
+    );
+    let list = tool_list_for_repo(&paths, &repo_root).expect("tool list should load");
+    assert!(
+        !list
+            .unclassified_tools
+            .iter()
+            .any(|tool| tool == "parallel_tool_calls"),
+        "parallel_tool_calls should not be recorded as unclassified: {:?}",
+        list.unclassified_tools
+    );
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
 fn run_hook_omp_pre_tool_use_prints_extension_decision() {
     let temp_root =
         std::env::temp_dir().join(format!("stateful-hook-omp-runtime-{}", std::process::id()));

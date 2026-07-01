@@ -17,6 +17,7 @@ fn default_allowed_tools() -> Vec<String> {
         "multi_agent_v1send_input",
         "task",
         "yield",
+        "parallel_tool_calls",
         "lsp",
         "glob",
         "ask",
