@@ -31,7 +31,8 @@ commands, OMP native `edit`/`write` pre-tool recovery that can auto-declare
 exact file scope, acquire same-reservation claims, and retry authorization when
 the only denial is missing reservation/scope without an explicit reservation id,
 `lazy_edit_resume` for strict replay of queued/conflicting line-based OMP edits,
-`lazy_write_resume` for queued full OMP writes with a stale-target guard,
+`lazy_write_resume` for queued full OMP writes, both with captured-wait claims
+before re-authorization and stale-target guards,
 `lazy_bash_resume` for queued external Bash commands waiting on scoped grants,
 and approval entries that deny arbitrary raw Bash while setting
 Python/JavaScript/JS/Ruby/Julia eval tools to false. External
@@ -264,14 +265,15 @@ denials are captured as live-agent lazy edit operations when the patch has
 safe repo-relative line targets. Remaining OMP `write` denials are captured as
 live-agent lazy write operations with the original full write content. Denials
 with a wait id reuse that id; other retryable lazy operations receive a generated
-live-agent operation id. `lazy_edit_resume` re-authorizes the original edit
-after the agent fixes scope, receives a claimable reservation, or recovers from
-another fallback denial, verifies the file content still matches the queued base
-text, and applies only line-based edit patch operations; block operations or
-changed files require regenerating the patch. `lazy_write_resume` re-authorizes
-the original write after the same recovery, verifies the target still matches the
-queued state, and writes the captured full content; changed targets require
-retrying the write.
+live-agent operation id. For stored wait ids, `lazy_edit_resume` and
+`lazy_write_resume` first claim the queued reservation, then re-authorize the
+original edit or write. Generated no-wait operation ids still require the agent
+to fix scope, receive and claim a claimable reservation, or recover from another
+fallback denial before resume. `lazy_edit_resume` verifies the file content still
+matches the queued base text, then applies only line-based edit patch operations;
+block operations or changed files require regenerating the patch.
+`lazy_write_resume` verifies the target still matches the queued state, then
+writes the captured full content; changed targets require retrying the write.
 `lazy_bash_resume` stores a trusted external `stateful sandbox run ...` command
 when the original OMP Bash call cannot display the scoped grant prompt, asks for
 the same grant during resume, re-authorizes the original Bash tool call, and

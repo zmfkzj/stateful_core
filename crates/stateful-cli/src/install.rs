@@ -1825,7 +1825,7 @@ function extractReservationId(reason) {{
   return match ? match[1] : "";
 }}
 
-function structuredLazyEditOperationId(decision) {{
+function structuredLazyWaitId(decision) {{
   return decision?.wait?.wait_id
     || decision?.reservation?.wait_id
     || decision?.reservation?.id
@@ -1833,12 +1833,12 @@ function structuredLazyEditOperationId(decision) {{
     || extractWaitId(decision?.message);
 }}
 
+function structuredLazyEditOperationId(decision) {{
+  return structuredLazyWaitId(decision);
+}}
+
 function structuredLazyWriteOperationId(decision) {{
-  return decision?.wait?.wait_id
-    || decision?.reservation?.wait_id
-    || decision?.reservation?.id
-    || extractWaitId(decision?.reason)
-    || extractWaitId(decision?.message);
+  return structuredLazyWaitId(decision);
 }}
 
 function structuredLazyReservationId(event, decision) {{
@@ -1912,6 +1912,8 @@ function rememberLazyEditOperation(event, ctx, decision) {{
   lazyEditOperations.set(operationId, {{
     operation_id: operationId,
     agent_id: agentId(event, ctx),
+    workspace_id: detectWorkspaceId(event, ctx),
+    wait_id: structuredLazyWaitId(decision),
     reservation_id: structuredLazyReservationId(event, decision),
     cwd: ctx.cwd,
     tool_name: event.toolName,
@@ -1939,6 +1941,8 @@ function rememberLazyWriteOperation(event, ctx, decision) {{
   lazyWriteOperations.set(operationId, {{
     operation_id: operationId,
     agent_id: agentId(event, ctx),
+    workspace_id: detectWorkspaceId(event, ctx),
+    wait_id: structuredLazyWaitId(decision),
     reservation_id: structuredLazyReservationId(event, decision),
     cwd: ctx.cwd,
     tool_name: event.toolName,
@@ -2535,6 +2539,28 @@ export default function statefulOmpExtension(pi) {{
       if (!approved) return {{ block: true, reason: "user denied stateful external sandbox grant" }};
     }}
   }});
+function state_reservation_claim(operation, ctx) {{
+  const waitId = String(operation?.wait_id || "").trim();
+  if (!waitId) return {{ ok: true }};
+  const agentId = String(operation?.agent_id || "").trim();
+  if (!agentId) return {{ ok: false, message: "state_reservation_claim missing agent_id" }};
+  const args = ["reservation", "claim", "--agent-id", agentId, "--wait-id", waitId];
+  const workspaceId = firstString(operation?.workspace_id, detectWorkspaceId({{}}, ctx));
+  if (workspaceId) args.push("--workspace-id", workspaceId);
+  const reservationId = String(operation?.reservation_id || "").trim();
+  if (reservationId) args.push("--reservation-id", reservationId);
+  const options = {{ encoding: "utf8" }};
+  const cwd = operation?.cwd || ctx?.cwd;
+  if (cwd) options.cwd = cwd;
+  const result = spawnSync(STATEFUL, args, options);
+  if (result.status === 0) return {{ ok: true }};
+  const detail = String(result.stderr || result.stdout || "").trim();
+  return {{
+    ok: false,
+    message: "state_reservation_claim failed" + (detail ? ": " + detail : ""),
+  }};
+}}
+
   pi.registerTool({{
     name: "lazy_edit_resume",
     label: "Lazy Edit Resume",
@@ -2552,6 +2578,8 @@ export default function statefulOmpExtension(pi) {{
       if (!operation) {{
         return lazyToolResult("failed", "lazy edit operation not found in this live OMP extension session", {{ operation_id: operationId }});
       }}
+      const claim = state_reservation_claim(operation, ctx);
+      if (!claim.ok) return lazyToolResult("failed", claim.message, {{ operation_id: operationId, targets: operation.targets }});
       const authorization = runStatefulHook("pre-tool-use", {{
         agent_id: operation.agent_id,
         reservation_id: operation.reservation_id || undefined,
@@ -2598,6 +2626,8 @@ export default function statefulOmpExtension(pi) {{
       if (!operation) {{
         return lazyToolResult("failed", "lazy write operation not found in this live OMP extension session", {{ operation_id: operationId }});
       }}
+      const claim = state_reservation_claim(operation, ctx);
+      if (!claim.ok) return lazyToolResult("failed", claim.message, {{ operation_id: operationId, targets: operation.targets }});
       const authorization = runStatefulHook("pre-tool-use", {{
         agent_id: operation.agent_id,
         reservation_id: operation.reservation_id || undefined,

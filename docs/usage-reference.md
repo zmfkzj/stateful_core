@@ -104,14 +104,16 @@ Installed OMP support:
   stored command.
 - `lazy_edit_resume` for strict replay of blocked, line-based OMP `edit` patches.
   The live extension stores the original patch after `missing_reservation`,
-  `missing_claim`, or claim-conflict denials; after the agent fixes the missing
-  scope or receives a claimable reservation, it re-authorizes the original edit,
-  checks the file has not changed since queue time, then applies the stored
-  line-based patch.
+  `missing_claim`, or claim-conflict denials. If the lazy operation captured a
+  `wait_id`, resume first claims that queued reservation; generated no-wait
+  operation ids still require the agent to fix missing scope or claim externally.
+  Resume then re-authorizes the original edit, checks the file has not changed
+  since queue time, and applies the stored line-based patch.
 - `lazy_write_resume` for replay of blocked full OMP `write` content. It uses the
-  same queued wait id or generated operation id path, re-authorizes after the
-  agent fixes the missing scope or receives a claimable reservation, and fails
-  if the target changed since the write was queued.
+  same queued wait id or generated operation id path: captured wait ids are
+  claimed before re-authorization, generated no-wait ids need the missing scope
+  or claim resolved externally, and replay fails if the target changed since the
+  write was queued.
 
 
 ### Repo allowlist

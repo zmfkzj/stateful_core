@@ -333,6 +333,19 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(extension.contains("function extractReservationId(reason)"));
     assert!(extension.contains("extractReservationId(decision?.reason)"));
     assert!(extension.contains("extractReservationId(decision?.message)"));
+    for tool_name in ["lazy_edit_resume", "lazy_write_resume"] {
+        let tool_start = extension
+            .find(&format!("name: \"{tool_name}\""))
+            .expect("lazy resume tool should be registered");
+        let pre_tool_start = extension[tool_start..]
+            .find("const authorization = runStatefulHook(\"pre-tool-use\"")
+            .map(|index| tool_start + index)
+            .expect("lazy resume tool should reauthorize with pre-tool-use");
+        assert!(
+            extension[tool_start..pre_tool_start].contains("state_reservation_claim"),
+            "{tool_name} should claim the existing reservation before rerunning pre-tool-use"
+        );
+    }
     assert!(extension.contains("Queued lazy write operation_id"));
     assert!(extension.contains("!target.includes(\":\")"));
     assert!(extension.contains("validateOmpLinePatchBases"));
