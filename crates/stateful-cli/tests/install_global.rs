@@ -417,8 +417,8 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(extension.contains("function shouldAutoApproveStatefulPrompt(ctx, _params)"));
     assert!(extension.contains("ctx?.config?.stateful?.autoApprove"));
     assert!(extension.contains("ctx?.config?.[\"stateful.autoApprove\"]"));
-    assert!(extension.contains("ctx?.config?.stateful?.autoApproval"));
-    assert!(extension.contains("ctx?.config?.[\"stateful.autoApproval\"]"));
+    assert!(!extension.contains("autoApproval"));
+    assert!(!extension.contains("auto_approve"));
     assert!(extension.contains("function configTextAutoApprove(text)"));
     assert!(extension.contains("statefulConfigFileAutoApprove()"));
     assert!(extension.contains("value === \"true\""));

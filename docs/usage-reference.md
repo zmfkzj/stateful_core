@@ -71,9 +71,6 @@ eval.rb: false
 eval.jl: false
 ```
 
-`stateful.autoApprove` is canonical; `stateful.autoApproval` is accepted as a
-compatibility alias.
-
 It removes `tools.approval` from the stateful profile because yolo mode delegates
 safety to Stateful hooks. Without `--update`, existing scalar values are
 preserved and only missing keys are inserted. With `--update`, existing target

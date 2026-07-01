@@ -655,7 +655,7 @@ fn omp_external_native_write_prompt(
     Ok(Some(OmpHookOutcome::Prompt {
         title: format!("Approve external {action}"),
         message: format!(
-            "Stateful is requesting approval for a repo-external OMP {action}.\n\nTargets:\n{}\n\nSet stateful.autoApprove (or alias stateful.autoApproval) to true to skip this prompt.",
+            "Stateful is requesting approval for a repo-external OMP {action}.\n\nTargets:\n{}\n\nSet stateful.autoApprove to true to skip this prompt.",
             external_targets.join("\n")
         ),
     }))

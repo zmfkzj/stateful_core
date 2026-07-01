@@ -776,10 +776,8 @@ The prototype supports user-level installation with repo allowlist gating.
 `stateful` profile agent directory (`~/.omp/profiles/stateful/agent`) with
 `tools.approvalMode: yolo`, `stateful.autoApprove: false`,
 `bash.enabled: true`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
-and `eval.jl: false`. `stateful.autoApprove` is canonical;
-`stateful.autoApproval` is accepted as a compatibility alias. The installer
-removes `tools.approval` from the stateful profile because yolo mode delegates
-safety to
+and `eval.jl: false`. The installer removes `tools.approval` from the stateful
+profile because yolo mode delegates safety to
 Stateful hooks. OMP built-in Bash may run only strict trusted
 `stateful sandbox run ...` and `stateful sandbox process find ...` commands
 after Stateful preflight; arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia
