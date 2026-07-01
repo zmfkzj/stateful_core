@@ -1506,7 +1506,8 @@ impl Store {
         workspace_id: impl AsRef<str>,
         relative_path: impl AsRef<str>,
     ) -> StoreResult<()> {
-        self.expire_stale()?;
+        let agent_id = agent_id.as_ref().to_string();
+        let workspace_id = workspace_id.as_ref().to_string();
         let requested_relative_path = relative_path.as_ref();
         let lease_action = if requested_relative_path.ends_with("/") {
             "write_directory"
@@ -1514,18 +1515,16 @@ impl Store {
             "write_file"
         };
         let relative_path = normalize_relative_path(requested_relative_path);
-        let workspace_id = workspace_id.as_ref().to_string();
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-
-        let result = (|| -> StoreResult<()> {
-            let released = self.conn.execute(
+        self.store_transaction(move |store| {
+            store.expire_stale()?;
+            let released = store.conn.execute(
                 "UPDATE claims
                  SET status = 'released'
                  WHERE agent_id = ?1 AND workspace_id = ?2 AND relative_path = ?3 AND action = ?4 AND status = 'active'",
-                params![agent_id.as_ref(), workspace_id, relative_path, lease_action],
+                params![&agent_id, &workspace_id, &relative_path, lease_action],
             )?;
             if released == 0 {
-                let owner_exists = self.conn.query_row(
+                let owner_exists = store.conn.query_row(
                     "SELECT EXISTS(
                             SELECT 1 FROM claims
                             WHERE agent_id != ?1
@@ -1534,7 +1533,7 @@ impl Store {
                               AND action = ?4
                               AND status = 'active'
                         )",
-                    params![agent_id.as_ref(), workspace_id, relative_path, lease_action],
+                    params![&agent_id, &workspace_id, &relative_path, lease_action],
                     |row| row.get::<_, bool>(0),
                 )?;
                 if owner_exists {
@@ -1542,23 +1541,14 @@ impl Store {
                 }
                 return Err(StoreError::ClaimNotFound);
             }
-            self.promote_waiters_after_lease_release(&workspace_id, &relative_path)?;
-            self.append_inner(&Event::claim_released(
-                agent_id.as_ref().to_string(),
-                workspace_id.clone(),
-                relative_path.clone(),
+            store.promote_waiters_after_lease_release(&workspace_id, &relative_path)?;
+            store.append_inner(&Event::claim_released(
+                agent_id,
+                workspace_id,
+                relative_path,
                 lease_action,
-            ))?;
-            self.conn.execute_batch("COMMIT")?;
-
-            Ok(())
-        })();
-
-        if result.is_err() {
-            let _ = self.conn.execute_batch("ROLLBACK");
-        }
-
-        result
+            ))
+        })
     }
 
     pub fn release_session_claims(
@@ -1568,23 +1558,9 @@ impl Store {
     ) -> StoreResult<u64> {
         let agent_id = agent_id.as_ref().to_string();
         let workspace_id = workspace_id.as_ref().to_string();
-        if !self.conn.is_autocommit() {
-            return self.release_session_claims_inner(&agent_id, &workspace_id);
-        }
-
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-
-        let result = (|| -> StoreResult<u64> {
-            let released = self.release_session_claims_inner(&agent_id, &workspace_id)?;
-            self.conn.execute_batch("COMMIT")?;
-            Ok(released)
-        })();
-
-        if result.is_err() {
-            let _ = self.conn.execute_batch("ROLLBACK");
-        }
-
-        result
+        self.store_transaction(move |store| {
+            store.release_session_claims_inner(&agent_id, &workspace_id)
+        })
     }
 
     fn release_session_claims_inner(&self, agent_id: &str, workspace_id: &str) -> StoreResult<u64> {
@@ -1622,37 +1598,18 @@ impl Store {
         relative_path: impl AsRef<str>,
         observation: ClaimObservation,
     ) -> StoreResult<()> {
-        self.expire_stale()?;
         let agent_id = agent_id.as_ref().to_string();
         let workspace_id = workspace_id.as_ref().to_string();
         let relative_path = normalize_relative_path(relative_path.as_ref());
-        if !self.conn.is_autocommit() {
-            return self.refresh_exact_file_claim_observation_inner(
+        self.store_transaction(move |store| {
+            store.expire_stale()?;
+            store.refresh_exact_file_claim_observation_inner(
                 &agent_id,
                 &workspace_id,
                 &relative_path,
                 &observation,
-            );
-        }
-
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-
-        let result = (|| -> StoreResult<()> {
-            self.refresh_exact_file_claim_observation_inner(
-                &agent_id,
-                &workspace_id,
-                &relative_path,
-                &observation,
-            )?;
-            self.conn.execute_batch("COMMIT")?;
-            Ok(())
-        })();
-
-        if result.is_err() {
-            let _ = self.conn.execute_batch("ROLLBACK");
-        }
-
-        result
+            )
+        })
     }
 
     fn refresh_exact_file_claim_observation_inner(
