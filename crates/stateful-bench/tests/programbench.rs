@@ -1626,6 +1626,37 @@ print(json.dumps(observed))
 }
 
 #[test]
+fn programbench_smoke_compile_removes_seed_executable_before_build() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r##"import json
+import tempfile
+import types
+from pathlib import Path
+
+with tempfile.TemporaryDirectory() as root:
+    airlock = Path(root)
+    (airlock / "executable").write_text("seed binary", encoding="utf-8")
+    (airlock / "compile.sh").write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "if [ -e executable ]; then echo old executable still exists >&2; exit 7; fi\n"
+        "printf replacement > executable\n",
+        encoding="utf-8",
+    )
+    args = types.SimpleNamespace(timeout_seconds=5)
+    mod.smoke_compile_airlock(str(airlock), args)
+    observed = (airlock / "executable").read_text(encoding="utf-8")
+print(json.dumps({"executable": observed}))
+"##,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("smoke compile observation should be JSON");
+
+    assert_eq!(observed["executable"], "replacement");
+}
+
+#[test]
 fn programbench_report_markdown_labels_partial_score_and_resolved_count() {
     let report = condition_report(
         "stateful-off_subagent-off",

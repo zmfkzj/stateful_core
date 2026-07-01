@@ -257,6 +257,9 @@ def smoke_compile_airlock(airlock: str, args) -> None:
     compile_path = Path(airlock) / "compile.sh"
     if not compile_path.is_file():
         raise FileNotFoundError("compile.sh")
+    executable_path = Path(airlock) / "executable"
+    if executable_path.exists() or executable_path.is_symlink():
+        executable_path.unlink()
     try:
         subprocess.run(
             ["sh", "./compile.sh"],

@@ -1430,7 +1430,6 @@ const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const OMP_AGENT_CONFIG = resolve(EXTENSION_DIR, "..", "config.yml");
 const BENCHMARK_SOURCE_BLOCK_ENV = "STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS";
  
-let verifiedBareStatefulPath = null;
 
 function statefulBinaryDigest(path) {{
   return createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -1456,32 +1455,21 @@ function firstPathStateful(cwd) {{
 }}
 
 function verifyBareStateful(cwd) {{
-  verifiedBareStatefulPath = null;
   const candidate = firstPathStateful(cwd);
   if (!candidate) return false;
   try {{
     if (statefulBinaryDigest(candidate) !== statefulBinaryDigest(STATEFUL)) return false;
-    verifiedBareStatefulPath = candidate;
     return true;
   }} catch {{
-    verifiedBareStatefulPath = null;
     return false;
   }}
 }}
 
-function bareStatefulStillVerified() {{
-  if (!verifiedBareStatefulPath) return false;
-  try {{
-    return statefulBinaryDigest(verifiedBareStatefulPath) === statefulBinaryDigest(STATEFUL);
-  }} catch {{
-    return false;
-  }}
-}}
 
-function isTrustedStatefulCommand(word) {{
+function isTrustedStatefulCommand(word, cwd) {{
   if (word === STATEFUL) return true;
   if (word !== "stateful") return false;
-  return bareStatefulStillVerified();
+  return verifyBareStateful(cwd);
 }}
 
 
@@ -2497,12 +2485,11 @@ function parseStatefulProcessFindWords(words) {{
   }}
   return {{ allow: true }};
 }}
-
-function statefulBashPassthroughDecision(command) {{
+function statefulBashPassthroughDecision(command, cwd) {{
   try {{
     const words = splitStatefulCommandWords(String(command || "").trim());
     if (words.length === 0) return {{ allow: false, reason: "Bash command is empty" }};
-    if (!isTrustedStatefulCommand(words[0])) {{
+    if (!isTrustedStatefulCommand(words[0], cwd)) {{
       return {{ allow: false, reason: "OMP raw Bash is denied; use the trusted stateful sandbox command" }};
     }}
     let decision;
@@ -2521,7 +2508,7 @@ export default function statefulOmpExtension(pi) {{
   pi.setLabel("Stateful");
   pi.on("tool_call", async (event, ctx) => {{
     if (event?.toolName !== "bash" && event?.toolName !== "functions.bash") return;
-    const decision = statefulBashPassthroughDecision(event?.input?.command);
+    const decision = statefulBashPassthroughDecision(event?.input?.command, ctx?.cwd);
     if (!decision.allow) return {{ block: true, reason: decision.reason }};
     try {{
       const rewritten = commandWithActiveSandboxIdentity(decision.words, event, ctx);

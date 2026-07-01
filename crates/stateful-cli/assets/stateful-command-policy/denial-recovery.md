@@ -34,7 +34,7 @@ If raw Bash or eval-tool execution is blocked:
 - Use native Stateful coordination tools and native inspection first.
 - Use OMP native `edit`/`write` auto-declare/claim for the default simple-write path; use reservation and claims for other repo edits.
 - Codex fallback command paths: read-only sandbox for read-only shell inspection, `stateful sandbox process find` for process checks, write-targets sandbox for command-shaped writes, and git profile for git.
-- OMP fallback command paths: built-in Bash with strict trusted `stateful sandbox run ...` or `stateful sandbox process find ...` commands. Bare `stateful` is trusted only after session-start preflight hash-verifies the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted.
+- OMP fallback command paths: built-in Bash with strict trusted `stateful sandbox run ...` or `stateful sandbox process find ...` commands. Bare `stateful` is trusted only after session-start or per-tool preflight hash-verifies the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted.
 
 Do not wrap `stateful sandbox run` in arbitrary Bash/eval in OMP; only the built-in Bash strict trusted Stateful command path is allowed.
 

@@ -323,6 +323,10 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
         extension.contains("cannot be read for stale check"),
         "lazy resume stale checks should fail cleanly when a target becomes unreadable"
     );
+    assert!(
+        extension.contains("return verifyBareStateful(cwd);"),
+        "OMP bash passthrough should lazily re-verify bare stateful for subagent tool calls"
+    );
     assert!(extension.contains("reservation or claim is ready"));
     assert!(extension.contains("structuredLazyEditOperationId(decision)"));
     assert!(extension.contains("structuredLazyWriteOperationId(decision)"));
@@ -372,10 +376,15 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(extension.contains("async function ensureExternalBashGrant(ctx, params, signal)"));
     assert!(extension.contains("pi.on(\"tool_call\""));
     assert!(extension.contains("function statefulBashPassthroughDecision"));
-    assert!(extension.contains("let verifiedBareStatefulPath = null"));
+    assert!(!extension.contains("verifiedBareStatefulPath"));
     assert!(extension.contains("function statefulBinaryDigest(path)"));
     assert!(extension.contains("verifyBareStateful(ctx.cwd)"));
-    assert!(extension.contains("isTrustedStatefulCommand(words[0])"));
+    assert!(extension.contains("isTrustedStatefulCommand(words[0], cwd)"));
+    assert!(extension.contains("statefulBashPassthroughDecision(event?.input?.command, ctx?.cwd)"));
+    assert!(
+        !extension.contains("bareStatefulStillVerified"),
+        "bare stateful trust must re-resolve the current tool cwd before allowing Bash passthrough"
+    );
     assert!(extension.contains("event?.toolName !== \"bash\""));
     assert!(extension.contains("ensureExternalBashGrant(ctx, params, signal)"));
     assert!(extension.contains("Approve external sandbox grant"));

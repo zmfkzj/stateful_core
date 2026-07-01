@@ -2,7 +2,7 @@
 
 Choose the narrowest existing entry point before writing a command.
 
-For OMP entries below, strict trusted bare `stateful` means session-start preflight has hash-verified the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted. Arbitrary raw Bash/eval remains denied.
+For OMP entries below, strict trusted bare `stateful` means session-start or per-tool preflight has hash-verified the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted. Arbitrary raw Bash/eval remains denied.
 
 | Need | Codex | OMP | Do not use |
 | --- | --- | --- | --- |

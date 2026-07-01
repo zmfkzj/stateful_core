@@ -253,9 +253,9 @@ authorization metadata.
 
 In OMP, built-in Bash may run only strict trusted `stateful sandbox run ...`
 and `stateful sandbox process find ...` commands. Bare `stateful` is trusted
-only after session-start preflight hash-verifies the first PATH `stateful`
-binary against the installed Stateful binary; otherwise use the installed
-absolute binary path. External write/create/write-dir/socket/signal scope still
+only after session-start or per-tool preflight hash-verifies the first PATH
+`stateful` binary against the installed Stateful binary; otherwise use the
+installed absolute binary path. External write/create/write-dir/socket/signal
 asks for a Stateful OMP UI grant by default; `stateful.autoApprove: true` skips
 only that Stateful-owned prompt while sandbox scope validation, hooks,
 reservation/claim checks, and grant limits still apply. When auto-approval is
