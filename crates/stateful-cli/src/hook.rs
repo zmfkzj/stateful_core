@@ -384,6 +384,7 @@ fn is_omp_safe_without_repo_write_authorization(tool_name: &str) -> bool {
         "browser",
         "find",
         "generate_image",
+        "glob",
         "grep",
         "irc",
         "lazy_edit_resume",
