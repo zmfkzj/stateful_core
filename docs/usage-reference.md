@@ -71,6 +71,9 @@ eval.rb: false
 eval.jl: false
 ```
 
+`stateful.autoApprove` is canonical; `stateful.autoApproval` is accepted as a
+compatibility alias.
+
 It removes `tools.approval` from the stateful profile because yolo mode delegates
 safety to Stateful hooks. Without `--update`, existing scalar values are
 preserved and only missing keys are inserted. With `--update`, existing target
@@ -89,14 +92,14 @@ Installed OMP support:
   preflight.
 - Built-in Bash for strict trusted `stateful sandbox process find ...` process
   inspection commands.
-- External write/create/write-dir/socket/signal scope asks for a scoped OMP UI
-  grant by default; `stateful.autoApprove: true` skips only that
-  Stateful-owned prompt while sandbox scope validation, hooks,
-  reservation/claim checks, and grant limits still apply. The approval prompt
-  omits raw command text and grants matching calls keyed by purpose plus
-  write/create/write-dir/socket/signal/network scope until expiry or max uses;
-  defaults are 5 uses and 600 seconds. When auto-approval is enabled, no prompt
-  is shown.
+- External write/create/write-dir/socket/signal scope and repo-external OMP
+  native `edit`/`write` file targets ask for a scoped OMP UI grant by default;
+  `stateful.autoApprove: true` skips only that Stateful-owned prompt while
+  sandbox scope validation, hooks, reservation/claim checks, and grant limits
+  still apply. The approval prompt omits raw command text and grants matching
+  calls keyed by purpose plus write/create/write-dir/socket/signal/network scope
+  until expiry or max uses; defaults are 5 uses and 600 seconds. When
+  auto-approval is enabled, no prompt is shown.
 - `lazy_bash_resume` for a blocked external Bash command that could not prompt
   for its scoped grant on the original tool call. The live extension stores the
   trusted `stateful sandbox run --fs external ...` command, asks for the same

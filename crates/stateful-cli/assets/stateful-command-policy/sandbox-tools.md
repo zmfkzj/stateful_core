@@ -14,7 +14,7 @@ For OMP entries below, strict trusted bare `stateful` means session-start or per
 | Remote git | same git profile with `--network enabled` | same | raw git, config-mutating remote setup |
 | GitHub PR list/view/status/create | `sandbox run --fs github-pr --network enabled --command 'gh pr ...'` | built-in Bash with strict trusted `stateful sandbox run --fs github-pr ...` | raw `gh`, browser/editor PR flows |
 | Read-only external shell command | `sandbox run --fs external --purpose ... --command ...` | built-in Bash with strict trusted `stateful sandbox run --fs external ...` | raw Bash/eval |
-| External write/socket/signal scope | `sandbox run --fs external` with explicit scope | built-in Bash with strict trusted `stateful sandbox run --fs external ...`; prompts unless `stateful.autoApprove: true` | repo-internal profiles for external writes |
+| External write/socket/signal scope | `sandbox run --fs external` with explicit scope | built-in Bash with strict trusted `stateful sandbox run --fs external ...`; repo-external native `edit`/`write` file targets also prompt unless OMP auto-approval is enabled | repo-internal profiles for external writes |
 | Nested Codex benchmark | `sandbox run-nested-codex-benchmark ...` | not a generic OMP command path | generic relaxed profiles or nested wrapping |
 
 ## Git And PR Rules

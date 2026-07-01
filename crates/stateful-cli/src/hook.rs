@@ -504,6 +504,10 @@ fn authorize_omp_targets(
     identity: Option<&RepoIdentity>,
     targets: Vec<PatchTarget>,
 ) -> anyhow::Result<OmpHookOutcome> {
+    if let Some(outcome) = omp_external_native_write_prompt(input, &targets, repo_root, cwd)? {
+        return Ok(outcome);
+    }
+
     let Some(targets) = normalize_targets(targets, repo_root, cwd)? else {
         return Ok(OmpHookOutcome::Block {
             reason: format!("{} target is outside the enabled repo", input.tool_name),
@@ -590,6 +594,80 @@ fn authorize_omp_targets(
 
         return Ok(OmpHookOutcome::Allow);
     }
+}
+
+fn omp_external_native_write_prompt(
+    input: &OmpPreToolUseInput,
+    targets: &[PatchTarget],
+    repo_root: Option<&Path>,
+    cwd: Option<&Path>,
+) -> anyhow::Result<Option<OmpHookOutcome>> {
+    let tool_name = runtime_tool_name_leaf(&input.tool_name);
+    if !(tool_name.eq_ignore_ascii_case("edit") || tool_name.eq_ignore_ascii_case("write")) {
+        return Ok(None);
+    }
+    let Some(repo_root) = repo_root else {
+        return Ok(None);
+    };
+    let mut external_targets = Vec::new();
+    let mut internal_targets = 0;
+    for target in targets {
+        match target.action {
+            "write_file" => {
+                if normalize_file_tool_target(&target.path, Some(repo_root), cwd)?.is_some() {
+                    internal_targets += 1;
+                } else {
+                    external_targets.push(omp_external_target_display(&target.path, cwd));
+                }
+            }
+            "move_file" => {
+                for path in [&target.path, target.new_path.as_deref().unwrap_or("")] {
+                    if path.is_empty() {
+                        continue;
+                    }
+                    if normalize_file_tool_target(path, Some(repo_root), cwd)?.is_some() {
+                        internal_targets += 1;
+                    } else {
+                        external_targets.push(omp_external_target_display(path, cwd));
+                    }
+                }
+            }
+            _ => return Ok(None),
+        }
+    }
+    if external_targets.is_empty() {
+        return Ok(None);
+    }
+    if internal_targets > 0 {
+        return Ok(Some(OmpHookOutcome::Block {
+            reason: format!(
+                "{} mixes repo-internal and repo-external targets; split the operation before retrying",
+                input.tool_name
+            ),
+        }));
+    }
+
+    let action = if tool_name.eq_ignore_ascii_case("edit") {
+        "edit"
+    } else {
+        "write"
+    };
+    Ok(Some(OmpHookOutcome::Prompt {
+        title: format!("Approve external {action}"),
+        message: format!(
+            "Stateful is requesting approval for a repo-external OMP {action}.\n\nTargets:\n{}\n\nSet stateful.autoApprove (or alias stateful.autoApproval) to true to skip this prompt.",
+            external_targets.join("\n")
+        ),
+    }))
+}
+
+fn omp_external_target_display(path: &str, cwd: Option<&Path>) -> String {
+    let path = Path::new(path.trim());
+    if path.is_absolute() {
+        return normalize_path(path.to_path_buf()).to_string_lossy().to_string();
+    }
+    let base = cwd.unwrap_or_else(|| Path::new("."));
+    normalize_path(base.join(path)).to_string_lossy().to_string()
 }
 
 fn release_omp_auto_claims(
@@ -764,16 +842,39 @@ fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {
     let Some(edit_input) = input.get("input").and_then(serde_json::Value::as_str) else {
         return Vec::new();
     };
-    edit_input
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let header = line.strip_prefix('[')?.strip_suffix(']')?;
-            let (path, _) = header.split_once('#')?;
+    let mut targets = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut current_target_index: Option<usize> = None;
+    for line in edit_input.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[').and_then(|line| line.strip_suffix(']')) {
+            let Some((path, _)) = header.split_once('#') else {
+                continue;
+            };
             let path = path.trim();
-            (!path.is_empty()).then(|| PatchTarget::write(path))
-        })
-        .collect()
+            if path.is_empty() {
+                current_path = None;
+                current_target_index = None;
+                continue;
+            }
+            current_path = Some(path.to_string());
+            current_target_index = Some(targets.len());
+            targets.push(PatchTarget::write(path));
+            continue;
+        }
+
+        let Some(destination) = line
+            .strip_prefix("MV ")
+            .map(str::trim)
+            .filter(|destination| !destination.is_empty())
+        else {
+            continue;
+        };
+        let (Some(path), Some(index)) = (current_path.as_deref(), current_target_index) else {
+            continue;
+        };
+        targets[index] = PatchTarget::move_file(path, destination);
+    }
+    targets
 }
 
 pub fn handle_omp_session_start_with_runtime(

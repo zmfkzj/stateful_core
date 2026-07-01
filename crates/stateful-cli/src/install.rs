@@ -2223,8 +2223,8 @@ function benchmarkSourceBlockReason(event) {{
 function configTextAutoApprove(text) {{
   const value = "(?:true|\\\"true\\\"|'true'|1|\\\"1\\\"|'1'|yes|\\\"yes\\\"|'yes'|on|\\\"on\\\"|'on')";
   const body = String(text || "");
-  return new RegExp("(^|\\n)\\s*stateful\\.autoApprove\\s*:\\s*" + value + "\\s*(?:#.*)?(?:\\n|$)", "i").test(body)
-    || new RegExp("(^|\\n)stateful\\s*:\\s*\\n(?:[ \\t]+[^\\n]*\\n)*?[ \\t]+autoApprove\\s*:\\s*" + value + "\\s*(?:#.*)?(?:\\n|$)", "i").test(body);
+  return new RegExp("(^|\\n)\\s*stateful\\.autoApprov(?:e|al)\\s*:\\s*" + value + "\\s*(?:#.*)?(?:\\n|$)", "i").test(body)
+    || new RegExp("(^|\\n)stateful\\s*:\\s*\\n(?:[ \\t]+[^\\n]*\\n)*?[ \\t]+autoApprov(?:e|al)\\s*:\\s*" + value + "\\s*(?:#.*)?(?:\\n|$)", "i").test(body);
 }}
 
 function statefulConfigFileAutoApprove() {{
@@ -2242,10 +2242,13 @@ function statefulConfigFileAutoApprove() {{
 
 function statefulPromptAutoApproveConfig(ctx) {{
   return configBool(ctx?.config?.stateful?.autoApprove)
+    || configBool(ctx?.config?.stateful?.autoApproval)
     || configBool(ctx?.config?.stateful?.auto_approve)
     || configBool(ctx?.config?.["stateful.autoApprove"])
+    || configBool(ctx?.config?.["stateful.autoApproval"])
     || configBool(ctx?.config?.["stateful.auto_approve"])
     || configBool(ctx?.stateful?.autoApprove)
+    || configBool(ctx?.stateful?.autoApproval)
     || configBool(ctx?.stateful?.auto_approve)
     || statefulConfigFileAutoApprove();
 }}

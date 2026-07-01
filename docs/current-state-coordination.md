@@ -271,8 +271,10 @@ stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) and ensures the target keys
 `tools.approvalMode: yolo`, `stateful.autoApprove: false`,
 `bash.enabled: true`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
-and `eval.jl: false`; it removes
-`tools.approval` from the stateful profile because yolo mode delegates safety to
+and `eval.jl: false`. `stateful.autoApprove` is canonical;
+`stateful.autoApproval` is accepted as a compatibility alias. The installer
+removes `tools.approval` from the stateful profile because yolo mode delegates
+safety to
 Stateful hooks. Without `--update`, existing scalar values are preserved and
 only missing keys are inserted; with `--update`, existing target scalar values
 are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
@@ -287,11 +289,11 @@ generated extension keeps built-in Bash preflight, edit/write auto-declare/claim
 and lazy resume tools. Built-in Bash may run only strict trusted
 `stateful sandbox run ...` and `stateful sandbox process find ...` commands
 after Stateful preflight; command execution and process inspection are not
-generated tool calls. External
-write/create/write-dir/socket/signal scope asks for a scoped OMP UI grant by
-default; `stateful.autoApprove: true` skips only that Stateful-owned prompt
-while sandbox scope validation, hooks, reservation/claim checks, and grant
-limits still apply. That grant omits raw command text, shows purpose and
+generated tool calls. External write/create/write-dir/socket/signal scope and
+repo-external OMP native `edit`/`write` file targets ask for a scoped OMP UI
+grant by default; `stateful.autoApprove: true` skips only that Stateful-owned
+prompt while sandbox scope validation, hooks, reservation/claim checks, and
+grant limits still apply. That grant omits raw command text, shows purpose and
 declared scope, and can cover matching calls until expiry or max uses. When
 auto-approval is enabled, no prompt is shown. Raw Bash and
 Python/JavaScript/JS/Ruby/Julia
@@ -352,11 +354,11 @@ Reconciliation acknowledgements and OMP `SessionStart`, `PostToolUse`, and
 OMP adapters preserve stateful hard blocks: built-in Bash may run only strict
 trusted `stateful sandbox run ...` and `stateful sandbox process find ...`
 commands after Stateful preflight. External write/create/write-dir/socket/signal
-scope asks for a scoped OMP UI grant by default; `stateful.autoApprove: true`
-skips only that Stateful-owned prompt while sandbox scope validation, hooks,
-reservation/claim checks, and grant limits still apply; stateful allow maps to
-allow; and stateful denial or unavailable state maps to block even when OMP yolo
-metadata is present.
+scope and repo-external OMP native `edit`/`write` file targets ask for a scoped
+OMP UI grant by default; `stateful.autoApprove: true` skips only that
+Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim
+checks, and grant limits still apply; stateful allow maps to allow; and stateful
+denial or unavailable state maps to block even when OMP yolo metadata is present.
 
 ### Hook Responsibilities
 
@@ -383,10 +385,11 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   only strict trusted `stateful sandbox run ...` and `stateful sandbox process
   find ...` commands after Stateful preflight; arbitrary raw Bash and the
   Python/JavaScript/JS/Ruby/Julia eval tools remain denied at host approval and
-  hook levels. Scoped external writes still ask for a Stateful OMP UI grant by
-  default; `stateful.autoApprove: true` skips only that Stateful-owned prompt
-  while sandbox scope validation, hooks, reservation/claim checks, and grant
-  limits still apply.
+  hook levels. Scoped external writes and repo-external OMP native `edit`/`write`
+  file targets still ask for a Stateful OMP UI grant by default;
+  `stateful.autoApprove: true` skips only that Stateful-owned prompt while
+  sandbox scope validation, hooks, reservation/claim checks, and grant limits
+  still apply.
 - check whether requested files or resources conflict with active claims
 - deny, warn, or add context based on policy
 
@@ -531,7 +534,7 @@ test execution -> run through sandbox run --fs build --network enabled with
   --write-dir <scratch-purpose>; scratch lives under /tmp/stateful/<session>/
 Codex raw Bash, arbitrary OMP raw Bash, or OMP Python/JavaScript/JS/Ruby/Julia eval tools
   -> deny
-repo-external OMP command-shaped work -> use built-in Bash with a strict trusted `stateful sandbox run --fs external ...` command; write/create/write-dir/socket/signal scope asks for a scoped OMP UI grant by default, and `stateful.autoApprove: true` skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply
+repo-external OMP command-shaped work -> use built-in Bash with a strict trusted `stateful sandbox run --fs external ...` command; write/create/write-dir/socket/signal scope and repo-external OMP native `edit`/`write` file targets ask for a scoped OMP UI grant by default, and `stateful.autoApprove: true` skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply
 ```
 
 Bash denial should tell the agent to use native read/search/diff tools for
@@ -541,12 +544,13 @@ ordinary read work,
 `<absolute-stateful-binary> sandbox run --fs write-targets --write-target <file> ... --command <cmd>`
 for Codex command-shaped repo writes after reservation and same-reservation claim,
 OMP built-in Bash with strict trusted `stateful sandbox run ...` commands for
-sandbox runs and repo-external work. External write/create/write-dir,
-socket, or signal scope asks for a scoped OMP UI grant by default;
-`stateful.autoApprove: true` skips only that Stateful-owned prompt while
-sandbox scope validation, hooks, reservation/claim checks, and grant limits still
-apply. Use OMP native `edit`/`write` auto-declare/claim for the default
-simple-write path and native edit tools for other repo file edits.
+sandbox runs and repo-external command-shaped work. External write/create/write-dir,
+socket, or signal scope and repo-external OMP native `edit`/`write` file targets
+ask for a scoped OMP UI grant by default; `stateful.autoApprove: true` skips only
+that Stateful-owned prompt while sandbox scope validation, hooks,
+reservation/claim checks, and grant limits still apply. Use OMP native
+`edit`/`write` auto-declare/claim for repo-internal simple writes and native edit
+tools for other repo file edits.
 
 The read-only sandbox profile is a write-confinement profile. It does not
 provide full process containment, and it cannot be combined with
@@ -591,8 +595,9 @@ Initial policy should prefer advisory claims:
 - OMP built-in Bash may run only strict trusted `stateful sandbox run ...` and
   `stateful sandbox process find ...` commands after Stateful preflight;
   arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution is
-  denied at host approval and hook levels. Scoped external writes still ask for
-  the Stateful OMP UI grant unless auto-approved.
+  denied at host approval and hook levels. Scoped external writes and repo-external
+  native `edit`/`write` file targets still ask for the Stateful OMP UI grant
+  unless auto-approved.
 - directory reservation and directory claim authorize only `write_directory` for the
   exact directory resource; they do not authorize `write_file`, delete, rename,
   or move actions on child paths
@@ -874,8 +879,9 @@ supported write action + target outside reservation scope -> deny
 Codex raw Bash -> deny; OMP built-in Bash -> allow only strict trusted
   `stateful sandbox run ...` and `stateful sandbox process find ...` commands
   after Stateful preflight; arbitrary raw OMP Bash and Python/JavaScript/JS/Ruby/Julia
-  eval tools -> deny. Scoped external writes still ask for the Stateful OMP UI
-  grant unless auto-approved.
+  eval tools -> deny. Scoped external writes and repo-external native
+  `edit`/`write` file targets still ask for the Stateful OMP UI grant unless
+  auto-approved.
 delete action + non-exact file scope -> deny
 rename/move action + non-exact source or destination scope -> deny
 active write claim in hard conflict domain -> deny

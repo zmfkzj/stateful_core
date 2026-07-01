@@ -258,10 +258,11 @@ and `stateful sandbox process find ...` commands. Bare `stateful` is trusted
 only after session-start or per-tool preflight hash-verifies the first PATH
 `stateful` binary against the installed Stateful binary; otherwise use the
 installed absolute binary path. External write/create/write-dir/socket/signal
-asks for a Stateful OMP UI grant by default; `stateful.autoApprove: true` skips
-only that Stateful-owned prompt while sandbox scope validation, hooks,
-reservation/claim checks, and grant limits still apply. When auto-approval is
-enabled, no prompt is shown. Native OMP `edit` and `write` use auto-declare/claim
+scope and repo-external OMP native `edit`/`write` file targets ask for a
+Stateful OMP UI grant by default; `stateful.autoApprove: true` skips only that
+Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim
+checks, and grant limits still apply. When auto-approval is enabled, no prompt
+is shown. Repo-internal native OMP `edit` and `write` use auto-declare/claim
 as the default simple-write path when no explicit reservation id is supplied and
 the only denial is missing reservation/scope. Use `lazy_edit_resume` for
 queued/conflicting line-based OMP `edit` patches and `lazy_write_resume` for

@@ -151,17 +151,17 @@ only strict trusted `stateful sandbox run ...` and
 `stateful sandbox process find ...` commands after Stateful preflight; arbitrary
 raw Bash and native Python execution are denied at host approval and hook
 levels. Command execution and process inspection are not generated tool calls.
-External write/create/write-dir/socket/signal scope prompts by default for a
-scoped OMP UI grant unless `stateful.autoApprove: true` is enabled.
-Auto-approval skips only the Stateful-owned UI prompt; sandbox scope validation,
-hooks, reservation/claim checks, and grant limits still apply. When prompted,
-the prompt shows purpose, declared scope, examples, max uses, and expiry rather
-than raw command text, and matching calls reuse the grant until it expires or
-reaches its use limit. The generated extension subscribes to replayable
-Stateful SSE reservation notifications: each event uses the per-agent/workspace
-notification sequence as the SSE `id` and JSON `sequence`, and reconnecting with
-`Last-Event-ID` / `last-event-id` acknowledges delivered events before later
-pending notifications are replayed. The extension injects a next-turn OMP
+External write/create/write-dir/socket/signal scope and repo-external OMP native
+`edit`/`write` file targets prompt by default for a scoped OMP UI grant unless
+`stateful.autoApprove: true` is enabled. Auto-approval skips only the
+Stateful-owned UI prompt; sandbox scope validation, hooks, reservation/claim
+checks, and grant limits still apply. When prompted, the prompt shows purpose,
+declared scope, examples, max uses, and expiry rather than raw command text, and
+matching calls reuse the grant until it expires or reaches its use limit. The
+generated extension subscribes to replayable Stateful SSE reservation notifications:
+each event uses the per-agent/workspace notification sequence as the SSE `id`
+and JSON `sequence`, and reconnecting with `Last-Event-ID` / `last-event-id`
+acknowledges delivered events before later pending notifications are replayed. The extension injects a next-turn OMP
 message when a queued `wait_id` becomes a claimable reservation (API state
 `reserved`); the claim and write still use normal Stateful tools.
 Ordinary read work should use agent-native read, search, or diff tools when
@@ -173,11 +173,13 @@ inspection uses `stateful sandbox process find <selector>`; in OMP, run that
 command through built-in Bash, not a generated process tool. Command-shaped repo
 writes must use `stateful sandbox run --fs write-targets` with explicit
 repo-relative target flags after reservation and same-reservation claim; in OMP, use
-built-in Bash with the same trusted command. Repo-external operations use
-`stateful sandbox run --fs external` with purpose and command; external writes
-must declare write/create/dir scope and ask for a scoped OMP UI grant by default
-unless `stateful.autoApprove: true` is enabled. Raw Bash test commands are not
-allowlisted; use `stateful sandbox run --fs build --network enabled --write-dir
+built-in Bash with the same trusted command. Repo-external command-shaped
+operations use `stateful sandbox run --fs external` with purpose and command;
+external sandbox writes must declare write/create/dir scope. Repo-external OMP
+native `edit`/`write` file targets and external sandbox writes ask for a scoped
+OMP UI grant by default unless `stateful.autoApprove: true` is enabled. Raw Bash
+test commands are not allowlisted; use
+`stateful sandbox run --fs build --network enabled --write-dir
 <scratch-purpose> --command <cmd>` so build artifacts go under
 `/tmp/stateful/<session>/<scratch-purpose>/`.
 

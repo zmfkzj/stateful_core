@@ -2586,6 +2586,116 @@ fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
 }
 
 #[test]
+fn omp_write_repo_external_target_prompts_for_scoped_approval() {
+    let input = serde_json::json!({
+        "runtime": "omp",
+        "agent_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "write",
+        "tool_input": { "path": "/tmp/stateful-outside.txt", "content": "hello" }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        None,
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp pre-tool should parse");
+
+    let OmpHookOutcome::Prompt { title, message } = outcome else {
+        panic!("repo-external OMP write should prompt");
+    };
+    assert!(title.contains("external write"));
+    assert!(message.contains("/tmp/stateful-outside.txt"));
+    assert!(message.contains("stateful.autoApprove"));
+}
+
+#[test]
+fn omp_edit_repo_external_target_prompts_for_scoped_approval() {
+    let input = serde_json::json!({
+        "runtime": "omp",
+        "agent_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "edit",
+        "tool_input": { "input": "[/tmp/stateful-outside.txt#ABCD]\nSWAP 1.=1:\n+new\n" }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        None,
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp pre-tool should parse");
+
+    let OmpHookOutcome::Prompt { title, message } = outcome else {
+        panic!("repo-external OMP edit should prompt");
+    };
+    assert!(title.contains("external edit"));
+    assert!(message.contains("/tmp/stateful-outside.txt"));
+    assert!(message.contains("stateful.autoApprove"));
+}
+
+#[test]
+fn omp_edit_move_to_repo_external_target_blocks_before_bypassing_repo_auth() {
+    let input = serde_json::json!({
+        "runtime": "omp",
+        "agent_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "edit",
+        "tool_input": { "input": "[docs/a.md#ABCD]\nMV /tmp/stateful-outside.txt\n" }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        None,
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp pre-tool should parse");
+
+    let OmpHookOutcome::Block { reason } = outcome else {
+        panic!("repo-internal to repo-external OMP edit move should block");
+    };
+    assert!(reason.contains("split the operation"));
+}
+
+#[test]
+fn omp_edit_mixed_repo_internal_and_external_targets_blocks() {
+    let input = serde_json::json!({
+        "runtime": "omp",
+        "agent_id": "omp-parent",
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "edit",
+        "tool_input": {
+            "input": "[docs/a.md#ABCD]\nSWAP 1.=1:\n+internal\n[/tmp/stateful-outside.txt#DCBA]\nSWAP 1.=1:\n+external\n"
+        }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        None,
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp pre-tool should parse");
+
+    let OmpHookOutcome::Block { reason } = outcome else {
+        panic!("mixed repo-internal and repo-external OMP edit should block");
+    };
+    assert!(reason.contains("split the operation"));
+}
+
+#[test]
 fn omp_unclassified_tools_are_manageable_with_stateful_tools_allowlist() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-hook-omp-tool-allowlist-test-{}",
