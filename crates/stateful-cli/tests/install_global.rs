@@ -305,6 +305,24 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(extension.contains("nextLazyEditOperationId()"));
     assert!(extension.contains("lazyWriteOperations"));
     assert!(extension.contains("nextLazyWriteOperationId()"));
+    assert!(
+        extension.contains("function readOperationBase(path)"),
+        "lazy operation base reads should go through an unreadable-file guard"
+    );
+    assert!(
+        !extension.contains(
+            "bases.set(target, existsSync(path) ? readFileSync(path, \"utf8\") : null);"
+        ),
+        "readOperationBases must not read targets directly because EACCES crashes lazy capture"
+    );
+    assert!(
+        extension.contains("if (!base.ok) return null;"),
+        "unreadable lazy operation bases should not be queued for resume"
+    );
+    assert!(
+        extension.contains("cannot be read for stale check"),
+        "lazy resume stale checks should fail cleanly when a target becomes unreadable"
+    );
     assert!(extension.contains("reservation or claim is ready"));
     assert!(extension.contains("structuredLazyEditOperationId(decision)"));
     assert!(extension.contains("structuredLazyWriteOperationId(decision)"));

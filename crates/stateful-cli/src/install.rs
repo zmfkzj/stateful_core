@@ -1894,11 +1894,22 @@ function safeLazyOperationTarget(target) {{
     && !target.split("/").some((part) => part === "" || part === "." || part === "..");
 }}
 
+function readOperationBase(path) {{
+  if (!existsSync(path)) return {{ ok: true, value: null }};
+  try {{
+    return {{ ok: true, value: readFileSync(path, "utf8") }};
+  }} catch (error) {{
+    return {{ ok: false, error: error?.message || String(error) }};
+  }}
+}}
+
 function readOperationBases(cwd, targets) {{
   const bases = new Map();
   for (const target of targets) {{
     const path = resolve(cwd, target);
-    bases.set(target, existsSync(path) ? readFileSync(path, "utf8") : null);
+    const base = readOperationBase(path);
+    if (!base.ok) return null;
+    bases.set(target, base.value);
   }}
   return bases;
 }}
@@ -1907,6 +1918,8 @@ function rememberLazyEditOperation(event, ctx, decision) {{
   if (event?.toolName !== "edit") return "";
   const targets = editPatchTargets(event.input || {{}});
   if (targets.length === 0 || !targets.every(safeLazyOperationTarget)) return "";
+  const bases = readOperationBases(ctx.cwd, targets);
+  if (!bases) return "";
   const operationId = structuredLazyEditOperationId(decision) || nextLazyEditOperationId();
   lazyEditOperations.set(operationId, {{
     operation_id: operationId,
@@ -1916,7 +1929,7 @@ function rememberLazyEditOperation(event, ctx, decision) {{
     tool_name: event.toolName,
     tool_input: event.input || {{}},
     targets,
-    bases: readOperationBases(ctx.cwd, targets),
+    bases,
     blocked_reason: decision?.reason || "",
   }});
   return operationId;
@@ -1931,8 +1944,10 @@ function rememberLazyWriteOperation(event, ctx, decision) {{
   if (event?.toolName !== "write") return "";
   const target = writeToolTarget(event.input || {{}});
   if (!target) return "";
-  const operationId = structuredLazyWriteOperationId(decision) || nextLazyWriteOperationId();
   const targets = [target];
+  const bases = readOperationBases(ctx.cwd, targets);
+  if (!bases) return "";
+  const operationId = structuredLazyWriteOperationId(decision) || nextLazyWriteOperationId();
   lazyWriteOperations.set(operationId, {{
     operation_id: operationId,
     agent_id: agentId(event, ctx),
@@ -1941,7 +1956,7 @@ function rememberLazyWriteOperation(event, ctx, decision) {{
     tool_name: event.toolName,
     tool_input: event.input || {{}},
     targets,
-    bases: readOperationBases(ctx.cwd, targets),
+    bases,
     blocked_reason: decision?.reason || "",
   }});
   return operationId;
@@ -2044,8 +2059,9 @@ function parseOmpLinePatch(patch) {{
 function validateOmpLinePatchBases(cwd, editsByFile, bases) {{
   for (const target of editsByFile.keys()) {{
     const filePath = resolve(cwd, target);
-    const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : null;
-    if (current !== (bases.get(target) ?? null)) {{
+    const current = readOperationBase(filePath);
+    if (!current.ok) return {{ status: "stale", message: target + " cannot be read for stale check" }};
+    if (current.value !== (bases.get(target) ?? null)) {{
       return {{ status: "stale", message: target + " changed since operation was queued" }};
     }}
   }}
