@@ -1282,6 +1282,161 @@ print(json.dumps({
 }
 
 #[test]
+fn programbench_omp_adapter_does_not_pass_parent_stateful_runtime_to_agent_docker() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import os
+import subprocess
+import types
+
+docker_exec_envs = []
+
+def exec_env(command):
+    env = {}
+    index = 0
+    while index < len(command) - 1:
+        if command[index] == "-e":
+            key, _, value = command[index + 1].partition("=")
+            env[key] = value
+            index += 2
+        else:
+            index += 1
+    return env
+
+def fake_run(command, **kwargs):
+    if command[:2] == ["docker", "run"]:
+        return subprocess.CompletedProcess(command, 0, stdout="agent-container-id\n", stderr="")
+    if command[:2] == ["docker", "exec"] and (
+        "/opt/stateful/bin/stateful" in command or "/opt/omp/bin/omp" in command
+    ):
+        docker_exec_envs.append(exec_env(command))
+        if "/opt/omp/bin/omp" in command:
+            return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+mod.subprocess.run = fake_run
+mod.omp_auth_source_agent_dir = lambda env: None
+os.environ["STATEFUL_SERVER_URL"] = "http://127.0.0.1:43873"
+os.environ["STATEFUL_SERVER_TOKEN"] = "parent-token"
+
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    omp_bin="host-omp",
+    stateful_binary="/host/stateful",
+    model="gpt-5.4-mini",
+    benchmark_max_turns=123,
+    timeout_seconds=456,
+    stateful=True,
+    subagent=False,
+    subagent_min_count=3,
+    airlock="/tmp/programbench-airlock",
+    agent_docker_image="stateful/omp-agent:test",
+    agent_docker_omp_bin="/opt/omp/bin/omp",
+    agent_docker_stateful_binary="/opt/stateful/bin/stateful",
+    agent_docker_home="/home/bench-agent",
+)
+mod.run_agent(args, mod.prompt_for_args(args))
+print(json.dumps(docker_exec_envs))
+"#,
+    );
+    let docker_exec_envs: Vec<serde_json::Value> =
+        serde_json::from_str(&output).expect("captured docker exec envs should be JSON");
+
+    assert_eq!(docker_exec_envs.len(), 3);
+    for env in docker_exec_envs {
+        assert_eq!(env["HOME"], "/home/bench-agent");
+        assert_eq!(
+            env["PI_CODING_AGENT_DIR"],
+            "/home/bench-agent/.omp/profiles/stateful/agent"
+        );
+        assert_eq!(env["STATEFUL_HOME"], "/home/bench-agent/.stateful");
+        assert_eq!(env["STATEFUL_SERVER_URL"], serde_json::Value::Null);
+        assert_eq!(env["STATEFUL_SERVER_TOKEN"], serde_json::Value::Null);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn programbench_omp_adapter_preserves_execute_only_executable_when_copying_to_agent_container() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r##"import json
+import pathlib
+import subprocess
+import tempfile
+import types
+
+docker_calls = []
+cp_modes = []
+
+def fake_run(command, **kwargs):
+    docker_calls.append(command)
+    if command[:2] == ["docker", "cp"] and command[2].endswith("/."):
+        cp_modes.append(executable.stat().st_mode & 0o777)
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+mod.subprocess.run = fake_run
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    timeout_seconds=123,
+)
+
+with tempfile.TemporaryDirectory() as tmp:
+    airlock = pathlib.Path(tmp)
+    executable = airlock / "executable"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o111)
+    (airlock / "README.md").write_text("readable\n")
+
+    mod.copy_airlock_to_agent_container(args, str(airlock), "agent-container-id")
+
+    print(json.dumps({
+        "cp_modes": cp_modes,
+        "docker_calls": docker_calls,
+        "restored_mode": executable.stat().st_mode & 0o777,
+    }))
+"##,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("copy result should be JSON");
+    let docker_calls = observed["docker_calls"]
+        .as_array()
+        .expect("docker calls should be array");
+
+    assert!(
+        docker_calls.iter().any(|call| {
+            docker_call_starts_with(call, &["docker", "cp"])
+                && call
+                    .as_array()
+                    .and_then(|args| args.get(3))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("agent-container-id:/workspace/")
+        }),
+        "execute-only executable should not prevent copying the airlock into the agent container"
+    );
+    assert_eq!(
+        observed["cp_modes"],
+        serde_json::json!([0o511]),
+        "host executable should be owner-readable only while docker cp reads it"
+    );
+    assert_eq!(
+        observed["restored_mode"],
+        serde_json::json!(0o111),
+        "host executable mode should be restored after docker cp"
+    );
+    assert!(
+        docker_calls.iter().any(|call| docker_call_execs(
+            call,
+            "agent-container-id",
+            &["chmod", "111", "/workspace/executable"],
+        )),
+        "copied executable should be chmodded back to its original mode inside the agent container"
+    );
+}
+
+#[test]
 fn programbench_omp_adapter_prepends_stateful_binary_dir_to_agent_path() {
     let output = run_python_adapter(
         &programbench_omp_agent_path(),

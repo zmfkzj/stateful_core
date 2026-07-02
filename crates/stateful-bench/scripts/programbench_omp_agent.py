@@ -245,18 +245,42 @@ def remove_agent_docker_container(args, agent_container_id: str) -> None:
 
 
 def copy_airlock_to_agent_container(args, airlock: str, agent_container_id: str) -> None:
-    subprocess.run(
-        [
-            resolve_host_binary(args.docker_bin),
-            "cp",
-            f"{airlock}/.",
-            f"{agent_container_id}:{CONTAINER_WORKSPACE}/",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=args.timeout_seconds,
-    )
+    executable = Path(airlock) / "executable"
+    executable_mode = None
+    if executable.is_file():
+        executable_mode = executable.stat().st_mode & 0o7777
+        if not os.access(executable, os.R_OK):
+            os.chmod(executable, executable_mode | 0o400)
+    try:
+        subprocess.run(
+            [
+                resolve_host_binary(args.docker_bin),
+                "cp",
+                f"{airlock}/.",
+                f"{agent_container_id}:{CONTAINER_WORKSPACE}/",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout_seconds,
+        )
+    finally:
+        if executable_mode is not None:
+            os.chmod(executable, executable_mode)
+    if executable_mode is not None:
+        subprocess.run(
+            docker_agent_exec_command(
+                args,
+                agent_container_id,
+                "chmod",
+                f"{executable_mode:o}",
+                f"{CONTAINER_WORKSPACE}/executable",
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout_seconds,
+        )
 
 
 def copy_agent_workspace_to_airlock(args, airlock: str, agent_container_id: str) -> None:
@@ -380,8 +404,6 @@ def run_agent(args, prompt):
     env["PI_CODING_AGENT_DIR"] = str(Path(airlock) / ".omp" / "profiles" / "stateful" / "agent")
     auth_source_agent = omp_auth_source_agent_dir(os.environ)
     if getattr(args, "agent_docker_image", None):
-        if args.stateful:
-            inherit_parent_stateful_runtime(env, os.environ)
         return run_agent_in_docker(args, prompt, airlock, env, auth_source_agent)
     if args.stateful:
         inherit_parent_stateful_runtime(env, os.environ)
