@@ -149,7 +149,7 @@ def run_omp_command(command, *, cwd: str, env: dict[str, str], timeout_seconds: 
 
 def run_agent(args, prompt):
     airlock = getattr(args, "airlock", "/tmp/programbench-airlock")
-    env = airlock_env(airlock)
+    env = airlock_env(airlock, args.stateful_binary if args.stateful else None)
     env.pop("OMP_AUTH_SOURCE_AGENT_DIR", None)
     if hasattr(args, "airlock") and hasattr(args, "container_id"):
         copy_workspace_from_container(args, airlock)

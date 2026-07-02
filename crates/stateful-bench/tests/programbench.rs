@@ -1035,6 +1035,53 @@ print(json.dumps({
 }
 
 #[test]
+fn programbench_omp_adapter_prepends_stateful_binary_dir_to_agent_path() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+def fake_run(command, **kwargs):
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+def fake_omp(command, *, cwd, env, timeout_seconds):
+    return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
+        "path": env.get("PATH", ""),
+        "stateful_dir": "/opt/stateful/bin",
+    }), stderr="")
+
+mod.subprocess.run = fake_run
+mod.run_omp_command = fake_omp
+mod.omp_auth_source_agent_dir = lambda env: None
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    omp_bin="omp",
+    stateful_binary="/opt/stateful/bin/stateful",
+    model=None,
+    benchmark_max_turns=321,
+    timeout_seconds=123,
+    stateful=True,
+    subagent=False,
+    subagent_min_count=3,
+)
+result = mod.run_agent(args, mod.prompt_for_args(args))
+print(result.stdout)
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("captured env should be JSON");
+    let path = observed["path"].as_str().expect("PATH should be a string");
+
+    assert_eq!(
+        path.split(':').next(),
+        observed["stateful_dir"].as_str(),
+        "agent PATH should prefer the stateful binary directory so bare `stateful` works"
+    );
+}
+
+#[test]
 fn programbench_omp_adapter_timeout_preserves_cleanup_denial() {
     let output = run_python_adapter(
         &programbench_omp_agent_path(),

@@ -239,7 +239,7 @@ def docker_exec(args, *inner: str, env: dict[str, str] | None = None) -> list[st
     ]
 
 
-def airlock_env(airlock: str) -> dict[str, str]:
+def airlock_env(airlock: str, stateful_binary: str | None = None) -> dict[str, str]:
     env = os.environ.copy()
     for key in list(env):
         if key.startswith("STATEFUL_"):
@@ -247,6 +247,8 @@ def airlock_env(airlock: str) -> dict[str, str]:
     env["HOME"] = airlock
     env["STATEFUL_HOME"] = str(Path(airlock) / ".stateful")
     env["CODEX_HOME"] = str(Path(airlock) / ".codex")
+    if stateful_binary is not None:
+        prepend_binary_dir_to_path(env, stateful_binary)
     return env
 
 
@@ -322,6 +324,14 @@ def resolve_host_binary(binary: str) -> str:
         return binary
     return str(path.resolve())
 
+def prepend_binary_dir_to_path(env: dict[str, str], binary: str) -> None:
+    resolved = Path(resolve_host_binary(binary))
+    if resolved.parent == Path("."):
+        return
+    directory = str(resolved.parent)
+    parts = [part for part in env.get("PATH", "").split(os.pathsep) if part and part != directory]
+    env["PATH"] = os.pathsep.join([directory, *parts])
+
 
 def run_stateful_command(args, airlock: str, *stateful_args: str) -> None:
     subprocess.run(
@@ -331,7 +341,7 @@ def run_stateful_command(args, airlock: str, *stateful_args: str) -> None:
         text=True,
         timeout=args.timeout_seconds,
         cwd=airlock,
-        env=airlock_env(airlock),
+        env=airlock_env(airlock, args.stateful_binary),
     )
 
 
@@ -345,7 +355,7 @@ def stop_stateful_server(args, airlock: str) -> None:
         text=True,
         timeout=args.timeout_seconds,
         cwd=airlock,
-        env=airlock_env(airlock),
+        env=airlock_env(airlock, args.stateful_binary),
     )
 
 
@@ -360,7 +370,7 @@ def install_stateful_for_codex(args, airlock: str) -> None:
 
 def run_agent(args, prompt):
     airlock = getattr(args, "airlock", "/tmp/programbench-airlock")
-    env = airlock_env(airlock)
+    env = airlock_env(airlock, args.stateful_binary if args.stateful else None)
     if hasattr(args, "airlock") and hasattr(args, "container_id"):
         copy_workspace_from_container(args, airlock)
     try:
