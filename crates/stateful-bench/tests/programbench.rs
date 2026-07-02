@@ -356,6 +356,10 @@ exit 0
             stateful_binary: stateful.to_string_lossy().into_owned(),
             codex_bin: codex.to_string_lossy().into_owned(),
             omp_bin: "omp".to_string(),
+            agent_docker_image: None,
+            agent_docker_omp_bin: "omp".to_string(),
+            agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+            agent_docker_home: "/home/stateful".to_string(),
         },
         vec![ProgramBenchDiscoveredInstance {
             instance_id: "owner__repo.abc123".to_string(),
@@ -480,6 +484,10 @@ printf '{{"usage":{{"input_tokens":7,"output_tokens":5}}}}\n'
         stateful_binary: "stateful".to_string(),
         codex_bin: codex.to_string_lossy().into_owned(),
         omp_bin: "omp".to_string(),
+        agent_docker_image: None,
+        agent_docker_omp_bin: "omp".to_string(),
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_home: "/home/stateful".to_string(),
     })
     .expect("matrix should discover through configured ProgramBench executable");
 
@@ -529,6 +537,10 @@ fn programbench_codex_agent_command_contains_condition_and_paths() {
         benchmark_max_turns: 500,
         timeout_seconds: 7200,
         subagent_min_count: 3,
+        agent_docker_image: None,
+        agent_docker_omp_bin: "omp".to_string(),
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_home: "/home/stateful".to_string(),
     })
     .expect("codex agent command should build");
 
@@ -557,12 +569,62 @@ fn programbench_omp_agent_command_marks_subagent_condition() {
         benchmark_max_turns: 500,
         timeout_seconds: 7200,
         subagent_min_count: 3,
+        agent_docker_image: None,
+        agent_docker_omp_bin: "omp".to_string(),
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_home: "/home/stateful".to_string(),
     })
     .expect("omp agent command should build");
 
     assert!(command.program.ends_with("programbench_omp_agent.py"));
     assert!(has_arg(&command.args, "--subagent"));
     assert!(!has_arg(&command.args, "--stateful"));
+}
+
+#[test]
+fn programbench_omp_agent_command_passes_agent_docker_options() {
+    let command = build_programbench_agent_command(ProgramBenchInstanceRunOptions {
+        agent: ProgramBenchAgentKind::OmpCli,
+        condition: ProgramBenchCondition::new(true, false),
+        instance_id: "ajeetdsouza__zoxide.67ca1bc".to_string(),
+        container_id: "programbench-container".to_string(),
+        condition_dir: "runs/pb/conditions/stateful-on_subagent-off".into(),
+        docker_bin: "docker".to_string(),
+        codex_bin: "codex".to_string(),
+        omp_bin: "host-omp".to_string(),
+        stateful_binary: "/host/stateful".to_string(),
+        model: None,
+        benchmark_max_turns: 500,
+        timeout_seconds: 7200,
+        subagent_min_count: 3,
+        agent_docker_image: Some("stateful/omp-agent:test".to_string()),
+        agent_docker_omp_bin: "/opt/omp/bin/omp".to_string(),
+        agent_docker_stateful_binary: "/opt/stateful/bin/stateful".to_string(),
+        agent_docker_home: "/home/bench-agent".to_string(),
+    })
+    .expect("omp agent command should build");
+
+    assert!(command.program.ends_with("programbench_omp_agent.py"));
+    assert!(has_arg_pair(
+        &command.args,
+        "--agent-docker-image",
+        "stateful/omp-agent:test",
+    ));
+    assert!(has_arg_pair(
+        &command.args,
+        "--agent-docker-omp-bin",
+        "/opt/omp/bin/omp",
+    ));
+    assert!(has_arg_pair(
+        &command.args,
+        "--agent-docker-stateful-binary",
+        "/opt/stateful/bin/stateful",
+    ));
+    assert!(has_arg_pair(
+        &command.args,
+        "--agent-docker-home",
+        "/home/bench-agent",
+    ));
 }
 
 #[test]
@@ -617,7 +679,13 @@ print(json.dumps({
 
     assert_eq!(
         observed["calls"][0]["command"],
-        serde_json::json!(["/usr/local/bin/stateful", "install", "--agent", "codex", "--yes"])
+        serde_json::json!([
+            "/usr/local/bin/stateful",
+            "install",
+            "--agent",
+            "codex",
+            "--yes"
+        ])
     );
     assert_eq!(
         observed["calls"][1]["command"],
@@ -625,7 +693,12 @@ print(json.dumps({
     );
     assert_eq!(
         observed["calls"][2]["command"],
-        serde_json::json!(["/usr/local/bin/stateful", "enable", "--repo", "/tmp/programbench-airlock"])
+        serde_json::json!([
+            "/usr/local/bin/stateful",
+            "enable",
+            "--repo",
+            "/tmp/programbench-airlock"
+        ])
     );
     assert_eq!(
         observed["agent_command"],
@@ -649,11 +722,16 @@ print(json.dumps({
     );
     assert_eq!(observed["agent_cwd"], "/tmp/programbench-airlock");
     assert_eq!(observed["agent_home"], "/tmp/programbench-airlock");
-    assert_eq!(observed["agent_stateful_home"], "/tmp/programbench-airlock/.stateful");
-    assert!(observed["prompt"]
-        .as_str()
-        .expect("prompt should be a string")
-        .contains("Benchmark max turns: 321."));
+    assert_eq!(
+        observed["agent_stateful_home"],
+        "/tmp/programbench-airlock/.stateful"
+    );
+    assert!(
+        observed["prompt"]
+            .as_str()
+            .expect("prompt should be a string")
+            .contains("Benchmark max turns: 321.")
+    );
     assert_eq!(observed["returncode"], 0);
 }
 
@@ -923,7 +1001,12 @@ print(json.dumps(calls))
     assert_eq!(calls[0]["home"], "/tmp/programbench-airlock");
     assert_eq!(
         calls[1]["command"],
-        serde_json::json!(["/usr/local/bin/stateful", "enable", "--repo", "/tmp/programbench-airlock"])
+        serde_json::json!([
+            "/usr/local/bin/stateful",
+            "enable",
+            "--repo",
+            "/tmp/programbench-airlock"
+        ])
     );
 }
 
@@ -991,7 +1074,13 @@ print(json.dumps({
 
     assert_eq!(
         observed["calls"][0]["command"],
-        serde_json::json!(["/usr/local/bin/stateful", "install", "--agent", "omp", "--yes"])
+        serde_json::json!([
+            "/usr/local/bin/stateful",
+            "install",
+            "--agent",
+            "omp",
+            "--yes"
+        ])
     );
     assert_eq!(
         observed["calls"][1]["command"],
@@ -999,7 +1088,12 @@ print(json.dumps({
     );
     assert_eq!(
         observed["calls"][2]["command"],
-        serde_json::json!(["/usr/local/bin/stateful", "enable", "--repo", "/tmp/programbench-airlock"])
+        serde_json::json!([
+            "/usr/local/bin/stateful",
+            "enable",
+            "--repo",
+            "/tmp/programbench-airlock"
+        ])
     );
     assert_eq!(
         observed["agent_command"],
@@ -1022,16 +1116,169 @@ print(json.dumps({
     );
     assert_eq!(observed["agent_cwd"], "/tmp/programbench-airlock");
     assert_eq!(observed["agent_home"], "/tmp/programbench-airlock");
-    assert_eq!(observed["agent_stateful_home"], "/tmp/programbench-airlock/.stateful");
+    assert_eq!(
+        observed["agent_stateful_home"],
+        "/tmp/programbench-airlock/.stateful"
+    );
     assert_eq!(
         observed["agent_dir"],
         "/tmp/programbench-airlock/.omp/profiles/stateful/agent"
     );
-    assert!(observed["prompt"]
-        .as_str()
-        .expect("prompt should be a string")
-        .contains("Benchmark max turns: 654."));
+    assert!(
+        observed["prompt"]
+            .as_str()
+            .expect("prompt should be a string")
+            .contains("Benchmark max turns: 654.")
+    );
     assert_eq!(observed["returncode"], 0);
+}
+
+#[test]
+fn programbench_omp_adapter_runs_agent_docker_container_when_configured() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+docker_calls = []
+host_commands = []
+host_omp_calls = []
+
+def fake_run(command, **kwargs):
+    if command and command[0] == "docker":
+        docker_calls.append(command)
+        if command[1] == "run":
+            return subprocess.CompletedProcess(command, 0, stdout="agent-container-id\n", stderr="")
+        if command[1] == "exec" and "/opt/omp/bin/omp" in command:
+            return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":11,"output_tokens":7}}\n', stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+    host_commands.append(command)
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+def fake_omp(command, *, cwd, env, timeout_seconds):
+    host_omp_calls.append(command)
+    return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":11,"output_tokens":7}}\n', stderr="")
+
+mod.subprocess.run = fake_run
+mod.run_omp_command = fake_omp
+mod.omp_auth_source_agent_dir = lambda env: None
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    omp_bin="host-omp",
+    stateful_binary="/host/stateful",
+    model="gpt-5.4-mini",
+    benchmark_max_turns=654,
+    timeout_seconds=456,
+    stateful=True,
+    subagent=False,
+    subagent_min_count=3,
+    airlock="/tmp/programbench-airlock",
+    agent_docker_image="stateful/omp-agent:test",
+    agent_docker_omp_bin="/opt/omp/bin/omp",
+    agent_docker_stateful_binary="/opt/stateful/bin/stateful",
+    agent_docker_home="/home/bench-agent",
+)
+result = mod.run_agent(args, mod.prompt_for_args(args))
+print(json.dumps({
+    "docker_calls": docker_calls,
+    "host_commands": host_commands,
+    "host_omp_calls": host_omp_calls,
+    "returncode": result.returncode,
+    "usage": mod.omp_token_usage_from_output(result.stdout),
+}))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("captured calls should be JSON");
+    let docker_calls = observed["docker_calls"]
+        .as_array()
+        .expect("docker calls should be array");
+
+    assert_eq!(observed["host_omp_calls"], serde_json::json!([]));
+    assert_eq!(observed["host_commands"], serde_json::json!([]));
+    assert!(docker_calls.iter().any(|call| call
+        == &serde_json::json!([
+            "docker",
+            "cp",
+            "programbench-container:/workspace/.",
+            "/tmp/programbench-airlock"
+        ])));
+    assert!(docker_calls.iter().any(|call| {
+        docker_call_starts_with(call, &["docker", "run"])
+            && docker_call_contains_arg(call, "stateful/omp-agent:test")
+            && docker_call_has_sequence(call, &["sleep", "infinity"])
+    }));
+    assert!(docker_calls.iter().any(|call| call
+        == &serde_json::json!([
+            "docker",
+            "cp",
+            "/tmp/programbench-airlock/.",
+            "agent-container-id:/workspace/"
+        ])));
+    assert!(docker_calls.iter().any(|call| docker_call_execs(
+        call,
+        "agent-container-id",
+        &[
+            "/opt/stateful/bin/stateful",
+            "install",
+            "--agent",
+            "omp",
+            "--yes"
+        ],
+    )));
+    assert!(docker_calls.iter().any(|call| docker_call_execs(
+        call,
+        "agent-container-id",
+        &["git", "init", "-q"],
+    )));
+    assert!(docker_calls.iter().any(|call| docker_call_execs(
+        call,
+        "agent-container-id",
+        &[
+            "/opt/stateful/bin/stateful",
+            "enable",
+            "--repo",
+            "/workspace"
+        ],
+    )));
+    assert!(docker_calls.iter().any(|call| docker_call_execs(
+        call,
+        "agent-container-id",
+        &[
+            "/opt/omp/bin/omp",
+            "--cwd",
+            "/workspace",
+            "--mode",
+            "json",
+            "--no-session",
+            "--approval-mode",
+            "yolo",
+            "--profile",
+            "stateful",
+        ],
+    )));
+    assert!(
+        docker_calls
+            .iter()
+            .any(|call| docker_call_contains_env(call, "HOME=/home/bench-agent"))
+    );
+    assert!(docker_calls.iter().any(|call| call
+        == &serde_json::json!([
+            "docker",
+            "cp",
+            "agent-container-id:/workspace/.",
+            "/tmp/programbench-airlock"
+        ])));
+    assert!(
+        docker_calls
+            .iter()
+            .any(|call| call == &serde_json::json!(["docker", "rm", "-f", "agent-container-id"]))
+    );
+    assert_eq!(observed["returncode"], 0);
+    assert_eq!(observed["usage"]["input_tokens"], 11);
+    assert_eq!(observed["usage"]["output_tokens"], 7);
 }
 
 #[test]
@@ -1317,7 +1564,10 @@ print(json.dumps(agent_env))
 
     assert_eq!(observed["stateful_server_url"], "http://127.0.0.1:43873");
     assert_eq!(observed["stateful_server_token"], "parent-token");
-    assert_eq!(observed["stateful_home"], "/tmp/programbench-airlock/.stateful");
+    assert_eq!(
+        observed["stateful_home"],
+        "/tmp/programbench-airlock/.stateful"
+    );
     assert_eq!(observed["auth_source"], serde_json::Value::Null);
 }
 
@@ -1441,7 +1691,11 @@ print(json.dumps(names))
     assert!(names.iter().any(|name| name.ends_with("config.yml")));
     assert!(names.iter().any(|name| name.ends_with("state.db")));
     assert!(names.iter().any(|name| name.ends_with("repos/repo.db")));
-    assert!(names.iter().any(|name| name.ends_with("runtime/server.pid")));
+    assert!(
+        names
+            .iter()
+            .any(|name| name.ends_with("runtime/server.pid"))
+    );
 }
 
 #[test]
@@ -1651,17 +1905,27 @@ print(json.dumps(observed))
 
     assert_eq!(observed["calls"][0]["command"][0], "docker");
     assert_eq!(observed["calls"][0]["command"][1], "cp");
-    assert!(observed["calls"][0]["command"][2]
-        .as_str()
-        .expect("copy source should be a string")
-        .ends_with("/."));
+    assert!(
+        observed["calls"][0]["command"][2]
+            .as_str()
+            .expect("copy source should be a string")
+            .ends_with("/.")
+    );
     assert_eq!(
         observed["calls"][0]["command"][3],
         "programbench-container:/workspace/"
     );
     assert_eq!(
         observed["calls"][1]["command"],
-        serde_json::json!(["docker", "exec", "-w", "/workspace", "programbench-container", "sh", "./compile.sh"])
+        serde_json::json!([
+            "docker",
+            "exec",
+            "-w",
+            "/workspace",
+            "programbench-container",
+            "sh",
+            "./compile.sh"
+        ])
     );
     assert_eq!(observed["calls"][1]["cwd"], "None");
     assert_eq!(observed["calls"][1]["timeout"], 5);
@@ -1669,17 +1933,23 @@ print(json.dumps(observed))
     let copied_names = observed["copied_names"]
         .as_array()
         .expect("copied names should be array");
-    assert!(copied_names
-        .iter()
-        .any(|name| name.as_str() == Some("compile.sh")));
-    assert!(copied_names
-        .iter()
-        .any(|name| name.as_str() == Some("main.c")));
-    assert!(copied_names
-        .iter()
-        .all(|name| !name.as_str().unwrap_or_default().contains(".omp")
-            && !name.as_str().unwrap_or_default().contains(".stateful")
-            && name.as_str() != Some("executable")));
+    assert!(
+        copied_names
+            .iter()
+            .any(|name| name.as_str() == Some("compile.sh"))
+    );
+    assert!(
+        copied_names
+            .iter()
+            .any(|name| name.as_str() == Some("main.c"))
+    );
+    assert!(
+        copied_names
+            .iter()
+            .all(|name| !name.as_str().unwrap_or_default().contains(".omp")
+                && !name.as_str().unwrap_or_default().contains(".stateful")
+                && name.as_str() != Some("executable"))
+    );
 }
 
 #[test]
@@ -2470,4 +2740,67 @@ fn temp_root(prefix: &str) -> PathBuf {
 
 fn has_arg(args: &[String], value: &str) -> bool {
     args.iter().any(|arg| arg == value)
+}
+
+fn has_arg_pair(args: &[String], key: &str, value: &str) -> bool {
+    args.windows(2).any(|pair| pair == [key, value])
+}
+
+fn docker_call_starts_with(call: &serde_json::Value, prefix: &[&str]) -> bool {
+    let Some(args) = call.as_array().map(|args| {
+        args.iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+    }) else {
+        return false;
+    };
+    args.starts_with(prefix)
+}
+
+fn docker_call_contains_arg(call: &serde_json::Value, expected: &str) -> bool {
+    call.as_array().is_some_and(|args| {
+        args.iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|arg| arg == expected)
+    })
+}
+
+fn docker_call_has_sequence(call: &serde_json::Value, expected: &[&str]) -> bool {
+    let Some(args) = call.as_array().map(|args| {
+        args.iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+    }) else {
+        return false;
+    };
+    args.windows(expected.len())
+        .any(|window| window == expected)
+}
+
+fn docker_call_execs(call: &serde_json::Value, container_id: &str, inner_prefix: &[&str]) -> bool {
+    let Some(args) = call.as_array().map(|args| {
+        args.iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+    }) else {
+        return false;
+    };
+    if args.len() < 3 || args[0] != "docker" || args[1] != "exec" {
+        return false;
+    }
+    let Some(container_index) = args.iter().position(|arg| *arg == container_id) else {
+        return false;
+    };
+    args[container_index + 1..].starts_with(inner_prefix)
+}
+
+fn docker_call_contains_env(call: &serde_json::Value, assignment: &str) -> bool {
+    let Some(args) = call.as_array().map(|args| {
+        args.iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+    }) else {
+        return false;
+    };
+    args.windows(2).any(|pair| pair == ["-e", assignment])
 }

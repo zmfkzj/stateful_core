@@ -18,6 +18,9 @@ const DEFAULT_PROGRAMBENCH_BIN: &str = "programbench";
 const DEFAULT_DOCKER_BIN: &str = "docker";
 const DEFAULT_CODEX_BIN: &str = "codex";
 const DEFAULT_OMP_BIN: &str = "omp";
+const DEFAULT_PROGRAMBENCH_AGENT_DOCKER_OMP_BIN: &str = DEFAULT_OMP_BIN;
+const DEFAULT_PROGRAMBENCH_AGENT_DOCKER_STATEFUL_BINARY: &str = "/usr/local/bin/stateful";
+const DEFAULT_PROGRAMBENCH_AGENT_DOCKER_HOME: &str = "/home/stateful";
 const DEFAULT_BENCHMARK_MAX_TURNS: usize = 500;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 7200;
 
@@ -64,6 +67,14 @@ pub enum ProgramBenchCommand {
         codex_bin: String,
         #[arg(long, default_value = DEFAULT_OMP_BIN)]
         omp_bin: String,
+        #[arg(long)]
+        agent_docker_image: Option<String>,
+        #[arg(long, default_value = DEFAULT_PROGRAMBENCH_AGENT_DOCKER_OMP_BIN)]
+        agent_docker_omp_bin: String,
+        #[arg(long, default_value = DEFAULT_PROGRAMBENCH_AGENT_DOCKER_STATEFUL_BINARY)]
+        agent_docker_stateful_binary: String,
+        #[arg(long, default_value = DEFAULT_PROGRAMBENCH_AGENT_DOCKER_HOME)]
+        agent_docker_home: String,
     },
     Eval {
         #[arg(long)]
@@ -145,6 +156,10 @@ pub struct ProgramBenchInstanceRunOptions {
     pub benchmark_max_turns: usize,
     pub timeout_seconds: u64,
     pub subagent_min_count: usize,
+    pub agent_docker_image: Option<String>,
+    pub agent_docker_omp_bin: String,
+    pub agent_docker_stateful_binary: String,
+    pub agent_docker_home: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,8 +180,11 @@ pub struct ProgramBenchRunOptions {
     pub stateful_binary: String,
     pub codex_bin: String,
     pub omp_bin: String,
+    pub agent_docker_image: Option<String>,
+    pub agent_docker_omp_bin: String,
+    pub agent_docker_stateful_binary: String,
+    pub agent_docker_home: String,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramBenchEvalOptions {
     pub run_dir: PathBuf,
@@ -1315,6 +1333,10 @@ fn run_programbench_instance(
         benchmark_max_turns: options.benchmark_max_turns,
         timeout_seconds: options.timeout_seconds,
         subagent_min_count: 3,
+        agent_docker_image: options.agent_docker_image.clone(),
+        agent_docker_omp_bin: options.agent_docker_omp_bin.clone(),
+        agent_docker_stateful_binary: options.agent_docker_stateful_binary.clone(),
+        agent_docker_home: options.agent_docker_home.clone(),
     })?;
     let adapter_result = execute_recipe_command_status(&command);
     remove_programbench_container(&options.docker_bin, &container_id);
@@ -1500,6 +1522,16 @@ pub fn build_programbench_agent_command(
         ProgramBenchAgentKind::OmpCli => {
             args.push("--omp-bin".to_string());
             args.push(options.omp_bin);
+            if let Some(agent_docker_image) = options.agent_docker_image {
+                args.push("--agent-docker-image".to_string());
+                args.push(agent_docker_image);
+                args.push("--agent-docker-omp-bin".to_string());
+                args.push(options.agent_docker_omp_bin);
+                args.push("--agent-docker-stateful-binary".to_string());
+                args.push(options.agent_docker_stateful_binary);
+                args.push("--agent-docker-home".to_string());
+                args.push(options.agent_docker_home);
+            }
         }
     }
 
@@ -1546,6 +1578,10 @@ pub fn run_programbench_cli(command: ProgramBenchCommand) -> Result<()> {
             stateful_binary,
             codex_bin,
             omp_bin,
+            agent_docker_image,
+            agent_docker_omp_bin,
+            agent_docker_stateful_binary,
+            agent_docker_home,
         } => {
             let metadata = run_programbench_matrix(ProgramBenchRunOptions {
                 output_dir,
@@ -1564,6 +1600,10 @@ pub fn run_programbench_cli(command: ProgramBenchCommand) -> Result<()> {
                 stateful_binary,
                 codex_bin,
                 omp_bin,
+                agent_docker_image,
+                agent_docker_omp_bin,
+                agent_docker_stateful_binary,
+                agent_docker_home,
             })?;
             println!("{}", serde_json::to_string_pretty(&metadata)?);
         }

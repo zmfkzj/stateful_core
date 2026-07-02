@@ -6,6 +6,8 @@ from __future__ import annotations
 import os
 import sqlite3
 import subprocess  # noqa: E402
+import tempfile
+import urllib.parse
 import sys
 from pathlib import Path
 
@@ -14,13 +16,16 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from programbench_codex_agent import (  # noqa: E402
+    CONTAINER_WORKSPACE,
     add_token_usage,
     airlock_env,
     build_base_parser,
     copy_workspace_from_container,
+    docker_exec_env_args,
     enable_stateful_repo,
     install_stateful_for_agent,
     iter_json_events,
+    resolve_host_binary,
     output_text,
     prompt_for_args,
     run_main,
@@ -146,6 +151,225 @@ def run_omp_command(command, *, cwd: str, env: dict[str, str], timeout_seconds: 
             exc.cleanup_error = cleanup_error
         raise
 
+AGENT_DOCKER_ENV_ALLOWLIST = {
+    "ANTHROPIC_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENROUTER_API_KEY",
+    "SSL_CERT_FILE",
+    "STATEFUL_SERVER_TOKEN",
+    "STATEFUL_SERVER_URL",
+}
+AGENT_DOCKER_ENV_PREFIXES = ("OMP_",)
+
+
+def docker_host_url(value: str) -> str:
+    parsed = urllib.parse.urlparse(value)
+    if parsed.hostname not in {"127.0.0.1", "localhost"}:
+        return value
+    netloc = "host.docker.internal"
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urllib.parse.urlunparse(parsed._replace(netloc=netloc))
+
+
+def agent_docker_env(args, base_env: dict[str, str]) -> dict[str, str]:
+    home = args.agent_docker_home.rstrip("/") or "/home/stateful"
+    env = {
+        "HOME": home,
+        "PI_CODING_AGENT_DIR": f"{home}/.omp/profiles/stateful/agent",
+        "STATEFUL_HOME": f"{home}/.stateful",
+        "XDG_CACHE_HOME": f"{home}/.cache",
+        "XDG_CONFIG_HOME": f"{home}/.config",
+    }
+    for key, value in base_env.items():
+        if key in AGENT_DOCKER_ENV_ALLOWLIST or key.startswith(AGENT_DOCKER_ENV_PREFIXES):
+            env[key] = docker_host_url(value) if key == "STATEFUL_SERVER_URL" else value
+    return env
+
+
+def docker_agent_exec_command(args, agent_container_id: str, *inner: str, env: dict[str, str] | None = None) -> list[str]:
+    return [
+        resolve_host_binary(args.docker_bin),
+        "exec",
+        "-w",
+        CONTAINER_WORKSPACE,
+        *docker_exec_env_args(env),
+        agent_container_id,
+        *inner,
+    ]
+
+
+def start_agent_docker_container(args) -> str:
+    completed = subprocess.run(
+        [
+            resolve_host_binary(args.docker_bin),
+            "run",
+            "-d",
+            "--init",
+            "--network",
+            "bridge",
+            "-w",
+            CONTAINER_WORKSPACE,
+            args.agent_docker_image,
+            "sleep",
+            "infinity",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=args.timeout_seconds,
+    )
+    agent_container_id = completed.stdout.strip()
+    if not agent_container_id:
+        raise RuntimeError(f"Docker did not return an agent container id for {args.agent_docker_image}")
+    return agent_container_id
+
+
+def remove_agent_docker_container(args, agent_container_id: str) -> None:
+    try:
+        subprocess.run(
+            [resolve_host_binary(args.docker_bin), "rm", "-f", agent_container_id],
+            capture_output=True,
+            text=True,
+            timeout=args.timeout_seconds,
+        )
+    except Exception:
+        pass
+
+
+def copy_airlock_to_agent_container(args, airlock: str, agent_container_id: str) -> None:
+    subprocess.run(
+        [
+            resolve_host_binary(args.docker_bin),
+            "cp",
+            f"{airlock}/.",
+            f"{agent_container_id}:{CONTAINER_WORKSPACE}/",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=args.timeout_seconds,
+    )
+
+
+def copy_agent_workspace_to_airlock(args, airlock: str, agent_container_id: str) -> None:
+    subprocess.run(
+        [
+            resolve_host_binary(args.docker_bin),
+            "cp",
+            f"{agent_container_id}:{CONTAINER_WORKSPACE}/.",
+            airlock,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=args.timeout_seconds,
+    )
+
+
+def run_agent_docker_stateful(args, agent_container_id: str, container_env: dict[str, str], *stateful_args: str) -> None:
+    subprocess.run(
+        docker_agent_exec_command(args, agent_container_id, args.agent_docker_stateful_binary, *stateful_args, env=container_env),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=args.timeout_seconds,
+    )
+
+
+def seed_omp_auth_credentials_into_container(args, agent_container_id: str, auth_source_agent: str | None, container_env: dict[str, str]) -> None:
+    if not auth_source_agent:
+        return
+    with tempfile.TemporaryDirectory(prefix="programbench-omp-auth-") as tmp:
+        seed_env = {
+            "OMP_AUTH_SOURCE_AGENT_DIR": auth_source_agent,
+            "PI_CODING_AGENT_DIR": str(Path(tmp) / "agent"),
+        }
+        seed_omp_auth_credentials(seed_env)
+        source_db = Path(seed_env["PI_CODING_AGENT_DIR"]) / "agent.db"
+        if not source_db.exists():
+            return
+        target_dir = container_env["PI_CODING_AGENT_DIR"]
+        subprocess.run(
+            docker_agent_exec_command(args, agent_container_id, "mkdir", "-p", target_dir, env=container_env),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout_seconds,
+        )
+        subprocess.run(
+            [
+                resolve_host_binary(args.docker_bin),
+                "cp",
+                str(source_db),
+                f"{agent_container_id}:{target_dir}/agent.db",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout_seconds,
+        )
+
+
+def run_agent_in_docker(args, prompt: str, airlock: str, base_env: dict[str, str], auth_source_agent: str | None):
+    agent_container_id = start_agent_docker_container(args)
+    container_env = agent_docker_env(args, base_env)
+    try:
+        copy_airlock_to_agent_container(args, airlock, agent_container_id)
+        if args.stateful:
+            run_agent_docker_stateful(args, agent_container_id, container_env, "install", "--agent", "omp", "--yes")
+        seed_omp_auth_credentials_into_container(args, agent_container_id, auth_source_agent, container_env)
+        if args.stateful:
+            subprocess.run(
+                docker_agent_exec_command(args, agent_container_id, "git", "init", "-q", env=container_env),
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=args.timeout_seconds,
+            )
+            run_agent_docker_stateful(args, agent_container_id, container_env, "enable", "--repo", CONTAINER_WORKSPACE)
+
+        command = docker_agent_exec_command(
+            args,
+            agent_container_id,
+            args.agent_docker_omp_bin,
+            "--cwd",
+            CONTAINER_WORKSPACE,
+            "--mode",
+            "json",
+            "--no-session",
+            "--approval-mode",
+            "yolo",
+            *(["--profile", "stateful"] if args.stateful else []),
+            *(["--model", args.model] if args.model else []),
+            "-p",
+            prompt,
+            env=container_env,
+        )
+        try:
+            return subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=args.timeout_seconds,
+            )
+        finally:
+            try:
+                copy_agent_workspace_to_airlock(args, airlock, agent_container_id)
+                if hasattr(args, "condition_dir"):
+                    smoke_compile_airlock(airlock, args)
+            except Exception as exc:  # noqa: BLE001 - preserve submission for failed compile diagnostics.
+                args.smoke_compile_error = str(exc)
+    finally:
+        remove_agent_docker_container(args, agent_container_id)
+
 
 def run_agent(args, prompt):
     airlock = getattr(args, "airlock", "/tmp/programbench-airlock")
@@ -155,6 +379,10 @@ def run_agent(args, prompt):
         copy_workspace_from_container(args, airlock)
     env["PI_CODING_AGENT_DIR"] = str(Path(airlock) / ".omp" / "profiles" / "stateful" / "agent")
     auth_source_agent = omp_auth_source_agent_dir(os.environ)
+    if getattr(args, "agent_docker_image", None):
+        if args.stateful:
+            inherit_parent_stateful_runtime(env, os.environ)
+        return run_agent_in_docker(args, prompt, airlock, env, auth_source_agent)
     if args.stateful:
         inherit_parent_stateful_runtime(env, os.environ)
     try:
@@ -201,6 +429,10 @@ def run_agent(args, prompt):
 def parse_args(argv: list[str] | None = None):
     parser = build_base_parser()
     parser.add_argument("--omp-bin", required=True)
+    parser.add_argument("--agent-docker-image")
+    parser.add_argument("--agent-docker-omp-bin", default="omp")
+    parser.add_argument("--agent-docker-stateful-binary", default="/usr/local/bin/stateful")
+    parser.add_argument("--agent-docker-home", default="/home/stateful")
     return parser.parse_args(argv)
 
 
