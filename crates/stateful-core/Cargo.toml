@@ -1,6 +1,6 @@
 [package]
 name = "stateful-core"
-version = "1.0.0"
+version = "0.1.1"
 description = "Core domain types and policy engine for current-state agent coordination."
 edition.workspace = true
 license.workspace = true
