@@ -38,8 +38,10 @@ use crate::{
 mod parse;
 mod process_find;
 
+#[allow(unused_imports)]
 pub(crate) use parse::{
     parse_sandbox_process_find_bash_invocation, parse_sandbox_run_bash_invocation,
+    resolve_sandbox_run_command,
 };
 use process_find::process_comm_basename;
 pub use process_find::run_sandbox_process_find;
@@ -3924,6 +3926,77 @@ mod tests {
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].pid, 202);
+    }
+
+    #[test]
+    fn sandbox_run_sequence_resolves_to_single_shell_script() {
+        let command = resolve_sandbox_run_command(
+            None,
+            vec!["export FOO=bar".to_string(), "printf \"$FOO\"".to_string()],
+            Some("/bin/zsh".to_string()),
+        )
+        .expect("sequence should resolve");
+
+        assert_eq!(
+            command,
+            "'/bin/zsh' -c 'set -e\nexport FOO=bar\nprintf \"$FOO\"\n'"
+        );
+    }
+
+    #[test]
+    fn sandbox_run_sequence_quotes_single_quotes_inside_steps() {
+        let command = resolve_sandbox_run_command(
+            None,
+            vec!["printf 'ok'".to_string()],
+            None,
+        )
+        .expect("sequence should resolve");
+
+        assert_eq!(
+            command,
+            "'/bin/sh' -c 'set -e\nprintf '\\''ok'\\''\n'"
+        );
+    }
+
+    #[test]
+    fn sandbox_run_sequence_rejects_command_and_sequence_together() {
+        let error = resolve_sandbox_run_command(
+            Some("printf ok".to_string()),
+            vec!["printf later".to_string()],
+            None,
+        )
+        .expect_err("command plus sequence should fail");
+
+        assert_eq!(
+            error,
+            "stateful sandbox run accepts either --command or --sequence, not both"
+        );
+    }
+
+    #[test]
+    fn sandbox_run_sequence_rejects_sequence_shell_without_sequence() {
+        let error = resolve_sandbox_run_command(None, Vec::new(), Some("/bin/zsh".to_string()))
+            .expect_err("sequence-shell without sequence should fail");
+
+        assert_eq!(
+            error,
+            "stateful sandbox run --sequence-shell requires --sequence"
+        );
+    }
+
+    #[test]
+    fn sandbox_run_sequence_rejects_non_absolute_shell() {
+        let error = resolve_sandbox_run_command(
+            None,
+            vec!["printf ok".to_string()],
+            Some("zsh".to_string()),
+        )
+        .expect_err("relative shell should fail");
+
+        assert_eq!(
+            error,
+            "stateful sandbox run --sequence-shell requires an absolute shell path"
+        );
     }
 
     #[test]
