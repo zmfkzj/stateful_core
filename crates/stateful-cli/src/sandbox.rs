@@ -756,6 +756,8 @@ fn run_sandboxed_command(
     stream_events: bool,
 ) -> anyhow::Result<SandboxCommandResult> {
     let temp_dir = sandbox_temp_dir(writable_paths);
+    #[cfg(not(target_os = "macos"))]
+    let _ = allow_macos_identity_and_trust_services;
     if allow_direct_nested_sandbox_run() {
         let mut command = direct_shell_command(command, cwd);
         apply_sandbox_temp_env(&mut command, temp_dir.as_deref());

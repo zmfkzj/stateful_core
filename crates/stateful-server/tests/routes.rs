@@ -1428,8 +1428,13 @@ async fn hook_native_write_requires_exact_file_lease_even_when_directory_lease_c
 }
 
 #[tokio::test]
-async fn hook_native_write_without_root_still_requires_base_observation() {
+async fn hook_native_write_without_root_denies_stale_claim_observation() {
     let app = build_router(ServerConfig::new("secret-token"));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let repo_root = temp.path().join("repo");
+    std::fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    std::fs::write(repo_root.join("src/auth.ts"), "version one\n")
+        .expect("initial target should be writable");
 
     ensure_test_reservation_via_http(&app, "s1", "w1", "src/auth.ts").await;
     let claim = app
@@ -1439,7 +1444,8 @@ async fn hook_native_write_without_root_still_requires_base_observation() {
             serde_json::json!({
                 "agent_id": "s1",
                 "workspace_id": "w1",
-                "path": "src/auth.ts"
+                "path": "src/auth.ts",
+                "root": repo_root.to_string_lossy().to_string()
             }),
         ))
         .await
@@ -1467,7 +1473,7 @@ async fn hook_native_write_without_root_still_requires_base_observation() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = response_json(response, 2048).await;
     assert_eq!(json["decision"], "deny");
-    assert_eq!(json["reason_code"], "missing_base_observation");
+    assert_eq!(json["reason_code"], "stale_claim_observation");
 }
 
 #[tokio::test]

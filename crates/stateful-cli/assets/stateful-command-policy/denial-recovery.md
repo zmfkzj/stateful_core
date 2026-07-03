@@ -34,7 +34,6 @@ If a hook or save-check says `unreconciled_human_write`, do not overwrite the fi
 3. If the active tool list exposes `state_reconcile_ack`, `state.reconcile.ack`, `state.reconcile_ack`, `stateful_reconcile_ack`, or an MCP-prefixed equivalent, call the exact shown tool with `resource`/`resources`, `reservation_id`, `files_reread`, `summary` or `human_change_summary`, and `decision`.
 4. Otherwise use `stateful reconcile ack --reservation-id <reservation_id> --resource <path> --files-reread <path> --summary <text> --decision <adopt|reapply|ask_user|abandon>`.
 5. Retry the original write only after an `adopt` or `reapply` acknowledgement succeeds.
-
 ## Claim Conflict Or Wait Queue
 
 If `state_claim_acquire` reports `claim_conflict`, do not retry acquisition or steal the claim.

@@ -394,6 +394,7 @@ stops at data-loss edges:
   human write; later agent writes to that file deny until reconciliation
 - reads, searches, diffs, and sandboxed tests after human writes: allow
 
+
 This avoids making the system too rigid while still preventing the highest-risk
 collisions.
 
