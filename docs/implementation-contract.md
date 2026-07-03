@@ -183,19 +183,21 @@ requests owned by the caller.
 `stateful server stop` to verify that the runtime file and process id describe
 the same stateful server.
 
-Native Stateful tools map directly onto these endpoints. Native tool handlers do
-not implement policy branches; they validate tool arguments, receive the active
-`agent_id` and `workspace_id` from the runtime integration, call the HTTP API,
-and return the server result. For OMP, the bridge first derives that `agent_id`
-from `ctx.sessionManager.getSessionId()` plus the current
+Native Stateful tool integrations that expose the full state surface map
+directly onto these endpoints. Native tool handlers do not implement policy
+branches; they validate tool arguments, receive the active `agent_id` and
+`workspace_id` from the runtime integration, call the HTTP API, and return the
+server result. For OMP, the bridge first derives that `agent_id` from
+`ctx.sessionManager.getSessionId()` plus the current
 `ctx.sessionManager.getLeafId()` when present, failing closed when the session id
-is unavailable or invalid. The single adapter-only exception is duplicate
-cleanup: `state_claim_release` maps a server `404 claim_not_found` into a
-successful no-op result when the same-agent claim is already gone, while the
-direct HTTP route still returns `404`. The OMP identity path supports
-`state_session_register` -> `state_reservation_declare` ->
-`state_claim_acquire` without a caller-supplied environment override because the
-extension injects the derived active identity.
+is unavailable or invalid. The shipped OMP extension registers lazy resume
+helpers, not the full `state_*` tool surface, so OMP agents must use the active
+tool list: use `state_*` tools only when exposed; otherwise rely on native
+`edit`/`write` auto-declare, lazy resume, or a write boundary with an existing
+`reservation_id`. The single adapter-only exception is duplicate cleanup:
+`state_claim_release` maps a server `404 claim_not_found` into a successful
+no-op result when the same-agent claim is already gone, while the direct HTTP
+route still returns `404`.
 
 Current envelope enforcement is limited to `/v1/authorize` and
 `/v1/reservation/declare`, `/v1/reservation/request`, `/v1/reservation/claim`, and

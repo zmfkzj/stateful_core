@@ -223,7 +223,7 @@ function reservationMessage(notification) {
   if (typeof purpose === "string" && purpose.trim().length > 0) {
     lines.push("purpose: " + purpose.trim());
   }
-  lines.push("Next: reread the target, then call state_reservation_claim with this reservation_id before retrying the write.");
+  lines.push("Next: reread the target, then resume the saved lazy operation or retry the write so the write boundary can claim the reservation. Only clients with an exposed state_reservation_claim tool should claim manually first.");
   return lines.join("\n");
 }
 

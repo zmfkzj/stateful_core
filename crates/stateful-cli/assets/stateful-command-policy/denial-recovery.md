@@ -8,8 +8,8 @@ If the denial says `missing_reservation`, `missing_claim`, `Target is outside ac
 
 1. For OMP native `edit`/`write` without an explicit `reservation_id`, allow the extension to auto-declare the exact tool-visible file scope, acquire same-reservation claims, and retry authorization when this is the only denial.
 2. Otherwise re-read the target if it exists.
-3. Add the missing exact file or directory scopes to the task reservation with `state_reservation_declare(purpose=<task purpose>, files_planned=[...])`.
-4. Acquire exact same-reservation claims with `state_claim_acquire(reservation_id=<reservation_id>, paths=[...])`.
+3. If the active tool list exposes them, add the missing exact file or directory scopes to the task reservation with `state_reservation_declare(purpose=<task purpose>, files_planned=[...])`, then acquire exact same-reservation claims with `state_claim_acquire(reservation_id=<reservation_id>, paths=[...])`.
+4. If those tools are absent, do not invent them. Use OMP native `edit`/`write` auto-declare, lazy resume, or an already-authorized `reservation_id` write boundary; otherwise report that the command-shaped write cannot be authorized in this tool context.
 5. Use native edit tools for repo edits, or `sandbox run --fs write-targets` / OMP built-in Bash with a strict trusted `stateful sandbox run --fs write-targets ...` command and matching targets for command-shaped writes.
 
 Use file claims for file writes, deletes, renames, and moves. Directory claims only authorize directory writes.
@@ -18,10 +18,10 @@ Use file claims for file writes, deletes, renames, and moves. Directory claims o
 
 If `state_claim_acquire` reports `claim_conflict`, do not retry acquisition or steal the claim.
 
-- To wait for a path, call `state_reservation_request` with a stable `request_id`, denied `action`, `path`, and `purpose`.
-- Use the next-turn notification or `state_notifications_poll` to learn when the reservation is claimable; polling marks returned notifications delivered. Use `state_resume_next` as durable recovery for still-active claimable reservations if a notice was missed or already delivered.
+- To wait for a path, call `state_reservation_request` with a stable `request_id`, denied `action`, `path`, and `purpose` when that tool is exposed.
+- Use the next-turn notification or exposed `state_notifications_poll` to learn when the reservation is claimable; polling marks returned notifications delivered. Use exposed `state_resume_next` as durable recovery for still-active claimable reservations if a notice was missed or already delivered.
 - When reserved, reread the target.
-- Native edits and write-target sandbox writes can lazy-claim the reservation at the next write boundary; manual native-tool/CLI flows should first call `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or `stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>`.
+- Native edits and write-target sandbox writes can lazy-claim the reservation at the next write boundary. Queued OMP lazy operations should resume with `lazy_edit_resume` or `lazy_write_resume`; manual native-tool/CLI flows should first call exposed `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or an explicitly permitted `stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>`.
 
 If a denial already includes `wait_id`, `queue_position`, or reservation guidance, follow that wait queue protocol.
 

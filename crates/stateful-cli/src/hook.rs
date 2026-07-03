@@ -1457,7 +1457,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 fn stateful_command_policy_reminder() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- Use `state_context_render` only for planning/manual inspection when active coordination may affect the plan; if you already inspected this turn for the same resource, reuse that result.\n- Before using Bash or eval tools, use the `stateful-command-policy` skill.\n- Use native Stateful coordination tools such as `state_reservation_declare` and `state_claim_acquire`; if the active tool list exposes runtime-specific names, call the exact shown equivalent. Do not run `stateful reservation declare` through Bash.\n- Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted `{binary} sandbox run` or `{binary} sandbox process find` commands.\n- Use `{binary} sandbox run --fs read-only --network disabled ...` for read-only shell fallback, `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> ...` for builds/tests, and `{binary} sandbox run --fs write-targets --write-target <file> ...` for command-shaped edits.\n- Use `{binary} sandbox run --fs git --network disabled ...` for local git, `{binary} sandbox run --fs git --network enabled ...` only for explicit remote git operations, and `{binary} sandbox run --fs github-pr --network enabled ...` for GitHub PR operations."
+        "Stateful command policy reminder:\n- Use `state_context_render` only for planning/manual inspection when active coordination may affect the plan; if you already inspected this turn for the same resource, reuse that result.\n- Before using Bash or eval tools, use the `stateful-command-policy` skill.\n- Use active Stateful native coordination tools only when they appear in the tool list, for example `state_reservation_declare` and `state_claim_acquire`; runtime-specific names must be copied exactly. If those tools are absent, use OMP native edit/write auto-declare, lazy resume helpers, or an existing `reservation_id` with trusted sandbox write-targets. Do not run `stateful reservation declare` through Bash.\n- Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted `{binary} sandbox run` or `{binary} sandbox process find` commands.\n- Use `{binary} sandbox run --fs read-only --network disabled ...` for read-only shell fallback, `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> ...` for builds/tests, and `{binary} sandbox run --fs write-targets --write-target <file> ...` for command-shaped edits.\n- Use `{binary} sandbox run --fs git --network disabled ...` for local git, `{binary} sandbox run --fs git --network enabled ...` only for explicit remote git operations, and `{binary} sandbox run --fs github-pr --network enabled ...` for GitHub PR operations."
     )
 }
 
@@ -1845,7 +1845,7 @@ fn command_mentions_stateful_coordination(command: &str) -> bool {
 }
 
 fn stateful_coordination_tool_guidance() -> &'static str {
-    "Use active Stateful native coordination tool names such as `state_reservation_declare` and `state_claim_acquire`; if the active tool list exposes runtime-specific tool names, call the exact shown equivalent. Do not run `stateful reservation declare` or legacy `stateful mcp call` through Bash."
+    "Use active Stateful native coordination tools only when they appear in the tool list, for example `state_reservation_declare` and `state_claim_acquire`; runtime-specific names must be copied exactly. If those tools are absent, use OMP native edit/write auto-declare or lazy resume helpers instead of inventing tools. Do not run `stateful reservation declare` or legacy `stateful mcp call` through Bash."
 }
 
 fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
@@ -2003,7 +2003,7 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 fn bash_policy_guidance() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Use the `stateful-command-policy` skill before Bash or eval tools; use `state_context_render` only for planning/manual inspection when active coordination may affect the plan. Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted `{binary} sandbox run` or `{binary} sandbox process find` commands. Use `{binary} sandbox run --fs read-only --network disabled --command ...` for read-only shell fallback, `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command ...` for builds/tests, and `{binary} sandbox run --fs write-targets --write-target <file> --command ...` for command-shaped edits. Use `{binary} sandbox run --fs git --network disabled ...` for local git, `{binary} sandbox run --fs git --network enabled ...` only for explicit remote git operations, and `{binary} sandbox run --fs github-pr --network enabled ...` for GitHub PR operations. Use native Stateful coordination tools such as `state_reservation_declare` and `state_claim_acquire`; if the active tool list exposes runtime-specific names, call the exact shown equivalent. Do not run `stateful reservation declare` through Bash."
+        "Use the `stateful-command-policy` skill before Bash or eval tools; use `state_context_render` only for planning/manual inspection when active coordination may affect the plan. Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted `{binary} sandbox run` or `{binary} sandbox process find` commands. Use `{binary} sandbox run --fs read-only --network disabled --command ...` for read-only shell fallback, `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command ...` for builds/tests, and `{binary} sandbox run --fs write-targets --write-target <file> --command ...` for command-shaped edits. Use `{binary} sandbox run --fs git --network disabled ...` for local git, `{binary} sandbox run --fs git --network enabled ...` only for explicit remote git operations, and `{binary} sandbox run --fs github-pr --network enabled ...` for GitHub PR operations. Use active Stateful native coordination tools only when they appear in the tool list, for example `state_reservation_declare` and `state_claim_acquire`; runtime-specific names must be copied exactly. If those tools are absent, use OMP native edit/write auto-declare or lazy resume helpers instead of inventing tools. Do not run `stateful reservation declare` through Bash."
     )
 }
 
@@ -2725,14 +2725,14 @@ fn authorization_denial_reason(decision: AuthorizeDecision) -> String {
         "state_notifications_poll",
         "state_resume_next",
         "reread",
-        "state_reservation_claim",
+        "lazy",
     ]
     .iter()
     .all(|term| reason.contains(term));
     if !has_resume_guidance {
         let target = wait.path.as_deref().unwrap_or("the target");
         reason.push_str(&format!(
-            " Resume by polling state_notifications_poll or state_resume_next for wait_id {}; when reserved, reread {}, then call state_reservation_claim with wait_id {} before retrying the write.",
+            " Resume by polling state_notifications_poll or state_resume_next for wait_id {}; when reserved, reread {}, then resume the queued lazy operation or retry the authorized write so the write boundary can claim wait_id {}. Only clients that expose state_reservation_claim should claim manually before retrying.",
             wait.wait_id, target, wait.wait_id
         ));
     }

@@ -313,6 +313,8 @@ fn pre_tool_use_raw_bash_denial_mentions_command_policy_skill_and_example() {
     assert!(reason.contains("planning/manual inspection"));
     assert!(reason.contains("state_reservation_declare"));
     assert!(reason.contains("state_claim_acquire"));
+    assert!(reason.contains("only when they appear in the tool list"));
+    assert!(reason.contains("lazy resume helpers"));
     assert!(reason.contains("--fs read-only --network disabled"));
     assert!(reason.contains("--fs build --network enabled"));
     assert!(reason.contains("--fs write-targets --write-target <file>"));
@@ -1784,9 +1786,10 @@ fn pre_tool_use_denies_raw_stateful_reservation_declare_with_native_tool_guidanc
     assert_bash_denial_mentions_all(
         outcome,
         &[
-            "Use active Stateful native coordination tool names",
+            "Use active Stateful native coordination tools only when they appear in the tool list",
             "state_reservation_declare",
             "state_claim_acquire",
+            "lazy resume helpers",
             "Do not run `stateful reservation declare`",
         ],
     );
@@ -1809,9 +1812,10 @@ fn pre_tool_use_denies_legacy_stateful_mcp_call_with_native_tool_guidance() {
     assert_bash_denial_mentions_all(
         outcome,
         &[
-            "Use active Stateful native coordination tool names",
+            "Use active Stateful native coordination tools only when they appear in the tool list",
             "state_reservation_declare",
             "state_claim_acquire",
+            "lazy resume helpers",
             "legacy `stateful mcp call` through Bash",
         ],
     );
@@ -4867,6 +4871,7 @@ fn pre_tool_use_apply_patch_denial_includes_wait_id_guidance() {
     assert!(reason.contains("state_resume_next"));
     assert!(reason.contains("reread"));
     assert!(reason.contains("state_reservation_claim"));
+    assert!(reason.contains("lazy operation"));
 }
 
 #[test]
@@ -5520,9 +5525,11 @@ fn user_prompt_submit_posts_context_render() {
     assert!(rendered.contains("Nearby Activity"));
     assert!(rendered.contains("planning/manual inspection"));
     assert!(rendered.contains("stateful-command-policy"));
-    assert!(rendered.contains("Use native Stateful coordination tools"));
+    assert!(rendered.contains("Use active Stateful native coordination tools"));
     assert!(rendered.contains("state_reservation_declare"));
     assert!(rendered.contains("state_claim_acquire"));
+    assert!(rendered.contains("only when they appear in the tool list"));
+    assert!(rendered.contains("lazy resume helpers"));
     assert!(rendered.contains("runtime-specific names"));
     assert!(rendered.contains("Do not run `stateful reservation declare`"));
     assert!(rendered.contains("--fs read-only --network disabled"));

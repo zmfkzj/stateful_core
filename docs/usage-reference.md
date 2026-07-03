@@ -406,8 +406,9 @@ heartbeats, reservation declaration, reservation request, reservation claim, res
 claims, activity observation/finalization, authorization, conflict checks,
 context rendering, reconciliation ack, notifications, resume, and outbox sync.
 
-Native Stateful tools expose agent-friendly tool names. Agent identity tools use
-native names directly; other tools map to dotted protocol names:
+Integrations that expose native Stateful tools use agent-friendly tool names.
+Agent identity tools use native names directly; other tools map to dotted
+protocol names:
 
 - `state_session_register` — registers the injected `agent_id`/`workspace_id`
 - `state_session_heartbeat` — heartbeats the injected `agent_id`/`workspace_id`
@@ -429,6 +430,12 @@ next action instead of rendering ambient context.
 - `state_notifications_poll` / `state.notifications.poll`
 - `state_resume_next` / `state.resume.next`
 
+The shipped OMP extension registers `lazy_edit_resume`, `lazy_write_resume`, and
+`lazy_bash_resume`; it does not register the full `state_*` coordination tool
+surface. OMP agents use the active tool list: call `state_*` tools only when they
+are exposed, otherwise rely on native `edit`/`write` auto-declare, lazy resume,
+or a write boundary with an existing `reservation_id`.
+
 `state_claim_acquire` takes `reservation_id` and `paths: string[]`; each path
 must match active exact file or directory reservation scope under that
 reservation, and the server creates one exact resource claim per entry. Legacy
@@ -438,10 +445,10 @@ server requests with `path` are still accepted for compatibility.
 
 `state_file_write` / `state.file.write` and `state_bash_write` /
 `state.bash.write` were removed. Use OMP native `edit`/`write` auto-declare/claim
-for the default simple-write path, native edit tools with hook-visible targets
-after task-level reservation and exact same-reservation claim for other file
-edits, and `stateful sandbox run --fs write-targets --reservation-id <reservation_id> ...`
-for command-shaped writes.
+for the default simple-write path. Other file edits require hook-visible native
+edit targets after task-level reservation and exact same-reservation claim.
+Command-shaped writes require `stateful sandbox run --fs write-targets
+--reservation-id <reservation_id> ...` with an already-authorized reservation.
 
 The `/v1/authorize` endpoint and the reservation declare/request/claim/cancel
 endpoints require the `stateful.v1` request envelope with `payload`. Flat legacy
