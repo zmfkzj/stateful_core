@@ -4653,6 +4653,22 @@ fn pre_tool_use_apply_patch_move_authorizes_source_and_destination() {
     assert!(request.contains("\"new_path\":\"new.txt\""));
     let body = request_json_body(&request);
     assert_eq!(body["payload"]["purpose"], "Fix auth validation behavior.");
+    let observations = body["payload"]["base_observations"]
+        .as_array()
+        .expect("base_observations should be present");
+    assert_eq!(observations.len(), 2);
+    let old_observation = observations
+        .iter()
+        .find(|observation| observation["path"] == "old.txt")
+        .expect("old.txt base observation should be present");
+    assert_eq!(old_observation["exists"], false);
+    assert!(old_observation["content_hash"].is_null());
+    let new_observation = observations
+        .iter()
+        .find(|observation| observation["path"] == "new.txt")
+        .expect("new.txt base observation should be present");
+    assert_eq!(new_observation["exists"], false);
+    assert!(new_observation["content_hash"].is_null());
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
     assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");

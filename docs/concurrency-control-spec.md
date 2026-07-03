@@ -176,29 +176,29 @@ Claim answers:
 Who is actively holding this now?
 ```
 
-For v1, only file and directory claims authorize supported filesystem writes.
+For shipped v1, file and directory claims authorize supported filesystem writes
+only when they are active under matching reservation scope. This broad
+reservation-scope plus same-reservation-claim requirement remains the shipped
+guardrail until replacement safety rails are implemented and verified.
 Other resources, such as tasks, tests, ports, and migrations, can provide
 coordination context; the task grouping itself does not replace exact claims for
 source-tree mutation.
 
-Claims are advisory as product semantics, but checked where the runtime has a
-reliable hook or sandbox boundary. This split is intentional:
+Target product semantics split the overloaded concept:
 
 ```text
-planning and context: advisory
-write boundary: pre-tool authorization with observation checks
+planning and context: reservation as advisory intent
+write boundary: independent freshness checks plus short write fences
 ```
 
-A write authorization validates the current same-reservation claim and rejects stale
-claim or base-file observations when the hook can supply them. This catches the
-common lost-update case where the file changed between claim acquisition,
-reread, and write authorization.
-
-Continuous post-authorization fencing is target behavior. The shipped v1 hook
-does not yet pass a claim id through the native write and confirm after
-`PostToolUse` that the same claim was continuously held until the write
-completed. Long sandboxed commands are authorized before execution and are not
-currently bounded by remaining claim TTL.
+In that target model, `reservation` is rendered intent, not write
+authorization by itself. Demoting reservation-required authorization is gated on
+mandatory base-observation coverage for supported file-changing writes and an
+implemented continuous same-file write fence. Until both safety rails ship,
+write authorization continues to validate the current same-reservation claim and
+reject stale claim or base-file observations when the hook can supply them. This
+catches the common lost-update case where the file changed between claim
+acquisition, reread, and write authorization.
 
 At authorization time, the policy engine checks:
 
@@ -213,8 +213,8 @@ At authorization time, the policy engine checks:
 Optimistic concurrency control belongs at the workspace boundary, not inside a
 collaborative text data structure.
 
-When a session reads, declares reservation, acquires a claim, or attempts a write, the
-system can record a compact base observation for the target:
+When a session reads, declares reservation, acquires a claim, or attempts a write,
+the target model records a compact base observation for each writable target:
 
 ```text
 repo head
@@ -228,6 +228,11 @@ observed_event_sequence
 Before a write, the policy engine compares the current observation with the
 actor's base observation and the effect log.
 
+Stale base observations are a hard stop. Replaying a patch or full-file write
+against content the actor did not observe is data loss, not a harmless
+coordination conflict. The next action is reread, regenerate or reconcile the
+write, and retry with a fresh observation.
+
 Expected same-agent effects are allowed when they are recorded under the active
 reservation and current claim. Unexpected effects produce a warning or denial:
 
@@ -239,7 +244,10 @@ reservation and current claim. Unexpected effects produce a warning or denial:
 
 This is OCC-style because actors can work optimistically while reading,
 planning, and editing in memory, but must prove that the target is still the
-same coordination state before mutation.
+same coordination state before mutation. Shipped v1 still uses reservation scope
+plus same-reservation claim as the broad authorization guardrail; moving that
+guardrail down to advisory intent is gated on mandatory base observations and
+implemented independent write fences for the supported write surfaces.
 
 ## Effect Log
 
@@ -420,15 +428,23 @@ changes that alter rationale may update current-state coordination.
 
 ## Invariants
 
-- Reservation authorizes scope; claim represents active possession.
-- A claim without matching reservation does not authorize a write.
-- Reservation without a current claim does not authorize a write to a
+- Shipped v1 authorization requires active reservation scope plus an active
+  same-reservation claim for supported file and directory writes.
+- In the target model, `reservation` is advisory intent for rendering and
+  handoff; it is not broad write authorization by itself.
+- Demoting reservation-required authorization is gated on mandatory
+  base-observation coverage and implemented continuous same-file write fencing.
+- A claim without matching reservation does not authorize a shipped v1 write.
+- Reservation without a current claim does not authorize a shipped v1 write to a
   claim-required write-authorizing resource.
+- Stale base observations are a hard stop because stale patch replay can lose
+  data.
 - Expired state is historical evidence, not live blocking authority.
 - Same physical workspace path is the hard conflict domain.
 - Same repo-relative path across worktrees or branches is warning context unless
   policy explicitly promotes it.
-- Subagents inherit only the parent session's active valid reservation scope.
+- Subagents inherit only the parent session's active valid reservation scope in
+  shipped v1.
 - Human writes are never discarded or blocked silently.
 - Overrides are specific, temporary, audited, and user-owned.
 - Validation evidence improves confidence but never replaces authorization.
