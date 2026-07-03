@@ -79,13 +79,8 @@ fn assert_current_agent_context_absent(repo_root: &Path) {
 
 #[test]
 fn session_start_registers_explicit_agent_without_current_file() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-session-start-agent-id-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -116,19 +111,12 @@ fn session_start_registers_explicit_agent_without_current_file() {
     assert!(request.contains("POST /v1/session/register HTTP/1.1"));
     assert!(request.contains("\"agent_id\":\"codex-agent-1\""));
     assert_current_agent_context_absent(&repo_root);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn session_start_derives_workspace_id_for_default_local_runtime() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-derived-workspace-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -166,19 +154,12 @@ fn session_start_derives_workspace_id_for_default_local_runtime() {
 
     assert_eq!(body["agent_id"], "derived-agent");
     assert_current_agent_context_absent(&repo_root);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn session_start_derives_workspace_id_for_default_shared_runtime() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-derived-shared-workspace-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -216,19 +197,12 @@ fn session_start_derives_workspace_id_for_default_shared_runtime() {
 
     assert_eq!(body["agent_id"], "derived-shared-agent");
     assert_current_agent_context_absent(&repo_root);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_authorization_uses_explicit_agent_id_when_thread_id_present() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-pre-tool-session-id-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -264,8 +238,6 @@ fn pre_tool_use_authorization_uses_explicit_agent_id_when_thread_id_present() {
     let request = rx.recv().expect("captured request should arrive");
     let body = request_json_body(&request);
     assert_eq!(body["agent"]["agent_id"], "parent-session-1");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -1574,13 +1546,8 @@ fn pre_tool_use_denies_raw_stateful_bench_operational_bash() {
 
 #[test]
 fn pre_tool_use_in_repo_does_not_write_current_agent_context() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-current-agent-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -1613,19 +1580,12 @@ fn pre_tool_use_in_repo_does_not_write_current_agent_context() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_current_agent_context_absent(&repo_root);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_uses_payload_agent_id_without_environment_fallback() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-stateful-agent-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -1660,19 +1620,12 @@ fn pre_tool_use_uses_payload_agent_id_without_environment_fallback() {
     let request = rx.recv().expect("authorize request should arrive");
     assert!(request.contains("\"agent_id\":\"s-current\""));
     assert_current_agent_context_absent(&repo_root);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_from_enabled_subdir_records_session_at_repo_root() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-subdir-session-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     let subdir = repo_root.join("nested/worktree");
@@ -1703,19 +1656,12 @@ fn pre_tool_use_from_enabled_subdir_records_session_at_repo_root() {
     let _request = rx.recv().expect("captured request should arrive");
     assert_current_agent_context_absent(&repo_root);
     assert!(!subdir.join(".stateful_core/runtime/session.json").exists());
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_in_disabled_repo_noops_without_runtime() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-disabled-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
 
     let input = r#"{
@@ -1737,18 +1683,12 @@ fn pre_tool_use_in_disabled_repo_noops_without_runtime() {
             .join(".stateful_core/runtime/session.json")
             .exists()
     );
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_allows_read_only_sandbox_when_runtime_unreachable() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-readonly-unreachable-runtime-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -1786,19 +1726,12 @@ fn pre_tool_use_allows_read_only_sandbox_when_runtime_unreachable() {
         "allowed hook should not print a denial: {}",
         String::from_utf8_lossy(&output.stdout)
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_denies_native_write_when_runtime_unreachable() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-write-unreachable-runtime-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -1832,8 +1765,6 @@ fn pre_tool_use_denies_native_write_when_runtime_unreachable() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"permissionDecision\":\"deny\""));
     assert!(stdout.contains("reachable stateful server"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -1966,13 +1897,8 @@ fn pre_tool_use_denies_bash_control_syntax_without_sandbox_run_wrapper() {
 
 #[test]
 fn run_hook_pre_tool_use_denies_raw_bash_with_legacy_trusted_sandbox_env() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-sandbox-env-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2018,8 +1944,6 @@ fn run_hook_pre_tool_use_denies_raw_bash_with_legacy_trusted_sandbox_env() {
             .expect("reason should be string")
             .contains("stateful sandbox run")
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -2299,13 +2223,8 @@ fn pre_tool_use_denies_unclassified_tool_names() {
 
 #[test]
 fn pre_tool_use_bash_denial_in_repo_does_not_render_live_context() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-bash-denial-context-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2350,8 +2269,6 @@ fn pre_tool_use_bash_denial_in_repo_does_not_render_live_context() {
         .expect("deny reason should be text");
     assert!(reason.contains("Raw Bash is denied"));
     assert!(!reason.contains("Nearby Activity"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -2385,13 +2302,8 @@ fn pre_tool_use_denies_github_remote_repository_mutation_tools() {
 
 #[test]
 fn pre_tool_use_records_unclassified_tools_for_tools_list() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-unclassified-tools-list-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2425,19 +2337,12 @@ fn pre_tool_use_records_unclassified_tools_for_tools_list() {
 
     let list = tool_list_for_repo(&paths, &repo_root).expect("tool list should load");
     assert_eq!(list.unclassified_tools, vec!["FutureWriteTool"]);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_allows_repo_tool_allowlist_but_preserves_hard_denies() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-tool-allowlist-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2506,8 +2411,6 @@ fn pre_tool_use_allows_repo_tool_allowlist_but_preserves_hard_denies() {
             .expect("reason should be string")
             .contains("filesystem MCP")
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -2697,13 +2600,8 @@ fn omp_edit_mixed_repo_internal_and_external_targets_blocks() {
 
 #[test]
 fn omp_unclassified_tools_are_manageable_with_stateful_tools_allowlist() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-omp-tool-allowlist-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2823,19 +2721,12 @@ fn omp_unclassified_tools_are_manageable_with_stateful_tools_allowlist() {
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
     assert_eq!(stdout["decision"], "allow");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn omp_glob_is_allowed_for_repo_with_stale_tool_allowlist() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-omp-stale-glob-allowlist-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2881,19 +2772,12 @@ fn omp_glob_is_allowed_for_repo_with_stale_tool_allowlist() {
         "glob should not be recorded as unclassified: {:?}",
         list.unclassified_tools
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn omp_parallel_tool_calls_is_allowed_for_repo_with_stale_tool_allowlist() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-omp-stale-parallel-tool-calls-allowlist-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -2940,17 +2824,12 @@ fn omp_parallel_tool_calls_is_allowed_for_repo_with_stale_tool_allowlist() {
         "parallel_tool_calls should not be recorded as unclassified: {:?}",
         list.unclassified_tools
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn run_hook_omp_pre_tool_use_prints_extension_decision() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-hook-omp-runtime-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
@@ -2979,19 +2858,12 @@ fn run_hook_omp_pre_tool_use_prints_extension_decision() {
     assert_eq!(stdout["decision"], "allow");
     let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
     assert_eq!(body["agent"]["agent_id"], "omp-parent");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn run_hook_omp_env_runtime_derives_workspace_id_from_enabled_repo() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-omp-env-runtime-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
@@ -3081,8 +2953,6 @@ fn run_hook_omp_env_runtime_derives_workspace_id_from_enabled_repo() {
         expected_root.to_string_lossy().as_ref()
     );
     assert_ne!(authorize["workspace"]["workspace_id"], "unknown");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -3114,13 +2984,8 @@ fn omp_edit_extracts_hashline_file_targets() {
 
 #[test]
 fn omp_edit_authorize_includes_lazy_queue_metadata_when_scope_exists() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-omp-lazy-edit-metadata-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
     fs::write(repo_root.join("docs/a.md"), "old\n").expect("target file should write");
@@ -3172,8 +3037,6 @@ fn omp_edit_authorize_includes_lazy_queue_metadata_when_scope_exists() {
             .as_str()
             .is_some_and(|hash| !hash.is_empty())
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -3819,13 +3682,8 @@ fn omp_subagent_post_tool_uses_child_session_and_parent_metadata() {
 
 #[test]
 fn pre_tool_use_edit_posts_authorize_and_denies_when_server_denies() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-edit-deny-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
@@ -3880,19 +3738,12 @@ fn pre_tool_use_edit_posts_authorize_and_denies_when_server_denies() {
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
     assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_edit_denies_when_authorize_connection_drops() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-edit-authorize-drop-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -3931,19 +3782,12 @@ fn pre_tool_use_edit_denies_when_authorize_connection_drops() {
     assert!(stdout.contains("\"permissionDecision\":\"deny\""));
     assert!(stdout.contains("server_unavailable"));
     assert!(stdout.contains("Writes fail closed"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_edit_posts_authorize_without_rendering_live_context_when_server_allows() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-edit-allow-context-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
@@ -3994,19 +3838,12 @@ fn pre_tool_use_edit_posts_authorize_without_rendering_live_context_when_server_
         "allowed Edit writes should not inject live context: {}",
         String::from_utf8_lossy(&output.stdout)
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_edit_relative_path_is_resolved_from_payload_cwd() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-edit-cwd-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     let docs_dir = repo_root.join("docs");
@@ -4045,19 +3882,12 @@ fn pre_tool_use_edit_relative_path_is_resolved_from_payload_cwd() {
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("\"action\":\"write_file\""));
     assert!(request.contains("\"path\":\"docs/plan.md\""));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn run_hook_uses_payload_cwd_for_repo_gate() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-payload-cwd-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     let outside = temp_root.join("outside");
@@ -4093,19 +3923,12 @@ fn run_hook_uses_payload_cwd_for_repo_gate() {
     assert!(request.contains("\"agent_id\":\"s-cwd\""));
     assert_current_agent_context_absent(&repo_root);
     assert!(!outside.join(".stateful_core/runtime/session.json").exists());
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_omits_queue_without_matching_current_intent_purpose() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-no-purpose-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -4146,19 +3969,12 @@ fn pre_tool_use_apply_patch_omits_queue_without_matching_current_intent_purpose(
     assert_eq!(body["payload"]["path"], "src/auth.ts");
     assert!(body["payload"].get("purpose").is_none());
     assert!(body["payload"].get("queue_on_conflict").is_none());
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_uses_current_intent_purpose_for_queue_even_when_target_differs() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-current-purpose-any-target-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -4211,16 +4027,12 @@ fn pre_tool_use_apply_patch_uses_current_intent_purpose_for_queue_even_when_targ
         body["payload"]["purpose"],
         "Continue documented retry work."
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
-    let temp_root = std::env::temp_dir().join(format!("stateful-hook-test-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -4300,19 +4112,12 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
         "allowed writes should not inject live context: {}",
         String::from_utf8_lossy(&output.stdout)
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_repeated_same_path_denial_suggests_single_writer() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-repeated-denial-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -4378,19 +4183,12 @@ fn pre_tool_use_apply_patch_repeated_same_path_denial_suggests_single_writer() {
         .expect("second denial reason should be text");
     assert!(second_reason.contains("Repeated denial for src/auth.ts"));
     assert!(second_reason.contains("Use one writer"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_different_path_denial_does_not_trigger_single_writer() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-repeated-denial-different-path-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -4456,19 +4254,12 @@ fn pre_tool_use_apply_patch_different_path_denial_does_not_trigger_single_writer
         .as_str()
         .expect("second denial reason should be text");
     assert!(!second_reason.contains("Use one writer"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_path_marker_key_does_not_collapse_separators() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-repeated-denial-path-key-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -4530,19 +4321,12 @@ fn pre_tool_use_apply_patch_path_marker_key_does_not_collapse_separators() {
         .as_str()
         .expect("second denial reason should be text");
     assert!(!second_reason.contains("Use one writer"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_invalid_agent_id_does_not_write_denial_marker() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-repeated-denial-session-key-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -4582,19 +4366,12 @@ fn pre_tool_use_apply_patch_invalid_agent_id_does_not_write_denial_marker() {
         "unsupported session id should fail closed before authorization"
     );
     assert!(!repo_root.join(".stateful_core/runtime/escape").exists());
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_denial_does_not_render_live_context() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-deny-info-context-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -4640,19 +4417,12 @@ fn pre_tool_use_apply_patch_denial_does_not_render_live_context() {
         .expect("deny reason should be text");
     assert_eq!(reason, "Declare matching reservation.");
     assert!(!reason.contains("Nearby Activity"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_sends_base_observation_for_existing_file() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-base-observation-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
@@ -4699,19 +4469,12 @@ fn pre_tool_use_apply_patch_sends_base_observation_for_existing_file() {
         observations[0]["content_hash"],
         test_content_hash(b"original contents\n")
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_patch_field_authorizes_every_file_target() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-patch-field-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -4760,19 +4523,12 @@ fn pre_tool_use_apply_patch_patch_field_authorizes_every_file_target() {
         json["hookSpecificOutput"]["permissionDecisionReason"],
         "Declare matching reservation."
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_move_authorizes_source_and_destination() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-move-patch-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -4821,19 +4577,12 @@ fn pre_tool_use_apply_patch_move_authorizes_source_and_destination() {
         json["hookSpecificOutput"]["permissionDecisionReason"],
         "Add exact source and destination scopes to the task reservation and acquire both claims."
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_raw_string_payload_posts_authorize() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-raw-patch-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -4870,19 +4619,12 @@ fn pre_tool_use_apply_patch_raw_string_payload_posts_authorize() {
     assert!(request.contains("\"action\":\"write_file\""));
     assert!(request.contains("\"path\":\"doc.txt\""));
     assert!(request.contains("\"tool_name\":\"apply_patch\""));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_file_change_posts_authorize_for_changed_paths() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-file-change-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -4922,20 +4664,12 @@ fn pre_tool_use_file_change_posts_authorize_for_changed_paths() {
         .expect("authorize request should arrive");
     assert!(request.contains("\"action\":\"write_file\""));
     assert!(request.contains("\"path\":\"doc.txt\""));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn hook_pre_tool_use_discovers_global_runtime_file() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-global-runtime-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     let paths = GlobalPaths::new(temp_root.join("home"));
@@ -4982,17 +4716,12 @@ fn hook_pre_tool_use_discovers_global_runtime_file() {
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/authorize HTTP/1.1"));
     assert!(request.contains("\"workspace_id\":\"w1\""));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_denies_when_server_denies() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-hook-deny-test-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -5032,19 +4761,12 @@ fn pre_tool_use_apply_patch_denies_when_server_denies() {
         json["hookSpecificOutput"]["permissionDecisionReason"],
         "Declare matching reservation."
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_denies_new_dependency_shadowing_python_root_before_authorize() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-shadow-dependency-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -5095,19 +4817,12 @@ dependencies = ["langchain-core>=0.3"]
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
         "shadowing guard should not post /v1/context/render or /v1/authorize"
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_denial_includes_wait_id_guidance() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-deny-wait-id-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -5152,17 +4867,12 @@ fn pre_tool_use_apply_patch_denial_includes_wait_id_guidance() {
     assert!(reason.contains("state_resume_next"));
     assert!(reason.contains("reread"));
     assert!(reason.contains("state_reservation_claim"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn pre_tool_use_apply_patch_delete_posts_delete_file_action() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-hook-delete-test-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -5197,17 +4907,12 @@ fn pre_tool_use_apply_patch_delete_posts_delete_file_action() {
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("\"action\":\"delete_file\""));
     assert!(request.contains("\"path\":\"src/auth.ts\""));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn session_start_posts_session_register() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-hook-session-test-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -5236,17 +4941,12 @@ fn session_start_posts_session_register() {
     assert!(request.contains("POST /v1/session/register HTTP/1.1"));
     assert!(request.contains("\"agent_id\":\"s1\""));
     assert!(request.contains("\"workspace_id\":\"w1\""));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn post_tool_use_posts_session_heartbeat() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-hook-post-test-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -5277,19 +4977,12 @@ fn post_tool_use_posts_session_heartbeat() {
     assert!(request.contains("POST /v1/session/heartbeat HTTP/1.1"));
     assert!(request.contains("\"agent_id\":\"s1\""));
     assert!(request.contains("\"workspace_id\":\"w1\""));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn post_tool_use_edit_refreshes_file_claim_observation() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-post-refresh-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
@@ -5343,19 +5036,12 @@ fn post_tool_use_edit_refreshes_file_claim_observation() {
             .to_string_lossy()
             .to_string()
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn post_tool_use_edit_reclaims_file_lease_after_refresh() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-post-release-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
@@ -5410,17 +5096,12 @@ fn post_tool_use_edit_reclaims_file_lease_after_refresh() {
     assert_eq!(body["agent_id"], "s1");
     assert_eq!(body["workspace_id"], "w1");
     assert_eq!(body["path"], "src/auth.ts");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn post_tool_use_in_disabled_repo_noops_without_outbox() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-hook-outbox-test-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
 
     let input = r#"{
@@ -5433,19 +5114,12 @@ fn post_tool_use_in_disabled_repo_noops_without_outbox() {
     handle_post_tool_use_in_repo(input, &temp_root).expect("disabled repo should no-op");
 
     assert!(!temp_root.join(".stateful_core/outbox/s1.jsonl").exists());
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn post_tool_use_outbox_fallback_records_current_created_at() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-outbox-created-at-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -5519,19 +5193,12 @@ fn post_tool_use_outbox_fallback_records_current_created_at() {
         .expect("created_at should be an RFC3339 timestamp");
     assert!(created_at >= before_hook);
     assert!(created_at <= after_hook);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn codex_stateful_lifecycle_posts_expected_server_requests() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-codex-lifecycle-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
@@ -5665,19 +5332,12 @@ fn codex_stateful_lifecycle_posts_expected_server_requests() {
     let finalize = rx.recv().expect("finalize request should arrive");
     assert!(finalize.contains("POST /v1/activity/finalize HTTP/1.1"));
     assert_eq!(request_json_body(&finalize)["agent_id"], "codex-session");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn omp_stateful_lifecycle_posts_expected_server_requests() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-hook-omp-lifecycle-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
@@ -5822,17 +5482,12 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
     let finalize_body = request_json_body(&finalize);
     assert_eq!(finalize_body["agent_id"], "omp-parent");
     assert_eq!(finalize_body["source"]["event"], "omp_stop");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn user_prompt_submit_posts_context_render() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-hook-prompt-test-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -5903,17 +5558,12 @@ fn user_prompt_submit_posts_context_render() {
         rx.recv_timeout(Duration::from_millis(200)).is_err(),
         "second UserPromptSubmit should not call /v1/context/render"
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn stop_posts_activity_finalize() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-hook-stop-test-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
@@ -5937,8 +5587,6 @@ fn stop_posts_activity_finalize() {
     assert!(request.contains("POST /v1/activity/finalize HTTP/1.1"));
     assert!(request.contains("\"agent_id\":\"s1\""));
     assert!(request.contains("\"workspace_id\":\"w1\""));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 fn read_http_request_maybe_body(stream: &mut std::net::TcpStream) -> String {

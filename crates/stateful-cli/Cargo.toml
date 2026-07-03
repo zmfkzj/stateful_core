@@ -27,6 +27,9 @@ time = { workspace = true, features = ["formatting", "parsing"] }
 tokio.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [features]
 default = []
 codex-benchmark = []

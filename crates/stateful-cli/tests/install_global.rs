@@ -470,7 +470,7 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
 #[test]
 fn install_omp_yes_can_target_user_omp_profile_separate_from_stateful_home() {
     let fixture = TestFixture::new("omp-install-default-home");
-    let user_home = fixture.root.join("home");
+    let user_home = fixture.paths.home.clone();
     let stateful_home = user_home.join(".stateful_core");
     let paths = GlobalPaths::new(&stateful_home);
     let omp_agent_dir = user_home
@@ -1059,26 +1059,22 @@ fn backup_paths_for(config_path: &Path) -> Vec<PathBuf> {
 }
 
 struct TestFixture {
-    root: PathBuf,
+    _root: tempfile::TempDir,
     paths: GlobalPaths,
     codex_config: PathBuf,
 }
 
 impl TestFixture {
     fn new(name: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "stateful-install-global-{name}-{}",
-            std::process::id()
-        ));
-        if root.exists() {
-            fs::remove_dir_all(&root).expect("old fixture root should be removable");
-        }
-        fs::create_dir_all(&root).expect("fixture root should be creatable");
+        let root = tempfile::Builder::new()
+            .prefix(&format!("stateful-install-global-{name}-"))
+            .tempdir()
+            .expect("temp dir should create");
 
-        let paths = GlobalPaths::new(root.join("home"));
-        let codex_config = root.join("codex").join("config.toml");
+        let paths = GlobalPaths::new(root.path().join("home"));
+        let codex_config = root.path().join("codex").join("config.toml");
         Self {
-            root,
+            _root: root,
             paths,
             codex_config,
         }
@@ -1130,13 +1126,5 @@ impl TestFixture {
         self.codex_config_parent()
             .join("rules")
             .join("stateful.rules")
-    }
-}
-
-impl Drop for TestFixture {
-    fn drop(&mut self) {
-        if self.root.exists() {
-            fs::remove_dir_all(&self.root).expect("fixture root should be removable");
-        }
     }
 }

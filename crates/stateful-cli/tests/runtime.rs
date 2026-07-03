@@ -48,12 +48,8 @@ fn validate_agent_id_rejects_unsupported_agent_identifier_characters() {
 
 #[test]
 fn runtime_file_round_trips_server_discovery() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-runtime-test-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
 
     let runtime = ServerRuntime::new("http://127.0.0.1:43873", "secret-token", "w1", 42);
     write_runtime_file(&temp_root, &runtime).expect("runtime file should write");
@@ -63,20 +59,12 @@ fn runtime_file_round_trips_server_discovery() {
     assert_eq!(discovered.base_url, "http://127.0.0.1:43873");
     assert_eq!(discovered.token, "secret-token");
     assert_eq!(discovered.workspace_id, "w1");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn global_runtime_file_round_trips_server_discovery() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-global-runtime-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     let paths = GlobalPaths::new(temp_root.join("home"));
 
@@ -89,20 +77,12 @@ fn global_runtime_file_round_trips_server_discovery() {
     assert_eq!(discovered.base_url, "http://127.0.0.1:43874");
     assert_eq!(discovered.token, "global-token");
     assert_eq!(discovered.workspace_id, "global-w");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn runtime_discovery_keeps_local_runtime_compatibility_fallback() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-runtime-compat-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     let paths = GlobalPaths::new(temp_root.join("home"));
 
@@ -115,20 +95,12 @@ fn runtime_discovery_keeps_local_runtime_compatibility_fallback() {
     assert_eq!(discovered.base_url, "http://127.0.0.1:43875");
     assert_eq!(discovered.token, "repo-token");
     assert_eq!(discovered.workspace_id, "repo-w");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn cli_current_uses_local_runtime_when_global_paths_are_unavailable() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-runtime-no-home-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -157,19 +129,13 @@ fn cli_current_uses_local_runtime_when_global_paths_are_unavailable() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"ok\""));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[cfg(unix)]
 #[test]
 fn runtime_files_are_owner_read_write_only() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-runtime-mode-test-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let runtime = ServerRuntime::new("http://127.0.0.1:43875", "secret-token", "w1", 44);
 
@@ -188,8 +154,6 @@ fn runtime_files_are_owner_read_write_only() {
         & 0o777;
     assert_eq!(repo_mode, 0o600);
     assert_eq!(global_mode, 0o600);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -254,14 +218,8 @@ fn runtime_has_required_identity_rejects_mismatched_nonzero_pid() {
 
 #[test]
 fn cli_current_rejects_env_runtime_without_required_capabilities() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-runtime-env-old-server-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -294,20 +252,12 @@ fn cli_current_rejects_env_runtime_without_required_capabilities() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn cli_current_accepts_env_runtime_with_required_capabilities() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-runtime-env-capable-server-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -343,27 +293,22 @@ fn cli_current_accepts_env_runtime_with_required_capabilities() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"ok\""));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn state_db_path_uses_local_runtime_directory() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-runtime-db-test-{}", std::process::id()));
-
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     assert_eq!(
-        state_db_path(&temp_root),
+        state_db_path(temp_root),
         temp_root.join(".stateful_core").join("state.db")
     );
 }
 
 #[test]
 fn global_state_db_path_uses_user_level_state_db() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-global-runtime-db-test-{}",
-        std::process::id()
-    ));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
 
     assert_eq!(global_state_db_path(&paths), paths.state_db);

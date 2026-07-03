@@ -2,10 +2,9 @@ use rusqlite::Connection;
 use serde_json::json;
 use stateful_core::{AuthorizationInput, CurrentEvidenceKind, CurrentItemKind, DecisionKind};
 use stateful_store::{Event, OutboxEntry, ReservationRequestInput, Store, StoreError};
-use std::fs;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
+use std::time::Duration as StdDuration;
 use time::{Duration as TimeDuration, OffsetDateTime};
 
 fn acquire_test_lease(store: &Store, agent_id: &str, workspace_id: &str, path: &str) {
@@ -152,16 +151,8 @@ fn outbox_entry_persists_full_sync_evidence() {
 
 #[test]
 fn migration_adds_sync_status_before_outbox_index_for_legacy_outbox() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-legacy-outbox-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
 
     {
         let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
@@ -214,21 +205,12 @@ fn migration_adds_sync_status_before_outbox_index_for_legacy_outbox() {
     assert_eq!(store.outbox_count().expect("outbox count should load"), 2);
 
     drop(store);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn migration_adds_notification_sequence_before_notification_index_for_legacy_notifications() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-legacy-notifications-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
 
     {
         let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
@@ -285,7 +267,6 @@ fn migration_adds_notification_sequence_before_notification_index_for_legacy_not
     assert_eq!(notifications[0].payload, json!({"wait_id":"legacy-wait"}));
 
     drop(store);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -505,13 +486,8 @@ fn expired_intent_is_not_write_authorizing_or_counted_active() {
 
 #[test]
 fn file_store_persists_events_and_materialized_views_across_reopen() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-store-file-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join(".stateful_core").join("state.db");
 
     {
         let store = Store::open(&db_path).expect("file store should open");
@@ -528,22 +504,12 @@ fn file_store_persists_events_and_materialized_views_across_reopen() {
         .expect("session lookup should succeed")
         .expect("session should be materialized");
     assert_eq!(session.workspace_id, "w1");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn file_store_enables_wal_journal_mode() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-wal-journal-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
 
     Store::open(&db_path).expect("file store should open");
 
@@ -552,22 +518,12 @@ fn file_store_enables_wal_journal_mode() {
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
         .expect("journal mode should load");
     assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn file_store_waits_for_short_sqlite_write_locks() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-busy-timeout-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("initial file store should open");
 
     let (locked_tx, locked_rx) = mpsc::channel();
@@ -586,22 +542,12 @@ fn file_store_waits_for_short_sqlite_write_locks() {
     lock_thread.join().expect("lock thread should finish");
 
     append_result.expect("append should wait for short sqlite write lock");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn retention_pruning_removes_old_history_but_preserves_live_notification_state() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-retention-pruning-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
     let mut old_event = Event::agent_registered("old-session", "w1").with_event_id("old-event");
@@ -647,22 +593,12 @@ fn retention_pruning_removes_old_history_but_preserves_live_notification_state()
         notification_ids,
         vec!["old-pending-notification", "recent-expired-notification"]
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn migration_adds_repo_identity_columns_to_existing_events_table() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-old-events-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
 
     {
         let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
@@ -722,22 +658,12 @@ fn migration_adds_repo_identity_columns_to_existing_events_table() {
     assert_eq!(events[1].worktree_id, None);
     assert_eq!(events[1].root, None);
     assert_eq!(events[1].branch, None);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn migration_removes_legacy_session_id_columns_after_agent_copy() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-legacy-agent-copy-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
 
     {
         let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
@@ -902,22 +828,12 @@ fn migration_removes_legacy_session_id_columns_after_agent_copy() {
             .iter()
             .any(|index| index.starts_with("idx_legacy_"))
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn migration_removes_legacy_coordination_rows_without_required_purpose() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-legacy-purpose-cleanup-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
 
     {
         let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
@@ -1046,8 +962,6 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
     assert_eq!(intent_count, 0);
     assert_eq!(waiter_count, 0);
     assert_eq!(active_claim_count, 0);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -1069,16 +983,8 @@ fn fresh_schema_omits_dead_coordination_tables() {
 
 #[test]
 fn migration_drops_dead_coordination_tables_from_legacy_db() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-dead-tables-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
 
     {
         let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
@@ -1135,22 +1041,12 @@ fn migration_drops_dead_coordination_tables_from_legacy_db() {
             ('conflicts', 'overrides', 'reconciliations', 'human_observations')",
     );
     assert_eq!(dead_tables, Vec::<String>::new());
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn failed_materialization_rolls_back_event_insert_and_allows_future_appends() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-failed-materialize-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
 
     {
         let conn = rusqlite::Connection::open(&db_path).expect("db should open");
@@ -1198,8 +1094,6 @@ fn failed_materialization_rolls_back_event_insert_and_allows_future_appends() {
         .append(Event::agent_registered("s2", "w1"))
         .expect("subsequent append should start a new transaction");
     assert_eq!(store.event_count().expect("event count should load"), 1);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -1427,14 +1321,8 @@ fn session_heartbeat_does_not_revive_expired_intent() {
 
 #[test]
 fn session_heartbeat_expires_stale_lease_and_promotes_waiter() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after unix epoch")
-        .as_nanos();
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-store-heartbeat-expired-claim-{unique}"));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
     let waiter = store
@@ -1476,8 +1364,6 @@ fn session_heartbeat_expires_stale_lease_and_promotes_waiter() {
         .expect("expired claim should promote waiting session");
     assert_eq!(reservation.wait_id, waiter.wait_id);
     assert_eq!(reservation.agent_id, "s2");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -1553,15 +1439,8 @@ fn session_heartbeat_caps_active_reservation_expiry_at_max_lifetime() {
 
 #[test]
 fn session_heartbeat_fails_closed_for_malformed_reservation_declared_at() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-heartbeat-malformed-reservation-{unique}"
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let mut reservation =
         Event::reservation_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
@@ -1607,8 +1486,6 @@ fn session_heartbeat_fails_closed_for_malformed_reservation_declared_at() {
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .expect("event count should load");
     assert_eq!(event_count, 1);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -1638,14 +1515,8 @@ fn reservation_declared_fails_closed_for_malformed_created_at() {
 
 #[test]
 fn session_heartbeat_extends_active_claim_expiry() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after unix epoch")
-        .as_nanos();
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-store-heartbeat-live-claim-{unique}"));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
     drop(store);
@@ -1678,20 +1549,12 @@ fn session_heartbeat_extends_active_claim_expiry() {
         .find(|item| item.kind == CurrentItemKind::Claim)
         .expect("claim item should exist");
     assert_eq!(claim.expires_at.as_deref(), Some("2999-01-01T00:15:00Z"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn session_heartbeat_does_not_extend_lease_without_matching_active_reservation() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after unix epoch")
-        .as_nanos();
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-store-heartbeat-uncovered-claim-{unique}"));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
     store
@@ -1722,8 +1585,6 @@ fn session_heartbeat_does_not_extend_lease_without_matching_active_reservation()
         .find(|item| item.kind == CurrentItemKind::Claim)
         .expect("claim item should still exist");
     assert_eq!(claim.expires_at.as_deref(), Some("2999-01-01T00:11:00Z"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -1766,14 +1627,8 @@ fn acquired_claim_persists_reservation_id() {
 
 #[test]
 fn acquired_claim_cannot_reuse_stale_claimed_wait_id_after_scope_expires() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-store-stale-claimed-wait-{unique}"));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let wait = store
         .enqueue_waiter(
@@ -1815,8 +1670,6 @@ fn acquired_claim_cannot_reuse_stale_claimed_wait_id_after_scope_expires() {
         .acquire_claim_for_reservation(&wait.wait_id, "s1", "w1", "src/auth.ts")
         .expect_err("expired claimed wait id should not authorize a fresh claim");
     assert!(matches!(error, StoreError::MissingReservation));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -2473,16 +2326,8 @@ fn active_exact_file_intent_by_same_agent_ignores_directory_intent() {
 
 #[test]
 fn expired_lease_is_not_returned_as_active_owner() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-expired-claim-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     acquire_test_lease(&store, "stale-session", "w1", "src/auth.ts");
     drop(store);
@@ -2499,8 +2344,6 @@ fn expired_lease_is_not_returned_as_active_owner() {
             .expect("claim owner should load"),
         None
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -2814,16 +2657,8 @@ fn finalizing_session_cancels_queued_and_reserved_waiters_and_promotes_next() {
 
 #[test]
 fn cancel_reservation_request_rolls_back_when_next_reservation_notification_fails() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-cancel-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
     let first = store
@@ -2894,21 +2729,12 @@ fn cancel_reservation_request_rolls_back_when_next_reservation_notification_fail
     assert_eq!(reservation.wait_id, first.wait_id);
 
     drop(trigger_conn);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn promote_next_waiter_for_path_rolls_back_when_notification_fails() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-promote-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
     let wait = store
@@ -2959,7 +2785,6 @@ fn promote_next_waiter_for_path_rolls_back_when_notification_fails() {
     );
 
     drop(trigger_conn);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -3004,16 +2829,8 @@ fn released_child_lease_promotes_directory_waiter_to_reservation() {
 
 #[test]
 fn release_claim_rolls_back_when_reservation_notification_fails() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-release-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
     acquire_test_lease(&store, "s1", "w1", "target/out.txt");
@@ -3067,21 +2884,12 @@ fn release_claim_rolls_back_when_reservation_notification_fails() {
     );
 
     drop(trigger_conn);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn release_session_claims_rolls_back_when_reservation_notification_fails() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-session-release-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
     acquire_test_lease(&store, "s1", "w1", "target/out.txt");
@@ -3137,7 +2945,6 @@ fn release_session_claims_rolls_back_when_reservation_notification_fails() {
     );
 
     drop(trigger_conn);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -3352,16 +3159,8 @@ fn released_directory_lease_keeps_same_agent_conflicting_waiter_queued() {
 
 #[test]
 fn live_current_state_rolls_back_unblocked_promotion_when_notification_fails() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-live-current-promotion-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let wait = store
         .enqueue_waiter(
@@ -3410,7 +3209,6 @@ fn live_current_state_rolls_back_unblocked_promotion_when_notification_fails() {
     );
 
     drop(trigger_conn);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -3867,16 +3665,8 @@ fn expired_reservation_promotes_next_waiter() {
 
 #[test]
 fn stale_reservation_expiry_promotes_next_waiter() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-stale-reservation-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
     let first = store
@@ -3930,22 +3720,12 @@ fn stale_reservation_expiry_promotes_next_waiter() {
         .expect("second waiter should be reserved");
     assert_eq!(reservation.wait_id, second.wait_id);
     assert_eq!(reservation.agent_id, "s3");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn expire_stale_rolls_back_reservation_expiry_when_next_notification_fails() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-expire-reservation-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
     let first = store
@@ -4020,7 +3800,6 @@ fn expire_stale_rolls_back_reservation_expiry_when_next_notification_fails() {
     );
 
     drop(trigger_conn);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]

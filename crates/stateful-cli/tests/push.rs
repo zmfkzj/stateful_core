@@ -136,33 +136,23 @@ fn git_output(root: &std::path::Path, args: &[&str]) -> String {
 }
 
 mod tempfile_root {
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-    };
+    use std::path::Path;
 
     pub struct TempRoot {
-        path: PathBuf,
+        root: tempfile::TempDir,
     }
 
     impl TempRoot {
         pub fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
-            if path.exists() {
-                fs::remove_dir_all(&path).expect("old temp root should be removable");
-            }
-            fs::create_dir_all(&path).expect("temp root should be creatable");
-            Self { path }
+            let root = tempfile::Builder::new()
+                .prefix(&format!("{name}-"))
+                .tempdir()
+                .expect("temp dir should create");
+            Self { root }
         }
 
         pub fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempRoot {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
+            self.root.path()
         }
     }
 }

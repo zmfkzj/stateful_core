@@ -7,7 +7,8 @@ const EXPECTED_ERROR: &str = "STATEFUL_GLOBAL_PATHS_EXPECTED_ERROR";
 
 #[test]
 fn global_paths_are_rooted_under_stateful_home() {
-    let home = std::env::temp_dir().join(format!("stateful-home-{}", std::process::id()));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let home = temp.path().join("stateful-home");
     let paths = GlobalPaths::new(&home);
 
     assert_eq!(paths.home, home);
@@ -32,7 +33,8 @@ fn global_paths_are_rooted_under_stateful_home() {
 
 #[test]
 fn from_env_prefers_stateful_home_over_home() {
-    let temp_dir = std::env::temp_dir().join(format!("stateful-env-{}", std::process::id()));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_dir = temp.path();
     let stateful_home = temp_dir.join("stateful-home");
     let home = temp_dir.join("home");
 
@@ -47,7 +49,8 @@ fn from_env_prefers_stateful_home_over_home() {
 
 #[test]
 fn from_env_falls_back_to_home_stateful_core() {
-    let home = std::env::temp_dir().join(format!("stateful-home-{}", std::process::id()));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let home = temp.path().join("stateful-home");
 
     run_from_env_child(|command| {
         command
@@ -68,7 +71,8 @@ fn from_env_errors_without_stateful_home_or_home() {
 
 #[test]
 fn from_env_rejects_empty_stateful_home() {
-    let home = std::env::temp_dir().join(format!("stateful-home-{}", std::process::id()));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let home = temp.path().join("stateful-home");
 
     run_from_env_child(|command| {
         command

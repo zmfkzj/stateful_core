@@ -97,13 +97,8 @@ fn parses_sandbox_process_find_json_flag() {
 
 #[test]
 fn doctor_labels_legacy_hooks_json_without_counting_it_as_installed() {
-    let temp = std::env::temp_dir().join(format!(
-        "stateful-doctor-legacy-hooks-{}",
-        std::process::id()
-    ));
-    if temp.exists() {
-        fs::remove_dir_all(&temp).expect("old temp root should remove");
-    }
+    let temp_dir = tempfile::tempdir().expect("temp dir should create");
+    let temp = temp_dir.path();
     let repo = temp.join("repo");
     let hooks_dir = repo.join(".codex");
     fs::create_dir_all(&hooks_dir).expect("hooks dir should create");
@@ -125,8 +120,6 @@ fn doctor_labels_legacy_hooks_json_without_counting_it_as_installed() {
     assert!(report.legacy_hooks_json);
     assert!(report.legacy_repo_state_db);
     assert!(!report.installed);
-
-    fs::remove_dir_all(&temp).expect("temp root should remove");
 }
 
 #[test]
@@ -743,11 +736,8 @@ fn parses_install_agent_omp_command() {
 
 #[test]
 fn omp_extension_uses_strict_agent_id_identity() {
-    let temp = std::env::temp_dir().join(format!(
-        "stateful-omp-extension-agent-id-{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&temp);
+    let temp_dir = tempfile::tempdir().expect("temp dir should create");
+    let temp = temp_dir.path();
     let agent_dir = temp.join("agent");
 
     apply_omp_install(OmpInstallOptions {
@@ -791,8 +781,6 @@ fn omp_extension_uses_strict_agent_id_identity() {
     assert!(!extension.contains("function processAgentId"));
     assert!(!extension.contains("omp-pid-"));
     assert!(extension.contains("missingAgentIdReason"));
-
-    fs::remove_dir_all(&temp).expect("temp root should remove");
 }
 
 #[test]
@@ -848,10 +836,8 @@ fn parses_tools_allow_list_and_deny_commands() {
 
 #[test]
 fn tools_list_prints_allowed_and_unclassified_tools() {
-    let root = std::env::temp_dir().join(format!("stateful-tools-list-{}", std::process::id()));
-    if root.exists() {
-        fs::remove_dir_all(&root).expect("old fixture root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let root = temp.path();
     let paths = GlobalPaths::new(root.join("home"));
     let repo = root.join("repo");
     fs::create_dir_all(repo.join(".git")).expect("git directory should be creatable");
@@ -911,8 +897,6 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
         json["unclassified_tools"],
         serde_json::json!(["FutureWriteTool"])
     );
-
-    fs::remove_dir_all(&root).expect("fixture root should be removable");
 }
 
 #[test]

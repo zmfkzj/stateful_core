@@ -739,13 +739,8 @@ async fn authorize_records_implicit_session_heartbeat() {
 
 #[tokio::test]
 async fn session_events_preserve_repo_identity_when_provided() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-session-identity-store-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -780,19 +775,12 @@ async fn session_events_preserve_repo_identity_when_provided() {
     assert_eq!(json["events"][0]["worktree_id"], "worktree-1");
     assert_eq!(json["events"][0]["root"], "/repo");
     assert_eq!(json["events"][0]["branch"], "main");
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
 async fn lease_finalize_route_is_available() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-coordination-store-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -849,17 +837,12 @@ async fn lease_finalize_route_is_available() {
             .expect("activity count should load"),
         1
     );
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
 async fn blocked_activity_phase_denies_authorized_write() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-blocked-activity-{}", std::process::id()));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -898,8 +881,6 @@ async fn blocked_activity_phase_denies_authorized_write() {
     let json = response_json(blocked, 2048).await;
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "inactive_session_phase");
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -1489,17 +1470,8 @@ async fn hook_native_write_allows_exact_file_intent_and_exact_file_lease() {
 
 #[tokio::test]
 async fn hook_native_write_denies_when_file_changed_since_claim_acquired() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-claim-observation-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     std::fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
     std::fs::write(repo_root.join("src/auth.ts"), "version one\n")
@@ -1570,22 +1542,12 @@ async fn hook_native_write_denies_when_file_changed_since_claim_acquired() {
         json["required_next_action"],
         "Reread target, reacquire claim, retry same edit."
     );
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
 async fn post_write_refresh_updates_claim_observation_for_next_write() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-claim-refresh-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     std::fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
     std::fs::write(repo_root.join("src/auth.ts"), "version one\n")
@@ -1665,8 +1627,6 @@ async fn post_write_refresh_updates_claim_observation_for_next_write() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = response_json(response, 2048).await;
     assert_eq!(json["decision"], "allow");
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -2006,11 +1966,8 @@ async fn active_claim_by_other_session_denies_authorize_even_with_matching_reser
 #[tokio::test]
 async fn authorize_denies_when_target_changed_since_base_observation() {
     let app = build_router(ServerConfig::new("secret-token"));
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-base-observation-{}", std::process::id()));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let src_dir = temp_root.join("src");
     std::fs::create_dir_all(&src_dir).expect("src directory should be created");
     let target = src_dir.join("auth.ts");
@@ -2075,8 +2032,6 @@ async fn authorize_denies_when_target_changed_since_base_observation() {
         json["required_next_action"],
         "Reread target, retry same edit with fresh base observation."
     );
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -2900,17 +2855,8 @@ async fn concurrent_codex_agents_transfer_native_edit_access_through_request_cla
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_reservation_requests_reserve_exactly_one_file_backed_waiter() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-concurrent-reservation-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file-backed store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -3002,8 +2948,6 @@ async fn concurrent_reservation_requests_reserve_exactly_one_file_backed_waiter(
     }
     assert_eq!(persisted_reserved, 1);
     assert_eq!(persisted_queued, agent_count - 1);
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -3264,17 +3208,8 @@ async fn lease_acquire_returns_conflict_for_active_claim_conflict() {
 
 #[tokio::test]
 async fn lease_acquire_allows_existing_directory_observation() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-directory-claim-observation-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     std::fs::create_dir_all(repo_root.join("tmp/build")).expect("repo tmp should be creatable");
     let db_path = temp_root.join(".stateful_core").join("state.db");
@@ -3311,8 +3246,6 @@ async fn lease_acquire_allows_existing_directory_observation() {
         .await
         .expect("directory claim acquire should complete");
     assert_eq!(acquire.status(), StatusCode::OK);
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -3347,17 +3280,8 @@ async fn lease_acquire_rejects_direct_tmp_directory_resource() {
 
 #[tokio::test]
 async fn lease_acquire_rejects_directory_observation_for_file_path() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-file-claim-directory-observation-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     std::fs::create_dir_all(repo_root.join("tmp")).expect("repo tmp should be creatable");
     let db_path = temp_root.join(".stateful_core").join("state.db");
@@ -3402,8 +3326,6 @@ async fn lease_acquire_rejects_directory_observation_for_file_path() {
             .contains("Is a directory"),
         "unexpected response: {json}"
     );
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -3469,17 +3391,8 @@ async fn lease_acquire_rejects_active_reservation_conflict_without_breaking_clai
 
 #[tokio::test]
 async fn reservation_claim_rolls_back_reservation_when_intent_event_append_fails() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-claim-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let wait = store
@@ -3541,7 +3454,6 @@ async fn reservation_claim_rolls_back_reservation_when_intent_event_append_fails
     assert_eq!(status, "reserved");
 
     drop(trigger_conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -4268,17 +4180,8 @@ async fn activity_finalize_clears_active_reservation_for_agent() {
 
 #[tokio::test]
 async fn activity_finalize_rolls_back_activity_and_lease_release_when_intent_completion_fails() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-finalize-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -4367,7 +4270,6 @@ async fn activity_finalize_rolls_back_activity_and_lease_release_when_intent_com
     assert_eq!(active_reservation_count, 1);
 
     drop(trigger_conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -5588,17 +5490,8 @@ async fn lease_acquire_records_audit_event() {
 
 #[tokio::test]
 async fn lease_acquire_rolls_back_lease_when_audit_event_append_fails() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-claim-acquire-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -5665,7 +5558,6 @@ async fn lease_acquire_rolls_back_lease_when_audit_event_append_fails() {
     assert_eq!(active_claim_count, 0);
 
     drop(trigger_conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -5714,17 +5606,8 @@ async fn reservation_request_records_audit_event() {
 
 #[tokio::test]
 async fn reservation_request_rolls_back_waiter_when_audit_event_append_fails() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-reservation-request-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -5775,7 +5658,6 @@ async fn reservation_request_rolls_back_waiter_when_audit_event_append_fails() {
     assert_eq!(waiter_count, 0);
 
     drop(trigger_conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -5909,17 +5791,8 @@ async fn authorize_denial_audit_event_includes_queued_wait_details() {
 
 #[tokio::test]
 async fn authorize_queue_rolls_back_waiter_when_audit_event_append_fails() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-authorize-queue-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -6003,7 +5876,6 @@ async fn authorize_queue_rolls_back_waiter_when_audit_event_append_fails() {
     assert_eq!(waiter_count, 0);
 
     drop(trigger_conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -6245,11 +6117,8 @@ async fn lifecycle_mutations_record_audit_events() {
 
 #[tokio::test]
 async fn authorize_uses_supplied_sqlite_store() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-server-store-{}", std::process::id()));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     store
@@ -6281,23 +6150,12 @@ async fn authorize_uses_supplied_sqlite_store() {
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "allow");
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
 async fn serve_listener_expires_stale_reservations_without_request_activity() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-server-maintenance-worker-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let setup_store = Store::open(&db_path).expect("file store should open");
     let first = setup_store
@@ -6363,7 +6221,6 @@ async fn serve_listener_expires_stale_reservations_without_request_activity() {
     server.abort();
     let _ = server.await;
     drop(conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 
     assert_eq!(first_status, "expired");
     assert_eq!(second_status, "reserved");
@@ -6371,17 +6228,8 @@ async fn serve_listener_expires_stale_reservations_without_request_activity() {
 
 #[tokio::test]
 async fn serve_listener_prunes_old_history_without_request_activity() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-server-retention-worker-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let setup_store = Store::open(&db_path).expect("file store should open");
     let mut old_event = Event::agent_registered("old-session", "w1").with_event_id("old-event");
@@ -6421,7 +6269,6 @@ async fn serve_listener_prunes_old_history_without_request_activity() {
     server.abort();
     let _ = server.await;
     drop(conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 
     assert_eq!(event_ids, vec!["recent-event"]);
 }
@@ -7017,13 +6864,8 @@ async fn outbox_sync_accepts_idempotent_events() {
 
 #[tokio::test]
 async fn outbox_sync_persists_full_event_payload() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-outbox-sync-payload-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -7055,8 +6897,6 @@ async fn outbox_sync_persists_full_event_payload() {
         stored.payload,
         serde_json::json!({"error": "server unavailable", "retry": true})
     );
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -7099,17 +6939,8 @@ async fn claim_refresh_observation_error_uses_status_error_envelope() {
 
 #[tokio::test]
 async fn activity_finalize_store_failure_uses_status_error_envelope() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-finalize-envelope-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -7175,22 +7006,12 @@ async fn activity_finalize_store_failure_uses_status_error_envelope() {
     );
 
     drop(trigger_conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
 async fn outbox_sync_store_failure_uses_status_error_envelope() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-outbox-envelope-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -7244,7 +7065,6 @@ async fn outbox_sync_store_failure_uses_status_error_envelope() {
     );
 
     drop(trigger_conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
