@@ -430,9 +430,12 @@ $REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-c.sh
 
 ## Start Shards In Existing tmux
 
-These commands use an existing tmux server socket. Pass the `STATEFUL_*`
-runtime variables into each tmux session with `tmux new-session -e`; otherwise
-the stateful condition will fail its runtime preflight.
+These commands use an existing tmux server socket. Pass
+`STATEFUL_SERVER_URL` and `STATEFUL_SERVER_TOKEN` explicitly on the
+`tmux new-session` command with `-e`; exporting or sourcing them inside the
+launcher script is not enough when the existing tmux server owns the child
+environment. If either variable is missing, the `stateful:on` condition fails
+its runtime preflight before the agent starts.
 
 ```bash
 "$TMUX" -S "$TMUX_SOCKET" new-session -d -s "$RUN_ID-shard-a-omp" -e STATEFUL_SERVER_URL="$STATEFUL_SERVER_URL" -e STATEFUL_SERVER_TOKEN="$STATEFUL_SERVER_TOKEN" /bin/zsh "$REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-a.sh"
