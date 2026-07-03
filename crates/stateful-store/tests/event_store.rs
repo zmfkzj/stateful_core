@@ -2,26 +2,24 @@ use rusqlite::Connection;
 use serde_json::json;
 use stateful_core::{AuthorizationInput, CurrentEvidenceKind, CurrentItemKind, DecisionKind};
 use stateful_store::{Event, OutboxEntry, ReservationRequestInput, Store, StoreError};
-use std::fs;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
+use std::time::Duration as StdDuration;
 use time::{Duration as TimeDuration, OffsetDateTime};
 
-fn acquire_test_lease(store: &Store, session_id: &str, workspace_id: &str, path: &str) {
+fn acquire_test_lease(store: &Store, agent_id: &str, workspace_id: &str, path: &str) {
     let has_matching_reservation = store
         .live_current_state(Some(path))
         .expect("live current state should load")
         .items
         .iter()
         .any(|item| {
-            item.kind == CurrentItemKind::Reservation
-                && item.session_id.as_deref() == Some(session_id)
+            item.kind == CurrentItemKind::Reservation && item.agent_id.as_deref() == Some(agent_id)
         });
     if !has_matching_reservation {
         store
             .append(Event::reservation_declared(
-                session_id,
+                agent_id,
                 workspace_id,
                 format!("Acquire test claim for {path}."),
                 [path],
@@ -29,7 +27,7 @@ fn acquire_test_lease(store: &Store, session_id: &str, workspace_id: &str, path:
             .expect("claim reservation should append");
     }
     store
-        .acquire_claim(session_id, workspace_id, path)
+        .acquire_claim(agent_id, workspace_id, path)
         .expect("claim should acquire");
 }
 
@@ -42,6 +40,30 @@ fn query_ids(conn: &Connection, sql: &str) -> Vec<String> {
         .expect("ids should load");
     ids.sort();
     ids
+}
+
+fn query_columns(conn: &Connection, table: &str) -> Vec<String> {
+    let mut statement = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .expect("column query should prepare");
+    statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("column query should execute")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("columns should load")
+}
+
+fn query_indexes(conn: &Connection, table: &str) -> Vec<String> {
+    let mut statement = conn
+        .prepare(&format!("PRAGMA index_list({table})"))
+        .expect("index query should prepare");
+    let mut indexes = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("index query should execute")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("indexes should load");
+    indexes.sort();
+    indexes
 }
 
 fn test_timestamp(timestamp: OffsetDateTime) -> String {
@@ -61,21 +83,21 @@ fn append_event_materializes_session_in_same_transaction() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::session_registered("s1", "w1"))
+        .append(Event::agent_registered("s1", "w1"))
         .expect("session event should append");
 
     let session = store
-        .session("s1")
+        .agent("s1")
         .expect("session lookup should succeed")
         .expect("session should be materialized");
-    assert_eq!(session.session_id, "s1");
+    assert_eq!(session.agent_id, "s1");
     assert_eq!(session.workspace_id, "w1");
 }
 
 #[test]
 fn repeated_event_id_is_idempotent() {
     let store = Store::open_in_memory().expect("in-memory store should open");
-    let event = Event::session_registered("s1", "w1").with_event_id("event-1");
+    let event = Event::agent_registered("s1", "w1").with_event_id("event-1");
 
     store
         .append(event.clone())
@@ -119,12 +141,132 @@ fn outbox_entry_persists_full_sync_evidence() {
         .expect("outbox entry lookup should succeed")
         .expect("outbox entry should exist");
     assert_eq!(stored.outbox_id, "outbox-1");
-    assert_eq!(stored.session_id, "s1");
+    assert_eq!(stored.agent_id, "s1");
     assert_eq!(stored.workspace_id, "w1");
     assert_eq!(stored.sequence, 1);
     assert_eq!(stored.event_type, "HeartbeatObserved");
     assert_eq!(stored.payload, json!({"error":"server unavailable"}));
     assert_eq!(stored.sync_status, stateful_store::SyncStatus::Synced);
+}
+
+#[test]
+fn migration_adds_sync_status_before_outbox_index_for_legacy_outbox() {
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
+        conn.execute_batch(
+            "
+            CREATE TABLE outbox (
+                outbox_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL
+            );
+
+            INSERT INTO outbox (
+                outbox_id,
+                agent_id,
+                sequence
+            ) VALUES (
+                'legacy-outbox-1',
+                'legacy-agent',
+                1
+            );
+            ",
+        )
+        .expect("legacy outbox table should be created");
+    }
+
+    let store = Store::open(&db_path).expect("store should migrate old outbox");
+
+    assert!(
+        store
+            .has_index("idx_outbox_agent_sequence_sync_status")
+            .expect("index check should run")
+    );
+    let legacy = store
+        .outbox_entry("legacy-outbox-1")
+        .expect("legacy outbox entry lookup should succeed")
+        .expect("legacy outbox entry should remain");
+    assert_eq!(legacy.workspace_id, "");
+    assert_eq!(legacy.event_type, "");
+    assert_eq!(legacy.payload, json!({}));
+    assert_eq!(legacy.sync_status, stateful_store::SyncStatus::Pending);
+
+    store
+        .append_outbox(
+            OutboxEntry::synced("outbox-2", "legacy-agent", 2)
+                .with_workspace_id("w1")
+                .with_event_type("HeartbeatObserved")
+                .with_payload(json!({"n":2})),
+        )
+        .expect("outbox append should succeed after migration");
+    assert_eq!(store.outbox_count().expect("outbox count should load"), 2);
+
+    drop(store);
+}
+
+#[test]
+fn migration_adds_notification_sequence_before_notification_index_for_legacy_notifications() {
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE notifications (
+                notification_id TEXT PRIMARY KEY,
+                target_agent_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT
+            );
+
+            INSERT INTO notifications (
+                notification_id,
+                target_agent_id,
+                workspace_id,
+                kind,
+                payload_json,
+                status,
+                created_at,
+                expires_at
+            ) VALUES (
+                'legacy-notification-1',
+                'legacy-agent',
+                'legacy-workspace',
+                'reservation_available',
+                '{"wait_id":"legacy-wait"}',
+                'pending',
+                '2026-05-31T00:00:00Z',
+                NULL
+            );
+            "#,
+        )
+        .expect("legacy notifications table should be created");
+    }
+
+    let store = Store::open(&db_path).expect("store should migrate old notifications");
+
+    assert!(
+        store
+            .has_index("idx_notifications_agent_workspace_status_sequence")
+            .expect("index check should run")
+    );
+    let notifications = store
+        .pending_notifications_after("legacy-agent", "legacy-workspace", 0)
+        .expect("legacy notifications should load");
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].notification_id, "legacy-notification-1");
+    assert_eq!(notifications[0].sequence, 1);
+    assert_eq!(notifications[0].payload, json!({"wait_id":"legacy-wait"}));
+
+    drop(store);
 }
 
 #[test]
@@ -141,7 +283,7 @@ fn reservation_declared_materializes_active_policy_state() {
         .expect("reservation event should append");
 
     let state = store
-        .policy_state_for_session("s1", "w1")
+        .policy_state_for_agent("s1", "w1")
         .expect("policy state should load");
     let decision =
         stateful_core::authorize_action(&state, AuthorizationInput::write_file("src/auth.ts"));
@@ -230,14 +372,14 @@ fn intent_declarations_preserve_existing_scope_in_same_workspace() {
         .expect("w2 reservation should append");
 
     let w1_state = store
-        .policy_state_for_session("s1", "w1")
+        .policy_state_for_agent("s1", "w1")
         .expect("w1 policy state should load");
     let w1_decision =
         stateful_core::authorize_action(&w1_state, AuthorizationInput::write_file("src/auth.ts"));
     assert_eq!(w1_decision.decision, DecisionKind::Allow);
 
     let w2_state = store
-        .policy_state_for_session("s1", "w2")
+        .policy_state_for_agent("s1", "w2")
         .expect("w2 policy state should load");
     let w2_decision =
         stateful_core::authorize_action(&w2_state, AuthorizationInput::write_file("docs/guide.md"));
@@ -253,7 +395,7 @@ fn intent_declarations_preserve_existing_scope_in_same_workspace() {
         .expect("replacement w1 reservation should append");
 
     let w1_state = store
-        .policy_state_for_session("s1", "w1")
+        .policy_state_for_agent("s1", "w1")
         .expect("replacement w1 policy state should load");
     let old_w1_decision =
         stateful_core::authorize_action(&w1_state, AuthorizationInput::write_file("src/auth.ts"));
@@ -265,7 +407,7 @@ fn intent_declarations_preserve_existing_scope_in_same_workspace() {
     assert_eq!(new_w1_decision.decision, DecisionKind::Allow);
 
     let w2_state = store
-        .policy_state_for_session("s1", "w2")
+        .policy_state_for_agent("s1", "w2")
         .expect("w2 policy state should still load");
     let w2_decision =
         stateful_core::authorize_action(&w2_state, AuthorizationInput::write_file("docs/guide.md"));
@@ -331,7 +473,7 @@ fn expired_intent_is_not_write_authorizing_or_counted_active() {
         .expect("stale reservation event should append");
 
     let state = store
-        .policy_state_for_session("stale-session", "w1")
+        .policy_state_for_agent("stale-session", "w1")
         .expect("policy state should load");
     let decision =
         stateful_core::authorize_action(&state, AuthorizationInput::write_file("src/auth.ts"));
@@ -344,18 +486,13 @@ fn expired_intent_is_not_write_authorizing_or_counted_active() {
 
 #[test]
 fn file_store_persists_events_and_materialized_views_across_reopen() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-store-file-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join(".stateful_core").join("state.db");
 
     {
         let store = Store::open(&db_path).expect("file store should open");
         store
-            .append(Event::session_registered("s1", "w1").with_event_id("event-1"))
+            .append(Event::agent_registered("s1", "w1").with_event_id("event-1"))
             .expect("event should append");
     }
 
@@ -363,26 +500,16 @@ fn file_store_persists_events_and_materialized_views_across_reopen() {
 
     assert_eq!(reopened.event_count().expect("event count should load"), 1);
     let session = reopened
-        .session("s1")
+        .agent("s1")
         .expect("session lookup should succeed")
         .expect("session should be materialized");
     assert_eq!(session.workspace_id, "w1");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn file_store_enables_wal_journal_mode() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-wal-journal-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
 
     Store::open(&db_path).expect("file store should open");
 
@@ -391,22 +518,12 @@ fn file_store_enables_wal_journal_mode() {
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
         .expect("journal mode should load");
     assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn file_store_waits_for_short_sqlite_write_locks() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-busy-timeout-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("initial file store should open");
 
     let (locked_tx, locked_rx) = mpsc::channel();
@@ -421,33 +538,23 @@ fn file_store_waits_for_short_sqlite_write_locks() {
     });
 
     locked_rx.recv().expect("write lock should be active");
-    let append_result = store.append(Event::session_registered("s-waiter", "w1"));
+    let append_result = store.append(Event::agent_registered("s-waiter", "w1"));
     lock_thread.join().expect("lock thread should finish");
 
     append_result.expect("append should wait for short sqlite write lock");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn retention_pruning_removes_old_history_but_preserves_live_notification_state() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-retention-pruning-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
-    let mut old_event = Event::session_registered("old-session", "w1").with_event_id("old-event");
+    let mut old_event = Event::agent_registered("old-session", "w1").with_event_id("old-event");
     old_event.created_at = "2026-05-01T00:00:00Z".to_string();
     store.append(old_event).expect("old event should append");
     let mut recent_event =
-        Event::session_registered("recent-session", "w1").with_event_id("recent-event");
+        Event::agent_registered("recent-session", "w1").with_event_id("recent-event");
     recent_event.created_at = "2026-05-20T00:00:00Z".to_string();
     store
         .append(recent_event)
@@ -456,14 +563,9 @@ fn retention_pruning_removes_old_history_but_preserves_live_notification_state()
     let conn = Connection::open(&db_path).expect("db should reopen");
     conn.execute_batch(
         "
-        INSERT INTO reconciliations (reconciliation_id, session_id, created_at)
-        VALUES
-            ('old-reconciliation', 's1', '2026-05-01T00:00:00Z'),
-            ('recent-reconciliation', 's1', '2026-05-20T00:00:00Z');
-
         INSERT INTO notifications (
             notification_id,
-            target_session_id,
+            target_agent_id,
             workspace_id,
             kind,
             payload_json,
@@ -486,30 +588,17 @@ fn retention_pruning_removes_old_history_but_preserves_live_notification_state()
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_id, "recent-event");
 
-    let reconciliation_ids = query_ids(&conn, "SELECT reconciliation_id FROM reconciliations");
-    assert_eq!(reconciliation_ids, vec!["recent-reconciliation"]);
-
     let notification_ids = query_ids(&conn, "SELECT notification_id FROM notifications");
     assert_eq!(
         notification_ids,
         vec!["old-pending-notification", "recent-expired-notification"]
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn migration_adds_repo_identity_columns_to_existing_events_table() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-old-events-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
 
     {
         let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
@@ -518,7 +607,7 @@ fn migration_adds_repo_identity_columns_to_existing_events_table() {
             CREATE TABLE events (
                 event_id TEXT PRIMARY KEY,
                 event_type TEXT NOT NULL,
-                session_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
                 sequence INTEGER,
                 payload_json TEXT NOT NULL,
@@ -528,14 +617,14 @@ fn migration_adds_repo_identity_columns_to_existing_events_table() {
             INSERT INTO events (
                 event_id,
                 event_type,
-                session_id,
+                agent_id,
                 workspace_id,
                 sequence,
                 payload_json,
                 created_at
             ) VALUES (
                 'legacy-event-1',
-                'SessionRegistered',
+                'AgentRegistered',
                 'legacy-session',
                 'legacy-workspace',
                 NULL,
@@ -549,14 +638,12 @@ fn migration_adds_repo_identity_columns_to_existing_events_table() {
 
     let store = Store::open(&db_path).expect("store should migrate old db");
     store
-        .append(
-            Event::session_registered("s1", "w1").with_workspace_identity(
-                "repo-1",
-                "worktree-1",
-                "/repo",
-                "main",
-            ),
-        )
+        .append(Event::agent_registered("s1", "w1").with_workspace_identity(
+            "repo-1",
+            "worktree-1",
+            "/repo",
+            "main",
+        ))
         .expect("event should append after migration");
 
     let events = store.recent_events(10).expect("events should read");
@@ -571,22 +658,182 @@ fn migration_adds_repo_identity_columns_to_existing_events_table() {
     assert_eq!(events[1].worktree_id, None);
     assert_eq!(events[1].root, None);
     assert_eq!(events[1].branch, None);
+}
 
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+#[test]
+fn migration_removes_legacy_session_id_columns_after_agent_copy() {
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
+        conn.execute_batch(
+            "
+            CREATE TABLE agents (
+                session_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            INSERT INTO agents (
+                session_id,
+                workspace_id,
+                updated_at
+            ) VALUES (
+                'old-agent',
+                'legacy-workspace',
+                '2026-05-31T00:00:00Z'
+            );
+
+            CREATE TABLE events (
+                event_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL DEFAULT '',
+                workspace_id TEXT NOT NULL,
+                sequence INTEGER,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            INSERT INTO events (
+                event_id,
+                event_type,
+                session_id,
+                agent_id,
+                workspace_id,
+                sequence,
+                payload_json,
+                created_at
+            ) VALUES (
+                'legacy-event-1',
+                'AgentRegistered',
+                'old-agent',
+                '',
+                'legacy-workspace',
+                1,
+                '{}',
+                '2026-05-31T00:00:00Z'
+            );
+
+            CREATE INDEX idx_legacy_events_session_sequence
+            ON events(session_id, sequence);
+
+            CREATE TABLE wait_queue (
+                wait_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL DEFAULT '',
+                workspace_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                action TEXT NOT NULL,
+                status TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                blocking_session_id TEXT,
+                blocking_agent_id TEXT
+            );
+
+            INSERT INTO wait_queue (
+                wait_id,
+                session_id,
+                agent_id,
+                workspace_id,
+                relative_path,
+                action,
+                status,
+                requested_at,
+                purpose,
+                blocking_session_id,
+                blocking_agent_id
+            ) VALUES (
+                'legacy-wait-1',
+                'old-agent',
+                '',
+                'legacy-workspace',
+                'src/auth.ts',
+                'write_file',
+                'queued',
+                '2026-05-31T00:00:00Z',
+                'Legacy wait should keep purpose.',
+                'blocking-agent',
+                NULL
+            );
+
+            CREATE INDEX idx_legacy_wait_queue_session_status
+            ON wait_queue(session_id, status);
+
+            CREATE INDEX idx_legacy_wait_queue_blocking_session
+            ON wait_queue(blocking_session_id);
+            ",
+        )
+        .expect("legacy identity columns should be created");
+    }
+
+    let store = Store::open(&db_path).expect("store should migrate old db");
+    store
+        .append(Event::agent_registered("new-agent", "new-workspace"))
+        .expect("event should append after identity migration");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&db_path).expect("migrated db should open");
+
+    let agent_columns = query_columns(&conn, "agents");
+    assert!(agent_columns.iter().any(|column| column == "agent_id"));
+    assert!(!agent_columns.iter().any(|column| column == "session_id"));
+    assert_eq!(
+        query_ids(&conn, "SELECT agent_id FROM agents"),
+        vec!["new-agent", "old-agent"]
+    );
+
+    let event_columns = query_columns(&conn, "events");
+    assert!(event_columns.iter().any(|column| column == "agent_id"));
+    assert!(!event_columns.iter().any(|column| column == "session_id"));
+    assert_eq!(
+        query_ids(&conn, "SELECT agent_id FROM events"),
+        vec!["new-agent", "old-agent"]
+    );
+    assert!(
+        !query_indexes(&conn, "events")
+            .iter()
+            .any(|index| index.starts_with("idx_legacy_"))
+    );
+
+    let wait_queue_columns = query_columns(&conn, "wait_queue");
+    assert!(wait_queue_columns.iter().any(|column| column == "agent_id"));
+    assert!(
+        wait_queue_columns
+            .iter()
+            .any(|column| column == "blocking_agent_id")
+    );
+    assert!(
+        !wait_queue_columns
+            .iter()
+            .any(|column| column == "session_id")
+    );
+    assert!(
+        !wait_queue_columns
+            .iter()
+            .any(|column| column == "blocking_session_id")
+    );
+    assert_eq!(
+        query_ids(&conn, "SELECT agent_id FROM wait_queue"),
+        vec!["old-agent"]
+    );
+    assert_eq!(
+        query_ids(&conn, "SELECT blocking_agent_id FROM wait_queue"),
+        vec!["blocking-agent"]
+    );
+    assert!(
+        !query_indexes(&conn, "wait_queue")
+            .iter()
+            .any(|index| index.starts_with("idx_legacy_"))
+    );
 }
 
 #[test]
 fn migration_removes_legacy_coordination_rows_without_required_purpose() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-legacy-purpose-cleanup-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
 
     {
         let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
@@ -594,7 +841,7 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
             "
             CREATE TABLE reservations (
                 reservation_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
                 scopes_json TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -604,7 +851,7 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
 
             INSERT INTO reservations (
                 reservation_id,
-                session_id,
+                agent_id,
                 workspace_id,
                 scopes_json,
                 status,
@@ -622,26 +869,26 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
 
             CREATE TABLE wait_queue (
                 wait_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
                 relative_path TEXT NOT NULL,
                 action TEXT NOT NULL,
                 status TEXT NOT NULL,
                 requested_at TEXT NOT NULL,
                 reservation_expires_at TEXT,
-                blocking_session_id TEXT
+                blocking_agent_id TEXT
             );
 
             INSERT INTO wait_queue (
                 wait_id,
-                session_id,
+                agent_id,
                 workspace_id,
                 relative_path,
                 action,
                 status,
                 requested_at,
                 reservation_expires_at,
-                blocking_session_id
+                blocking_agent_id
             ) VALUES (
                 'legacy-waiter-1',
                 'legacy-waiter-session',
@@ -656,7 +903,7 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
 
             CREATE TABLE claims (
                 claim_id TEXT PRIMARY KEY,
-                session_id TEXT,
+                agent_id TEXT,
                 workspace_id TEXT NOT NULL,
                 repo_id TEXT,
                 relative_path TEXT,
@@ -667,7 +914,7 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
 
             INSERT INTO claims (
                 claim_id,
-                session_id,
+                agent_id,
                 workspace_id,
                 repo_id,
                 relative_path,
@@ -715,22 +962,91 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
     assert_eq!(intent_count, 0);
     assert_eq!(waiter_count, 0);
     assert_eq!(active_claim_count, 0);
+}
 
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+#[test]
+fn fresh_schema_omits_dead_coordination_tables() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    for table in [
+        "conflicts",
+        "overrides",
+        "reconciliations",
+        "human_observations",
+    ] {
+        assert!(
+            !store.has_table(table).expect("table check should run"),
+            "dead table {table} should not exist in a fresh schema"
+        );
+    }
+}
+
+#[test]
+fn migration_drops_dead_coordination_tables_from_legacy_db() {
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
+        conn.execute_batch(
+            "
+            CREATE TABLE conflicts (
+                conflict_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                checked_at TEXT NOT NULL
+            );
+
+            CREATE INDEX idx_conflicts_agent_checked_at
+                ON conflicts(agent_id, checked_at);
+
+            INSERT INTO conflicts (conflict_id, agent_id, checked_at)
+            VALUES ('legacy-conflict-1', 'legacy-agent', '2026-05-31T00:00:00Z');
+
+            CREATE TABLE overrides (
+                override_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                expires_at TEXT
+            );
+
+            CREATE TABLE reconciliations (
+                reconciliation_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX idx_reconciliations_agent_created_at
+                ON reconciliations(agent_id, created_at);
+
+            CREATE TABLE human_observations (
+                observation_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            ",
+        )
+        .expect("legacy dead tables should be created");
+    }
+
+    let store = Store::open(&db_path).expect("store should migrate old db");
+    store
+        .append(Event::agent_registered("s1", "w1"))
+        .expect("event should append after dead-table migration");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&db_path).expect("migrated db should reopen");
+    let dead_tables = query_ids(
+        &conn,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN
+            ('conflicts', 'overrides', 'reconciliations', 'human_observations')",
+    );
+    assert_eq!(dead_tables, Vec::<String>::new());
 }
 
 #[test]
 fn failed_materialization_rolls_back_event_insert_and_allows_future_appends() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-failed-materialize-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
 
     {
         let conn = rusqlite::Connection::open(&db_path).expect("db should open");
@@ -738,7 +1054,7 @@ fn failed_materialization_rolls_back_event_insert_and_allows_future_appends() {
             "
             CREATE TABLE reservations (
                 reservation_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
                 scopes_json TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -775,19 +1091,17 @@ fn failed_materialization_rolls_back_event_insert_and_allows_future_appends() {
     assert_eq!(store.event_count().expect("event count should load"), 0);
 
     store
-        .append(Event::session_registered("s2", "w1"))
+        .append(Event::agent_registered("s2", "w1"))
         .expect("subsequent append should start a new transaction");
     assert_eq!(store.event_count().expect("event count should load"), 1);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
-fn current_summary_counts_sessions_events_and_active_reservations() {
+fn current_summary_counts_agents_events_and_active_reservations() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::session_registered("s1", "w1"))
+        .append(Event::agent_registered("s1", "w1"))
         .expect("session event should append");
     store
         .append(Event::reservation_declared(
@@ -800,7 +1114,7 @@ fn current_summary_counts_sessions_events_and_active_reservations() {
 
     let summary = store.current_summary().expect("summary should load");
 
-    assert_eq!(summary.session_count, 1);
+    assert_eq!(summary.agent_count, 1);
     assert_eq!(summary.active_reservation_count, 1);
     assert_eq!(summary.event_count, 2);
 }
@@ -821,12 +1135,12 @@ fn live_current_state_reports_active_items_with_purpose() {
     store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
-            session_id: "s2",
+            agent_id: "s2",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
             purpose: "Update the same auth file after the active claim clears.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("waiter should enqueue");
 
@@ -935,7 +1249,7 @@ fn event_records_return_recent_audit_events() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
-        .append(Event::session_registered("s1", "w1").with_event_id("event-1"))
+        .append(Event::agent_registered("s1", "w1").with_event_id("event-1"))
         .expect("first event should append");
     store
         .append(
@@ -960,7 +1274,7 @@ fn event_records_return_recent_audit_events() {
 #[test]
 fn event_records_preserve_repo_identity_when_present() {
     let store = Store::open_in_memory().expect("store should open");
-    let event = Event::session_registered("s1", "w1").with_workspace_identity(
+    let event = Event::agent_registered("s1", "w1").with_workspace_identity(
         "repo-1",
         "worktree-1",
         "/repo",
@@ -986,7 +1300,7 @@ fn session_heartbeat_does_not_revive_expired_intent() {
         .append(reservation)
         .expect("reservation should append");
 
-    let mut heartbeat = Event::session_heartbeat("s1", "w1");
+    let mut heartbeat = Event::agent_heartbeat("s1", "w1");
     heartbeat.created_at = "2999-01-01T00:16:00Z".to_string();
     store
         .append(heartbeat)
@@ -1007,14 +1321,8 @@ fn session_heartbeat_does_not_revive_expired_intent() {
 
 #[test]
 fn session_heartbeat_expires_stale_lease_and_promotes_waiter() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after unix epoch")
-        .as_nanos();
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-store-heartbeat-expired-claim-{unique}"));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
     let waiter = store
@@ -1031,14 +1339,14 @@ fn session_heartbeat_expires_stale_lease_and_promotes_waiter() {
 
     let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
     conn.execute(
-        "UPDATE claims SET expires_at = ?1 WHERE session_id = ?2",
+        "UPDATE claims SET expires_at = ?1 WHERE agent_id = ?2",
         ["2999-01-01T00:05:00Z", "s1"],
     )
     .expect("claim expiry should update");
     drop(conn);
 
     let store = Store::open(&db_path).expect("file store should reopen");
-    let mut heartbeat = Event::session_heartbeat("s1", "w1");
+    let mut heartbeat = Event::agent_heartbeat("s1", "w1");
     heartbeat.created_at = "2999-01-01T00:10:00Z".to_string();
     store
         .append(heartbeat)
@@ -1055,9 +1363,7 @@ fn session_heartbeat_expires_stale_lease_and_promotes_waiter() {
         .expect("reservation lookup should succeed")
         .expect("expired claim should promote waiting session");
     assert_eq!(reservation.wait_id, waiter.wait_id);
-    assert_eq!(reservation.session_id, "s2");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+    assert_eq!(reservation.agent_id, "s2");
 }
 
 #[test]
@@ -1079,7 +1385,7 @@ fn session_heartbeat_extends_active_reservation_expiry() {
         .expect("reservation item should exist");
     assert_eq!(before.expires_at.as_deref(), Some("2999-01-01T00:15:00Z"));
 
-    let mut heartbeat = Event::session_heartbeat("s1", "w1");
+    let mut heartbeat = Event::agent_heartbeat("s1", "w1");
     heartbeat.created_at = "2999-01-01T00:10:00Z".to_string();
     store
         .append(heartbeat)
@@ -1111,7 +1417,7 @@ fn session_heartbeat_caps_active_reservation_expiry_at_max_lifetime() {
         "2999-01-01T00:38:00Z",
         "2999-01-01T00:52:00Z",
     ] {
-        let mut heartbeat = Event::session_heartbeat("s1", "w1");
+        let mut heartbeat = Event::agent_heartbeat("s1", "w1");
         heartbeat.created_at = heartbeat_at.to_string();
         store
             .append(heartbeat)
@@ -1133,15 +1439,8 @@ fn session_heartbeat_caps_active_reservation_expiry_at_max_lifetime() {
 
 #[test]
 fn session_heartbeat_fails_closed_for_malformed_reservation_declared_at() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-heartbeat-malformed-reservation-{unique}"
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let mut reservation =
         Event::reservation_declared("s1", "w1", "Fix auth validation behavior.", ["src/auth.ts"]);
@@ -1156,14 +1455,14 @@ fn session_heartbeat_fails_closed_for_malformed_reservation_declared_at() {
 
     let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
     conn.execute(
-        "UPDATE reservations SET declared_at = ?1, expires_at = ?2 WHERE session_id = ?3",
+        "UPDATE reservations SET declared_at = ?1, expires_at = ?2 WHERE agent_id = ?3",
         ["not-a-timestamp", current_expires_at.as_str(), "s1"],
     )
     .expect("reservation timestamp should corrupt");
     drop(conn);
 
     let store = Store::open(&db_path).expect("file store should reopen");
-    let mut heartbeat = Event::session_heartbeat("s1", "w1");
+    let mut heartbeat = Event::agent_heartbeat("s1", "w1");
     heartbeat.created_at = heartbeat_at;
     let error = store
         .append(heartbeat)
@@ -1177,7 +1476,7 @@ fn session_heartbeat_fails_closed_for_malformed_reservation_declared_at() {
     let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
     let expires_at: String = conn
         .query_row(
-            "SELECT expires_at FROM reservations WHERE session_id = ?1",
+            "SELECT expires_at FROM reservations WHERE agent_id = ?1",
             ["s1"],
             |row| row.get(0),
         )
@@ -1187,8 +1486,6 @@ fn session_heartbeat_fails_closed_for_malformed_reservation_declared_at() {
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .expect("event count should load");
     assert_eq!(event_count, 1);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -1218,33 +1515,27 @@ fn reservation_declared_fails_closed_for_malformed_created_at() {
 
 #[test]
 fn session_heartbeat_extends_active_claim_expiry() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after unix epoch")
-        .as_nanos();
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-store-heartbeat-live-claim-{unique}"));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
     drop(store);
 
     let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
     conn.execute(
-        "UPDATE claims SET expires_at = ?1 WHERE session_id = ?2",
+        "UPDATE claims SET expires_at = ?1 WHERE agent_id = ?2",
         ["2999-01-01T00:11:00Z", "s1"],
     )
     .expect("claim expiry should update");
     conn.execute(
-        "UPDATE reservations SET declared_at = ?1, expires_at = ?2 WHERE session_id = ?3",
+        "UPDATE reservations SET declared_at = ?1, expires_at = ?2 WHERE agent_id = ?3",
         ["2999-01-01T00:00:00Z", "2999-01-01T00:20:00Z", "s1"],
     )
     .expect("reservation expiry should update");
     drop(conn);
 
     let store = Store::open(&db_path).expect("file store should reopen");
-    let mut heartbeat = Event::session_heartbeat("s1", "w1");
+    let mut heartbeat = Event::agent_heartbeat("s1", "w1");
     heartbeat.created_at = "2999-01-01T00:10:00Z".to_string();
     store
         .append(heartbeat)
@@ -1258,20 +1549,12 @@ fn session_heartbeat_extends_active_claim_expiry() {
         .find(|item| item.kind == CurrentItemKind::Claim)
         .expect("claim item should exist");
     assert_eq!(claim.expires_at.as_deref(), Some("2999-01-01T00:15:00Z"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn session_heartbeat_does_not_extend_lease_without_matching_active_reservation() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after unix epoch")
-        .as_nanos();
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-store-heartbeat-uncovered-claim-{unique}"));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
     store
@@ -1281,14 +1564,14 @@ fn session_heartbeat_does_not_extend_lease_without_matching_active_reservation()
 
     let conn = rusqlite::Connection::open(&db_path).expect("db should reopen");
     conn.execute(
-        "UPDATE claims SET expires_at = ?1 WHERE session_id = ?2",
+        "UPDATE claims SET expires_at = ?1 WHERE agent_id = ?2",
         ["2999-01-01T00:11:00Z", "s1"],
     )
     .expect("claim expiry should update");
     drop(conn);
 
     let store = Store::open(&db_path).expect("file store should reopen");
-    let mut heartbeat = Event::session_heartbeat("s1", "w1");
+    let mut heartbeat = Event::agent_heartbeat("s1", "w1");
     heartbeat.created_at = "2999-01-01T00:10:00Z".to_string();
     store
         .append(heartbeat)
@@ -1302,8 +1585,6 @@ fn session_heartbeat_does_not_extend_lease_without_matching_active_reservation()
         .find(|item| item.kind == CurrentItemKind::Claim)
         .expect("claim item should still exist");
     assert_eq!(claim.expires_at.as_deref(), Some("2999-01-01T00:11:00Z"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -1346,14 +1627,8 @@ fn acquired_claim_persists_reservation_id() {
 
 #[test]
 fn acquired_claim_cannot_reuse_stale_claimed_wait_id_after_scope_expires() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-store-stale-claimed-wait-{unique}"));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let wait = store
         .enqueue_waiter(
@@ -1395,8 +1670,6 @@ fn acquired_claim_cannot_reuse_stale_claimed_wait_id_after_scope_expires() {
         .acquire_claim_for_reservation(&wait.wait_id, "s1", "w1", "src/auth.ts")
         .expect_err("expired claimed wait id should not authorize a fresh claim");
     assert!(matches!(error, StoreError::MissingReservation));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -1492,7 +1765,7 @@ fn acquire_claim_allows_same_path_in_different_workspaces() {
 }
 
 #[test]
-fn same_session_can_acquire_exact_file_lease_under_directory_lease() {
+fn same_agent_can_acquire_exact_file_lease_under_directory_lease() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
@@ -1517,23 +1790,23 @@ fn same_session_can_acquire_exact_file_lease_under_directory_lease() {
 
     store
         .acquire_claim("s1", "w1", "src/auth.ts")
-        .expect("exact file claim should acquire under a directory claim in the same session");
+        .expect("exact file claim should acquire under a directory claim for the same agent");
 
     assert!(
         store
-            .active_claim_covers_path_by_session("w1", "src/auth.ts", "s1")
+            .active_claim_covers_path_by_agent("w1", "src/auth.ts", "s1")
             .expect("file coverage should load")
     );
     assert!(
         store
-            .active_exact_file_lease_by_session("w1", "src/auth.ts", "s1")
+            .active_exact_file_lease_by_agent("w1", "src/auth.ts", "s1")
             .expect("exact file claim should load")
     );
     assert_eq!(store.lease_count().expect("claim count should load"), 2);
 }
 
 #[test]
-fn acquire_claim_reports_already_held_for_same_session_duplicate_exact_file_lease() {
+fn acquire_claim_reports_already_held_for_same_agent_duplicate_exact_file_lease() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
@@ -1547,7 +1820,7 @@ fn acquire_claim_reports_already_held_for_same_session_duplicate_exact_file_leas
 }
 
 #[test]
-fn acquire_claims_batch_is_atomic_and_idempotent_for_same_session() {
+fn acquire_claims_batch_is_atomic_and_idempotent_for_same_agent() {
     let store = Store::open_in_memory().expect("in-memory store should open");
     store
         .append(Event::reservation_declared(
@@ -1618,7 +1891,7 @@ fn acquire_claims_batch_rolls_back_when_one_path_conflicts() {
     assert_eq!(
         store
             .active_claim_owner("w1", "src/session.ts")
-            .expect("session claim owner should load"),
+            .expect("agent claim owner should load"),
         None
     );
 }
@@ -1751,17 +2024,17 @@ fn file_lease_with_directory_name_does_not_cover_descendants() {
     );
     assert!(
         !store
-            .active_claim_covers_path_by_session("w1", "target/debug/out.txt", "s1")
+            .active_claim_covers_path_by_agent("w1", "target/debug/out.txt", "s1")
             .expect("descendant file coverage should load")
     );
     assert!(
         !store
-            .active_claim_covers_directory_by_session("w1", "target/", "s1")
+            .active_claim_covers_directory_by_agent("w1", "target/", "s1")
             .expect("directory coverage should load")
     );
     assert!(
         store
-            .active_exact_file_lease_by_session("w1", "target", "s1")
+            .active_exact_file_lease_by_agent("w1", "target", "s1")
             .expect("exact file claim should load")
     );
 }
@@ -1819,35 +2092,35 @@ fn release_claim_matches_requested_path_shape_when_file_and_directory_paths_over
 
     assert!(
         !store
-            .active_exact_file_lease_by_session("w1", "target", "s1")
+            .active_exact_file_lease_by_agent("w1", "target", "s1")
             .expect("exact file claim should load")
     );
     assert!(
         store
-            .active_claim_covers_directory_by_session("w1", "target/", "s1")
+            .active_claim_covers_directory_by_agent("w1", "target/", "s1")
             .expect("directory coverage should load")
     );
 }
 
 #[test]
-fn release_claim_rejects_other_session_owner() {
+fn release_claim_rejects_other_agent_owner() {
     let store = Store::open_in_memory().expect("in-memory store should open");
     acquire_test_lease(&store, "s1", "w1", "target/");
 
     let error = store
         .release_claim("s2", "w1", "target/")
-        .expect_err("other session should not release claim");
+        .expect_err("other agent should not release claim");
 
     assert!(error.to_string().contains("claim owner mismatch"));
     assert!(
         store
-            .active_claim_covers_directory_by_session("w1", "target/", "s1")
+            .active_claim_covers_directory_by_agent("w1", "target/", "s1")
             .expect("directory coverage should load")
     );
 }
 
 #[test]
-fn release_claim_rejects_missing_same_session_lease() {
+fn release_claim_rejects_missing_same_agent_lease() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     let error = store
@@ -1886,7 +2159,7 @@ fn active_claim_conflict_for_directory_matches_subtree_paths() {
     assert_eq!(
         store
             .active_claim_conflict_owner_for_directory("w1", "target/", "s2")
-            .expect("same owner directory claim should not conflict"),
+            .expect("same agent directory claim should not conflict"),
         None
     );
     assert_eq!(
@@ -1912,25 +2185,25 @@ fn active_claim_conflict_for_directory_matches_ancestor_directory_paths() {
 }
 
 #[test]
-fn active_claim_covers_directory_by_same_session_matches_exact_or_ancestor_paths() {
+fn active_claim_covers_directory_by_same_agent_matches_exact_or_ancestor_paths() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "target/");
 
     assert!(
         store
-            .active_claim_covers_directory_by_session("w1", "target/", "s1")
+            .active_claim_covers_directory_by_agent("w1", "target/", "s1")
             .expect("directory claim coverage should load")
     );
     assert!(
         store
-            .active_claim_covers_directory_by_session("w1", "target/debug/", "s1")
+            .active_claim_covers_directory_by_agent("w1", "target/debug/", "s1")
             .expect("ancestor directory claim coverage should load")
     );
     assert!(
         !store
-            .active_claim_covers_directory_by_session("w1", "target/", "s2")
-            .expect("other session directory claim coverage should load")
+            .active_claim_covers_directory_by_agent("w1", "target/", "s2")
+            .expect("other agent directory claim coverage should load")
     );
 }
 
@@ -1949,7 +2222,7 @@ fn active_claim_conflict_for_path_matches_ancestor_directory_paths() {
     assert_eq!(
         store
             .active_claim_conflict_owner_for_path("w1", "target/debug/out.txt", "s2")
-            .expect("same owner directory claim should not conflict"),
+            .expect("same agent directory claim should not conflict"),
         None
     );
     assert_eq!(
@@ -1961,7 +2234,7 @@ fn active_claim_conflict_for_path_matches_ancestor_directory_paths() {
 }
 
 #[test]
-fn active_claim_covers_path_by_same_session_matches_exact_or_ancestor_paths() {
+fn active_claim_covers_path_by_same_agent_matches_exact_or_ancestor_paths() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "target/");
@@ -1969,28 +2242,28 @@ fn active_claim_covers_path_by_same_session_matches_exact_or_ancestor_paths() {
 
     assert!(
         store
-            .active_claim_covers_path_by_session("w1", "src/auth.ts", "s1")
+            .active_claim_covers_path_by_agent("w1", "src/auth.ts", "s1")
             .expect("exact file claim coverage should load")
     );
     assert!(
         store
-            .active_claim_covers_path_by_session("w1", "target/debug/out.txt", "s1")
+            .active_claim_covers_path_by_agent("w1", "target/debug/out.txt", "s1")
             .expect("ancestor directory claim coverage should load")
     );
     assert!(
         !store
-            .active_claim_covers_path_by_session("w1", "target-other/out.txt", "s1")
+            .active_claim_covers_path_by_agent("w1", "target-other/out.txt", "s1")
             .expect("sibling path claim coverage should load")
     );
     assert!(
         !store
-            .active_claim_covers_path_by_session("w1", "src/auth.ts", "s2")
-            .expect("other session file claim coverage should load")
+            .active_claim_covers_path_by_agent("w1", "src/auth.ts", "s2")
+            .expect("other agent file claim coverage should load")
     );
 }
 
 #[test]
-fn active_exact_file_lease_by_same_session_ignores_ancestor_directory_lease() {
+fn active_exact_file_lease_by_same_agent_ignores_ancestor_directory_lease() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "target/");
@@ -1998,23 +2271,23 @@ fn active_exact_file_lease_by_same_session_ignores_ancestor_directory_lease() {
 
     assert!(
         store
-            .active_exact_file_lease_by_session("w1", "src/auth.ts", "s1")
+            .active_exact_file_lease_by_agent("w1", "src/auth.ts", "s1")
             .expect("exact file claim should load")
     );
     assert!(
         !store
-            .active_exact_file_lease_by_session("w1", "target/debug/out.txt", "s1")
+            .active_exact_file_lease_by_agent("w1", "target/debug/out.txt", "s1")
             .expect("ancestor directory claim should not count as exact file claim")
     );
     assert!(
         !store
-            .active_exact_file_lease_by_session("w1", "src/auth.ts", "s2")
-            .expect("other session file claim should not count")
+            .active_exact_file_lease_by_agent("w1", "src/auth.ts", "s2")
+            .expect("other agent file claim should not count")
     );
 }
 
 #[test]
-fn active_exact_file_intent_by_same_session_ignores_directory_intent() {
+fn active_exact_file_intent_by_same_agent_ignores_directory_intent() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     store
@@ -2027,7 +2300,7 @@ fn active_exact_file_intent_by_same_session_ignores_directory_intent() {
         .expect("directory reservation should append");
     assert!(
         !store
-            .active_exact_file_intent_by_session("w1", "src/auth.ts", "s1")
+            .active_exact_file_intent_by_agent("w1", "src/auth.ts", "s1")
             .expect("directory scope should not count as exact file scope")
     );
 
@@ -2041,28 +2314,20 @@ fn active_exact_file_intent_by_same_session_ignores_directory_intent() {
         .expect("file reservation should append");
     assert!(
         store
-            .active_exact_file_intent_by_session("w1", "src/auth.ts", "s1")
+            .active_exact_file_intent_by_agent("w1", "src/auth.ts", "s1")
             .expect("task reservation exact file scope should load")
     );
     assert!(
         !store
-            .active_exact_file_intent_by_session("w1", "src/auth.ts", "s2")
-            .expect("other session task reservation exact file scope should not count")
+            .active_exact_file_intent_by_agent("w1", "src/auth.ts", "s2")
+            .expect("other agent task reservation exact file scope should not count")
     );
 }
 
 #[test]
 fn expired_lease_is_not_returned_as_active_owner() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-expired-claim-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     acquire_test_lease(&store, "stale-session", "w1", "src/auth.ts");
     drop(store);
@@ -2079,8 +2344,6 @@ fn expired_lease_is_not_returned_as_active_owner() {
             .expect("claim owner should load"),
         None
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -2118,7 +2381,7 @@ fn released_lease_promotes_first_waiter_to_reservation() {
         .expect("reservation lookup should succeed")
         .expect("first waiter should be reserved");
     assert_eq!(reservation.wait_id, first.wait_id);
-    assert_eq!(reservation.session_id, "s2");
+    assert_eq!(reservation.agent_id, "s2");
     assert_eq!(reservation.relative_path, "src/auth.ts");
     assert_eq!(
         store
@@ -2136,12 +2399,12 @@ fn reservation_request_rejects_normalized_empty_relative_path() {
         let error = store
             .enqueue_reservation_request(ReservationRequestInput {
                 request_id: "request-1",
-                session_id: "s1",
+                agent_id: "s1",
                 workspace_id: "w1",
                 relative_path: path,
                 action: "write_file",
                 purpose: "Reserve path before writing.",
-                blocking_session_id: None,
+                blocking_agent_id: None,
             })
             .expect_err("normalized-empty reservation request should reject");
 
@@ -2162,23 +2425,23 @@ fn reservation_request_id_is_idempotent_for_wait_queue_records() {
     let first = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
-            session_id: "s2",
+            agent_id: "s2",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
             purpose: "Fix auth validation behavior.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("reservation request should enqueue");
     let repeated = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
-            session_id: "s2",
+            agent_id: "s2",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
             purpose: "A different retry purpose should not replace the original.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("reservation request retry should load existing waiter");
 
@@ -2200,23 +2463,23 @@ fn expired_reservation_request_retry_requeues_same_waiter_with_original_fifo_pos
     let first = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
-            session_id: "s2",
+            agent_id: "s2",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
             purpose: "Fix auth validation behavior.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("first request should enqueue");
     let second = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-2",
-            session_id: "s3",
+            agent_id: "s3",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
             purpose: "Update session handling.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("second request should enqueue");
     store
@@ -2232,23 +2495,23 @@ fn expired_reservation_request_retry_requeues_same_waiter_with_original_fifo_pos
     let retried = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
-            session_id: "s2",
+            agent_id: "s2",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
             purpose: "Retry should preserve the original purpose.",
-            blocking_session_id: Some("s3"),
+            blocking_agent_id: Some("s3"),
         })
         .expect("expired request retry should requeue");
     let third = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-3",
-            session_id: "s4",
+            agent_id: "s4",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
             purpose: "Update auth docs.",
-            blocking_session_id: Some("s3"),
+            blocking_agent_id: Some("s3"),
         })
         .expect("third request should enqueue");
 
@@ -2276,7 +2539,7 @@ fn expired_reservation_request_retry_requeues_same_waiter_with_original_fifo_pos
         .expect("next waiter should promote")
         .expect("retried waiter should reserve");
     assert_eq!(next.wait_id, first.wait_id);
-    assert_eq!(next.session_id, "s2");
+    assert_eq!(next.agent_id, "s2");
 }
 
 #[test]
@@ -2285,23 +2548,23 @@ fn canceling_reserved_reservation_request_promotes_next_waiter() {
     let first = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
-            session_id: "s2",
+            agent_id: "s2",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
             purpose: "Fix auth validation behavior.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("first request should enqueue");
     let second = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-2",
-            session_id: "s3",
+            agent_id: "s3",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
             purpose: "Update session handling.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("second request should enqueue");
     store
@@ -2319,7 +2582,7 @@ fn canceling_reserved_reservation_request_promotes_next_waiter() {
         .expect("reservation lookup should succeed")
         .expect("second waiter should be reserved");
     assert_eq!(reservation.wait_id, second.wait_id);
-    assert_eq!(reservation.session_id, "s3");
+    assert_eq!(reservation.agent_id, "s3");
 }
 
 #[test]
@@ -2328,34 +2591,34 @@ fn finalizing_session_cancels_queued_and_reserved_waiters_and_promotes_next() {
     let reserved = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-reserved",
-            session_id: "s2",
+            agent_id: "s2",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
             purpose: "Fix auth validation behavior.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("reserved session request should enqueue");
     let next = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-next",
-            session_id: "s3",
+            agent_id: "s3",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
             purpose: "Update session handling.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("next request should enqueue");
     let queued = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-queued",
-            session_id: "s2",
+            agent_id: "s2",
             workspace_id: "w1",
             relative_path: "docs/notes.md",
             action: "write_file",
             purpose: "Update docs.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("queued session request should enqueue");
     store
@@ -2387,45 +2650,37 @@ fn finalizing_session_cancels_queued_and_reserved_waiters_and_promotes_next() {
         .expect("reservation lookup should succeed")
         .expect("next waiter should be reserved");
     assert_eq!(promoted.wait_id, next.wait_id);
-    assert_eq!(promoted.session_id, "s3");
+    assert_eq!(promoted.agent_id, "s3");
     assert_ne!(reserved.wait_id, promoted.wait_id);
     assert_ne!(queued.wait_id, promoted.wait_id);
 }
 
 #[test]
 fn cancel_reservation_request_rolls_back_when_next_reservation_notification_fails() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-cancel-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
     let first = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
-            session_id: "s2",
+            agent_id: "s2",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
             purpose: "Fix auth validation behavior.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("first request should enqueue");
     let second = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-2",
-            session_id: "s3",
+            agent_id: "s3",
             workspace_id: "w1",
             relative_path: "src/auth.ts",
             action: "write_file",
             purpose: "Update session handling.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("second request should enqueue");
     store
@@ -2474,21 +2729,12 @@ fn cancel_reservation_request_rolls_back_when_next_reservation_notification_fail
     assert_eq!(reservation.wait_id, first.wait_id);
 
     drop(trigger_conn);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn promote_next_waiter_for_path_rolls_back_when_notification_fails() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-promote-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
     let wait = store
@@ -2539,7 +2785,6 @@ fn promote_next_waiter_for_path_rolls_back_when_notification_fails() {
     );
 
     drop(trigger_conn);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -2567,7 +2812,7 @@ fn released_child_lease_promotes_directory_waiter_to_reservation() {
         .expect("reservation lookup should succeed")
         .expect("directory waiter should be reserved");
     assert_eq!(reservation.wait_id, wait.wait_id);
-    assert_eq!(reservation.session_id, "s2");
+    assert_eq!(reservation.agent_id, "s2");
     assert_eq!(reservation.relative_path, "target");
 
     let notifications = store
@@ -2584,16 +2829,8 @@ fn released_child_lease_promotes_directory_waiter_to_reservation() {
 
 #[test]
 fn release_claim_rolls_back_when_reservation_notification_fails() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-release-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
     acquire_test_lease(&store, "s1", "w1", "target/out.txt");
@@ -2647,21 +2884,12 @@ fn release_claim_rolls_back_when_reservation_notification_fails() {
     );
 
     drop(trigger_conn);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn release_session_claims_rolls_back_when_reservation_notification_fails() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-session-release-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
     acquire_test_lease(&store, "s1", "w1", "target/out.txt");
@@ -2717,7 +2945,6 @@ fn release_session_claims_rolls_back_when_reservation_notification_fails() {
     );
 
     drop(trigger_conn);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -2833,7 +3060,7 @@ fn released_directory_lease_promotes_child_file_waiter_to_reservation() {
         .expect("reservation lookup should succeed")
         .expect("child file waiter should be reserved");
     assert_eq!(reservation.wait_id, wait.wait_id);
-    assert_eq!(reservation.session_id, "s2");
+    assert_eq!(reservation.agent_id, "s2");
 
     let notifications = store
         .pending_notifications("s2", "w1")
@@ -2885,30 +3112,30 @@ fn released_directory_lease_promotes_all_non_conflicting_child_file_waiters() {
 }
 
 #[test]
-fn released_directory_lease_keeps_same_session_conflicting_waiter_queued() {
+fn released_directory_lease_keeps_same_agent_conflicting_waiter_queued() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     acquire_test_lease(&store, "s1", "w1", "target/");
     let first = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-1",
-            session_id: "s2",
+            agent_id: "s2",
             workspace_id: "w1",
             relative_path: "target/a.txt",
             action: "write_file",
             purpose: "Queue first file write after blocker clears.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("first child file waiter should enqueue");
     let second = store
         .enqueue_reservation_request(ReservationRequestInput {
             request_id: "request-2",
-            session_id: "s2",
+            agent_id: "s2",
             workspace_id: "w1",
             relative_path: "target/a.txt",
             action: "write_file",
             purpose: "Queue second file write after blocker clears.",
-            blocking_session_id: Some("s1"),
+            blocking_agent_id: Some("s1"),
         })
         .expect("second child file waiter should enqueue");
 
@@ -2932,16 +3159,8 @@ fn released_directory_lease_keeps_same_session_conflicting_waiter_queued() {
 
 #[test]
 fn live_current_state_rolls_back_unblocked_promotion_when_notification_fails() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-live-current-promotion-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let wait = store
         .enqueue_waiter(
@@ -2990,7 +3209,6 @@ fn live_current_state_rolls_back_unblocked_promotion_when_notification_fails() {
     );
 
     drop(trigger_conn);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -3048,7 +3266,7 @@ fn released_directory_lease_promotes_child_directory_waiter_to_reservation() {
         .expect("reservation lookup should succeed")
         .expect("child directory waiter should be reserved");
     assert_eq!(reservation.wait_id, wait.wait_id);
-    assert_eq!(reservation.session_id, "s2");
+    assert_eq!(reservation.agent_id, "s2");
     assert_eq!(reservation.action, "write_directory");
 }
 
@@ -3074,7 +3292,7 @@ fn reservation_promotion_creates_pending_notification_for_waiter() {
         .pending_notifications("s2", "w1")
         .expect("notifications should load");
     assert_eq!(notifications.len(), 1);
-    assert_eq!(notifications[0].target_session_id, "s2");
+    assert_eq!(notifications[0].target_agent_id, "s2");
     assert_eq!(notifications[0].workspace_id, "w1");
     assert_eq!(notifications[0].kind, "reservation_granted");
     assert_eq!(notifications[0].payload["relative_path"], "src/auth.ts");
@@ -3150,7 +3368,7 @@ fn pending_notifications_are_delivered_once() {
 }
 
 #[test]
-fn reservation_blocks_other_sessions_until_claimed_or_expired() {
+fn reservation_blocks_other_agents_until_claimed_or_expired() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     let wait = store
@@ -3192,7 +3410,7 @@ fn reservation_blocks_other_sessions_until_claimed_or_expired() {
 }
 
 #[test]
-fn active_waiter_by_session_matches_queued_and_reserved_standing() {
+fn active_waiter_by_agent_matches_queued_and_reserved_standing() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
     let file_wait = store
@@ -3207,7 +3425,7 @@ fn active_waiter_by_session_matches_queued_and_reserved_standing() {
         .expect("file waiter should enqueue");
     assert_eq!(
         store
-            .active_waiter_for_path_by_session("w1", "target/out.txt", "s2")
+            .active_waiter_for_path_by_agent("w1", "target/out.txt", "s2")
             .expect("path waiter should load")
             .expect("queued file waiter should match")
             .wait_id,
@@ -3215,7 +3433,7 @@ fn active_waiter_by_session_matches_queued_and_reserved_standing() {
     );
     assert_eq!(
         store
-            .active_waiter_for_directory_by_session("w1", "target", "s2")
+            .active_waiter_for_directory_by_agent("w1", "target", "s2")
             .expect("directory waiter should load")
             .expect("queued child file waiter should match parent directory")
             .wait_id,
@@ -3223,8 +3441,8 @@ fn active_waiter_by_session_matches_queued_and_reserved_standing() {
     );
     assert!(
         store
-            .active_waiter_for_path_by_session("w1", "target/out.txt", "s1")
-            .expect("other-session waiter lookup should load")
+            .active_waiter_for_path_by_agent("w1", "target/out.txt", "s1")
+            .expect("other agent waiter lookup should load")
             .is_none()
     );
 
@@ -3232,7 +3450,7 @@ fn active_waiter_by_session_matches_queued_and_reserved_standing() {
         .promote_next_waiter("w1", "target/out.txt")
         .expect("file waiter should promote");
     let reserved = store
-        .active_waiter_for_path_by_session("w1", "target/out.txt", "s2")
+        .active_waiter_for_path_by_agent("w1", "target/out.txt", "s2")
         .expect("reserved waiter should load")
         .expect("reserved file waiter should match");
     assert_eq!(reserved.wait_id, file_wait.wait_id);
@@ -3250,7 +3468,7 @@ fn active_waiter_by_session_matches_queued_and_reserved_standing() {
         .expect("directory waiter should enqueue");
     assert_eq!(
         store
-            .active_waiter_for_path_by_session("w1", "target/out.txt", "s3")
+            .active_waiter_for_path_by_agent("w1", "target/out.txt", "s3")
             .expect("ancestor directory waiter should load")
             .expect("queued ancestor directory waiter should match child path")
             .wait_id,
@@ -3280,12 +3498,12 @@ fn active_reservation_conflict_for_directory_matches_subtree_paths() {
         .active_reservation_conflict_for_directory("w1", "target/", "s1")
         .expect("directory reservation conflict should load")
         .expect("reserved subtree path should conflict");
-    assert_eq!(conflict.session_id, "s2");
+    assert_eq!(conflict.agent_id, "s2");
     assert_eq!(conflict.relative_path, "target/out.txt");
     assert!(
         store
             .active_reservation_conflict_for_directory("w1", "target/", "s2")
-            .expect("same-session reservation should not conflict")
+            .expect("same-agent reservation should not conflict")
             .is_none()
     );
     assert!(
@@ -3322,8 +3540,8 @@ fn directory_reservation_same_normalized_path_does_not_conflict_with_file_path()
     );
     assert!(
         store
-            .active_reservation_for_path_by_session("w1", "target", "s2")
-            .expect("same-session path reservation should load")
+            .active_reservation_for_path_by_agent("w1", "target", "s2")
+            .expect("same-agent path reservation should load")
             .is_none()
     );
     assert!(
@@ -3355,7 +3573,7 @@ fn active_reservation_conflict_for_directory_matches_ancestor_directory_paths() 
         .active_reservation_conflict_for_directory("w1", "target/debug/", "s1")
         .expect("ancestor directory reservation conflict should load");
 
-    assert_eq!(conflict.expect("conflict should exist").session_id, "s2");
+    assert_eq!(conflict.expect("conflict should exist").agent_id, "s2");
 }
 
 #[test]
@@ -3380,12 +3598,12 @@ fn active_reservation_conflict_for_path_matches_ancestor_directory_paths() {
         .active_reservation_conflict_for_path("w1", "target/out.txt", "s1")
         .expect("path reservation conflict should load")
         .expect("reserved ancestor directory should conflict");
-    assert_eq!(conflict.session_id, "s2");
+    assert_eq!(conflict.agent_id, "s2");
     assert_eq!(conflict.relative_path, "target");
     assert!(
         store
             .active_reservation_conflict_for_path("w1", "target/out.txt", "s2")
-            .expect("same-session reservation should not conflict")
+            .expect("same-agent reservation should not conflict")
             .is_none()
     );
     assert!(
@@ -3442,21 +3660,13 @@ fn expired_reservation_promotes_next_waiter() {
         .expect("reservation lookup should succeed")
         .expect("second waiter should be reserved");
     assert_eq!(reservation.wait_id, second.wait_id);
-    assert_eq!(reservation.session_id, "s3");
+    assert_eq!(reservation.agent_id, "s3");
 }
 
 #[test]
 fn stale_reservation_expiry_promotes_next_waiter() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-stale-reservation-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
     let first = store
@@ -3509,23 +3719,13 @@ fn stale_reservation_expiry_promotes_next_waiter() {
         .expect("reservation lookup should succeed")
         .expect("second waiter should be reserved");
     assert_eq!(reservation.wait_id, second.wait_id);
-    assert_eq!(reservation.session_id, "s3");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+    assert_eq!(reservation.agent_id, "s3");
 }
 
 #[test]
 fn expire_stale_rolls_back_reservation_expiry_when_next_notification_fails() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-store-expire-reservation-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-    let db_path = temp_root.join("state.db");
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
 
     let first = store
@@ -3600,7 +3800,6 @@ fn expire_stale_rolls_back_reservation_expiry_when_next_notification_fails() {
     );
 
     drop(trigger_conn);
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -3614,15 +3813,13 @@ fn migrations_create_contract_tables_and_indexes() {
     );
     for index in [
         "idx_events_workspace_created_at",
-        "idx_events_session_sequence",
-        "idx_sessions_workspace_session",
+        "idx_events_agent_sequence",
+        "idx_agents_workspace_agent",
         "idx_activities_workspace_expires_at",
-        "idx_reservations_session_status_expires_at",
+        "idx_reservations_agent_status_expires_at",
         "idx_claims_workspace_absolute_status_expires_at",
         "idx_claims_repo_relative_status_expires_at",
-        "idx_conflicts_session_checked_at",
-        "idx_reconciliations_session_created_at",
-        "idx_outbox_session_sequence_sync_status",
+        "idx_outbox_agent_sequence_sync_status",
     ] {
         assert!(
             store.has_index(index).expect("index check should run"),

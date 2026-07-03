@@ -30,7 +30,7 @@ integration target is:
 
 ```text
 Codex lifecycle hooks
-+ MCP tools
++ native Stateful coordination tools
 + state server
 ```
 
@@ -50,20 +50,22 @@ source and explored a constrained read-only hook path. The current
 implementation supersedes that target: Codex raw Bash is denied with sandbox
 guidance, and OMP raw Bash is blocked unless it uses the trusted wrapper.
 Repo-external shell work must use `stateful sandbox run --fs external --purpose ...`.
-Repo file edit authorization starts with native edit tools such as Codex `apply_patch` or Edit after exact
-reservation and a successful same-reservation file claim, where target paths can be
-checked before writing, or with `--fs write-targets` wrapper calls that declare
-explicit repo-relative targets after reservation and same-reservation claim. Raw Bash test
-commands are not allowlisted;
-use
+OMP native `edit`/`write` can auto-declare/claim the exact tool-visible file
+scope for the default simple-write path when no explicit reservation id is
+supplied and the only denial is missing reservation/scope. Other repo file edit
+authorization starts with native edit tools such as Codex `apply_patch` or Edit
+after exact reservation and a successful same-reservation file claim, where target paths can
+be checked before writing, or with `--fs write-targets` wrapper calls that
+declare explicit repo-relative targets after reservation and same-reservation
+claim. Raw Bash test commands are not allowlisted; use
 `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`
 so disposable artifacts stay under `/tmp/stateful/<session>/<purpose>/`.
 
 Overrides are never automatic. A blocked write can proceed only when the user
-explicitly instructs the current session to allow a specific resource override.
+explicitly instructs the current agent to allow a specific resource override.
 The user owns the judgment and responsibility for that exception.
 Overrides apply only to active claim conflicts and are scoped to the current
-session, current turn, and specific resource.
+agent, current turn, and specific resource.
 
 Subagents may write only within the parent session's active valid reservation scope,
 but their activity and claims are attributed to the subagent actor.

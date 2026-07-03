@@ -199,6 +199,41 @@ fn run_pairs_templates_use_absolute_paths_when_output_dir_is_relative() {
 }
 
 #[test]
+fn run_pairs_treats_workspace_template_path_shell_metacharacters_as_data() {
+    let root = temp_root("stateful-bench-run-template-injection");
+    let pairs_path = root.join("pairs.jsonl");
+    let injected = root.join("template-injected");
+    let output_dir = root.join(format!("runs; printf injected > {} #", injected.display()));
+    write_jsonl(&pairs_path, &[pair()]).expect("pair manifest should write");
+
+    run_pairs(RunOptions {
+        pairs: pairs_path,
+        mode: RunMode::NoState,
+        run_id: "synthetic-template-injection".to_string(),
+        agent_cmd_template: "true".to_string(),
+        output_dir,
+        timeout_seconds: 10,
+        max_pairs: None,
+        pair_ids: Vec::new(),
+        jobs: 1,
+        auth_check_cmd_template: None,
+        budget_check_cmd_template: None,
+        setup_cmd_template: Some("mkdir -p {workspace}".to_string()),
+        harness_cmd_template: None,
+        stateful_binary: "stateful".to_string(),
+    })
+    .expect("shell metacharacters in template paths should stay data");
+
+    assert!(
+        !injected.exists(),
+        "rendering {{workspace}} interpreted shell syntax and created {}",
+        injected.display()
+    );
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
 fn run_pairs_filters_to_explicit_pair_ids_before_execution() {
     let root = temp_root("stateful-bench-run-pair-id-filter");
     let pairs_path = root.join("pairs.jsonl");

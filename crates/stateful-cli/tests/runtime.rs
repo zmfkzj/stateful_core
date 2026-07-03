@@ -2,7 +2,6 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
-    path::Path,
     process::Command,
     sync::mpsc,
     thread,
@@ -12,339 +11,60 @@ use std::{
 use std::os::unix::fs::PermissionsExt;
 
 use stateful_cli::{
-    CurrentSession, GlobalPaths, ReservationCancelArgs, ReservationClaimArgs,
-    ReservationDeclareArgs, ReservationRequestArgs, ServerRuntime, cancel_reservation_via_http,
-    claim_reservation_via_http, declare_reservation_via_http, discover_runtime,
-    discover_runtime_with_global, get_json, global_state_db_path, post_json,
-    read_current_session_file, read_current_session_file_for_session, request_reservation_via_http,
-    state_db_path, write_current_session_file, write_current_session_file_for_session,
-    write_global_runtime_file, write_runtime_file,
+    GlobalPaths, ReservationCancelArgs, ReservationClaimArgs, ReservationDeclareArgs,
+    ReservationRequestArgs, ServerRuntime, cancel_reservation_via_http, claim_reservation_via_http,
+    declare_reservation_via_http, discover_runtime, discover_runtime_with_global, get_json,
+    global_state_db_path, post_json, request_reservation_via_http, state_db_path,
+    validate_agent_id, write_global_runtime_file, write_runtime_file,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-const CURRENT_SESSION_CHILD_CASE: &str = "STATEFUL_RUNTIME_CURRENT_SESSION_CHILD_CASE";
-const CURRENT_SESSION_CHILD_ROOT: &str = "STATEFUL_RUNTIME_CURRENT_SESSION_CHILD_ROOT";
-
-fn run_current_session_child(repo_root: &Path, child_case: &str) {
-    let output = Command::new(std::env::current_exe().expect("current test binary path"))
-        .arg("current_session_file_child_probe")
-        .arg("--ignored")
-        .arg("--exact")
-        .arg("--nocapture")
-        .env_clear()
-        .env(CURRENT_SESSION_CHILD_CASE, child_case)
-        .env(CURRENT_SESSION_CHILD_ROOT, repo_root)
-        .output()
-        .expect("current session child test should run");
-    assert!(
-        output.status.success(),
-        "current session child failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 #[test]
-#[ignore]
-fn current_session_file_child_probe() {
-    let Ok(child_case) = std::env::var(CURRENT_SESSION_CHILD_CASE) else {
-        return;
-    };
-    let repo_root = std::path::PathBuf::from(
-        std::env::var_os(CURRENT_SESSION_CHILD_ROOT)
-            .expect("current session child root must be configured"),
-    );
-
-    match child_case.as_str() {
-        "roundtrip_no_codex_env" => {
-            write_current_session_file(&repo_root, &CurrentSession::new("s1", "w1"))
-                .expect("current session file should write");
-
-            let session =
-                read_current_session_file(&repo_root).expect("current session should read");
-            assert_eq!(session.session_id, "s1");
-            assert_eq!(session.workspace_id, "w1");
-        }
-        "read_prefers_codex_thread_id" => {
-            let session =
-                read_current_session_file(&repo_root).expect("current session should read");
-            assert_eq!(session.session_id, "thread-child");
-            assert_eq!(session.workspace_id, "w1");
-        }
-        "read_uses_legacy_session" => {
-            let session =
-                read_current_session_file(&repo_root).expect("current session should read");
-            assert_eq!(session.session_id, "legacy-session");
-            assert_eq!(session.workspace_id, "w1");
-        }
-        "read_uses_verified_legacy_session_with_stale_sibling" => {
-            let session =
-                read_current_session_file(&repo_root).expect("current session should read");
-            assert_eq!(session.session_id, "legacy-session");
-            assert_eq!(session.workspace_id, "w1");
-        }
-        "read_rejects_unverified_legacy_session" => {
-            let error = read_current_session_file(&repo_root)
-                .expect_err("unverified legacy session should fail");
-            assert!(
-                error
-                    .to_string()
-                    .contains("has no matching session-bound file")
-            );
-        }
-        "read_uses_stateful_session_id" => {
-            let session =
-                read_current_session_file(&repo_root).expect("current session should read");
-            assert_eq!(session.session_id, "session-child");
-            assert_eq!(session.workspace_id, "w1");
-        }
-        "read_symlink_error" => {
-            let error =
-                read_current_session_file(&repo_root).expect_err("symlinked session should fail");
-            assert!(error.to_string().contains("symlinked current session file"));
-        }
-        "write_symlink_error" => {
-            let error = write_current_session_file(&repo_root, &CurrentSession::new("s1", "w1"))
-                .expect_err("symlinked session write should fail");
-            assert!(error.to_string().contains("symlinked current session file"));
-        }
-        "write_non_regular_error" => {
-            let error = write_current_session_file(&repo_root, &CurrentSession::new("s1", "w1"))
-                .expect_err("socket session write should fail");
-            assert!(
-                error
-                    .to_string()
-                    .contains("current session file is not a regular file")
-            );
-        }
-        other => panic!("unknown current session child case `{other}`"),
+fn validate_agent_id_accepts_safe_agent_identifiers() {
+    for agent_id in ["agent-1", "sub_agent_2", "A0_b-C9"] {
+        validate_agent_id(agent_id, "agent_id").expect("safe agent id should be accepted");
     }
 }
 
 #[test]
-fn current_session_file_prefers_codex_thread_id_over_stateful_session_id() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-current-session-codex-thread-env-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+fn validate_agent_id_rejects_empty_agent_identifier() {
+    let error = validate_agent_id("", "agent_id").expect_err("empty agent id should fail");
 
-    write_current_session_file(&temp_root, &CurrentSession::new("legacy-session", "w1"))
-        .expect("legacy current session should write");
-    write_current_session_file_for_session(
-        &temp_root,
-        "session-child",
-        &CurrentSession::new("session-child", "w1"),
-    )
-    .expect("generic session-bound current session should write");
-    write_current_session_file_for_session(
-        &temp_root,
-        "thread-child",
-        &CurrentSession::new("thread-child", "w1"),
-    )
-    .expect("codex thread-bound current session should write");
-
-    let output = Command::new(std::env::current_exe().expect("current test binary path"))
-        .arg("current_session_file_child_probe")
-        .arg("--ignored")
-        .arg("--exact")
-        .arg("--nocapture")
-        .env_clear()
-        .env(CURRENT_SESSION_CHILD_CASE, "read_prefers_codex_thread_id")
-        .env(CURRENT_SESSION_CHILD_ROOT, &temp_root)
-        .env("STATEFUL_SESSION_ID", "session-child")
-        .env("STATEFUL_CODEX_RUN_ID", "root-session")
-        .env("CODEX_THREAD_ID", "thread-child")
-        .output()
-        .expect("current session child test should run");
-
-    assert!(
-        output.status.success(),
-        "current session child failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+    assert!(error.to_string().contains("agent_id is set but empty"));
 }
 
 #[test]
-fn current_session_file_uses_codex_thread_id_without_stateful_session_id() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-current-session-codex-thread-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+fn validate_agent_id_rejects_unsupported_agent_identifier_characters() {
+    for agent_id in ["agent/1", "agent 1", "agent.1"] {
+        let error =
+            validate_agent_id(agent_id, "agent_id").expect_err("unsupported agent id should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("agent_id contains unsupported characters")
+        );
     }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-
-    write_current_session_file(&temp_root, &CurrentSession::new("legacy-session", "w1"))
-        .expect("legacy current session should write");
-    write_current_session_file_for_session(
-        &temp_root,
-        "legacy-session",
-        &CurrentSession::new("legacy-session", "w1"),
-    )
-    .expect("matching session-bound current session should write");
-    write_current_session_file_for_session(
-        &temp_root,
-        "thread-child",
-        &CurrentSession::new("thread-child", "w1"),
-    )
-    .expect("codex thread-bound current session should write");
-
-    let output = Command::new(std::env::current_exe().expect("current test binary path"))
-        .arg("current_session_file_child_probe")
-        .arg("--ignored")
-        .arg("--exact")
-        .arg("--nocapture")
-        .env_clear()
-        .env(CURRENT_SESSION_CHILD_CASE, "read_prefers_codex_thread_id")
-        .env(CURRENT_SESSION_CHILD_ROOT, &temp_root)
-        .env("STATEFUL_CODEX_RUN_ID", "root-session")
-        .env("CODEX_THREAD_ID", "thread-child")
-        .output()
-        .expect("current session child test should run");
-
-    assert!(
-        output.status.success(),
-        "current session child failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[test]
-fn current_session_file_uses_verified_legacy_alias_with_stale_session_bound_file() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-current-session-ambiguous-legacy-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-
-    write_current_session_file(&temp_root, &CurrentSession::new("legacy-session", "w1"))
-        .expect("legacy current session should write");
-    write_current_session_file_for_session(
-        &temp_root,
-        "legacy-session",
-        &CurrentSession::new("legacy-session", "w1"),
-    )
-    .expect("matching session-bound current session should write");
-    write_current_session_file_for_session(
-        &temp_root,
-        "other-session",
-        &CurrentSession::new("other-session", "w1"),
-    )
-    .expect("second session-bound current session should write");
-
-    let output = Command::new(std::env::current_exe().expect("current test binary path"))
-        .arg("current_session_file_child_probe")
-        .arg("--ignored")
-        .arg("--exact")
-        .arg("--nocapture")
-        .env_clear()
-        .env(
-            CURRENT_SESSION_CHILD_CASE,
-            "read_uses_verified_legacy_session_with_stale_sibling",
-        )
-        .env(CURRENT_SESSION_CHILD_ROOT, &temp_root)
-        .output()
-        .expect("current session child test should run");
-
-    assert!(
-        output.status.success(),
-        "current session child failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[test]
-fn current_session_file_rejects_unverified_legacy_alias_without_stateful_session_id() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-current-session-unverified-legacy-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-
-    write_current_session_file(&temp_root, &CurrentSession::new("legacy-session", "w1"))
-        .expect("legacy current session should write");
-    write_current_session_file_for_session(
-        &temp_root,
-        "other-session",
-        &CurrentSession::new("other-session", "w1"),
-    )
-    .expect("other session-bound current session should write");
-
-    let output = Command::new(std::env::current_exe().expect("current test binary path"))
-        .arg("current_session_file_child_probe")
-        .arg("--ignored")
-        .arg("--exact")
-        .arg("--nocapture")
-        .env_clear()
-        .env(
-            CURRENT_SESSION_CHILD_CASE,
-            "read_rejects_unverified_legacy_session",
-        )
-        .env(CURRENT_SESSION_CHILD_ROOT, &temp_root)
-        .output()
-        .expect("current session child test should run");
-
-    assert!(
-        output.status.success(),
-        "current session child failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn runtime_file_round_trips_server_discovery() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-runtime-test-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
 
     let runtime = ServerRuntime::new("http://127.0.0.1:43873", "secret-token", "w1", 42);
-    write_runtime_file(&temp_root, &runtime).expect("runtime file should write");
+    write_runtime_file(temp_root, &runtime).expect("runtime file should write");
 
-    let discovered = discover_runtime(&temp_root).expect("runtime should be discoverable");
+    let discovered = discover_runtime(temp_root).expect("runtime should be discoverable");
 
     assert_eq!(discovered.base_url, "http://127.0.0.1:43873");
     assert_eq!(discovered.token, "secret-token");
     assert_eq!(discovered.workspace_id, "w1");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn global_runtime_file_round_trips_server_discovery() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-global-runtime-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     let paths = GlobalPaths::new(temp_root.join("home"));
 
@@ -357,20 +77,12 @@ fn global_runtime_file_round_trips_server_discovery() {
     assert_eq!(discovered.base_url, "http://127.0.0.1:43874");
     assert_eq!(discovered.token, "global-token");
     assert_eq!(discovered.workspace_id, "global-w");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn runtime_discovery_keeps_local_runtime_compatibility_fallback() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-runtime-compat-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     let paths = GlobalPaths::new(temp_root.join("home"));
 
@@ -383,20 +95,12 @@ fn runtime_discovery_keeps_local_runtime_compatibility_fallback() {
     assert_eq!(discovered.base_url, "http://127.0.0.1:43875");
     assert_eq!(discovered.token, "repo-token");
     assert_eq!(discovered.workspace_id, "repo-w");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn cli_current_uses_local_runtime_when_global_paths_are_unavailable() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-runtime-no-home-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -410,11 +114,11 @@ fn cli_current_uses_local_runtime_when_global_paths_are_unavailable() {
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    write_runtime_file(&temp_root, &runtime).expect("runtime file should write");
+    write_runtime_file(temp_root, &runtime).expect("runtime file should write");
 
     let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
         .arg("current")
-        .current_dir(&temp_root)
+        .current_dir(temp_root)
         .env_clear()
         .output()
         .expect("stateful current should run");
@@ -425,23 +129,17 @@ fn cli_current_uses_local_runtime_when_global_paths_are_unavailable() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"ok\""));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[cfg(unix)]
 #[test]
 fn runtime_files_are_owner_read_write_only() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-runtime-mode-test-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
     let runtime = ServerRuntime::new("http://127.0.0.1:43875", "secret-token", "w1", 44);
 
-    write_runtime_file(&temp_root, &runtime).expect("repo runtime file should write");
+    write_runtime_file(temp_root, &runtime).expect("repo runtime file should write");
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let repo_mode = fs::metadata(temp_root.join(".stateful_core/runtime/server.json"))
@@ -456,49 +154,6 @@ fn runtime_files_are_owner_read_write_only() {
         & 0o777;
     assert_eq!(repo_mode, 0o600);
     assert_eq!(global_mode, 0o600);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[cfg(unix)]
-#[test]
-fn current_session_files_are_owner_read_write_only() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-current-session-mode-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-
-    write_current_session_file(&temp_root, &CurrentSession::new("legacy", "w1"))
-        .expect("legacy session file should write");
-    write_current_session_file_for_session(
-        &temp_root,
-        "session-1",
-        &CurrentSession::new("session-1", "w1"),
-    )
-    .expect("session-bound session file should write");
-
-    let legacy_mode = fs::metadata(temp_root.join(".stateful_core/runtime/session.json"))
-        .expect("legacy session metadata should read")
-        .permissions()
-        .mode()
-        & 0o777;
-    let session_mode = fs::metadata(
-        temp_root
-            .join(".stateful_core/runtime/sessions")
-            .join("session-1.json"),
-    )
-    .expect("session-bound metadata should read")
-    .permissions()
-    .mode()
-        & 0o777;
-    assert_eq!(legacy_mode, 0o600);
-    assert_eq!(session_mode, 0o600);
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
@@ -563,14 +218,8 @@ fn runtime_has_required_identity_rejects_mismatched_nonzero_pid() {
 
 #[test]
 fn cli_current_rejects_env_runtime_without_required_capabilities() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-runtime-env-old-server-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -586,7 +235,7 @@ fn cli_current_rejects_env_runtime_without_required_capabilities() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
         .arg("current")
-        .current_dir(&temp_root)
+        .current_dir(temp_root)
         .env_clear()
         .env("STATEFUL_SERVER_URL", format!("http://{addr}"))
         .env("STATEFUL_SERVER_TOKEN", "secret-token")
@@ -603,20 +252,12 @@ fn cli_current_rejects_env_runtime_without_required_capabilities() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn cli_current_accepts_env_runtime_with_required_capabilities() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-runtime-env-capable-server-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -639,7 +280,7 @@ fn cli_current_accepts_env_runtime_with_required_capabilities() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
         .arg("current")
-        .current_dir(&temp_root)
+        .current_dir(temp_root)
         .env_clear()
         .env("STATEFUL_SERVER_URL", format!("http://{addr}"))
         .env("STATEFUL_SERVER_TOKEN", "secret-token")
@@ -652,172 +293,22 @@ fn cli_current_accepts_env_runtime_with_required_capabilities() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"ok\""));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[test]
-fn current_session_file_round_trips_for_mcp_enrichment() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-current-session-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-
-    run_current_session_child(&temp_root, "roundtrip_no_codex_env");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[cfg(unix)]
-#[test]
-fn current_session_file_refuses_symlink_before_reading() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-current-session-symlink-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(temp_root.join(".stateful_core/runtime"))
-        .expect("runtime dir should be creatable");
-    let victim = temp_root.join("victim-session.json");
-    fs::write(&victim, r#"{"session_id":"s1","workspace_id":"w1"}"#)
-        .expect("victim session should write");
-    std::os::unix::fs::symlink(
-        &victim,
-        temp_root.join(".stateful_core/runtime/session.json"),
-    )
-    .expect("current session symlink should create");
-
-    run_current_session_child(&temp_root, "read_symlink_error");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[cfg(unix)]
-#[test]
-fn current_session_file_refuses_symlink_before_writing() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-current-session-write-symlink-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(temp_root.join(".stateful_core/runtime"))
-        .expect("runtime dir should be creatable");
-    let victim = temp_root.join("victim-session.json");
-    fs::write(&victim, "victim\n").expect("victim should write");
-    std::os::unix::fs::symlink(
-        &victim,
-        temp_root.join(".stateful_core/runtime/session.json"),
-    )
-    .expect("current session symlink should create");
-
-    run_current_session_child(&temp_root, "write_symlink_error");
-    assert_eq!(
-        fs::read_to_string(&victim).expect("victim should read"),
-        "victim\n"
-    );
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[cfg(unix)]
-#[test]
-fn current_session_file_refuses_non_regular_file_before_writing() {
-    let temp_root = std::env::temp_dir().join(format!("scws-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(temp_root.join(".stateful_core/runtime"))
-        .expect("runtime dir should be creatable");
-    let session_path = temp_root.join(".stateful_core/runtime/session.json");
-    fs::create_dir(&session_path).expect("session path should be non-regular");
-
-    run_current_session_child(&temp_root, "write_non_regular_error");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[test]
-fn session_file_is_isolated_from_legacy_current_session() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-session-file-test-{}", std::process::id()));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-
-    write_current_session_file(&temp_root, &CurrentSession::new("s-legacy", "w1"))
-        .expect("legacy current session should write");
-    write_current_session_file_for_session(
-        &temp_root,
-        "s-run-a",
-        &CurrentSession::new("s-run-a", "w1"),
-    )
-    .expect("session-bound current session should write");
-
-    let session =
-        read_current_session_file_for_session(&temp_root, "s-run-a").expect("run session reads");
-
-    assert_eq!(session.session_id, "s-run-a");
-    assert_eq!(session.workspace_id, "w1");
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[test]
-fn session_file_refuses_to_rebind_to_different_stateful_session() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-session-file-rebind-test-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
-
-    write_current_session_file_for_session(
-        &temp_root,
-        "s-run-a",
-        &CurrentSession::new("s-run-a", "w1"),
-    )
-    .expect("session-bound current session should write");
-
-    let error = write_current_session_file_for_session(
-        &temp_root,
-        "s-run-a",
-        &CurrentSession::new("s-run-a", "w2"),
-    )
-    .expect_err("same session file should not rebind to a different Stateful session");
-
-    assert!(error.to_string().contains("already bound"));
-
-    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[test]
 fn state_db_path_uses_local_runtime_directory() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-runtime-db-test-{}", std::process::id()));
-
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     assert_eq!(
-        state_db_path(&temp_root),
+        state_db_path(temp_root),
         temp_root.join(".stateful_core").join("state.db")
     );
 }
 
 #[test]
 fn global_state_db_path_uses_user_level_state_db() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-global-runtime-db-test-{}",
-        std::process::id()
-    ));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let paths = GlobalPaths::new(temp_root.join("home"));
 
     assert_eq!(global_state_db_path(&paths), paths.state_db);
@@ -843,7 +334,7 @@ fn post_json_sends_bearer_token_and_payload() {
         &runtime,
         "/v1/reservation/declare",
         &serde_json::json!({
-            "session_id": "s1",
+            "agent_id": "s1",
             "workspace_id": "w1",
             "purpose": "Fix auth validation behavior.",
             "files_planned": ["src/auth.ts"]
@@ -908,7 +399,7 @@ fn declare_reservation_via_http_posts_expected_payload() {
     let response = declare_reservation_via_http(
         &runtime,
         ReservationDeclareArgs {
-            session_id: "s1".to_string(),
+            agent_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             purpose: "Fix auth validation behavior.".to_string(),
             files_planned: vec!["src/auth.ts".to_string()],
@@ -942,9 +433,9 @@ fn declare_reservation_via_http_posts_expected_payload() {
     let after_request = OffsetDateTime::now_utc();
     assert!(observed_at >= before_request);
     assert!(observed_at <= after_request);
-    assert_eq!(body["session"]["session_id"], "s1");
-    assert_eq!(body["session"]["actor_id"], "stateful-cli:42");
-    assert_eq!(body["session"]["actor_type"], "agent");
+    assert_eq!(body["agent"]["agent_id"], "s1");
+    assert_eq!(body["agent"]["actor_id"], "s1");
+    assert_eq!(body["agent"]["actor_type"], "agent");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert_eq!(body["workspace"]["repo_id"], "");
     assert_eq!(body["workspace"]["worktree_id"], "");
@@ -983,7 +474,7 @@ fn claim_reservation_via_http_posts_expected_payload() {
     claim_reservation_via_http(
         &runtime,
         ReservationClaimArgs {
-            session_id: "s1".to_string(),
+            agent_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             wait_id: "wait-1".to_string(),
             reservation_id: None,
@@ -996,7 +487,7 @@ fn claim_reservation_via_http_posts_expected_payload() {
     assert!(request.contains("POST /v1/reservation/claim HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v1");
-    assert_eq!(body["session"]["session_id"], "s1");
+    assert_eq!(body["agent"]["agent_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert_eq!(body["source"]["kind"], "cli");
     assert_eq!(body["source"]["event"], "reservation_claim");
@@ -1030,7 +521,7 @@ fn request_reservation_via_http_posts_expected_payload() {
     let response = request_reservation_via_http(
         &runtime,
         ReservationRequestArgs {
-            session_id: "s1".to_string(),
+            agent_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             request_id: "request-1".to_string(),
             reservation_id: None,
@@ -1048,7 +539,7 @@ fn request_reservation_via_http_posts_expected_payload() {
     assert!(request.contains("POST /v1/reservation/request HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v1");
-    assert_eq!(body["session"]["session_id"], "s1");
+    assert_eq!(body["agent"]["agent_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert_eq!(body["source"]["kind"], "cli");
     assert_eq!(body["source"]["event"], "reservation_request");
@@ -1085,7 +576,7 @@ fn cancel_reservation_via_http_posts_expected_payload() {
     cancel_reservation_via_http(
         &runtime,
         ReservationCancelArgs {
-            session_id: "s1".to_string(),
+            agent_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             request_id: "request-1".to_string(),
             identity: None,
@@ -1097,7 +588,7 @@ fn cancel_reservation_via_http_posts_expected_payload() {
     assert!(request.contains("POST /v1/reservation/cancel HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v1");
-    assert_eq!(body["session"]["session_id"], "s1");
+    assert_eq!(body["agent"]["agent_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert_eq!(body["source"]["kind"], "cli");
     assert_eq!(body["source"]["event"], "reservation_cancel");

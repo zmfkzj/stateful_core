@@ -2,6 +2,8 @@
 
 This document defines the coordination model behind `stateful_core`.
 
+Shipped local v1 is a pre-write guardrail for supported actions, not exclusive locking: claims are advisory product semantics, but they block at hook and sandbox boundaries where the system can observe and authorize a supported mutation.
+
 The short version:
 
 ```text
@@ -202,7 +204,7 @@ At authorization time, the policy engine checks:
 
 - the target has active matching reservation
 - the claim is active and unexpired
-- the claim belongs to the current session or authorized actor path
+- the claim belongs to the current agent or authorized actor path
 - the target is inside the declared file or directory scope
 - no stronger conflict has appeared since the claim was acquired
 
@@ -226,14 +228,14 @@ observed_event_sequence
 Before a write, the policy engine compares the current observation with the
 actor's base observation and the effect log.
 
-Expected same-session effects are allowed when they are recorded under the
-active reservation and current claim. Unexpected effects produce a warning or denial:
+Expected same-agent effects are allowed when they are recorded under the active
+reservation and current claim. Unexpected effects produce a warning or denial:
 
 - another actor wrote the target
 - a human write was observed and not reconciled
 - the file hash changed since the actor last read it
 - the claim generation changed
-- the session's reservation expired or was superseded
+- the actor's reservation expired or was superseded
 
 This is OCC-style because actors can work optimistically while reading,
 planning, and editing in memory, but must prove that the target is still the
@@ -261,7 +263,7 @@ checks should read the materialized view for speed, but audit, replay,
 debugging, and recovery depend on the event log.
 
 Effects are evidence, not authority. A previous successful write does not allow a
-future write unless the session still has active reservation, matching scope, and a
+future write unless the active agent still has active reservation, matching scope, and a
 fresh claim.
 
 ## Validation Hooks
@@ -282,7 +284,7 @@ Validation records should include:
 
 ```text
 validation_id
-session_id
+agent_id
 reservation_id
 resources_checked
 command_or_tool
@@ -320,22 +322,23 @@ clear that the user accepted responsibility for that exception.
 
 ## Authorization Decision
 
-The policy engine owns one decision shape:
+The shipped policy engine returns the current `Decision` shape:
 
 ```text
 authorize_action(input) -> decision
 ```
 
-The output should include:
+The output includes:
 
 ```text
 decision: allow | warn | deny | error
-reason
-conflicts[]
+reason_code
+message
 required_next_action
-context_items[]
-audit_event
 ```
+
+Target richer context may add `conflicts[]`, `context_items[]`, and
+`audit_event`.
 
 The decision order is:
 
@@ -386,7 +389,7 @@ blocked -> queued -> claimable_reservation -> claimed -> active
 ```
 
 Queued requests are FIFO per resource. A claimable reservation (the current API
-state is `reserved`) is not write authority. The owning session must reread the
+state is `reserved`) is not write authority. The owning agent must reread the
 target, claim the reservation, and then retry the write. The claim creates fresh
 active reservation scope and a same-reservation claim for that resource.
 
@@ -395,20 +398,25 @@ workspace later on old state.
 
 ## Relationship to Existing Docs
 
-This document defines the concurrency model at a product and policy level.
-Detailed implementation rules live in the existing docs:
+This document defines the concurrency model at a product and policy level. The
+canonical doc hierarchy is:
 
-- [Core Concept](core-concept.md) defines current state and product boundary.
-- [State Model](state-model.md) defines records, freshness, overrides, queues,
-  and views.
-- [Architecture](architecture.md) defines hooks, server, MCP, policy engine, and
-  failure modes.
-- [Implementation Contract](implementation-contract.md) defines concrete v1 API,
-  CLI, storage, and test expectations.
+1. [README](../README.md): shipped status, operator overview, and entry points.
+2. [Implementation Contract](implementation-contract.md): concrete v1 API, CLI,
+   hook, runtime, storage, and test expectations.
+3. [State Model](state-model.md): records, freshness, overrides, queues, and
+   views.
+4. [Architecture](architecture.md): hooks, server, native tools, policy engine,
+   and failure modes.
+5. [Current-State Coordination](current-state-coordination.md): rationale and
+   index for current-state coordination, including queue/resume/lazy-resume
+   design notes. It is not an independent source of truth for shipped behavior.
 
 When this document and a lower-level implementation document differ, treat this
-document as the model reservation and the implementation contract as the current
-shipping behavior. Changes that alter the model should update both layers.
+document as the model reference and the implementation contract as the current
+shipping behavior. Changes that alter shipped behavior should update the
+implementation contract, state model, or architecture document as applicable;
+changes that alter rationale may update current-state coordination.
 
 ## Invariants
 

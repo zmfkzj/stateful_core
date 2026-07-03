@@ -62,12 +62,12 @@ Current state is a scoped, time-bound summary of active work.
 
 Examples:
 
-- An agent session is exploring auth validation.
-- A subagent is editing under its own session identity while sharing the
-  workspace-level coordination model.
-- A session plans to edit `src/auth.ts`.
+- An agent is exploring auth validation.
+- An OMP subagent branch is editing under the `agent_id` derived for that branch
+  while sharing the workspace-level coordination model.
+- An agent plans to edit `src/auth.ts`.
 - A file has an active advisory claim.
-- A session is testing after a change.
+- An agent is testing after a change.
 - A file changed after an agent acquired its exact file claim, or a future
   observer/IDE integration reports nearby human editing activity.
 - A session finalized as `done`, `failed`, or `blocked`.
@@ -76,8 +76,8 @@ Current state must be compact enough to render into an agent prompt and precise
 enough to drive conflict checks before important tool calls.
 
 The shipped v1 prototype observes Codex and OMP sessions, supported tool
-effects, MCP calls, exact file claim freshness, and explicit reconciliation
-acknowledgements.
+effects, native Stateful tool calls, exact file claim freshness, and explicit
+reconciliation acknowledgements.
 It does not automatically watch human editor buffers or filesystem saves.
 
 ## Freshness
@@ -94,9 +94,12 @@ Expired state can remain useful as historical evidence, but it should not block
 new work as if it were still active.
 
 V1 reservation freshness uses a 15-minute default TTL. Heartbeats can extend active
-reservation while the phase is `exploring`, `editing`, or `testing`, but never beyond
-60 minutes from declaration. Blocked or finalized work is visible but does not
-authorize writes.
+reservations while the phase is `exploring`, `editing`, or `testing`, but never
+beyond 60 minutes from declaration. Blocked or finalized work is visible but does
+not authorize writes. Active claims expire after 300 seconds without heartbeat,
+and claimable reservations expire after 120 seconds, so long-running test/build
+work must keep heartbeating and reacquire authority before any post-60-minute
+write.
 
 ## Coordination Protocol
 
@@ -127,7 +130,7 @@ after important action  -> observe effects and refresh state
 before turn stops       -> require final status
 ```
 
-For v1, supported write actions are blocked unless the session has an active
+For v1, supported write actions are blocked unless the active agent has an active
 task reservation whose file or directory set covers the target, plus a fresh
 same-reservation claim on the exact resource being written. Abstract task, test,
 port, or migration resources can provide context but do not permit writes by
@@ -137,8 +140,11 @@ boundary.
 
 V1 only authorizes writes through tool paths with reliable target extraction.
 Repo file edits use hook-visible native edit tools such as Codex `apply_patch`,
-`Edit`, and `Write`, or OMP `edit` and `write`, after task-level reservation and
-a successful same-reservation file claim; the claim is released after the completed
+`Edit`, and `Write`, or OMP `edit` and `write`. OMP `edit` and `write`
+auto-declare/claim the exact tool-visible file scope for the default simple-write
+path when no explicit reservation id is supplied and the only denial is missing
+reservation/scope; other native edit paths require task-level reservation and a
+successful same-reservation file claim. The claim is released after the completed
 write transaction. Bash command text alone is never a repo-internal
 authorization source. Runtime tool names are classified by their leaf segment,
 so `functions.bash` follows Bash rules, `functions.python` follows Python
@@ -148,18 +154,20 @@ only strict trusted `stateful sandbox run ...` and
 `stateful sandbox process find ...` commands after Stateful preflight; arbitrary
 raw Bash and native Python execution are denied at host approval and hook
 levels. Command execution and process inspection are not generated tool calls.
-External write/create/write-dir/socket/signal scope prompts by default for a
-scoped OMP UI grant unless `stateful.autoApprove: true` is enabled.
-Auto-approval skips only the Stateful-owned UI prompt; sandbox scope validation,
-hooks, reservation/claim checks, and grant limits still apply. When prompted,
-the prompt shows purpose, declared scope, examples, max uses, and expiry rather
-than raw command text, and matching calls reuse the grant until it expires or
-reaches its use limit. The generated extension subscribes to Stateful SSE
-reservation notifications and injects a next-turn OMP message when a queued
-`wait_id` becomes a `claimable_reservation`; the claim and write still use the normal Stateful tools.
-generated extension also subscribes to Stateful SSE reservation
-notifications and injects a next-turn OMP message when a queued `wait_id`
-becomes a `claimable_reservation`; the claim and write still use the normal Stateful tools.
+External write/create/write-dir/socket/signal scope and repo-external OMP native
+`edit`/`write` file targets auto-approve the scoped Stateful-owned OMP grant
+prompt by default through `stateful.autoApprove: true`. Auto-approval skips only
+the Stateful-owned UI prompt; sandbox scope validation, hooks, reservation/claim
+checks, and grant limits still apply. Set `stateful.autoApprove: false` to
+require the prompt. When prompted, the prompt shows purpose, declared scope,
+examples, max uses, and expiry rather than raw command text, and matching calls
+reuse the grant until it expires or reaches its use limit. The
+generated extension subscribes to replayable Stateful SSE reservation notifications:
+each event uses the per-agent/workspace notification sequence as the SSE `id`
+and JSON `sequence`, and reconnecting with `Last-Event-ID` / `last-event-id`
+acknowledges delivered events before later pending notifications are replayed. The extension injects a next-turn OMP
+message when a queued `wait_id` becomes a claimable reservation (API state
+`reserved`); the claim and write still use normal Stateful tools.
 Ordinary read work should use agent-native read, search, or diff tools when
 available.
 Read-only inspection that genuinely needs a shell must use a single trusted
@@ -169,11 +177,13 @@ inspection uses `stateful sandbox process find <selector>`; in OMP, run that
 command through built-in Bash, not a generated process tool. Command-shaped repo
 writes must use `stateful sandbox run --fs write-targets` with explicit
 repo-relative target flags after reservation and same-reservation claim; in OMP, use
-built-in Bash with the same trusted command. Repo-external operations use
-`stateful sandbox run --fs external` with purpose and command; external writes
-must declare write/create/dir scope and ask for a scoped OMP UI grant by default
-unless `stateful.autoApprove: true` is enabled. Raw Bash test commands are not
-allowlisted; use `stateful sandbox run --fs build --network enabled --write-dir
+built-in Bash with the same trusted command. Repo-external command-shaped
+operations use `stateful sandbox run --fs external` with purpose and command;
+external sandbox writes must declare write/create/dir scope. Repo-external OMP
+native `edit`/`write` file targets and external sandbox writes auto-approve the
+scoped OMP UI grant by default; set `stateful.autoApprove: false` to require it.
+Raw Bash test commands are not allowlisted; use
+`stateful sandbox run --fs build --network enabled --write-dir
 <scratch-purpose> --command <cmd>` so build artifacts go under
 `/tmp/stateful/<session>/<scratch-purpose>/`.
 

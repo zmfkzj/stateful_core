@@ -9,7 +9,7 @@ use std::{sync::Arc, time::Duration};
 use tokio_stream::StreamExt;
 use tower::ServiceExt;
 
-fn acquire_test_lease(store: &Store, session_id: &str, workspace_id: &str, path: &str) {
+fn acquire_test_lease(store: &Store, agent_id: &str, workspace_id: &str, path: &str) {
     let has_matching_reservation = store
         .live_current_state(Some(path))
         .expect("live current state should load")
@@ -17,12 +17,12 @@ fn acquire_test_lease(store: &Store, session_id: &str, workspace_id: &str, path:
         .iter()
         .any(|item| {
             item.kind == stateful_core::CurrentItemKind::Reservation
-                && item.session_id.as_deref() == Some(session_id)
+                && item.agent_id.as_deref() == Some(agent_id)
         });
     if !has_matching_reservation {
         store
             .append(Event::reservation_declared(
-                session_id,
+                agent_id,
                 workspace_id,
                 format!("Acquire test claim for {path}."),
                 [path],
@@ -30,13 +30,13 @@ fn acquire_test_lease(store: &Store, session_id: &str, workspace_id: &str, path:
             .expect("claim reservation should append");
     }
     store
-        .acquire_claim(session_id, workspace_id, path)
+        .acquire_claim(agent_id, workspace_id, path)
         .expect("claim should acquire");
 }
 
 async fn ensure_test_reservation_via_http(
     app: &Router,
-    session_id: &str,
+    agent_id: &str,
     workspace_id: &str,
     path: &str,
 ) {
@@ -52,7 +52,7 @@ async fn ensure_test_reservation_via_http(
                 item["kind"] == "reservation"
                     && item["freshness"] == "live"
                     && item["resource"] == path
-                    && item["session_id"] == session_id
+                    && item["agent_id"] == agent_id
                     && item["workspace_id"] == workspace_id
             })
         });
@@ -65,7 +65,7 @@ async fn ensure_test_reservation_via_http(
         .clone()
         .oneshot(protocol_request(
             "/v1/reservation/declare",
-            session_id,
+            agent_id,
             workspace_id,
             serde_json::json!({
                 "purpose": format!("Acquire test claim for {path}."),
@@ -101,7 +101,7 @@ async fn health_is_public_but_authorize_requires_token() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
-                        "session_id": "s1",
+                        "agent_id": "s1",
                         "action": "write_file",
                         "path": "src/auth.ts"
                     })
@@ -193,7 +193,7 @@ async fn authorize_accepts_hook_source_kind() {
 }
 
 #[tokio::test]
-async fn lease_release_rejects_other_session_owner_with_actionable_error() {
+async fn lease_release_rejects_other_agent_owner_with_actionable_error() {
     let app = build_router(ServerConfig::new("secret-token"));
     ensure_test_reservation_via_http(&app, "s1", "w1", "target/").await;
     let acquire = app
@@ -201,7 +201,7 @@ async fn lease_release_rejects_other_session_owner_with_actionable_error() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "target/"
             }),
@@ -214,7 +214,7 @@ async fn lease_release_rejects_other_session_owner_with_actionable_error() {
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1",
                 "path": "target/"
             }),
@@ -235,7 +235,7 @@ async fn lease_release_rejects_other_session_owner_with_actionable_error() {
 }
 
 #[tokio::test]
-async fn lease_acquire_returns_already_held_for_duplicate_same_session() {
+async fn lease_acquire_returns_already_held_for_duplicate_same_agent() {
     let app = build_router(ServerConfig::new("secret-token"));
     ensure_test_reservation_via_http(&app, "s1", "w1", "src/auth.ts").await;
 
@@ -244,7 +244,7 @@ async fn lease_acquire_returns_already_held_for_duplicate_same_session() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -257,7 +257,7 @@ async fn lease_acquire_returns_already_held_for_duplicate_same_session() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -300,7 +300,7 @@ async fn lease_acquire_accepts_batch_paths() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "paths": ["src/auth.ts", "src/session.ts"]
             }),
@@ -327,22 +327,20 @@ async fn lease_acquire_accepts_batch_paths() {
     let current = response_json(current, 4096).await;
     assert!(current["items"].as_array().is_some_and(|items| {
         items.iter().any(|item| {
-            item["kind"] == "claim"
-                && item["resource"] == "src/auth.ts"
-                && item["session_id"] == "s1"
+            item["kind"] == "claim" && item["resource"] == "src/auth.ts" && item["agent_id"] == "s1"
         })
     }));
 }
 
 #[tokio::test]
-async fn lease_release_rejects_missing_same_session_lease() {
+async fn lease_release_rejects_missing_same_agent_lease() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     let response = app
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "target/"
             }),
@@ -357,8 +355,8 @@ async fn lease_release_rejects_missing_same_session_lease() {
     assert!(
         json["message"]
             .as_str()
-            .is_some_and(|message| message.contains("same-session claim")),
-        "message should explain no same-session claim was released: {json}"
+            .is_some_and(|message| message.contains("same-agent claim")),
+        "message should explain no same-agent claim was released: {json}"
     );
 }
 
@@ -370,7 +368,7 @@ async fn side_effecting_routes_reservation_declare_rejects_legacy_body() {
         .oneshot(json_request(
             "/v1/reservation/declare",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "purpose": "Test requested work.",
                 "files_planned": ["src/auth.ts"]
@@ -418,7 +416,7 @@ async fn side_effecting_routes_reservation_declare_accepts_protocol_envelope() {
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["events"][0]["event_type"], "ReservationDeclared");
-    assert_eq!(json["events"][0]["session_id"], "s1");
+    assert_eq!(json["events"][0]["agent_id"], "s1");
     assert_eq!(json["events"][0]["workspace_id"], "w1");
     assert_eq!(json["events"][0]["repo_id"], "repo-1");
 
@@ -427,7 +425,7 @@ async fn side_effecting_routes_reservation_declare_accepts_protocol_envelope() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -548,8 +546,8 @@ async fn side_effecting_routes_reservation_declare_does_not_store_empty_identity
                 "protocol_version": "stateful.v1",
                 "request_id": "req-empty-identity",
                 "observed_at": "2026-05-31T00:00:00Z",
-                "session": {
-                    "session_id": "s1",
+                "agent": {
+                    "agent_id": "s1",
                     "actor_id": "agent-1",
                     "actor_type": "agent"
                 },
@@ -598,7 +596,7 @@ async fn authorize_rejects_legacy_body_after_protocol_enforcement() {
         .oneshot(json_request(
             "/v1/authorize",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "action": "write_file",
                 "path": "src/auth.ts"
@@ -666,7 +664,7 @@ async fn session_register_and_heartbeat_update_current_summary() {
         .oneshot(json_request(
             "/v1/session/register",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1"
             }),
         ))
@@ -679,7 +677,7 @@ async fn session_register_and_heartbeat_update_current_summary() {
         .oneshot(json_request(
             "/v1/session/heartbeat",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1"
             }),
         ))
@@ -697,7 +695,7 @@ async fn session_register_and_heartbeat_update_current_summary() {
         .await
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-    assert_eq!(json["current"]["session_count"], 1);
+    assert_eq!(json["current"]["agent_count"], 1);
     assert_eq!(json["current"]["event_count"], 2);
 }
 
@@ -731,8 +729,8 @@ async fn authorize_records_implicit_session_heartbeat() {
         .expect("events should be an array");
     assert!(
         events.iter().any(|event| {
-            event["event_type"] == "SessionHeartbeat"
-                && event["session_id"] == "s1"
+            event["event_type"] == "AgentHeartbeat"
+                && event["agent_id"] == "s1"
                 && event["workspace_id"] == "w1"
         }),
         "authorize should record implicit heartbeat: {events:?}"
@@ -741,13 +739,8 @@ async fn authorize_records_implicit_session_heartbeat() {
 
 #[tokio::test]
 async fn session_events_preserve_repo_identity_when_provided() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-session-identity-store-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -757,7 +750,7 @@ async fn session_events_preserve_repo_identity_when_provided() {
         .oneshot(json_request(
             "/v1/session/register",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "repo_id": "repo-1",
                 "worktree_id": "worktree-1",
@@ -782,19 +775,12 @@ async fn session_events_preserve_repo_identity_when_provided() {
     assert_eq!(json["events"][0]["worktree_id"], "worktree-1");
     assert_eq!(json["events"][0]["root"], "/repo");
     assert_eq!(json["events"][0]["branch"], "main");
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
-async fn lease_activity_and_conflict_routes_are_available() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-coordination-store-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+async fn lease_finalize_route_is_available() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -805,7 +791,7 @@ async fn lease_activity_and_conflict_routes_are_available() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -814,25 +800,12 @@ async fn lease_activity_and_conflict_routes_are_available() {
         .expect("claim acquire should complete");
     assert_eq!(claim.status(), StatusCode::OK);
 
-    let activity = app
-        .clone()
-        .oneshot(json_request(
-            "/v1/activity/observe",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1"
-            }),
-        ))
-        .await
-        .expect("activity observe should complete");
-    assert_eq!(activity.status(), StatusCode::OK);
-
     let finalized = app
         .clone()
         .oneshot(json_request(
             "/v1/activity/finalize",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1"
             }),
         ))
@@ -840,31 +813,11 @@ async fn lease_activity_and_conflict_routes_are_available() {
         .expect("activity finalize should complete");
     assert_eq!(finalized.status(), StatusCode::OK);
 
-    let conflict = app
-        .clone()
-        .oneshot(json_request(
-            "/v1/conflicts/check",
-            serde_json::json!({
-                "session_id": "s1",
-                "action": "write_file",
-                "path": "src/auth.ts"
-            }),
-        ))
-        .await
-        .expect("conflict check should complete");
-    assert_eq!(conflict.status(), StatusCode::OK);
-    let body = to_bytes(conflict.into_body(), 1024)
-        .await
-        .expect("body should read");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-    assert_eq!(json["decision"], "deny");
-    assert_eq!(json["reason_code"], "missing_reservation");
-
     let release = app
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -882,22 +835,24 @@ async fn lease_activity_and_conflict_routes_are_available() {
         reopened
             .activity_count()
             .expect("activity count should load"),
-        2
+        1
     );
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
 async fn blocked_activity_phase_denies_authorized_write() {
-    let app = build_router(ServerConfig::new("secret-token"));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
     ensure_test_reservation_via_http(&app, "s1", "w1", "src/auth.ts").await;
     let claim = app
         .clone()
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -905,20 +860,10 @@ async fn blocked_activity_phase_denies_authorized_write() {
         .await
         .expect("claim acquire should complete");
     assert_eq!(claim.status(), StatusCode::OK);
-
-    let activity = app
-        .clone()
-        .oneshot(json_request(
-            "/v1/activity/observe",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "phase": "blocked"
-            }),
-        ))
-        .await
-        .expect("activity observe should complete");
-    assert_eq!(activity.status(), StatusCode::OK);
+    let blocker = Store::open(&db_path).expect("file store should reopen");
+    blocker
+        .append_activity_with_phase("s1", "w1", stateful_core::ActivityPhase::Blocked)
+        .expect("blocked activity should append");
 
     let blocked = app
         .oneshot(protocol_request(
@@ -1026,7 +971,7 @@ async fn claim_from_different_reservation_does_not_authorize_write() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "reservation_id": reservation_a,
                 "path": "src/auth.ts"
@@ -1069,7 +1014,7 @@ async fn claim_from_different_reservation_does_not_authorize_write() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "reservation_id": reservation_b,
                 "path": "src/auth.ts"
@@ -1113,7 +1058,7 @@ async fn same_reservation_claim_authorizes_write() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "reservation_id": reservation_id.clone(),
                 "path": "src/auth.ts"
@@ -1147,15 +1092,15 @@ async fn same_reservation_claim_authorizes_write() {
 }
 
 #[tokio::test]
-async fn missing_claim_cannot_be_bypassed_by_changing_session_id() {
+async fn missing_claim_cannot_be_bypassed_by_changing_agent_id() {
     let app = build_router(ServerConfig::new("secret-token"));
 
-    for session_id in ["s-original", "s-swapped"] {
+    for agent_id in ["s-original", "s-swapped"] {
         let declare = app
             .clone()
             .oneshot(protocol_request(
                 "/v1/reservation/declare",
-                session_id,
+                agent_id,
                 "w1",
                 serde_json::json!({
                     "purpose": "Test requested work.",
@@ -1318,7 +1263,7 @@ async fn hook_file_write_without_tool_name_still_requires_exact_file_lease() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/"
             }),
@@ -1405,7 +1350,7 @@ async fn hook_native_write_requires_exact_file_lease_even_when_directory_lease_c
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/"
             }),
@@ -1487,7 +1432,7 @@ async fn hook_native_write_allows_exact_file_intent_and_exact_file_lease() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -1525,17 +1470,8 @@ async fn hook_native_write_allows_exact_file_intent_and_exact_file_lease() {
 
 #[tokio::test]
 async fn hook_native_write_denies_when_file_changed_since_claim_acquired() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-claim-observation-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     std::fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
     std::fs::write(repo_root.join("src/auth.ts"), "version one\n")
@@ -1565,7 +1501,7 @@ async fn hook_native_write_denies_when_file_changed_since_claim_acquired() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts",
                 "root": repo_root.to_string_lossy()
@@ -1606,22 +1542,12 @@ async fn hook_native_write_denies_when_file_changed_since_claim_acquired() {
         json["required_next_action"],
         "Reread target, reacquire claim, retry same edit."
     );
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
 async fn post_write_refresh_updates_claim_observation_for_next_write() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-claim-refresh-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     std::fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
     std::fs::write(repo_root.join("src/auth.ts"), "version one\n")
@@ -1651,7 +1577,7 @@ async fn post_write_refresh_updates_claim_observation_for_next_write() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts",
                 "root": repo_root.to_string_lossy()
@@ -1669,7 +1595,7 @@ async fn post_write_refresh_updates_claim_observation_for_next_write() {
         .oneshot(json_request(
             "/v1/claim/refresh-observation",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts",
                 "root": repo_root.to_string_lossy()
@@ -1701,8 +1627,6 @@ async fn post_write_refresh_updates_claim_observation_for_next_write() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = response_json(response, 2048).await;
     assert_eq!(json["decision"], "allow");
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -1730,7 +1654,7 @@ async fn cli_sandbox_write_file_requires_exact_file_intent_despite_directory_lea
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/"
             }),
@@ -1795,7 +1719,7 @@ async fn write_file_requires_same_reservation_file_claim_even_when_directory_cla
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "target/"
             }),
@@ -1842,7 +1766,7 @@ async fn write_file_requires_same_reservation_file_claim_even_when_directory_cla
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "target"
             }),
@@ -1892,7 +1816,7 @@ async fn authorize_requires_intent_in_same_workspace_as_lease() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -1949,7 +1873,7 @@ async fn authorize_requires_intent_in_same_workspace_as_lease() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -1990,7 +1914,7 @@ async fn active_claim_by_other_session_denies_authorize_even_with_matching_reser
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -2036,17 +1960,14 @@ async fn active_claim_by_other_session_denies_authorize_even_with_matching_reser
     assert_eq!(json["reason_code"], "active_claim_conflict");
     let required_next_action = json["required_next_action"].as_str().unwrap_or_default();
     assert!(required_next_action.contains("Do not redeclare reservation"));
-    assert!(required_next_action.contains("session_id"));
+    assert!(required_next_action.contains("agent_id"));
 }
 
 #[tokio::test]
 async fn authorize_denies_when_target_changed_since_base_observation() {
     let app = build_router(ServerConfig::new("secret-token"));
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-base-observation-{}", std::process::id()));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let src_dir = temp_root.join("src");
     std::fs::create_dir_all(&src_dir).expect("src directory should be created");
     let target = src_dir.join("auth.ts");
@@ -2073,7 +1994,7 @@ async fn authorize_denies_when_target_changed_since_base_observation() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -2111,8 +2032,6 @@ async fn authorize_denies_when_target_changed_since_base_observation() {
         json["required_next_action"],
         "Reread target, retry same edit with fresh base observation."
     );
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -2126,7 +2045,7 @@ async fn queue_on_conflict_without_intent_enqueues_wait_record() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -2169,7 +2088,7 @@ async fn queue_on_conflict_without_intent_enqueues_wait_record() {
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -2182,7 +2101,7 @@ async fn queue_on_conflict_without_intent_enqueues_wait_record() {
         .oneshot(json_request(
             "/v1/resume/next",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1"
             }),
         ))
@@ -2237,7 +2156,7 @@ async fn queue_on_conflict_out_of_scope_enqueues_wait_record() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/session.ts"
             }),
@@ -2295,7 +2214,7 @@ async fn queue_on_conflict_out_of_scope_enqueues_wait_record() {
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/session.ts"
             }),
@@ -2308,7 +2227,7 @@ async fn queue_on_conflict_out_of_scope_enqueues_wait_record() {
         .oneshot(json_request(
             "/v1/resume/next",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1"
             }),
         ))
@@ -2456,7 +2375,7 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -2465,12 +2384,12 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
         .expect("claim acquire should complete");
     assert_eq!(claim.status(), StatusCode::OK);
 
-    for session_id in ["s2", "s3"] {
+    for agent_id in ["s2", "s3"] {
         let declare = app
             .clone()
             .oneshot(protocol_request(
                 "/v1/reservation/declare",
-                session_id,
+                agent_id,
                 "w1",
                 serde_json::json!({
                     "purpose": "Test requested work.",
@@ -2506,7 +2425,7 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
     assert_eq!(json["reason_code"], "active_claim_conflict");
     assert_eq!(json["wait"]["status"], "queued");
     assert_eq!(json["wait"]["queue_position"], 1);
-    assert_eq!(json["wait"]["blocking_session_id"], "s1");
+    assert_eq!(json["wait"]["blocking_agent_id"], "s1");
     let s2_wait_id = json["wait"]["wait_id"]
         .as_str()
         .expect("wait id should be present")
@@ -2538,7 +2457,7 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -2589,10 +2508,10 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "reservation_conflict");
-    assert_eq!(json["reservation"]["session_id"], "s2");
+    assert_eq!(json["reservation"]["agent_id"], "s2");
     let required_next_action = json["required_next_action"].as_str().unwrap_or_default();
     assert!(required_next_action.contains("Do not redeclare reservation"));
-    assert!(required_next_action.contains("session_id"));
+    assert!(required_next_action.contains("agent_id"));
 
     let unclaimed_b = app
         .clone()
@@ -2660,17 +2579,17 @@ async fn queued_conflict_reserves_first_waiter_after_lease_release() {
 }
 
 #[tokio::test]
-async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_claim_and_lease() {
+async fn concurrent_codex_agents_transfer_native_edit_access_through_request_claim_and_lease() {
     let store = Store::open_in_memory().expect("store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
 
-    for session_id in ["codex-a", "codex-b", "codex-c"] {
+    for agent_id in ["codex-a", "codex-b", "codex-c"] {
         let register = app
             .clone()
             .oneshot(json_request(
                 "/v1/session/register",
                 serde_json::json!({
-                    "session_id": session_id,
+                    "agent_id": agent_id,
                     "workspace_id": "w1"
                 }),
             ))
@@ -2699,7 +2618,7 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "codex-a",
+                "agent_id": "codex-a",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -2745,7 +2664,7 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
     let json = response_json(request_b, 2048).await;
     assert_eq!(json["request_state"], "queued");
     assert_eq!(json["wait"]["queue_position"], 1);
-    assert_eq!(json["wait"]["blocking_session_id"], "codex-a");
+    assert_eq!(json["wait"]["blocking_agent_id"], "codex-a");
     let codex_b_wait_id = json["wait"]["wait_id"]
         .as_str()
         .expect("wait id should be present")
@@ -2770,7 +2689,7 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
     let json = response_json(request_c, 2048).await;
     assert_eq!(json["request_state"], "queued");
     assert_eq!(json["wait"]["queue_position"], 2);
-    assert_eq!(json["wait"]["blocking_session_id"], "codex-a");
+    assert_eq!(json["wait"]["blocking_agent_id"], "codex-a");
     let codex_c_wait_id = json["wait"]["wait_id"]
         .as_str()
         .expect("wait id should be present")
@@ -2781,7 +2700,7 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
         .oneshot(json_request(
             "/v1/activity/finalize",
             serde_json::json!({
-                "session_id": "codex-a",
+                "agent_id": "codex-a",
                 "workspace_id": "w1"
             }),
         ))
@@ -2796,7 +2715,7 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
         .oneshot(json_request(
             "/v1/resume/next",
             serde_json::json!({
-                "session_id": "codex-b",
+                "agent_id": "codex-b",
                 "workspace_id": "w1"
             }),
         ))
@@ -2822,7 +2741,7 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
     let json = response_json(blocked_c, 2048).await;
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "reservation_conflict");
-    assert_eq!(json["reservation"]["session_id"], "codex-b");
+    assert_eq!(json["reservation"]["agent_id"], "codex-b");
 
     let lazy_claim_b = app
         .clone()
@@ -2876,7 +2795,7 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
         .oneshot(json_request(
             "/v1/activity/finalize",
             serde_json::json!({
-                "session_id": "codex-b",
+                "agent_id": "codex-b",
                 "workspace_id": "w1"
             }),
         ))
@@ -2891,7 +2810,7 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
         .oneshot(json_request(
             "/v1/resume/next",
             serde_json::json!({
-                "session_id": "codex-c",
+                "agent_id": "codex-c",
                 "workspace_id": "w1"
             }),
         ))
@@ -2936,23 +2855,14 @@ async fn concurrent_codex_sessions_transfer_native_edit_access_through_request_c
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_reservation_requests_reserve_exactly_one_file_backed_waiter() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-concurrent-reservation-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file-backed store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
-    let session_count = 12;
+    let agent_count = 12;
 
-    for index in 0..session_count {
+    for index in 0..agent_count {
         let declare = app
             .clone()
             .oneshot(protocol_request(
@@ -2969,8 +2879,8 @@ async fn concurrent_reservation_requests_reserve_exactly_one_file_backed_waiter(
         assert_eq!(declare.status(), StatusCode::OK);
     }
 
-    let barrier = Arc::new(tokio::sync::Barrier::new(session_count));
-    let handles = (0..session_count)
+    let barrier = Arc::new(tokio::sync::Barrier::new(agent_count));
+    let handles = (0..agent_count)
         .map(|index| {
             let app = app.clone();
             let barrier = Arc::clone(&barrier);
@@ -3019,13 +2929,13 @@ async fn concurrent_reservation_requests_reserve_exactly_one_file_backed_waiter(
             .iter()
             .filter(|state| state.as_str() == "queued")
             .count(),
-        session_count - 1
+        agent_count - 1
     );
 
     let reopened = Store::open(&db_path).expect("file-backed store should reopen");
     let mut persisted_reserved = 0;
     let mut persisted_queued = 0;
-    for index in 0..session_count {
+    for index in 0..agent_count {
         let waiter = reopened
             .waiter_by_request_id(format!("request-stress-{index}"))
             .expect("waiter lookup should succeed")
@@ -3037,9 +2947,7 @@ async fn concurrent_reservation_requests_reserve_exactly_one_file_backed_waiter(
         }
     }
     assert_eq!(persisted_reserved, 1);
-    assert_eq!(persisted_queued, session_count - 1);
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+    assert_eq!(persisted_queued, agent_count - 1);
 }
 
 #[tokio::test]
@@ -3072,7 +2980,7 @@ async fn reservation_request_reserves_available_target_but_still_requires_claim(
     assert_eq!(json["status"], "ok");
     assert_eq!(json["request_state"], "reserved");
     assert_eq!(json["request_id"], "request-1");
-    assert_eq!(json["reservation"]["session_id"], "s1");
+    assert_eq!(json["reservation"]["agent_id"], "s1");
     assert_eq!(json["reservation"]["relative_path"], "src/auth.ts");
     assert_eq!(json["reservation"]["status"], "reserved");
     assert_eq!(
@@ -3140,7 +3048,7 @@ async fn claim_acquire_with_active_reservation_returns_reservation_claim_guidanc
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -3152,7 +3060,7 @@ async fn claim_acquire_with_active_reservation_returns_reservation_claim_guidanc
     assert_eq!(json["reason_code"], "reservation_claim_required");
     assert_eq!(json["reservation"]["wait_id"], wait_id);
     assert_eq!(json["reservation"]["status"], "reserved");
-    assert_eq!(json["reservation"]["session_id"], "s1");
+    assert_eq!(json["reservation"]["agent_id"], "s1");
     assert!(
         json["required_next_action"]
             .as_str()
@@ -3187,7 +3095,7 @@ async fn reservation_claim_preserves_existing_session_intent_scope() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1",
                 "path": "src/parser.ts"
             }),
@@ -3263,7 +3171,7 @@ async fn lease_acquire_returns_conflict_for_active_claim_conflict() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -3277,7 +3185,7 @@ async fn lease_acquire_returns_conflict_for_active_claim_conflict() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -3300,17 +3208,8 @@ async fn lease_acquire_returns_conflict_for_active_claim_conflict() {
 
 #[tokio::test]
 async fn lease_acquire_allows_existing_directory_observation() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-directory-claim-observation-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     std::fs::create_dir_all(repo_root.join("tmp/build")).expect("repo tmp should be creatable");
     let db_path = temp_root.join(".stateful_core").join("state.db");
@@ -3338,7 +3237,7 @@ async fn lease_acquire_allows_existing_directory_observation() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "tmp/build/",
                 "root": repo_root.to_string_lossy()
@@ -3347,8 +3246,6 @@ async fn lease_acquire_allows_existing_directory_observation() {
         .await
         .expect("directory claim acquire should complete");
     assert_eq!(acquire.status(), StatusCode::OK);
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -3361,7 +3258,7 @@ async fn lease_acquire_rejects_direct_tmp_directory_resource() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "tmp/"
             }),
@@ -3383,17 +3280,8 @@ async fn lease_acquire_rejects_direct_tmp_directory_resource() {
 
 #[tokio::test]
 async fn lease_acquire_rejects_directory_observation_for_file_path() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-file-claim-directory-observation-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let repo_root = temp_root.join("repo");
     std::fs::create_dir_all(repo_root.join("tmp")).expect("repo tmp should be creatable");
     let db_path = temp_root.join(".stateful_core").join("state.db");
@@ -3421,7 +3309,7 @@ async fn lease_acquire_rejects_directory_observation_for_file_path() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "tmp",
                 "root": repo_root.to_string_lossy()
@@ -3432,14 +3320,12 @@ async fn lease_acquire_rejects_directory_observation_for_file_path() {
     assert_eq!(acquire.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let json = response_json(acquire, 2048).await;
     assert!(
-        json["error"]
+        json["message"]
             .as_str()
             .expect("error message should be present")
             .contains("Is a directory"),
         "unexpected response: {json}"
     );
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -3476,7 +3362,7 @@ async fn lease_acquire_rejects_active_reservation_conflict_without_breaking_clai
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -3505,17 +3391,8 @@ async fn lease_acquire_rejects_active_reservation_conflict_without_breaking_clai
 
 #[tokio::test]
 async fn reservation_claim_rolls_back_reservation_when_intent_event_append_fails() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-claim-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let wait = store
@@ -3577,7 +3454,6 @@ async fn reservation_claim_rolls_back_reservation_when_intent_event_append_fails
     assert_eq!(status, "reserved");
 
     drop(trigger_conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -3653,7 +3529,7 @@ async fn reservation_request_queues_conflict_and_reuses_request_id() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -3686,7 +3562,7 @@ async fn reservation_request_queues_conflict_and_reuses_request_id() {
     assert_eq!(json["request_id"], "request-2");
     assert_eq!(json["wait"]["status"], "queued");
     assert_eq!(json["wait"]["queue_position"], 1);
-    assert_eq!(json["wait"]["blocking_session_id"], "s1");
+    assert_eq!(json["wait"]["blocking_agent_id"], "s1");
     assert_eq!(json["wait"]["purpose"], "Queue s2 auth changes.");
     let first_wait_id = json["wait"]["wait_id"]
         .as_str()
@@ -3752,7 +3628,7 @@ async fn reservation_cancel_cancels_reserved_request_and_promotes_next_waiter() 
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -3761,18 +3637,18 @@ async fn reservation_cancel_cancels_reserved_request_and_promotes_next_waiter() 
         .expect("claim acquire should complete");
     assert_eq!(claim.status(), StatusCode::OK);
 
-    for (session_id, request_id) in [("s2", "request-2"), ("s3", "request-3")] {
+    for (agent_id, request_id) in [("s2", "request-2"), ("s3", "request-3")] {
         let queued = app
             .clone()
             .oneshot(protocol_request(
                 "/v1/reservation/request",
-                session_id,
+                agent_id,
                 "w1",
                 serde_json::json!({
                     "request_id": request_id,
                     "action": "write_file",
                     "path": "src/auth.ts",
-                    "purpose": format!("Queue {session_id} auth changes.")
+                    "purpose": format!("Queue {agent_id} auth changes.")
                 }),
             ))
             .await
@@ -3785,7 +3661,7 @@ async fn reservation_cancel_cancels_reserved_request_and_promotes_next_waiter() 
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -3820,7 +3696,7 @@ async fn reservation_cancel_cancels_reserved_request_and_promotes_next_waiter() 
         .oneshot(json_request(
             "/v1/resume/next",
             serde_json::json!({
-                "session_id": "s3",
+                "agent_id": "s3",
                 "workspace_id": "w1"
             }),
         ))
@@ -3832,7 +3708,7 @@ async fn reservation_cancel_cancels_reserved_request_and_promotes_next_waiter() 
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["resume_available"], true);
-    assert_eq!(json["reservation"]["session_id"], "s3");
+    assert_eq!(json["reservation"]["agent_id"], "s3");
     assert_eq!(json["reservation"]["relative_path"], "src/auth.ts");
 }
 
@@ -3889,7 +3765,7 @@ async fn activity_finalize_reclaims_claims_and_notifications_poll_returns_resume
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -3940,7 +3816,7 @@ async fn activity_finalize_reclaims_claims_and_notifications_poll_returns_resume
         .oneshot(json_request(
             "/v1/activity/finalize",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1"
             }),
         ))
@@ -3953,7 +3829,7 @@ async fn activity_finalize_reclaims_claims_and_notifications_poll_returns_resume
         .oneshot(json_request(
             "/v1/notifications/poll",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1"
             }),
         ))
@@ -3985,7 +3861,7 @@ async fn activity_finalize_reclaims_claims_and_notifications_poll_returns_resume
         .oneshot(json_request(
             "/v1/notifications/poll",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1"
             }),
         ))
@@ -4017,7 +3893,7 @@ async fn notifications_stream_emits_reservation_granted_sse() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -4063,7 +3939,7 @@ async fn notifications_stream_emits_reservation_granted_sse() {
         .oneshot(json_request(
             "/v1/activity/finalize",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1"
             }),
         ))
@@ -4073,7 +3949,7 @@ async fn notifications_stream_emits_reservation_granted_sse() {
 
     let stream = app
         .oneshot(authorized_get(
-            "/v1/notifications/stream?session_id=s2&workspace_id=w1",
+            "/v1/notifications/stream?agent_id=s2&workspace_id=w1",
         ))
         .await
         .expect("notification stream should complete");
@@ -4088,13 +3964,173 @@ async fn notifications_stream_emits_reservation_granted_sse() {
         .expect("stream chunk should read");
     let text = String::from_utf8(chunk.to_vec()).expect("chunk should be utf8");
     assert!(text.contains("event: reservation_granted"));
+    assert!(text.contains("id: 1"));
+    assert!(text.contains("\"sequence\":1"));
     assert!(text.contains("\"relative_path\":\"src/auth.ts\""));
     assert!(text.contains("\"purpose\":\"Queue requested write after blocker clears.\""));
     assert!(text.contains("state.reservation.claim"));
 }
 
 #[tokio::test]
-async fn activity_finalize_clears_active_reservation_for_session() {
+async fn notifications_stream_replays_until_last_event_id_acknowledges() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    ensure_test_reservation_via_http(&app, "s1", "w1", "src/replay.ts").await;
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/replay.ts"
+            }),
+        ))
+        .await
+        .expect("claim acquire should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/reservation/declare",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "purpose": "Test replayable SSE notification.",
+                "files_planned": ["src/replay.ts"]
+            }),
+        ))
+        .await
+        .expect("reservation declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let queued = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/replay.ts",
+                "queue_on_conflict": true,
+                "purpose": "Queue replay test after blocker clears."
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(queued.status(), StatusCode::OK);
+
+    let finalize = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/activity/finalize",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("finalize should complete");
+    assert_eq!(finalize.status(), StatusCode::OK);
+
+    let first_stream = app
+        .clone()
+        .oneshot(authorized_get(
+            "/v1/notifications/stream?agent_id=s2&workspace_id=w1",
+        ))
+        .await
+        .expect("first stream should complete");
+    assert_eq!(first_stream.status(), StatusCode::OK);
+    let mut first_body = first_stream.into_body().into_data_stream();
+    let first_chunk = tokio::time::timeout(Duration::from_secs(2), first_body.next())
+        .await
+        .expect("first stream should emit notification")
+        .expect("first stream item should exist")
+        .expect("first stream chunk should read");
+    let first_text = String::from_utf8(first_chunk.to_vec()).expect("first chunk should be utf8");
+    assert!(first_text.contains("id: 1"));
+    assert!(first_text.contains("\"relative_path\":\"src/replay.ts\""));
+    drop(first_body);
+
+    let replay_stream = app
+        .clone()
+        .oneshot(authorized_get(
+            "/v1/notifications/stream?agent_id=s2&workspace_id=w1",
+        ))
+        .await
+        .expect("replay stream should complete");
+    assert_eq!(replay_stream.status(), StatusCode::OK);
+    let mut replay_body = replay_stream.into_body().into_data_stream();
+    let replay_chunk = tokio::time::timeout(Duration::from_secs(2), replay_body.next())
+        .await
+        .expect("replay stream should emit notification")
+        .expect("replay stream item should exist")
+        .expect("replay stream chunk should read");
+    let replay_text =
+        String::from_utf8(replay_chunk.to_vec()).expect("replay chunk should be utf8");
+    assert!(replay_text.contains("id: 1"));
+    assert!(replay_text.contains("\"relative_path\":\"src/replay.ts\""));
+    drop(replay_body);
+
+    let acked_stream = app
+        .clone()
+        .oneshot(authorized_get_with_last_event_id(
+            "/v1/notifications/stream?agent_id=s2&workspace_id=w1",
+            "1",
+        ))
+        .await
+        .expect("acked stream should complete");
+    assert_eq!(acked_stream.status(), StatusCode::OK);
+    let mut acked_body = acked_stream.into_body().into_data_stream();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), acked_body.next())
+            .await
+            .is_err(),
+        "acked stream should not replay sequence 1"
+    );
+    drop(acked_body);
+
+    let poll = app
+        .oneshot(json_request(
+            "/v1/notifications/poll",
+            serde_json::json!({
+                "agent_id": "s2",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("notification poll should complete");
+    assert_eq!(poll.status(), StatusCode::OK);
+    let json = response_json(poll, 2048).await;
+    assert_eq!(
+        json["notifications"]
+            .as_array()
+            .expect("notifications array")
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn notifications_stream_rejects_invalid_agent_id() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .oneshot(authorized_get(
+            "/v1/notifications/stream?agent_id=bad/id&workspace_id=w1",
+        ))
+        .await
+        .expect("notification stream should complete");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(response, 1024).await;
+    assert_eq!(json["reason_code"], "invalid_agent_id");
+}
+
+#[tokio::test]
+async fn activity_finalize_clears_active_reservation_for_agent() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     ensure_test_reservation_via_http(&app, "s1", "w1", "src/auth.ts").await;
@@ -4109,7 +4145,7 @@ async fn activity_finalize_clears_active_reservation_for_session() {
     assert!(json["items"].as_array().is_some_and(|items| {
         items
             .iter()
-            .any(|item| item["kind"] == "reservation" && item["session_id"] == "s1")
+            .any(|item| item["kind"] == "reservation" && item["agent_id"] == "s1")
     }));
 
     let finalize = app
@@ -4117,7 +4153,7 @@ async fn activity_finalize_clears_active_reservation_for_session() {
         .oneshot(json_request(
             "/v1/activity/finalize",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1"
             }),
         ))
@@ -4137,24 +4173,15 @@ async fn activity_finalize_clears_active_reservation_for_session() {
     assert!(json["items"].as_array().is_some_and(|items| {
         !items
             .iter()
-            .any(|item| item["kind"] == "reservation" && item["session_id"] == "s1")
+            .any(|item| item["kind"] == "reservation" && item["agent_id"] == "s1")
     }));
     assert_eq!(json["current"]["active_reservation_count"], 0);
 }
 
 #[tokio::test]
 async fn activity_finalize_rolls_back_activity_and_lease_release_when_intent_completion_fails() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-finalize-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -4165,7 +4192,7 @@ async fn activity_finalize_rolls_back_activity_and_lease_release_when_intent_com
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -4191,7 +4218,7 @@ async fn activity_finalize_rolls_back_activity_and_lease_release_when_intent_com
         .oneshot(json_request(
             "/v1/activity/finalize",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1"
             }),
         ))
@@ -4200,7 +4227,7 @@ async fn activity_finalize_rolls_back_activity_and_lease_release_when_intent_com
     assert_eq!(finalize.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let json = response_json(finalize, 2048).await;
     assert!(
-        json["error"]
+        json["message"]
             .as_str()
             .expect("error should be string")
             .contains("simulated reservation completion failure")
@@ -4209,7 +4236,7 @@ async fn activity_finalize_rolls_back_activity_and_lease_release_when_intent_com
     let activity_count: u64 = trigger_conn
         .query_row(
             "SELECT COUNT(*) FROM activities
-             WHERE session_id = 's1'
+             WHERE agent_id = 's1'
                AND workspace_id = 'w1'",
             [],
             |row| row.get::<_, u64>(0),
@@ -4221,7 +4248,7 @@ async fn activity_finalize_rolls_back_activity_and_lease_release_when_intent_com
         .query_row(
             "SELECT COUNT(*) FROM claims
              WHERE workspace_id = 'w1'
-               AND session_id = 's1'
+               AND agent_id = 's1'
                AND relative_path = 'src/auth.ts'
                AND status = 'active'",
             [],
@@ -4234,7 +4261,7 @@ async fn activity_finalize_rolls_back_activity_and_lease_release_when_intent_com
         .query_row(
             "SELECT COUNT(*) FROM reservations
              WHERE workspace_id = 'w1'
-               AND session_id = 's1'
+               AND agent_id = 's1'
                AND status = 'active'",
             [],
             |row| row.get::<_, u64>(0),
@@ -4243,11 +4270,10 @@ async fn activity_finalize_rolls_back_activity_and_lease_release_when_intent_com
     assert_eq!(active_reservation_count, 1);
 
     drop(trigger_conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
-async fn resume_next_returns_active_reservation_for_session() {
+async fn resume_next_returns_active_reservation_for_agent() {
     let store = Store::open_in_memory().expect("store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
 
@@ -4257,7 +4283,7 @@ async fn resume_next_returns_active_reservation_for_session() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -4303,7 +4329,7 @@ async fn resume_next_returns_active_reservation_for_session() {
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -4316,7 +4342,7 @@ async fn resume_next_returns_active_reservation_for_session() {
         .oneshot(json_request(
             "/v1/resume/next",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1"
             }),
         ))
@@ -4330,7 +4356,7 @@ async fn resume_next_returns_active_reservation_for_session() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["status"], "ok");
     assert_eq!(json["resume_available"], true);
-    assert_eq!(json["reservation"]["session_id"], "s2");
+    assert_eq!(json["reservation"]["agent_id"], "s2");
     assert_eq!(json["reservation"]["relative_path"], "src/auth.ts");
     assert_eq!(
         json["reservation"]["purpose"],
@@ -4352,7 +4378,7 @@ async fn active_claim_allows_matching_authorize_without_explicit_reservation_id(
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -4441,7 +4467,7 @@ async fn repo_write_authorization_requires_lease_and_updates_rendered_state_unti
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -4472,7 +4498,7 @@ async fn repo_write_authorization_requires_lease_and_updates_rendered_state_unti
             serde_json::json!({
                 "mode": "detailed",
                 "workspace_id": "w1",
-                "session_id": "s1"
+                "agent_id": "s1"
             }),
         ))
         .await
@@ -4484,10 +4510,10 @@ async fn repo_write_authorization_requires_lease_and_updates_rendered_state_unti
         items.iter().any(|item| {
             item["kind"] == "claim"
                 && item["resource"] == "src/auth.ts"
-                && item["session_id"] == "s1"
+                && item["agent_id"] == "s1"
                 && item["source_refs"]
                     .as_array()
-                    .is_some_and(|refs| refs.iter().any(|value| value == "CurrentSessionScope"))
+                    .is_some_and(|refs| refs.iter().any(|value| value == "AgentContextScope"))
         }),
         "render should show same-reservation claim before write completes: {items:?}"
     );
@@ -4497,7 +4523,7 @@ async fn repo_write_authorization_requires_lease_and_updates_rendered_state_unti
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -4513,7 +4539,7 @@ async fn repo_write_authorization_requires_lease_and_updates_rendered_state_unti
             serde_json::json!({
                 "mode": "detailed",
                 "workspace_id": "w1",
-                "session_id": "s1"
+                "agent_id": "s1"
             }),
         ))
         .await
@@ -4523,9 +4549,7 @@ async fn repo_write_authorization_requires_lease_and_updates_rendered_state_unti
     let items = json["items"].as_array().expect("items should be an array");
     assert!(
         !items.iter().any(|item| {
-            item["kind"] == "claim"
-                && item["resource"] == "src/auth.ts"
-                && item["session_id"] == "s1"
+            item["kind"] == "claim" && item["resource"] == "src/auth.ts" && item["agent_id"] == "s1"
         }),
         "render should remove claim after release: {items:?}"
     );
@@ -4533,7 +4557,7 @@ async fn repo_write_authorization_requires_lease_and_updates_rendered_state_unti
         items.iter().any(|item| {
             item["kind"] == "reservation"
                 && item["resource"] == "src/auth.ts"
-                && item["session_id"] == "s1"
+                && item["agent_id"] == "s1"
         }),
         "render should keep declared reservation visible after claim release: {items:?}"
     );
@@ -4835,7 +4859,7 @@ async fn write_directory_action_requires_exact_directory_intent_over_http() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "target/"
             }),
@@ -4895,7 +4919,7 @@ async fn write_directory_action_denies_when_subtree_has_other_session_lease() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1",
                 "path": "target/out.txt"
             }),
@@ -4951,7 +4975,7 @@ async fn write_file_action_denies_when_ancestor_directory_has_other_session_leas
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1",
                 "path": "target/"
             }),
@@ -5050,7 +5074,7 @@ async fn write_file_action_denies_when_ancestor_directory_has_other_session_rese
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "reservation_conflict");
-    assert_eq!(json["reservation"]["session_id"], "s2");
+    assert_eq!(json["reservation"]["agent_id"], "s2");
     assert_eq!(json["reservation"]["relative_path"], "target");
 }
 
@@ -5123,7 +5147,7 @@ async fn queued_write_directory_conflict_reserves_waiter_after_child_lease_relea
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1",
                 "path": "target/out.txt"
             }),
@@ -5180,7 +5204,7 @@ async fn queued_write_directory_conflict_reserves_waiter_after_child_lease_relea
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1",
                 "path": "target/out.txt"
             }),
@@ -5194,7 +5218,7 @@ async fn queued_write_directory_conflict_reserves_waiter_after_child_lease_relea
         .oneshot(json_request(
             "/v1/resume/next",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1"
             }),
         ))
@@ -5206,7 +5230,7 @@ async fn queued_write_directory_conflict_reserves_waiter_after_child_lease_relea
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["resume_available"], true);
-    assert_eq!(json["reservation"]["session_id"], "s1");
+    assert_eq!(json["reservation"]["agent_id"], "s1");
     assert_eq!(json["reservation"]["relative_path"], "target");
     assert_eq!(json["reservation"]["action"], "write_directory");
 
@@ -5253,7 +5277,7 @@ async fn queued_child_file_conflict_reserves_waiter_after_directory_lease_releas
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1",
                 "path": "target/"
             }),
@@ -5306,7 +5330,7 @@ async fn queued_child_file_conflict_reserves_waiter_after_directory_lease_releas
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "s2",
+                "agent_id": "s2",
                 "workspace_id": "w1",
                 "path": "target/"
             }),
@@ -5319,7 +5343,7 @@ async fn queued_child_file_conflict_reserves_waiter_after_directory_lease_releas
         .oneshot(json_request(
             "/v1/resume/next",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1"
             }),
         ))
@@ -5331,7 +5355,7 @@ async fn queued_child_file_conflict_reserves_waiter_after_directory_lease_releas
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["resume_available"], true);
-    assert_eq!(json["reservation"]["session_id"], "s1");
+    assert_eq!(json["reservation"]["agent_id"], "s1");
     assert_eq!(json["reservation"]["relative_path"], "target/out.txt");
     assert_eq!(json["reservation"]["action"], "write_file");
 }
@@ -5379,13 +5403,13 @@ async fn events_returns_recent_audit_events() {
     for index in 0..101 {
         store
             .append(
-                Event::session_registered(format!("old-session-{index}"), "w1")
+                Event::agent_registered(format!("old-session-{index}"), "w1")
                     .with_event_id(format!("old-event-{index}")),
             )
             .expect("old event should append");
     }
     store
-        .append(Event::session_registered("new-session", "w1").with_event_id("new-event"))
+        .append(Event::agent_registered("new-session", "w1").with_event_id("new-event"))
         .expect("new event should append");
     let app = build_router(ServerConfig::with_store("secret-token", store));
 
@@ -5435,7 +5459,7 @@ async fn lease_acquire_records_audit_event() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -5457,7 +5481,7 @@ async fn lease_acquire_records_audit_event() {
     assert!(
         events.iter().any(|event| {
             event["event_type"] == "ClaimAcquired"
-                && event["session_id"] == "s1"
+                && event["agent_id"] == "s1"
                 && event["workspace_id"] == "w1"
         }),
         "claim acquisition should be present in audit events: {events:?}"
@@ -5466,17 +5490,8 @@ async fn lease_acquire_records_audit_event() {
 
 #[tokio::test]
 async fn lease_acquire_rolls_back_lease_when_audit_event_append_fails() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-claim-acquire-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -5513,7 +5528,7 @@ async fn lease_acquire_rolls_back_lease_when_audit_event_append_fails() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -5523,7 +5538,7 @@ async fn lease_acquire_rolls_back_lease_when_audit_event_append_fails() {
     assert_eq!(acquire.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let json = response_json(acquire, 2048).await;
     assert!(
-        json["error"]
+        json["message"]
             .as_str()
             .expect("error should be string")
             .contains("simulated claim audit event append failure")
@@ -5533,7 +5548,7 @@ async fn lease_acquire_rolls_back_lease_when_audit_event_append_fails() {
         .query_row(
             "SELECT COUNT(*) FROM claims
              WHERE workspace_id = 'w1'
-               AND session_id = 's1'
+               AND agent_id = 's1'
                AND relative_path = 'src/auth.ts'
                AND status = 'active'",
             [],
@@ -5543,7 +5558,6 @@ async fn lease_acquire_rolls_back_lease_when_audit_event_append_fails() {
     assert_eq!(active_claim_count, 0);
 
     drop(trigger_conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -5580,7 +5594,7 @@ async fn reservation_request_records_audit_event() {
     assert!(
         events.iter().any(|event| {
             event["event_type"] == "ReservationRequested"
-                && event["session_id"] == "s1"
+                && event["agent_id"] == "s1"
                 && event["workspace_id"] == "w1"
                 && event["payload"]["request_id"] == "request-1"
                 && event["payload"]["relative_path"] == "src/auth.ts"
@@ -5592,17 +5606,8 @@ async fn reservation_request_records_audit_event() {
 
 #[tokio::test]
 async fn reservation_request_rolls_back_waiter_when_audit_event_append_fails() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-reservation-request-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -5653,7 +5658,6 @@ async fn reservation_request_rolls_back_waiter_when_audit_event_append_fails() {
     assert_eq!(waiter_count, 0);
 
     drop(trigger_conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -5706,7 +5710,7 @@ async fn authorize_denial_records_audit_event() {
     assert!(
         events.iter().any(|event| {
             event["event_type"] == "AuthorizationDenied"
-                && event["session_id"] == "s1"
+                && event["agent_id"] == "s1"
                 && event["workspace_id"] == "w1"
                 && event["payload"]["reason_code"] == "scope_mismatch"
                 && event["payload"]["action"] == "write_file"
@@ -5726,7 +5730,7 @@ async fn authorize_denial_audit_event_includes_queued_wait_details() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -5773,13 +5777,13 @@ async fn authorize_denial_audit_event_includes_queued_wait_details() {
     assert!(
         events.iter().any(|event| {
             event["event_type"] == "AuthorizationDenied"
-                && event["session_id"] == "s2"
+                && event["agent_id"] == "s2"
                 && event["workspace_id"] == "w1"
                 && event["payload"]["reason_code"] == "active_claim_conflict"
                 && event["payload"]["wait"]["wait_id"] == wait_id
                 && event["payload"]["wait"]["status"] == "queued"
                 && event["payload"]["wait"]["queue_position"] == 1
-                && event["payload"]["wait"]["blocking_session_id"] == "s1"
+                && event["payload"]["wait"]["blocking_agent_id"] == "s1"
         }),
         "authorization denial audit event should include queued wait details: {events:?}"
     );
@@ -5787,17 +5791,8 @@ async fn authorize_denial_audit_event_includes_queued_wait_details() {
 
 #[tokio::test]
 async fn authorize_queue_rolls_back_waiter_when_audit_event_append_fails() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-authorize-queue-rollback-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -5808,7 +5803,7 @@ async fn authorize_queue_rolls_back_waiter_when_audit_event_append_fails() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/auth.ts"
             }),
@@ -5871,7 +5866,7 @@ async fn authorize_queue_rolls_back_waiter_when_audit_event_append_fails() {
     let waiter_count: u64 = trigger_conn
         .query_row(
             "SELECT COUNT(*) FROM wait_queue
-             WHERE session_id = 's2'
+             WHERE agent_id = 's2'
                AND workspace_id = 'w1'
                AND relative_path = 'src/auth.ts'",
             [],
@@ -5881,7 +5876,6 @@ async fn authorize_queue_rolls_back_waiter_when_audit_event_append_fails() {
     assert_eq!(waiter_count, 0);
 
     drop(trigger_conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -5894,7 +5888,7 @@ async fn lifecycle_mutations_record_audit_events() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/release.ts"
             }),
@@ -5908,7 +5902,7 @@ async fn lifecycle_mutations_record_audit_events() {
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "path": "src/release.ts"
             }),
@@ -5923,7 +5917,7 @@ async fn lifecycle_mutations_record_audit_events() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "blocker",
+                "agent_id": "blocker",
                 "workspace_id": "w1",
                 "path": "src/claim.ts"
             }),
@@ -5959,7 +5953,7 @@ async fn lifecycle_mutations_record_audit_events() {
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "blocker",
+                "agent_id": "blocker",
                 "workspace_id": "w1",
                 "path": "src/claim.ts"
             }),
@@ -5988,7 +5982,7 @@ async fn lifecycle_mutations_record_audit_events() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "cancel-blocker",
+                "agent_id": "cancel-blocker",
                 "workspace_id": "w1",
                 "path": "src/cancel.ts"
             }),
@@ -6019,7 +6013,7 @@ async fn lifecycle_mutations_record_audit_events() {
         .oneshot(json_request(
             "/v1/claim/release",
             serde_json::json!({
-                "session_id": "cancel-blocker",
+                "agent_id": "cancel-blocker",
                 "workspace_id": "w1",
                 "path": "src/cancel.ts"
             }),
@@ -6048,7 +6042,7 @@ async fn lifecycle_mutations_record_audit_events() {
         .oneshot(json_request(
             "/v1/claim/acquire",
             serde_json::json!({
-                "session_id": "finalizer",
+                "agent_id": "finalizer",
                 "workspace_id": "w1",
                 "path": "src/finalize.ts"
             }),
@@ -6062,7 +6056,7 @@ async fn lifecycle_mutations_record_audit_events() {
         .oneshot(json_request(
             "/v1/activity/finalize",
             serde_json::json!({
-                "session_id": "finalizer",
+                "agent_id": "finalizer",
                 "workspace_id": "w1"
             }),
         ))
@@ -6083,7 +6077,7 @@ async fn lifecycle_mutations_record_audit_events() {
     assert!(
         events.iter().any(|event| {
             event["event_type"] == "ClaimReleased"
-                && event["session_id"] == "s1"
+                && event["agent_id"] == "s1"
                 && event["workspace_id"] == "w1"
                 && event["payload"]["path"] == "src/release.ts"
         }),
@@ -6092,7 +6086,7 @@ async fn lifecycle_mutations_record_audit_events() {
     assert!(
         events.iter().any(|event| {
             event["event_type"] == "ReservationClaimed"
-                && event["session_id"] == "claimer"
+                && event["agent_id"] == "claimer"
                 && event["workspace_id"] == "w1"
                 && event["payload"]["wait_id"] == claim_wait_id
                 && event["payload"]["relative_path"] == "src/claim.ts"
@@ -6102,7 +6096,7 @@ async fn lifecycle_mutations_record_audit_events() {
     assert!(
         events.iter().any(|event| {
             event["event_type"] == "ReservationCanceled"
-                && event["session_id"] == "cancelable"
+                && event["agent_id"] == "cancelable"
                 && event["workspace_id"] == "w1"
                 && event["payload"]["request_id"] == "request-cancel"
                 && event["payload"]["relative_path"] == "src/cancel.ts"
@@ -6112,7 +6106,7 @@ async fn lifecycle_mutations_record_audit_events() {
     assert!(
         events.iter().any(|event| {
             event["event_type"] == "ActivityFinalized"
-                && event["session_id"] == "finalizer"
+                && event["agent_id"] == "finalizer"
                 && event["workspace_id"] == "w1"
                 && event["payload"]["released_claims"] == 1
                 && event["payload"]["completed_reservations"] == 1
@@ -6123,11 +6117,8 @@ async fn lifecycle_mutations_record_audit_events() {
 
 #[tokio::test]
 async fn authorize_uses_supplied_sqlite_store() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-server-store-{}", std::process::id()));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     store
@@ -6159,23 +6150,12 @@ async fn authorize_uses_supplied_sqlite_store() {
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["decision"], "allow");
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
 async fn serve_listener_expires_stale_reservations_without_request_activity() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-server-maintenance-worker-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let setup_store = Store::open(&db_path).expect("file store should open");
     let first = setup_store
@@ -6241,7 +6221,6 @@ async fn serve_listener_expires_stale_reservations_without_request_activity() {
     server.abort();
     let _ = server.await;
     drop(conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 
     assert_eq!(first_status, "expired");
     assert_eq!(second_status, "reserved");
@@ -6249,26 +6228,17 @@ async fn serve_listener_expires_stale_reservations_without_request_activity() {
 
 #[tokio::test]
 async fn serve_listener_prunes_old_history_without_request_activity() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-server-retention-worker-{}-{unique}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let setup_store = Store::open(&db_path).expect("file store should open");
-    let mut old_event = Event::session_registered("old-session", "w1").with_event_id("old-event");
+    let mut old_event = Event::agent_registered("old-session", "w1").with_event_id("old-event");
     old_event.created_at = "1970-01-01T00:00:00Z".to_string();
     setup_store
         .append(old_event)
         .expect("old event should append");
     let recent_event =
-        Event::session_registered("recent-session", "w1").with_event_id("recent-event");
+        Event::agent_registered("recent-session", "w1").with_event_id("recent-event");
     setup_store
         .append(recent_event)
         .expect("recent event should append");
@@ -6299,7 +6269,6 @@ async fn serve_listener_prunes_old_history_without_request_activity() {
     server.abort();
     let _ = server.await;
     drop(conn);
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 
     assert_eq!(event_ids, vec!["recent-event"]);
 }
@@ -6438,7 +6407,7 @@ async fn context_render_treats_empty_resource_as_unfiltered() {
 }
 
 #[tokio::test]
-async fn context_render_lists_current_session_lease_as_active_scope() {
+async fn context_render_lists_agent_context_lease_as_active_scope() {
     let store = Store::open_in_memory().expect("store should open");
     acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
     acquire_test_lease(&store, "s2", "w1", "src/session.ts");
@@ -6450,7 +6419,7 @@ async fn context_render_lists_current_session_lease_as_active_scope() {
             serde_json::json!({
                 "mode": "detailed",
                 "workspace_id": "w1",
-                "session_id": "s1"
+                "agent_id": "s1"
             }),
         ))
         .await
@@ -6462,19 +6431,19 @@ async fn context_render_lists_current_session_lease_as_active_scope() {
     assert!(
         items.iter().any(|item| {
             item["kind"] == "claim"
-                && item["session_id"] == "s1"
+                && item["agent_id"] == "s1"
                 && item["severity"] == "info"
                 && item["source_refs"]
                     .as_array()
-                    .is_some_and(|refs| refs.iter().any(|value| value == "CurrentSessionScope"))
+                    .is_some_and(|refs| refs.iter().any(|value| value == "AgentContextScope"))
         }),
-        "current session claim should be reported as own active scope: {items:?}"
+        "current agent claim should be reported as own active scope: {items:?}"
     );
     assert!(
         items
             .iter()
-            .any(|item| item["kind"] == "claim" && item["session_id"] == "s2"),
-        "other session claim should remain visible: {items:?}"
+            .any(|item| item["kind"] == "claim" && item["agent_id"] == "s2"),
+        "other agent claim should remain visible: {items:?}"
     );
     assert!(
         json["prompt_text"]
@@ -6487,7 +6456,7 @@ async fn context_render_lists_current_session_lease_as_active_scope() {
 }
 
 #[tokio::test]
-async fn context_render_lists_current_session_intent_as_active_scope() {
+async fn context_render_lists_agent_context_intent_as_active_scope() {
     let app = build_router(ServerConfig::new("secret-token"));
 
     let current_declare = app
@@ -6497,7 +6466,7 @@ async fn context_render_lists_current_session_intent_as_active_scope() {
             "s1",
             "w1",
             serde_json::json!({
-                "purpose": "Current session edits auth.",
+                "purpose": "Current agent edits auth.",
                 "files_planned": ["src/auth.ts"]
             }),
         ))
@@ -6512,7 +6481,7 @@ async fn context_render_lists_current_session_intent_as_active_scope() {
             "s2",
             "w1",
             serde_json::json!({
-                "purpose": "Other session edits session handling.",
+                "purpose": "Other agent edits session handling.",
                 "files_planned": ["src/session.ts"]
             }),
         ))
@@ -6526,7 +6495,7 @@ async fn context_render_lists_current_session_intent_as_active_scope() {
             serde_json::json!({
                 "mode": "detailed",
                 "workspace_id": "w1",
-                "session_id": "s1"
+                "agent_id": "s1"
             }),
         ))
         .await
@@ -6538,19 +6507,19 @@ async fn context_render_lists_current_session_intent_as_active_scope() {
     assert!(
         items.iter().any(|item| {
             item["kind"] == "reservation"
-                && item["session_id"] == "s1"
+                && item["agent_id"] == "s1"
                 && item["severity"] == "info"
                 && item["source_refs"]
                     .as_array()
-                    .is_some_and(|refs| refs.iter().any(|value| value == "CurrentSessionScope"))
+                    .is_some_and(|refs| refs.iter().any(|value| value == "AgentContextScope"))
         }),
-        "current session reservation should be reported as own active scope: {items:?}"
+        "current agent reservation should be reported as own active scope: {items:?}"
     );
     assert!(
         items
             .iter()
-            .any(|item| item["kind"] == "reservation" && item["session_id"] == "s2"),
-        "other session reservation should remain visible: {items:?}"
+            .any(|item| item["kind"] == "reservation" && item["agent_id"] == "s2"),
+        "other agent reservation should remain visible: {items:?}"
     );
     assert!(
         json["prompt_text"]
@@ -6614,7 +6583,7 @@ async fn context_render_filters_items_to_requested_workspace() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["workspace_id"], "w1");
     assert_eq!(items[0]["purpose"], "Fix auth validation behavior.");
-    assert_eq!(json["current"]["session_count"], 0);
+    assert_eq!(json["current"]["agent_count"], 0);
     assert_eq!(json["current"]["active_reservation_count"], 1);
     assert_eq!(json["current"]["event_count"], 1);
     let prompt_text = json["prompt_text"].as_str().unwrap_or_default();
@@ -6870,70 +6839,6 @@ async fn reservation_request_retry_backfills_identity_for_filtered_context_rende
 }
 
 #[tokio::test]
-async fn reconcile_ack_records_acknowledgement() {
-    let app = build_router(ServerConfig::new("secret-token"));
-
-    let response = app
-        .oneshot(json_request(
-            "/v1/reconcile/ack",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "decision": "adopt",
-                "files_reread": ["src/auth.ts"],
-                "human_change_summary": "User adjusted auth guard."
-            }),
-        ))
-        .await
-        .expect("reconcile ack should complete");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = to_bytes(response.into_body(), 1024)
-        .await
-        .expect("body should read");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-    assert_eq!(json["status"], "ok");
-    assert_eq!(json["clears_human_write_block"], true);
-}
-
-#[tokio::test]
-async fn reconcile_ack_persists_acknowledgement() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-reconcile-store-{}", std::process::id()));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    let db_path = temp_root.join(".stateful_core").join("state.db");
-    let store = Store::open(&db_path).expect("file store should open");
-    let app = build_router(ServerConfig::with_store("secret-token", store));
-
-    let response = app
-        .oneshot(json_request(
-            "/v1/reconcile/ack",
-            serde_json::json!({
-                "session_id": "s1",
-                "workspace_id": "w1",
-                "decision": "reapply",
-                "files_reread": ["src/auth.ts"],
-                "human_change_summary": "User edited guard."
-            }),
-        ))
-        .await
-        .expect("reconcile ack should complete");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let reopened = Store::open(&db_path).expect("file store should reopen");
-    assert_eq!(
-        reopened
-            .reconciliation_count()
-            .expect("reconciliation count should load"),
-        1
-    );
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[tokio::test]
 async fn outbox_sync_accepts_idempotent_events() {
     let app = build_router(ServerConfig::new("secret-token"));
 
@@ -6944,7 +6849,7 @@ async fn outbox_sync_accepts_idempotent_events() {
                 "/v1/outbox/sync",
                 serde_json::json!({
                     "outbox_id": "outbox-1",
-                    "session_id": "s1",
+                    "agent_id": "s1",
                     "workspace_id": "w1",
                     "sequence": 1,
                     "event_type": "HeartbeatObserved",
@@ -6959,13 +6864,8 @@ async fn outbox_sync_accepts_idempotent_events() {
 
 #[tokio::test]
 async fn outbox_sync_persists_full_event_payload() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "stateful-outbox-sync-payload-{}",
-        std::process::id()
-    ));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
     let db_path = temp_root.join(".stateful_core").join("state.db");
     let store = Store::open(&db_path).expect("file store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
@@ -6975,7 +6875,7 @@ async fn outbox_sync_persists_full_event_payload() {
             "/v1/outbox/sync",
             serde_json::json!({
                 "outbox_id": "outbox-full",
-                "session_id": "s1",
+                "agent_id": "s1",
                 "workspace_id": "w1",
                 "sequence": 7,
                 "event_type": "HeartbeatObserved",
@@ -6997,8 +6897,242 @@ async fn outbox_sync_persists_full_event_payload() {
         stored.payload,
         serde_json::json!({"error": "server unavailable", "retry": true})
     );
+}
 
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+#[tokio::test]
+async fn claim_refresh_observation_error_uses_status_error_envelope() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/claim/refresh-observation",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("claim refresh should complete");
+
+    let status = response.status();
+    assert!(
+        status.is_client_error() || status.is_server_error(),
+        "missing root should map to an error status, got {status}"
+    );
+    let json = response_json(response, 2048).await;
+    assert_eq!(
+        json["status"], "error",
+        "unified envelope should mark errors with status=error: {json}"
+    );
+    assert!(
+        json["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "unified envelope should carry a non-empty message: {json}"
+    );
+    assert!(
+        json.get("error").is_none(),
+        "legacy bare top-level error field should be gone: {json}"
+    );
+}
+
+#[tokio::test]
+async fn activity_finalize_store_failure_uses_status_error_envelope() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    ensure_test_reservation_via_http(&app, "s1", "w1", "src/auth.ts").await;
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("claim acquire should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let trigger_conn =
+        rusqlite::Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_finalize_envelope
+             BEFORE UPDATE OF status ON reservations
+             WHEN NEW.status = 'completed'
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated finalize failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let finalize = app
+        .oneshot(json_request(
+            "/v1/activity/finalize",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("finalize should complete");
+
+    let status = finalize.status();
+    assert!(
+        status.is_client_error() || status.is_server_error(),
+        "store failure should map to an error status, got {status}"
+    );
+    let json = response_json(finalize, 2048).await;
+    assert_eq!(
+        json["status"], "error",
+        "unified envelope should mark errors with status=error: {json}"
+    );
+    assert!(
+        json["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("simulated finalize failure")),
+        "unified envelope message should surface the failure reason: {json}"
+    );
+    assert!(
+        json.get("error").is_none(),
+        "legacy bare top-level error field should be gone: {json}"
+    );
+
+    drop(trigger_conn);
+}
+
+#[tokio::test]
+async fn outbox_sync_store_failure_uses_status_error_envelope() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let trigger_conn =
+        rusqlite::Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_outbox_envelope
+             BEFORE INSERT ON outbox
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated outbox failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/outbox/sync",
+            serde_json::json!({
+                "outbox_id": "outbox-envelope-1",
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "sequence": 1,
+                "event_type": "HeartbeatObserved",
+                "payload": {"ok": true}
+            }),
+        ))
+        .await
+        .expect("outbox sync should complete");
+
+    let status = response.status();
+    assert!(
+        status.is_client_error() || status.is_server_error(),
+        "store failure should map to an error status, got {status}"
+    );
+    let json = response_json(response, 2048).await;
+    assert_eq!(
+        json["status"], "error",
+        "unified envelope should mark errors with status=error: {json}"
+    );
+    assert!(
+        json["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("simulated outbox failure")),
+        "unified envelope message should surface the failure reason: {json}"
+    );
+    assert!(
+        json.get("error").is_none(),
+        "legacy bare top-level error field should be gone: {json}"
+    );
+
+    drop(trigger_conn);
+}
+
+#[tokio::test]
+async fn removed_compat_endpoints_return_not_found() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    for (path, body) in [
+        (
+            "/v1/activity/observe",
+            serde_json::json!({"agent_id": "s1", "workspace_id": "w1"}),
+        ),
+        (
+            "/v1/conflicts/check",
+            serde_json::json!({
+                "agent_id": "s1",
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ),
+        (
+            "/v1/reconcile/ack",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "decision": "adopt",
+                "files_reread": ["src/auth.ts"],
+                "human_change_summary": "User adjusted auth guard."
+            }),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(json_request(path, body))
+            .await
+            .expect("request should complete");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{path} should be removed and answer 404"
+        );
+    }
+}
+
+#[tokio::test]
+async fn protected_route_rejects_wrong_bearer_token() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/authorize")
+                .header("authorization", "Bearer wrong-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "agent_id": "s1",
+                        "action": "write_file",
+                        "path": "src/auth.ts"
+                    })
+                    .to_string(),
+                ))
+                .expect("authorize request should build"),
+        )
+        .await
+        .expect("authorize response should complete");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 fn json_request(path: &str, body: serde_json::Value) -> Request<Body> {
@@ -7012,7 +7146,7 @@ fn json_request(path: &str, body: serde_json::Value) -> Request<Body> {
 }
 
 fn protocol_body(
-    session_id: &str,
+    agent_id: &str,
     workspace_id: &str,
     payload: serde_json::Value,
 ) -> serde_json::Value {
@@ -7020,8 +7154,8 @@ fn protocol_body(
         "protocol_version": "stateful.v1",
         "request_id": "req-1",
         "observed_at": "2026-05-31T00:00:00Z",
-        "session": {
-            "session_id": session_id,
+        "agent": {
+            "agent_id": agent_id,
             "actor_id": "agent-1",
             "actor_type": "agent"
         },
@@ -7043,21 +7177,21 @@ fn protocol_body(
 
 fn protocol_request(
     path: &str,
-    session_id: &str,
+    agent_id: &str,
     workspace_id: &str,
     payload: serde_json::Value,
 ) -> Request<Body> {
-    json_request(path, protocol_body(session_id, workspace_id, payload))
+    json_request(path, protocol_body(agent_id, workspace_id, payload))
 }
 
 fn native_hook_authorize_request(
-    session_id: &str,
+    agent_id: &str,
     workspace_id: &str,
     path: &str,
     tool_name: &str,
 ) -> Request<Body> {
     let mut body = protocol_body(
-        session_id,
+        agent_id,
         workspace_id,
         serde_json::json!({
             "action": "write_file",
@@ -7066,7 +7200,7 @@ fn native_hook_authorize_request(
     );
     body["source"]["kind"] = serde_json::json!("hook");
     body["source"]["event"] = serde_json::json!("pre_tool_use");
-    body["source"]["source_ref"] = serde_json::json!(format!("hook:{session_id}:{tool_name}"));
+    body["source"]["source_ref"] = serde_json::json!(format!("hook:{agent_id}:{tool_name}"));
     body["source"]["tool_name"] = serde_json::json!(tool_name);
 
     json_request("/v1/authorize", body)
@@ -7093,6 +7227,16 @@ fn authorized_get(path: &str) -> Request<Body> {
         .method("GET")
         .uri(path)
         .header("authorization", "Bearer secret-token")
+        .body(Body::empty())
+        .expect("get request should build")
+}
+
+fn authorized_get_with_last_event_id(path: &str, last_event_id: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("authorization", "Bearer secret-token")
+        .header("last-event-id", last_event_id)
         .body(Body::empty())
         .expect("get request should build")
 }

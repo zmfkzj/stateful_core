@@ -19,7 +19,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Check formatting
         run: cargo fmt --all --check
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Run workspace tests
         run: env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo test --workspace
       - name: Run codex-benchmark feature hook tests
         run: cargo test -p stateful-cli --features codex-benchmark --test hook
+
+      - name: Run stateful-bench Python script tests
+        run: python3 -m venv .venv && . .venv/bin/activate && python -m pip install pytest && python -m pytest crates/stateful-bench/scripts/tests

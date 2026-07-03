@@ -1,6 +1,6 @@
 # DeNovoSWE Benchmark Guide
 
-Last updated: 2026-06-24.
+Last updated: 2026-06-30.
 
 This guide records the protocol we use when running DeNovoSWE through
 `stateful-bench`. It follows the official AweAgent DeNovoSWE recipe/task
@@ -127,7 +127,7 @@ The adapter's built-in benchmark isolation prompt is an integrity guardrail, not
 a strategy hint. Keep it enabled for normal scored runs so agents are evaluated
 only on the provided workspace and package specification.
 
-Stateful lifecycle enforcement belongs in hooks, extensions, MCP/tool policy,
+Stateful lifecycle enforcement belongs in hooks, extensions, native-tool policy,
 installed skills, and runtime configuration rather than in benchmark task
 prompt text.
 
@@ -165,19 +165,29 @@ The 12-instance Docker OMP command in
 `--max-concurrent 6`. Treat it as a declared behavior/concurrency run; report it
 separately from full four-axis or official-style stateful/no-state comparisons.
 
-For `subagent:on`, the generated DeNovo prompt explicitly requires native
-Codex/OMP subagents before implementation or broad repository exploration,
-while allowing narrow preflight to read the prompt, inspect tool availability,
-or initialize stateful coordination. It tells OMP to use the current `task` tool
-or older multi-agent tools such as `multi_agent_v1spawn_agent`, requires every
-counted subagent to inspect, edit, and verify a distinct implementation slice,
-and requires explicit blocker reporting if the runtime does not expose subagent
-tools. OMP runs also unpack bundled task agents into the isolated runtime home,
-append the requirement to the system prompt, and enable `features.multi_agent=true`.
-The adapter enforces the minimum native subagent spawn count for both Codex and
-OMP `subagent:on` runs. Treat that injected instruction as a declared
-behavior-test condition axis; do not reuse it as normal scored comparison policy
-or as general patch-quality guidance.
+For `subagent:on`, the generated DeNovo prompt appends only `orchestrate`.
+`subagent:off` does not add a custom subagent prompt. OMP runs also unpack
+bundled task agents into the isolated runtime home and enable
+`features.multi_agent=true`. The adapter still enforces the minimum native
+subagent spawn count for both Codex and OMP `subagent:on` runs. Treat that
+prompt addition as a declared behavior-test condition axis; do not reuse it as
+normal scored comparison policy or general patch-quality guidance.
+
+## Success Criteria
+
+Define the claim before reading the results:
+
+- Improvement claim: the stateful condition must improve the primary
+  score/success metric under fixed conditions.
+- Non-inferiority or efficiency claim: the stateful condition must keep the
+  primary quality metric comparable while improving an efficiency metric; report
+  quality separately from efficiency.
+
+Minimum evidence for either claim is three independent trials per condition over
+the same instance set, model, prompt version, temperature, context window, max
+turns, evaluator settings, runtime limits, and network/source policy. For small
+samples, report every trial plus mean and variance or standard deviation.
+
 
 ## Docker OMP Stateful Lifecycle
 
@@ -223,6 +233,13 @@ Lifecycle troubleshooting checklist:
   long-running `stateful-bench` process is owned by a durable process manager.
   Some restricted command wrappers reap daemonized/background children on exit;
   the symptom is a pid file or empty launch log with no durable run directory.
+- If Docker reports `invalid mount config for type "bind": bind source path
+  does not exist` for an `omp-homes/<instance>/home` path that exists on the
+  host, the Docker daemon cannot see that host path. This is common with Colima
+  when `DENOVO_OUTPUT_ROOT` is under `/private/tmp` or another unmounted host
+  tree. Relaunch with the benchmark output under a Docker-mounted path such as
+  `$REPO_ROOT/target/stateful_bench_runs/...` or another `/Users/...` path, then
+  use fresh run IDs and OMP homes.
 
 ## Reporting Rules
 

@@ -22,6 +22,7 @@ const DEFAULT_CODEX_ALLOWED_TOOLS: &[&str] = &[
 const DEFAULT_OMP_ALLOWED_TOOLS: &[&str] = &[
     "task",
     "yield",
+    "parallel_tool_calls",
     "lsp",
     "glob",
     "ask",

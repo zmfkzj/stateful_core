@@ -1,3 +1,4 @@
 .stateful_core/ export-ignore
 .stateful_bench/ export-ignore
 target/ export-ignore
+docs/superpowers/ export-ignore

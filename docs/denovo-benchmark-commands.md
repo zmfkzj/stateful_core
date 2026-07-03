@@ -1,6 +1,6 @@
 # DeNovoSWE Benchmark Commands
 
-Last updated: 2026-06-24.
+Last updated: 2026-06-30.
 
 Use this file to relaunch the OMP-backed DeNovoSWE benchmark without
 reconstructing the command line.
@@ -76,6 +76,12 @@ file, not the public full JSONL. The aborted r36 attempt duplicated the full
   `OMP_BIN`, `TMUX`, and `TMUX_SOCKET`.
 - For Docker-backed OMP agent runs through Docker Desktop or Colima, set
   `DOCKER_HOST` to the Unix socket used by the Docker CLI before launching.
+- For Docker-backed OMP agent runs, keep `DENOVO_OUTPUT_ROOT` on a host path
+  mounted into the Docker daemon. With Colima, prefer `$REPO_ROOT/target/...` or
+  another `/Users/...` path. Avoid `/private/tmp/...`: `stateful-bench` may
+  create `omp-homes/<instance>/home` on the host, but Docker can still fail with
+  `invalid mount config for type "bind": bind source path does not exist`
+  because the daemon cannot see that tree.
 - Change run IDs and isolated OMP home directories before reusing commands.
 - For Docker-isolated OMP runs, build or tag the agent image from
   `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. The image includes
@@ -163,7 +169,7 @@ unless deliberately testing another model:
   --omp-bin "$OMP_BIN" \
   --stateful-binary "$STATEFUL_BIN" \
   --benchmark-model deepseek-v4-flash \
-  --benchmark-reasoning-effort low \
+  --benchmark-reasoning-effort high \
   --benchmark-model-context-window 256000 \
   --benchmark-temperature 1 \
   --benchmark-max-turns 500 \
@@ -190,7 +196,7 @@ matrix:
   --omp-bin "$OMP_BIN" \
   --stateful-binary "$STATEFUL_BIN" \
   --benchmark-model deepseek-v4-flash \
-  --benchmark-reasoning-effort low \
+  --benchmark-reasoning-effort high \
   --benchmark-model-context-window 256000 \
   --benchmark-temperature 1 \
   --benchmark-max-turns 500 \
@@ -226,7 +232,7 @@ default in-image `stateful` path explicitly; omit
   --agent-docker-stateful-binary "$DOCKER_STATEFUL_BIN" \
   --agent-docker-sandbox off \
   --benchmark-model deepseek-v4-flash \
-  --benchmark-reasoning-effort low \
+  --benchmark-reasoning-effort high \
   --benchmark-model-context-window 256000 \
   --benchmark-temperature 1 \
   --benchmark-max-turns 500 \
@@ -241,6 +247,12 @@ instances with `subagent:on`, `stateful:on/off`, six-way instance concurrency,
 and three independent trials. It is a declared subagent/concurrency behavior
 test, not the official-style `--max-concurrent 1` default from
 `docs/denovo-benchmark-guide.md`.
+
+Report and collection commands in this section summarize that behavior run only.
+They do not convert the 12-instance `--max-concurrent 6` reduced matrix into
+official-style `--max-concurrent 1` quality evidence. Final comparison tables
+must state both `max-concurrent` and matrix type, for example `reduced
+stateful:on/off,subagent:on` versus the full four-axis matrix.
 
 Rebuild the Docker agent image before relaunching after local `stateful` or OMP
 integration changes. The examples below pass `--agent-docker-sandbox off`
@@ -296,7 +308,7 @@ for trial in 1 2 3; do
     --agent-docker-stateful-binary "$DOCKER_STATEFUL_BIN" \
     --agent-docker-sandbox off \
     --benchmark-model deepseek-v4-flash \
-    --benchmark-reasoning-effort low \
+    --benchmark-reasoning-effort high \
     --benchmark-model-context-window 256000 \
     --benchmark-temperature 1 \
     --benchmark-max-turns 500 \
@@ -341,6 +353,12 @@ Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
   detached run. Use a short, existing-parent socket path because long paths can
   exceed tmux's socket length limit; create the session with that socket and
   keep benchmark stdout/stderr in a launch log under the run output directory.
+- If Docker reports `invalid mount config for type "bind": bind source path
+  does not exist` for an `omp-homes/<instance>/home` path, first verify whether
+  the benchmark output root is under `/private/tmp` or another path not mounted
+  into the Docker daemon. The host directory can exist while Colima still cannot
+  bind it. Move `DENOVO_OUTPUT_ROOT` to `$REPO_ROOT/target/stateful_bench_runs`
+  or another `/Users/...` path and relaunch with fresh run IDs.
 - Rebuild or retag the Docker OMP agent image after changing the Dockerfile. If
   a Docker OMP run still shows `bubblewrap` namespace failures, confirm the
   command includes `--agent-docker-sandbox off`; otherwise nested OMP sandboxing
@@ -394,19 +412,13 @@ stateful-off/stateful-on with `subagent:on` and emitted that sequence. Treat a
 missing registration, absent heartbeat, or missing finalization as a lifecycle
 failure rather than a model-quality result.
 
-For `subagent:on`, the generated DeNovo prompt requires native Codex/OMP
-subagents before implementation or broad repository exploration, while allowing
-narrow preflight to read the prompt, inspect tool availability, or initialize
-stateful coordination. It tells OMP to use the current `task` tool or older
-multi-agent tools such as `multi_agent_v1spawn_agent`, requires every counted
-subagent to inspect, edit, and verify a distinct implementation slice, and
-requires explicit blocker reporting if the runtime does not expose subagent
-tools. OMP runs also unpack bundled task agents into the isolated runtime home,
-append the requirement to the system prompt, and enable `features.multi_agent=true`.
-The adapter enforces the minimum native subagent spawn count for both Codex and
-OMP `subagent:on` runs. This prompt addition is a declared behavior-test
-condition axis, not a
-general prompt policy for normal scored comparisons.
+For `subagent:on`, the generated DeNovo prompt appends only `orchestrate`.
+`subagent:off` does not add a custom subagent prompt. OMP runs also unpack
+bundled task agents into the isolated runtime home and enable
+`features.multi_agent=true`. The adapter still enforces the minimum native
+subagent spawn count for both Codex and OMP `subagent:on` runs. This prompt
+addition is a declared behavior-test condition axis, not a general prompt policy
+for normal scored comparisons.
 
 Shard launch scripts are expected at:
 
@@ -418,9 +430,12 @@ $REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-c.sh
 
 ## Start Shards In Existing tmux
 
-These commands use an existing tmux server socket. Pass the `STATEFUL_*`
-runtime variables into each tmux session with `tmux new-session -e`; otherwise
-the stateful condition will fail its runtime preflight.
+These commands use an existing tmux server socket. Pass
+`STATEFUL_SERVER_URL` and `STATEFUL_SERVER_TOKEN` explicitly on the
+`tmux new-session` command with `-e`; exporting or sourcing them inside the
+launcher script is not enough when the existing tmux server owns the child
+environment. If either variable is missing, the `stateful:on` condition fails
+its runtime preflight before the agent starts.
 
 ```bash
 "$TMUX" -S "$TMUX_SOCKET" new-session -d -s "$RUN_ID-shard-a-omp" -e STATEFUL_SERVER_URL="$STATEFUL_SERVER_URL" -e STATEFUL_SERVER_TOKEN="$STATEFUL_SERVER_TOKEN" /bin/zsh "$REPO_ROOT/.stateful_bench/denovo/run-control/run-$RUN_ID-shard-a.sh"
@@ -462,8 +477,13 @@ upstream access through `.read.log` URL headers, `read`/`browser` URL or path
 tool-call arguments, forbidden target-upstream commands in shell command tool
 calls, or traffic denied by the Docker OMP source-access proxy.
 
-After all three trials complete, collect each trial separately and report the
-mean:
+After all three behavior-test trials complete, collect each trial separately and
+report the mean:
+
+These collection commands are not an official-style quality comparison unless
+the underlying runs used the official-style `--max-concurrent 1` design. Keep
+`max-concurrent` and matrix type in the final table alongside run IDs and trial
+IDs.
 
 ```bash
 python3 crates/stateful-bench/scripts/denovo_progress_report.py --run-prefix "$RUN_SERIES-t1-shard-" --expected-instances-per-condition 3675

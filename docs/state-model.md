@@ -43,7 +43,7 @@ being mutated.
 The practical hierarchy is:
 
 ```text
-session
+agent_id + workspace_id
   goal
     turn
       reservation_id
@@ -52,26 +52,30 @@ session
             write actions
 ```
 
-For v1, Codex hooks must treat the current Codex hook `thread_id` as
-authoritative when present, falling back to `session_id` for older payloads. The
-OMP extension must store `process.env.STATEFUL_SESSION_ID` from explicit OMP
-event/ctx ids (`event.sessionId`, `event.session_id`, session fields), falling
-back to the `ctx.sessionManager.getSessionFile()` header/stem and then
-`getLeafId()` during `stateful hook omp session-start`. MCP
-reservation declaration may omit `session_id`; in that case the adapter uses the
-current session recorded by lifecycle hooks so MCP declarations keep the current
-session as reservation owner while write authorization uses `reservation_id`.
+For v1, agent-facing coordination identity is the active `agent_id` scoped by
+`workspace_id`. Codex hooks and native tools inject that identity into hook and
+state operations. OMP derives its Stateful `agent_id` only from
+`ctx.sessionManager`: `getSessionId()` supplies the required session UUID and
+`getLeafId()`, when present, supplies the active branch. The generated id is
+`omp-${sessionId}-${leafId}` with a leaf id and `omp-${sessionId}` without one;
+if `getSessionId()` is unavailable or invalid, OMP Stateful actions fail closed.
+Agents do not repair current-session files, choose session environment
+variables, read event/ctx agent or session fields, use process ids, or fall back
+to runtime session aliases. Reservation declaration may omit low-level storage
+identifiers when the runtime integration provides the active `agent_id` and
+`workspace_id`; write authorization uses the `reservation_id` attached to that
+identity.
 
 ## Activity Record
 
 An activity record summarizes what one actor is doing now.
 
 ```text
-session_id
+agent_id
 actor_id
 actor_type: agent | subagent | human | system
 owner_id
-parent_session_id
+parent_agent_id
 parent_actor_id
 workspace
 workspace_id
@@ -107,7 +111,7 @@ A claim is an advisory claim on a resource.
 
 ```text
 claim_id
-session_id
+agent_id
 actor_id
 actor_type: agent | subagent | human | system
 owner_id
@@ -134,7 +138,7 @@ not replace source-control review. Only `file` and `directory` claims can
 authorize supported write actions in v1.
 
 Claim freshness defaults to `claim_ttl_seconds = 300`. Heartbeats refresh active
-claim expiry while the owning session remains active. Missing heartbeats do not
+claim expiry while the owning agent remains active. Missing heartbeats do not
 mean success; they eventually make the claim eligible for expiry and FIFO queue
 promotion.
 
@@ -184,16 +188,16 @@ relative_path
 absolute_path
 ```
 
-The shipped hard conflict domain is the same `workspace_id` and same normalized
-`relative_path`. This approximates two actors touching the same file inside the
-same enabled workspace. The target physical-file domain also records and compares
-same normalized `absolute_path`.
+The shipped hard conflict domain is only the same `workspace_id` and same
+normalized `relative_path`. In operator terms, two sessions in the same enabled
+workspace writing the same normalized path conflict; the same repo-relative path
+in another workspace, worktree, or branch does not hard-block in shipped v1.
 
-The target soft conflict domain is the same `repo_id` and same `relative_path`
-across different workspaces, worktrees, or branches. This should not block by
-default, but should produce warning context because later merge or integration
-work may conflict. The shipped authorization path does not yet emit this warn
-tier.
+Cross-workspace/repo identity handling is target warning behavior unless another
+shipped contract says otherwise. The target soft conflict domain is the same
+`repo_id` and same `relative_path` across different workspaces, worktrees, or
+branches; it should warn because later merge or integration work may conflict,
+but the shipped authorization path does not yet emit this warn tier.
 
 If repository identity is unknown, the target model should only hard-block on
 same normalized `absolute_path`; repo-relative matches with incomplete identity
@@ -245,12 +249,12 @@ original spelling, but conflict checks use canonical paths.
 
 ## Reservation Record
 
-A reservation records the file set a session plans to touch for a task before it
+A reservation records the file set an agent plans to touch for a task before it
 performs important actions.
 
 ```text
 reservation_id
-session_id
+agent_id
 purpose
 goal
 phase
@@ -280,8 +284,8 @@ purpose. Abstract resources in `resources_planned`, such as `task`, `test`,
 fields. Shipped authorization is based on active, unexpired reservation scope
 rows, active same-reservation claims, and active phases.
 
-Reservation declarations add to the session's active reservation scope in that workspace. This
-lets a session keep one reservation while adding a newly discovered source
+Reservation declarations add to the agent's active reservation scope in that workspace. This
+lets an agent keep one reservation while adding a newly discovered source
 file or `tmp/` build/test scope without invalidating existing claimed paths. If
 the same path is declared again, the latest matching active declaration supplies
 the purpose used for future claim acquisition.
@@ -324,9 +328,9 @@ A conflict record is the target durable shape for a policy decision.
 
 ```text
 conflict_id
-session_id
+agent_id
 target_resource
-conflicting_session_id
+conflicting_agent_id
 conflict_type: missing_reservation | active_claim | planned_edit | stale_state | human_change | unreconciled_human_write | soft_repo_conflict | unknown_repo_identity | coordination_resource_overlap
 severity: warn | block
 decision: allow | warn | deny
@@ -353,7 +357,7 @@ reserved immediately.
 ```text
 wait_id
 request_id
-session_id
+agent_id
 workspace_id
 repo_id
 worktree_id
@@ -365,7 +369,7 @@ action: write_file | write_directory
 requested_at
 status: queued | reserved | claimed | canceled | expired
 reservation_expires_at
-blocking_session_id
+blocking_agent_id
 ```
 
 The shipped queue is FIFO by insertion order (`rowid`). A queued request can be
@@ -379,15 +383,15 @@ multi-resource scheduler is implemented.
 Multi-resource `resources[]`, explicit `queue_sequence`, `blocked_by_claim_id`,
 and recorded `grant_trigger` fields are target model for future hardening.
 
-Promotion is triggered by explicit claim release, session or activity
+Promotion is triggered by explicit claim release, agent or activity
 finalization, claim/reservation expiry, or current-state materialization that
 finds an already-unblocked queued waiter, but the current row does not persist
 the trigger reason. Soft repo-relative conflicts do not create wait queue
 records in v1.
 
 Promotion creates claimable reservations, not active write authority. Each
-waiting session must reread the target. Manual MCP/CLI flows then explicitly
-claim the reservation with `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)`
+waiting agent must reread the target. Manual native-tool/CLI flows then
+explicitly claim the reservation with `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)`
 or `stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>`;
 native edit hooks and sandbox `write-targets` authorization can lazy-claim it at
 the retried write boundary. Claiming creates active reservation scope and active
@@ -396,10 +400,16 @@ The default claimable reservation TTL is 120 seconds. If a claimable reservation
 expires, the server may promote the next eligible FIFO waiter.
 
 Reservation notifications are delivery hints, not the durable reservation
-record. `stateful notifications poll` / `state_notifications_poll` returns each
-pending notification once and marks it delivered. If the client misses that
-response, `stateful resume next` / `state_resume_next` can still rediscover the
-claimable reservation until it is claimed or expires.
+record. Each pending notification has a monotonic `sequence` for its target
+agent in that workspace. `stateful notifications poll` /
+`state_notifications_poll` returns pending notifications and marks the returned
+rows delivered. The SSE stream sends each notification as `id: <sequence>` with
+the same `sequence` in JSON data, but stream delivery alone does not mark it
+delivered. Reconnecting clients send `Last-Event-ID` / `last-event-id`; the
+server marks notifications through that sequence delivered and replays later
+pending notifications. If the client misses that response, `stateful resume next`
+/ `state_resume_next` can still rediscover the claimable reservation until it is
+claimed or expires.
 
 For target multi-resource requests, a request is eligible only when it is at the
 head of every resource queue it participates in and every requested resource has
@@ -412,21 +422,21 @@ cancellation, or expiry state instead of creating a duplicate queue item.
 Repeating an expired request requeues the same waiter in place, preserving its
 original FIFO row while requiring a new reservation and claim before writing.
 
-Queued or claimable (`reserved`) requests can be canceled explicitly. Session or
-activity finalization releases active claims, cancels that session's queued and
+Queued or claimable (`reserved`) requests can be canceled explicitly. Stop or
+activity finalization releases active claims, cancels that agent's queued and
 claimable (`reserved`) requests, and promotes the next eligible waiter for any
 released or canceled resource.
 
 ## Override Record
 
-An override records an explicit user instruction to permit a blocked resource in
-the current session. Overrides are never inferred or granted automatically.
+An override records an explicit user instruction to permit a blocked resource for
+the current agent. Overrides are never inferred or granted automatically.
 Override records are target model only; the current server does not expose an
 override authorization path.
 
 ```text
 override_id
-session_id
+agent_id
 turn_id
 actor_id
 resource_type: file | directory
@@ -440,33 +450,35 @@ source_ref
 ```
 
 The user owns the judgment and responsibility for an override. An override must
-be scoped to a specific resource, current session, and current turn. Overrides
-apply only to active claim conflicts. They cannot bypass missing reservation, expired
-reservation, target blocked/finalized state, file or directory scope matching, delete
-exact-scope rules, or rename/move exact-scope rules.
+be scoped to a specific resource, current agent, and current turn. Overrides
+apply only to active claim conflicts. They cannot bypass missing reservation,
+expired reservation, target blocked/finalized state, file or directory scope
+matching, delete exact-scope rules, or rename/move exact-scope rules.
 Overrides do not reorder the wait queue, grant queue priority, or transfer a
-reservation from one session to another.
+reservation from one agent to another.
 
 ## Identity Rules
 
-V1 identifies work with both session and actor fields:
+V1 identifies agent-facing work with explicit agent and actor fields:
 
 ```text
-session_id
+agent_id
 turn_id
 actor_id
 actor_type: agent | subagent | human | system
 owner_id
-parent_session_id
+parent_agent_id
 parent_actor_id
 ```
 
-Subagent-specific `actor_type`, `parent_session_id`, and `parent_actor_id`
-fields are protocol vocabulary for native subagent-aware adapters. The Codex
-integration records each native subagent under its own effective session
-identity when Codex exposes a thread id. Parent and child sessions coordinate
+Subagent-specific `actor_type`, `parent_agent_id`, and `parent_actor_id` fields
+are protocol vocabulary for native subagent-aware adapters. For OMP,
+branch-specific work uses the Stateful `agent_id` derived from
+`ctx.sessionManager.getSessionId()` plus `ctx.sessionManager.getLeafId()` when
+present. The Codex integration records each native subagent under its own
+effective agent identity when Codex exposes one. Parent and child agents coordinate
 through the same workspace state, but a child does not inherit the parent's
-same-reservation claim authority. Same-owner sessions do not receive automatic
+same-reservation claim authority. Same-owner agents do not receive automatic
 override authority.
 
 ## Sandboxed Test Execution
@@ -484,12 +496,14 @@ the scratch `target` child. Other tool-specific build directories should be
 configured under the same external scratch root.
 
 Source-tree edits should use native edit tools with hook-visible targets, such
-as Codex `apply_patch` or Edit, after task-level reservation covers the target
-and a successful same-reservation file claim is active. Native edit hooks and
-`sandbox run --fs write-targets` release their authorized same-reservation claims
-after the write transaction completes; subsequent writes must reread and
-reacquire a claim or claim a
-claimable reservation. Command-shaped source writes must use exact
+as Codex `apply_patch` or Edit. OMP native `edit`/`write` can auto-declare/claim
+the exact tool-visible file scope for the default simple-write path when no
+explicit reservation id is supplied and the only denial is missing
+reservation/scope; other native edit paths require task-level reservation and an
+active same-reservation file claim. Native edit hooks and `sandbox run --fs
+write-targets` release their authorized same-reservation claims after the write
+transaction completes; subsequent writes must reread and reacquire a claim or
+claim a claimable reservation. Command-shaped source writes must use exact
 `--write-target` or `--create-target` entries, not the `tmp/` artifact directory
 scope.
 
@@ -498,7 +512,7 @@ scope.
 A finalization record closes out active work for a turn or session.
 
 ```text
-session_id
+agent_id
 status: done | failed | blocked
 summary
 files_changed
@@ -509,29 +523,26 @@ finalized_at
 source_ref
 ```
 
-The shipped `Stop` hook posts finalization for the session, which closes active
-work and releases the session's claims.
+The shipped `Stop` hook posts finalization for the agent, which closes active
+work and releases the agent's claims.
 
 ## Reconciliation Record
 
 A reconciliation record acknowledges that an agent has reread and accounted for a
 human write before resuming work on the affected file.
 
+The shipped `reconcile_ack` API records the flat acknowledgement payload:
+
 ```text
-reconciliation_id
-session_id
-turn_id
-actor_id
-target_resources
-trigger_event_id
+agent_id
+workspace_id
 files_reread
 human_change_summary
-conflict_with_plan: yes | no | unknown
 decision: adopt | reapply | ask_user | abandon
-next_action
-created_at
-source_ref
 ```
+
+Future richer reconciliation records may add actor/turn metadata, target
+resources, trigger event ids, and next-action fields.
 
 Only `adopt` and `reapply` can clear an unreconciled-human-write block. `ask_user`
 keeps writes blocked until the user provides direction. `abandon` keeps writes
@@ -547,7 +558,7 @@ yet emit `HumanWriteObserved` events or enforce unreconciled-human-write blocks.
 The shipped event log is append-only audit evidence for coordination decisions
 and lifecycle mutations. Current-state tables remain the active coordination
 source for conflict checks. Event-backed materialization is used for accepted
-session and reservation declaration events; other shipped lifecycle APIs update
+agent registration and reservation declaration events; other shipped lifecycle APIs update
 materialized tables directly and append audit events in the same transaction.
 
 The shipped server emits:
@@ -575,7 +586,6 @@ The target model also includes these explicit coordination events:
 - `HumanWriteObserved`
 - `ReconciliationAcknowledged`
 - `ActivityUpdated`
-- `ActivityFinalized`
 - `OutboxEventQueued`
 - `OutboxEventSynced`
 - `StateExpired`
@@ -594,6 +604,13 @@ Freshness is required for all active coordination records.
 - Default reservation TTL is 15 minutes.
 - Heartbeats may extend active reservation TTL, but never beyond 60 minutes from
   `declared_at`.
+- Operator math: a long-running build/test can keep a reservation alive with
+  heartbeats, but any write after the 60-minute cap needs a fresh reservation and
+  same-reservation claim.
+- Active claims expire after 300 seconds without heartbeat; if a waiter is
+  queued, expiry can promote it.
+- A promoted claimable reservation (`reserved`) expires after 120 seconds, so
+  resume or lazy resume promptly or expect the next eligible FIFO waiter to move.
 - Shipped reservation authorization is based on active, unexpired scope rows. Expired
   rows are removed from the active policy state and deny as `missing_reservation`.
 - Phase-aware authorization requires the latest activity phase to be
@@ -660,7 +677,7 @@ Local outbox entries should carry enough metadata to sync later:
 ```text
 outbox_id
 event_type
-session_id
+agent_id
 actor_id
 workspace_id
 sequence
@@ -671,15 +688,19 @@ last_sync_attempt_at
 sync_error
 ```
 
+`sync_status` defaults to `pending`. Legacy local outbox records without a
+recorded `sync_status` are treated as pending so they remain eligible for
+ordered sync rather than being skipped.
+
 `outbox_id` is the idempotency key for sync. The state server must treat repeated
 sync attempts for the same `outbox_id` as the same event. Pending entries should
-sync in `sequence` order per session. Failed entries remain available for retry
+sync in `sequence` order per agent. Failed entries remain available for retry
 and inspection.
 
 ## Human Save Gate Rules
 
 Human save-gate events are advisory coordination evidence for future IDE
-integration. They are not emitted by the current CLI, MCP, or HTTP
+integration. They are not emitted by the current CLI, native tools, or HTTP
 implementation.
 
 - IDE open, selection, dirty-buffer, and save-completion events may update
@@ -701,12 +722,12 @@ implementation.
 
 Expected materialized views:
 
-- active sessions by workspace
+- active agents by workspace
 - active claims by resource
 - planned edits by workspace
-- conflicts by session
-- finalization summaries by session
-- prompt context package for Codex hooks and MCP tools
+- conflicts by agent
+- finalization summaries by agent
+- prompt context package for Codex hooks and native Stateful tools
 
 The current server exposes `/v1/context/render` and `state_context_render` as a
 store-backed planning/manual inspection view over active reservations, active

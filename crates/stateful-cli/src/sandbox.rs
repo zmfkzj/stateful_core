@@ -28,19 +28,34 @@ use std::os::unix::fs::FileTypeExt;
 use std::os::unix::process::CommandExt;
 
 use crate::{
-    CurrentSession, GlobalPaths, HttpResponse, ProtocolEnvelopeArgs, RepoGate, ServerRuntime,
+    AgentContext, GlobalPaths, HttpResponse, ProtocolEnvelopeArgs, RepoGate, ServerRuntime,
     discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server, post_json,
-    protocol_envelope, read_current_session_file, repo_gate, repo_identity_for_enabled_repo,
-    runtime::{current_stateful_session_id, write_current_session_file_for_explicit_session},
+    protocol_envelope, repo_gate, repo_identity_for_enabled_repo,
     runtime_env_override_is_configured, shadow_guard,
-    shell_command::{
-        first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
-    },
+    shell_command::{first_word_is_env_assignment, split_simple_command_words},
+    validate_agent_id,
+};
+mod parse;
+mod process_find;
+
+pub(crate) use parse::{
+    parse_sandbox_process_find_bash_invocation, parse_sandbox_run_bash_invocation,
+};
+// Temporary re-export for CLI sequence plumbing; keep the lint narrow.
+#[allow(unused_imports)]
+pub(crate) use parse::resolve_sandbox_run_command;
+use process_find::process_comm_basename;
+pub use process_find::run_sandbox_process_find;
+pub(crate) use process_find::validate_process_find_request;
+#[cfg(test)]
+use process_find::{
+    filter_process_find_rows, parse_process_find_ps_output, process_find_output_for_rows,
 };
 
 pub(crate) const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
 pub(crate) const STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV: &str = "STATEFUL_ALLOW_NESTED_SANDBOX_RUN";
 const SANDBOX_TMP_ROOT: &str = "/tmp/stateful";
+const DEFAULT_SANDBOX_RUN_TIMEOUT_SECONDS: u64 = 3600;
 #[cfg(unix)]
 const SIGKILL: i32 = 9;
 
@@ -66,6 +81,8 @@ pub struct SandboxRunRequest {
     pub network: SandboxNetworkPolicy,
     pub purpose: Option<String>,
     pub reservation_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub workspace_id: Option<String>,
     pub write_targets: Vec<String>,
     pub create_targets: Vec<String>,
     pub write_dirs: Vec<String>,
@@ -149,19 +166,6 @@ pub struct SandboxProcessInfo {
     pub tty: String,
     pub comm: String,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SandboxProcessRow {
-    info: SandboxProcessInfo,
-    command: String,
-}
-
-const PROCESS_FIND_DEFAULT_FIELDS: &[&str] = &[
-    "pid", "ppid", "pgid", "user", "uid", "stat", "start", "etime", "time", "pcpu", "pmem", "rss",
-    "vsz", "nice", "pri", "tty", "comm",
-];
-
-const PROCESS_FIND_FORBIDDEN_FIELDS: &[&str] = &["command", "args", "argv", "env"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxAuthorizationDenied {
@@ -261,6 +265,14 @@ pub(crate) fn sandbox_run_cli_exit_code(output: &SandboxRunOutput) -> Option<i32
     }
 }
 
+fn sandbox_run_timeout_duration(timeout_seconds: Option<u64>) -> Duration {
+    Duration::from_secs(
+        timeout_seconds
+            .unwrap_or(DEFAULT_SANDBOX_RUN_TIMEOUT_SECONDS)
+            .max(1),
+    )
+}
+
 pub fn run_sandbox_in_repo(
     repo_root: &Path,
     paths: &GlobalPaths,
@@ -335,18 +347,20 @@ pub fn run_sandbox_in_repo(
                 let runtime = runtime
                     .as_ref()
                     .expect("external sandbox repo targets require runtime");
-                let current_session = current_session_for_sandbox_profile(
+                let agent_context = agent_context_for_sandbox_profile(
                     &repo_root,
                     paths,
                     runtime,
-                    "sandbox external repo targets require a current stateful session",
+                    request.agent_id.as_deref(),
+                    request.workspace_id.as_deref(),
+                    "sandbox external repo targets require --agent-id",
                 )?;
                 let authorize_context = SandboxAuthorizeContext {
                     runtime,
                     repo_root: &repo_root,
                     paths,
-                    session_id: &current_session.session_id,
-                    workspace_id: &current_session.workspace_id,
+                    agent_id: &agent_context.agent_id,
+                    workspace_id: &agent_context.workspace_id,
                     network: request.network,
                     fs_profile: sandbox_fs_profile_name(request.fs),
                     reservation_id: request.reservation_id.as_deref(),
@@ -390,8 +404,8 @@ pub fn run_sandbox_in_repo(
                 }
 
                 release_after_run = Some(SandboxLeaseReleaseContext {
-                    session_id: current_session.session_id.clone(),
-                    workspace_id: current_session.workspace_id.clone(),
+                    agent_id: agent_context.agent_id.clone(),
+                    workspace_id: agent_context.workspace_id.clone(),
                     paths: external_scope
                         .repo_write_targets
                         .iter()
@@ -431,18 +445,20 @@ pub fn run_sandbox_in_repo(
             let runtime = runtime
                 .as_ref()
                 .expect("write-targets sandbox profile requires runtime");
-            let current_session = current_session_for_sandbox_profile(
+            let agent_context = agent_context_for_sandbox_profile(
                 &repo_root,
                 paths,
                 runtime,
-                "sandbox write-targets requires a current stateful session",
+                request.agent_id.as_deref(),
+                request.workspace_id.as_deref(),
+                "sandbox write-targets requires --agent-id",
             )?;
             let authorize_context = SandboxAuthorizeContext {
                 runtime,
                 repo_root: &repo_root,
                 paths,
-                session_id: &current_session.session_id,
-                workspace_id: &current_session.workspace_id,
+                agent_id: &agent_context.agent_id,
+                workspace_id: &agent_context.workspace_id,
                 network: request.network,
                 fs_profile: sandbox_fs_profile_name(request.fs),
                 reservation_id: request.reservation_id.as_deref(),
@@ -482,8 +498,8 @@ pub fn run_sandbox_in_repo(
             }
 
             release_after_run = Some(SandboxLeaseReleaseContext {
-                session_id: current_session.session_id.clone(),
-                workspace_id: current_session.workspace_id.clone(),
+                agent_id: agent_context.agent_id.clone(),
+                workspace_id: agent_context.workspace_id.clone(),
                 paths: write_targets
                     .iter()
                     .chain(create_targets.iter())
@@ -517,17 +533,19 @@ pub fn run_sandbox_in_repo(
             let runtime = runtime
                 .as_ref()
                 .expect("build sandbox profile requires runtime");
-            let current_session = current_session_for_sandbox_profile(
+            let agent_context = agent_context_for_sandbox_profile(
                 &repo_root,
                 paths,
                 runtime,
-                "sandbox build profile requires a current stateful session",
+                request.agent_id.as_deref(),
+                request.workspace_id.as_deref(),
+                "sandbox build profile requires --agent-id",
             )?;
             let build_write_dir = write_dirs
                 .first()
                 .expect("build profile validation requires one write dir");
             let (display_path, writable_paths) =
-                prepare_build_profile_writable_paths(&current_session.session_id, build_write_dir)?;
+                prepare_build_profile_writable_paths(&agent_context.agent_id, build_write_dir)?;
             allowed_write_targets.push(sandbox_write_dir_display_path(&display_path));
             writable_paths
         }
@@ -545,7 +563,7 @@ pub fn run_sandbox_in_repo(
     };
 
     let cwd = resolve_sandbox_cwd(&repo_root)?;
-    let timeout = Duration::from_secs(request.timeout_seconds.unwrap_or(300).max(1));
+    let timeout = sandbox_run_timeout_duration(request.timeout_seconds);
     let result = (|| -> anyhow::Result<_> {
         match direct_command.as_ref() {
             Some(ValidatedSandboxDirectCommand::Git(words)) => {
@@ -606,235 +624,6 @@ pub fn run_sandbox_in_repo(
     })
 }
 
-pub(crate) fn parse_sandbox_run_bash_invocation(
-    command: &str,
-) -> Result<SandboxRunBashInvocation, String> {
-    reject_outer_shell_syntax(
-        command,
-        "Bash wrapper must be a single stateful sandbox run command",
-    )?;
-    let words = split_simple_command_words(command)?;
-    if words.is_empty() {
-        return Err("Bash commands must use stateful sandbox run".to_string());
-    }
-    if first_word_is_env_assignment(&words[0]) {
-        return Err("Bash wrapper must not use outer environment assignments".to_string());
-    }
-    if words.len() < 3 || words[1] != "sandbox" || words[2] != "run" {
-        return Err("Bash commands must use stateful sandbox run".to_string());
-    }
-
-    let mut fs = SandboxFsProfile::ReadOnly;
-    let mut network = SandboxNetworkPolicy::Disabled;
-    let mut purpose = None;
-    let mut reservation_id = None;
-    let mut write_targets = Vec::new();
-    let mut create_targets = Vec::new();
-    let mut write_dirs = Vec::new();
-    let mut connect_sockets = Vec::new();
-    let mut allow_signal = false;
-    let mut inner_command = None;
-    let mut timeout_seconds = None;
-    let mut stream_events = false;
-    let mut index = 3;
-    while index < words.len() {
-        let arg = &words[index];
-        match arg.as_str() {
-            "--" => {
-                return Err("stateful sandbox run does not support argv mode".to_string());
-            }
-            "--fs" => {
-                index += 1;
-                let value = parse_sandbox_run_arg_value(&words, index, "--fs")?;
-                fs = parse_sandbox_fs_profile(&value)?;
-            }
-            "--network" => {
-                index += 1;
-                let value = parse_sandbox_run_arg_value(&words, index, "--network")?;
-                network = parse_sandbox_network_policy(&value)?;
-            }
-            "--purpose" => {
-                if purpose.is_some() {
-                    return Err("stateful sandbox run accepts at most one --purpose".to_string());
-                }
-                index += 1;
-                purpose = Some(parse_sandbox_run_arg_value(&words, index, "--purpose")?);
-            }
-            "--reservation-id" => {
-                if reservation_id.is_some() {
-                    return Err(
-                        "stateful sandbox run accepts at most one --reservation-id".to_string()
-                    );
-                }
-                index += 1;
-                reservation_id = Some(parse_sandbox_run_arg_value(
-                    &words,
-                    index,
-                    "--reservation-id",
-                )?);
-            }
-            "--write-target" => {
-                index += 1;
-                write_targets.push(parse_sandbox_run_arg_value(
-                    &words,
-                    index,
-                    "--write-target",
-                )?);
-            }
-            "--create-target" => {
-                index += 1;
-                create_targets.push(parse_sandbox_run_arg_value(
-                    &words,
-                    index,
-                    "--create-target",
-                )?);
-            }
-            "--write-dir" => {
-                index += 1;
-                write_dirs.push(parse_sandbox_run_arg_value(&words, index, "--write-dir")?);
-            }
-            "--connect-socket" => {
-                index += 1;
-                connect_sockets.push(parse_sandbox_run_arg_value(
-                    &words,
-                    index,
-                    "--connect-socket",
-                )?);
-            }
-            "--allow-signal" => {
-                allow_signal = true;
-            }
-            "--command" => {
-                if inner_command.is_some() {
-                    return Err("stateful sandbox run requires exactly one --command".to_string());
-                }
-                index += 1;
-                inner_command = Some(parse_sandbox_run_arg_value(&words, index, "--command")?);
-            }
-            "--timeout-seconds" => {
-                index += 1;
-                let timeout = parse_sandbox_run_arg_value(&words, index, "--timeout-seconds")?;
-                timeout_seconds = Some(timeout.parse::<u64>().map_err(|_| {
-                    "stateful sandbox run --timeout-seconds requires an integer value".to_string()
-                })?);
-            }
-            "--stream-events" => {
-                stream_events = true;
-            }
-            _ => {
-                return Err(format!("unsupported stateful sandbox run argument `{arg}`"));
-            }
-        }
-        index += 1;
-    }
-
-    let Some(command) = inner_command else {
-        return Err("stateful sandbox run requires exactly one --command".to_string());
-    };
-
-    Ok(SandboxRunBashInvocation {
-        executable: words[0].clone(),
-        request: SandboxRunRequest {
-            fs,
-            network,
-            purpose,
-            reservation_id,
-            write_targets,
-            create_targets,
-            write_dirs,
-            connect_sockets,
-            allow_signal,
-            command,
-            timeout_seconds,
-            stream_events,
-        },
-    })
-}
-
-pub(crate) fn parse_sandbox_process_find_bash_invocation(
-    command: &str,
-) -> Result<SandboxProcessFindBashInvocation, String> {
-    reject_outer_shell_syntax(
-        command,
-        "Bash wrapper must be a single stateful sandbox process find command",
-    )?;
-    let words = split_simple_command_words(command)?;
-    if words.is_empty() {
-        return Err("Bash commands must use stateful sandbox process find".to_string());
-    }
-    if first_word_is_env_assignment(&words[0]) {
-        return Err("Bash wrapper must not use outer environment assignments".to_string());
-    }
-    if words.len() < 4 || words[1] != "sandbox" || words[2] != "process" || words[3] != "find" {
-        return Err("Bash commands must use stateful sandbox process find".to_string());
-    }
-
-    let mut request = SandboxProcessFindRequest {
-        names: Vec::new(),
-        contains: Vec::new(),
-        pids: Vec::new(),
-        parent_pids: Vec::new(),
-        process_groups: Vec::new(),
-        fields: Vec::new(),
-    };
-    let mut index = 4;
-    while index < words.len() {
-        let arg = &words[index];
-        match arg.as_str() {
-            "--" => {
-                return Err("stateful sandbox process find does not support argv mode".to_string());
-            }
-            "--name" => {
-                index += 1;
-                request
-                    .names
-                    .push(parse_sandbox_run_arg_value(&words, index, "--name")?);
-            }
-            "--contains" => {
-                index += 1;
-                request
-                    .contains
-                    .push(parse_sandbox_run_arg_value(&words, index, "--contains")?);
-            }
-            "--pid" => {
-                index += 1;
-                request
-                    .pids
-                    .push(parse_process_selector_arg(&words, index, "--pid")?);
-            }
-            "--parent-pid" | "--ppid" => {
-                index += 1;
-                request
-                    .parent_pids
-                    .push(parse_process_selector_arg(&words, index, arg)?);
-            }
-            "--process-group" | "--pgid" => {
-                index += 1;
-                request
-                    .process_groups
-                    .push(parse_process_selector_arg(&words, index, arg)?);
-            }
-            "--field" => {
-                index += 1;
-                request
-                    .fields
-                    .push(parse_sandbox_run_arg_value(&words, index, "--field")?);
-            }
-            _ => {
-                return Err(format!(
-                    "unsupported stateful sandbox process find argument `{arg}`"
-                ));
-            }
-        }
-        index += 1;
-    }
-
-    Ok(SandboxProcessFindBashInvocation {
-        executable: words[0].clone(),
-        request,
-    })
-}
-
 pub(crate) fn validate_sandbox_run_request_shape(
     request: &SandboxRunRequest,
 ) -> anyhow::Result<ValidatedSandboxRunShape> {
@@ -892,110 +681,30 @@ pub(crate) fn validate_sandbox_run_request_shape(
     })
 }
 
-pub(crate) fn validate_process_find_request(
-    request: &SandboxProcessFindRequest,
-) -> anyhow::Result<()> {
-    if request.names.is_empty()
-        && request.contains.is_empty()
-        && request.pids.is_empty()
-        && request.parent_pids.is_empty()
-        && request.process_groups.is_empty()
-    {
-        anyhow::bail!("stateful sandbox process find requires at least one selector");
-    }
-    for name in &request.names {
-        validate_process_name_selector(name)?;
-    }
-    for contains in &request.contains {
-        validate_process_contains_selector(contains)?;
-    }
-    for (label, ids) in [
-        ("--pid", request.pids.as_slice()),
-        ("--parent-pid", request.parent_pids.as_slice()),
-        ("--process-group", request.process_groups.as_slice()),
-    ] {
-        if ids.contains(&0) {
-            anyhow::bail!("stateful sandbox process find {label} selectors must be positive");
-        }
-    }
-
-    validate_process_find_fields(&request.fields)?;
-
-    Ok(())
-}
-
-pub fn run_sandbox_process_find(
-    request: SandboxProcessFindRequest,
-) -> anyhow::Result<SandboxProcessFindOutput> {
-    validate_process_find_request(&request)?;
-    let rows = read_process_find_rows()?;
-    process_find_output_for_rows(&request, rows)
-}
-
-fn parse_process_selector_arg(words: &[String], index: usize, arg: &str) -> Result<u32, String> {
-    let value = parse_sandbox_run_arg_value(words, index, arg)?;
-    value
-        .parse::<u32>()
-        .map_err(|_| format!("stateful sandbox process find argument `{arg}` requires an integer"))
-}
-
-fn parse_sandbox_run_arg_value(
-    words: &[String],
-    index: usize,
-    arg: &str,
-) -> Result<String, String> {
-    words
-        .get(index)
-        .cloned()
-        .ok_or_else(|| format!("stateful sandbox run argument `{arg}` requires a value"))
-}
-
-fn parse_sandbox_fs_profile(value: &str) -> Result<SandboxFsProfile, String> {
-    match value {
-        "read-only" => Ok(SandboxFsProfile::ReadOnly),
-        "write-targets" => Ok(SandboxFsProfile::WriteTargets),
-        "external" => Ok(SandboxFsProfile::External),
-        "build" => Ok(SandboxFsProfile::Build),
-        "git" => Ok(SandboxFsProfile::Git),
-        "github-pr" => Ok(SandboxFsProfile::GithubPr),
-        _ => Err(
-            "stateful sandbox run supports only read-only, write-targets, external, build, git, and github-pr profiles"
-                .to_string(),
-        ),
-    }
-}
-
-pub(crate) fn current_session_for_sandbox_profile(
+pub(crate) fn agent_context_for_sandbox_profile(
     repo_root: &Path,
     paths: &GlobalPaths,
     runtime: &ServerRuntime,
+    agent_id: Option<&str>,
+    workspace_id: Option<&str>,
     missing_message: &'static str,
-) -> anyhow::Result<CurrentSession> {
-    match read_current_session_file(repo_root) {
-        Ok(session) => Ok(session),
-        Err(_) => {
-            let Some(session_id) = current_stateful_session_id()? else {
-                anyhow::bail!(missing_message);
-            };
+) -> anyhow::Result<AgentContext> {
+    let agent_id = agent_id.ok_or_else(|| anyhow::anyhow!(missing_message))?;
+    validate_agent_id(agent_id, "agent_id")?;
+    let workspace_id = match workspace_id {
+        Some(workspace_id) => workspace_id.to_string(),
+        None => {
             let identity = repo_identity_for_enabled_repo(paths, repo_root).ok();
-            let workspace_id =
-                effective_workspace_id_for_repo(&runtime.workspace_id, identity.as_ref());
-            let session = CurrentSession::new(session_id, workspace_id);
-            write_current_session_file_for_explicit_session(repo_root, &session)
-                .map_err(|error| anyhow::anyhow!("{missing_message}: {error}"))?;
-            Ok(session)
+            effective_workspace_id_for_repo(&runtime.workspace_id, identity.as_ref())
         }
-    }
+    };
+    Ok(AgentContext::new(agent_id, workspace_id))
 }
 
-fn parse_sandbox_network_policy(value: &str) -> Result<SandboxNetworkPolicy, String> {
-    match value {
-        "disabled" => Ok(SandboxNetworkPolicy::Disabled),
-        "enabled" => Ok(SandboxNetworkPolicy::Enabled),
-        _ => Err("stateful sandbox run network must be disabled or enabled".to_string()),
-    }
-}
-
+#[expect(
+    clippy::too_many_arguments,
+    reason = "sandbox launch wires policy knobs explicitly"
+)]
 fn run_sandboxed_command(
     command: &str,
     cwd: &Path,
@@ -1008,6 +717,8 @@ fn run_sandboxed_command(
     stream_events: bool,
 ) -> anyhow::Result<SandboxCommandResult> {
     let temp_dir = sandbox_temp_dir(writable_paths);
+    #[cfg(not(target_os = "macos"))]
+    let _ = allow_macos_identity_and_trust_services;
     if allow_direct_nested_sandbox_run() {
         let mut command = direct_shell_command(command, cwd);
         apply_sandbox_temp_env(&mut command, temp_dir.as_deref());
@@ -1065,6 +776,10 @@ fn run_sandboxed_command(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "git sandbox launch reuses parsed policy knobs"
+)]
 fn run_sandboxed_git_command(
     words: &[String],
     cwd: &Path,
@@ -1816,12 +1531,12 @@ fn prepare_sandbox_writable_paths(
 }
 
 fn prepare_build_profile_writable_paths(
-    session_id: &str,
+    agent_id: &str,
     scratch_purpose: &str,
 ) -> anyhow::Result<(String, Vec<SandboxWritablePath>)> {
     ensure_build_scratch_purpose_target(scratch_purpose)?;
 
-    let session_fragment = sandbox_tmp_fragment(session_id);
+    let session_fragment = sandbox_tmp_fragment(agent_id);
     let scratch_root = PathBuf::from(SANDBOX_TMP_ROOT);
     let scratch_relative = PathBuf::from(&session_fragment).join(scratch_purpose);
     let scratch_dir = scratch_root.join(&scratch_relative);
@@ -1998,30 +1713,6 @@ fn validate_profile_network_policy(
         anyhow::bail!("github-pr sandbox run requires --network enabled");
     }
 
-    Ok(())
-}
-
-fn validate_process_name_selector(name: &str) -> anyhow::Result<()> {
-    if name.trim().is_empty() {
-        anyhow::bail!("stateful sandbox process find --name must not be empty");
-    }
-    if !name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        anyhow::bail!("stateful sandbox process find --name contains unsupported characters");
-    }
-    Ok(())
-}
-
-fn validate_process_contains_selector(contains: &str) -> anyhow::Result<()> {
-    let trimmed = contains.trim();
-    if trimmed.len() < 3 {
-        anyhow::bail!("stateful sandbox process find --contains must be at least 3 characters");
-    }
-    if trimmed.chars().any(char::is_control) {
-        anyhow::bail!("stateful sandbox process find --contains contains control characters");
-    }
     Ok(())
 }
 
@@ -2492,212 +2183,6 @@ enum ShellSegmentQuoteState {
     Double,
 }
 
-fn read_process_find_rows() -> anyhow::Result<Vec<SandboxProcessRow>> {
-    let output = Command::new("/bin/ps")
-        .args(["-axo", "pid=,ppid=,pgid=,user=,uid=,stat=,start=,etime=,time=,pcpu=,pmem=,rss=,vsz=,nice=,pri=,tty=,comm=,command="])
-        .output()
-        .or_else(|_| {
-            Command::new("ps")
-                .args(["-axo", "pid=,ppid=,pgid=,user=,uid=,stat=,start=,etime=,time=,pcpu=,pmem=,rss=,vsz=,nice=,pri=,tty=,comm=,command="])
-                .output()
-        })?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "stateful sandbox process find failed to inspect processes: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    parse_process_find_ps_output(&String::from_utf8_lossy(&output.stdout))
-}
-
-fn parse_process_find_ps_output(output: &str) -> anyhow::Result<Vec<SandboxProcessRow>> {
-    let mut rows = Vec::new();
-    for line in output.lines() {
-        let fields = line.split_whitespace().collect::<Vec<_>>();
-        if fields.len() < PROCESS_FIND_DEFAULT_FIELDS.len() {
-            continue;
-        }
-        let pid = parse_process_find_u32_field(fields[0], "pid")?;
-        let ppid = parse_process_find_u32_field(fields[1], "ppid")?;
-        let pgid = parse_process_find_u32_field(fields[2], "pgid")?;
-        let user = fields[3].to_string();
-        let uid = parse_process_find_i32_field(fields[4], "uid")?;
-        let stat = fields[5].to_string();
-        let start = fields[6].to_string();
-        let etime = fields[7].to_string();
-        let time = fields[8].to_string();
-        let pcpu = fields[9].to_string();
-        let pmem = fields[10].to_string();
-        let rss = parse_process_find_u64_field(fields[11], "rss")?;
-        let vsz = parse_process_find_u64_field(fields[12], "vsz")?;
-        let nice = parse_process_find_i32_field(fields[13], "nice")?;
-        let pri = parse_process_find_i32_field(fields[14], "pri")?;
-        let tty = fields[15].to_string();
-        let comm = fields[16].to_string();
-        let command = if fields.len() > PROCESS_FIND_DEFAULT_FIELDS.len() {
-            fields[PROCESS_FIND_DEFAULT_FIELDS.len()..].join(" ")
-        } else {
-            comm.clone()
-        };
-        rows.push(SandboxProcessRow {
-            info: SandboxProcessInfo {
-                pid,
-                ppid,
-                pgid,
-                user,
-                uid,
-                stat,
-                start,
-                etime,
-                time,
-                pcpu,
-                pmem,
-                rss,
-                vsz,
-                nice,
-                pri,
-                tty,
-                comm,
-            },
-            command,
-        });
-    }
-    Ok(rows)
-}
-
-fn parse_process_find_u32_field(value: &str, field: &str) -> anyhow::Result<u32> {
-    value.parse::<u32>().map_err(|_| {
-        anyhow::anyhow!("stateful sandbox process find invalid {field} field `{value}`")
-    })
-}
-
-fn parse_process_find_u64_field(value: &str, field: &str) -> anyhow::Result<u64> {
-    value.parse::<u64>().map_err(|_| {
-        anyhow::anyhow!("stateful sandbox process find invalid {field} field `{value}`")
-    })
-}
-
-fn parse_process_find_i32_field(value: &str, field: &str) -> anyhow::Result<i32> {
-    value.parse::<i32>().map_err(|_| {
-        anyhow::anyhow!("stateful sandbox process find invalid {field} field `{value}`")
-    })
-}
-
-fn filter_process_find_rows(
-    request: &SandboxProcessFindRequest,
-    rows: Vec<SandboxProcessRow>,
-) -> Vec<SandboxProcessInfo> {
-    rows.into_iter()
-        .filter(|row| row.info.pid != std::process::id())
-        .filter(|row| process_find_row_matches(request, row))
-        .map(|row| row.info)
-        .collect()
-}
-
-fn process_find_output_for_rows(
-    request: &SandboxProcessFindRequest,
-    rows: Vec<SandboxProcessRow>,
-) -> anyhow::Result<SandboxProcessFindOutput> {
-    validate_process_find_fields(&request.fields)?;
-    let processes = filter_process_find_rows(request, rows)
-        .into_iter()
-        .map(|process| process_find_info_to_json(&process, &request.fields))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(SandboxProcessFindOutput {
-        status: "ok",
-        processes,
-    })
-}
-
-fn validate_process_find_fields(fields: &[String]) -> anyhow::Result<()> {
-    for field in fields {
-        if PROCESS_FIND_FORBIDDEN_FIELDS.contains(&field.as_str()) {
-            anyhow::bail!("stateful sandbox process find cannot expose field `{field}`");
-        }
-        if !process_find_is_safe_field(field) {
-            anyhow::bail!("stateful sandbox process find unknown field `{field}`");
-        }
-    }
-    Ok(())
-}
-
-fn process_find_is_safe_field(field: &str) -> bool {
-    PROCESS_FIND_DEFAULT_FIELDS.contains(&field)
-}
-
-fn process_find_info_to_json(
-    info: &SandboxProcessInfo,
-    requested_fields: &[String],
-) -> anyhow::Result<Value> {
-    let mut process = serde_json::Map::new();
-    if requested_fields.is_empty() {
-        for field in PROCESS_FIND_DEFAULT_FIELDS {
-            process.insert(
-                (*field).to_string(),
-                process_find_info_field_value(info, field)?,
-            );
-        }
-    } else {
-        for field in requested_fields {
-            process.insert(
-                field.clone(),
-                process_find_info_field_value(info, field.as_str())?,
-            );
-        }
-    }
-    Ok(Value::Object(process))
-}
-
-fn process_find_info_field_value(info: &SandboxProcessInfo, field: &str) -> anyhow::Result<Value> {
-    match field {
-        "pid" => Ok(Value::from(info.pid)),
-        "ppid" => Ok(Value::from(info.ppid)),
-        "pgid" => Ok(Value::from(info.pgid)),
-        "user" => Ok(Value::from(info.user.clone())),
-        "uid" => Ok(Value::from(info.uid)),
-        "stat" => Ok(Value::from(info.stat.clone())),
-        "start" => Ok(Value::from(info.start.clone())),
-        "etime" => Ok(Value::from(info.etime.clone())),
-        "time" => Ok(Value::from(info.time.clone())),
-        "pcpu" => Ok(Value::from(info.pcpu.clone())),
-        "pmem" => Ok(Value::from(info.pmem.clone())),
-        "rss" => Ok(Value::from(info.rss)),
-        "vsz" => Ok(Value::from(info.vsz)),
-        "nice" => Ok(Value::from(info.nice)),
-        "pri" => Ok(Value::from(info.pri)),
-        "tty" => Ok(Value::from(info.tty.clone())),
-        "comm" => Ok(Value::from(info.comm.clone())),
-        _ if PROCESS_FIND_FORBIDDEN_FIELDS.contains(&field) => {
-            anyhow::bail!("stateful sandbox process find cannot expose field `{field}`")
-        }
-        _ => anyhow::bail!("stateful sandbox process find unknown field `{field}`"),
-    }
-}
-
-fn process_find_row_matches(request: &SandboxProcessFindRequest, row: &SandboxProcessRow) -> bool {
-    (request.names.is_empty()
-        || request
-            .names
-            .iter()
-            .any(|name| row.info.comm == *name || process_comm_basename(&row.info.comm) == name))
-        && (request.contains.is_empty()
-            || request
-                .contains
-                .iter()
-                .any(|contains| row.command.contains(contains)))
-        && (request.pids.is_empty() || request.pids.contains(&row.info.pid))
-        && (request.parent_pids.is_empty() || request.parent_pids.contains(&row.info.ppid))
-        && (request.process_groups.is_empty() || request.process_groups.contains(&row.info.pgid))
-}
-
-fn process_comm_basename(comm: &str) -> &str {
-    Path::new(comm)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(comm)
-}
-
 fn sandbox_fs_profile_name(fs: SandboxFsProfile) -> &'static str {
     match fs {
         SandboxFsProfile::ReadOnly => "read-only",
@@ -2803,7 +2288,7 @@ fn validate_github_pr_profile_command(command: &str) -> anyhow::Result<Vec<Strin
 pub(crate) fn parse_github_pr_profile_command(command: &str) -> Result<Vec<String>, String> {
     reject_direct_profile_shell_syntax(command)
         .map_err(|reason| format!("github-pr profile requires a single gh pr command: {reason}"))?;
-    let words = split_git_profile_command_words(command)
+    let words = split_simple_command_words(command)
         .map_err(|reason| format!("github-pr profile requires a single gh pr command: {reason}"))?;
     validate_github_pr_profile_words(&words)?;
     Ok(words)
@@ -2812,13 +2297,48 @@ pub(crate) fn parse_github_pr_profile_command(command: &str) -> Result<Vec<Strin
 pub(crate) fn parse_git_profile_command(command: &str) -> Result<Vec<String>, String> {
     reject_direct_profile_shell_syntax(command)
         .map_err(|reason| format!("git profile requires a single git command: {reason}"))?;
-    let words = split_git_profile_command_words(command)
+    let words = split_simple_command_words(command)
         .map_err(|reason| format!("git profile requires a single git command: {reason}"))?;
+    let words = coalesce_git_commit_message_flag(words);
     if words.first().is_none_or(|word| word != "git") {
         return Err("git profile requires a single git command".to_string());
     }
     validate_git_profile_words(&words)?;
     Ok(words)
+}
+
+fn coalesce_git_commit_message_flag(words: Vec<String>) -> Vec<String> {
+    if words.get(1).map(String::as_str) != Some("commit") {
+        return words;
+    }
+
+    // ponytail: unquoted `-m msg path` is ambiguous; use `--` before pathspecs.
+    let mut coalesced = Vec::with_capacity(words.len());
+    let mut index = 0;
+    while index < words.len() {
+        let word = &words[index];
+        coalesced.push(word.clone());
+        if matches!(word.as_str(), "-m" | "--message")
+            && words.get(index + 1).is_some()
+            && words
+                .get(index + 2)
+                .is_some_and(|next| !next.starts_with('-'))
+        {
+            index += 1;
+            let mut message = words[index].clone();
+            while words
+                .get(index + 1)
+                .is_some_and(|next| !next.starts_with('-'))
+            {
+                index += 1;
+                message.push(' ');
+                message.push_str(&words[index]);
+            }
+            coalesced.push(message);
+        }
+        index += 1;
+    }
+    coalesced
 }
 
 fn validate_github_pr_profile_words(words: &[String]) -> Result<(), String> {
@@ -3114,61 +2634,6 @@ fn reject_direct_profile_shell_syntax(command: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn split_git_profile_command_words(command: &str) -> Result<Vec<String>, String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut state = ShellQuoteState::None;
-    let mut in_word = false;
-
-    for ch in command.chars() {
-        match state {
-            ShellQuoteState::None => match ch {
-                '\'' => {
-                    state = ShellQuoteState::Single;
-                    in_word = true;
-                }
-                '"' => {
-                    state = ShellQuoteState::Double;
-                    in_word = true;
-                }
-                ch if ch.is_whitespace() => {
-                    if in_word {
-                        words.push(std::mem::take(&mut current));
-                        in_word = false;
-                    }
-                }
-                _ => {
-                    current.push(ch);
-                    in_word = true;
-                }
-            },
-            ShellQuoteState::Single => {
-                if ch == '\'' {
-                    state = ShellQuoteState::None;
-                } else {
-                    current.push(ch);
-                }
-            }
-            ShellQuoteState::Double => {
-                if ch == '"' {
-                    state = ShellQuoteState::None;
-                } else {
-                    current.push(ch);
-                }
-            }
-        }
-    }
-
-    if state != ShellQuoteState::None {
-        return Err("unterminated quotes".to_string());
-    }
-    if in_word {
-        words.push(current);
-    }
-
-    Ok(words)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellQuoteState {
     None,
@@ -3287,7 +2752,7 @@ pub(crate) struct SandboxAuthorizeContext<'a> {
     pub(crate) runtime: &'a ServerRuntime,
     pub(crate) repo_root: &'a Path,
     pub(crate) paths: &'a GlobalPaths,
-    pub(crate) session_id: &'a str,
+    pub(crate) agent_id: &'a str,
     pub(crate) workspace_id: &'a str,
     pub(crate) network: SandboxNetworkPolicy,
     pub(crate) fs_profile: &'static str,
@@ -3296,7 +2761,7 @@ pub(crate) struct SandboxAuthorizeContext<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SandboxLeaseReleaseContext {
-    session_id: String,
+    agent_id: String,
     workspace_id: String,
     paths: Vec<String>,
 }
@@ -3332,7 +2797,7 @@ pub(crate) fn authorize_sandbox_write(
     let body = protocol_envelope(ProtocolEnvelopeArgs {
         runtime: context.runtime,
         request_id: uuid::Uuid::new_v4().to_string(),
-        session_id: context.session_id.to_string(),
+        agent_id: context.agent_id.to_string(),
         workspace_id: context.workspace_id.to_string(),
         identity: repo_identity_for_enabled_repo(context.paths, context.repo_root).ok(),
         source_kind: "cli",
@@ -3382,7 +2847,7 @@ fn release_sandbox_write_claims(runtime: &ServerRuntime, context: &SandboxLeaseR
 
     for path in paths {
         let body = serde_json::json!({
-            "session_id": context.session_id,
+            "agent_id": context.agent_id,
             "workspace_id": context.workspace_id,
             "path": path,
         });
@@ -3456,6 +2921,10 @@ fn is_git_internal_segment(segment: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "seatbelt profile generation keeps sandbox knobs explicit"
+)]
 fn seatbelt_command(
     command: &str,
     cwd: &Path,
@@ -4228,53 +3697,10 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    const SANDBOX_SESSION_CHILD_CASE: &str = "STATEFUL_SANDBOX_SESSION_CHILD_CASE";
-    const SANDBOX_SESSION_CHILD_ROOT: &str = "STATEFUL_SANDBOX_SESSION_CHILD_ROOT";
-
     #[test]
-    #[ignore]
-    fn sandbox_current_session_child_probe() {
-        let Ok(child_case) = std::env::var(SANDBOX_SESSION_CHILD_CASE) else {
-            return;
-        };
-        let repo_root = PathBuf::from(
-            std::env::var_os(SANDBOX_SESSION_CHILD_ROOT)
-                .expect("sandbox session child root must be configured"),
-        );
-
-        match child_case.as_str() {
-            "bootstrap_from_codex_thread_id" => {
-                let paths = GlobalPaths::new(repo_root.join("home"));
-                let runtime =
-                    ServerRuntime::new("http://127.0.0.1:9", "secret-token", "workspace-a", 42);
-                let session = current_session_for_sandbox_profile(
-                    &repo_root,
-                    &paths,
-                    &runtime,
-                    "missing session",
-                )
-                .expect("sandbox current session should bootstrap");
-
-                assert_eq!(session, CurrentSession::new("thread-a", "workspace-a"));
-                assert_eq!(
-                    crate::read_current_session_file_for_session(&repo_root, "thread-a")
-                        .expect("session-bound current session should read"),
-                    CurrentSession::new("thread-a", "workspace-a")
-                );
-                assert_eq!(
-                    read_current_session_file(&repo_root)
-                        .expect("legacy current session alias should read"),
-                    CurrentSession::new("thread-a", "workspace-a")
-                );
-            }
-            other => panic!("unknown sandbox session child case `{other}`"),
-        }
-    }
-
-    #[test]
-    fn sandbox_current_session_bootstraps_from_codex_thread_id_when_missing() {
+    fn sandbox_agent_context_requires_explicit_agent_id_when_missing() {
         let temp_root = std::env::temp_dir().join(format!(
-            "stateful-sandbox-session-bootstrap-test-{}",
+            "stateful-sandbox-agent-id-required-test-{}",
             std::process::id()
         ));
         if temp_root.exists() {
@@ -4282,24 +3708,64 @@ mod tests {
         }
         fs::create_dir_all(&temp_root).expect("temp root should create");
 
-        let output = Command::new(std::env::current_exe().expect("current test binary path"))
-            .arg("sandbox::tests::sandbox_current_session_child_probe")
-            .arg("--ignored")
-            .arg("--exact")
-            .arg("--nocapture")
-            .env_clear()
-            .env(SANDBOX_SESSION_CHILD_CASE, "bootstrap_from_codex_thread_id")
-            .env(SANDBOX_SESSION_CHILD_ROOT, &temp_root)
-            .env("CODEX_THREAD_ID", "thread-a")
-            .output()
-            .expect("sandbox session child test should run");
+        let paths = GlobalPaths::new(temp_root.join("home"));
+        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret-token", "workspace-a", 42);
+        let error = agent_context_for_sandbox_profile(
+            &temp_root,
+            &paths,
+            &runtime,
+            None,
+            None,
+            "sandbox write-targets requires --agent-id",
+        )
+        .expect_err("missing agent id should fail");
 
         assert!(
-            output.status.success(),
-            "sandbox session child failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            error
+                .to_string()
+                .contains("sandbox write-targets requires --agent-id"),
+            "unexpected error: {error}"
         );
+        assert!(
+            !temp_root
+                .join(".stateful_core/runtime/session.json")
+                .exists()
+        );
+        assert!(!temp_root.join(".stateful_core/runtime/sessions").exists());
+
+        fs::remove_dir_all(&temp_root).expect("temp root should remove");
+    }
+
+    #[test]
+    fn sandbox_agent_context_uses_explicit_agent_identity() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "stateful-sandbox-agent-id-explicit-test-{}",
+            std::process::id()
+        ));
+        if temp_root.exists() {
+            fs::remove_dir_all(&temp_root).expect("old temp root should remove");
+        }
+        fs::create_dir_all(&temp_root).expect("temp root should create");
+
+        let paths = GlobalPaths::new(temp_root.join("home"));
+        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret-token", "workspace-a", 42);
+        let session = agent_context_for_sandbox_profile(
+            &temp_root,
+            &paths,
+            &runtime,
+            Some("agent-a"),
+            Some("workspace-b"),
+            "sandbox write-targets requires --agent-id",
+        )
+        .expect("explicit agent identity should resolve");
+
+        assert_eq!(session, AgentContext::new("agent-a", "workspace-b"));
+        assert!(
+            !temp_root
+                .join(".stateful_core/runtime/session.json")
+                .exists()
+        );
+        assert!(!temp_root.join(".stateful_core/runtime/sessions").exists());
 
         fs::remove_dir_all(&temp_root).expect("temp root should remove");
     }
@@ -4510,11 +3976,107 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_run_sequence_resolves_to_single_shell_script() {
+        let command = resolve_sandbox_run_command(
+            None,
+            vec!["export FOO=bar".to_string(), "printf \"$FOO\"".to_string()],
+            Some("/bin/zsh".to_string()),
+        )
+        .expect("sequence should resolve");
+
+        assert_eq!(
+            command,
+            "'/bin/zsh' -c 'set -e\nexport FOO=bar\nprintf \"$FOO\"\n'"
+        );
+    }
+
+    #[test]
+    fn sandbox_run_sequence_quotes_single_quotes_inside_steps() {
+        let command = resolve_sandbox_run_command(None, vec!["printf 'ok'".to_string()], None)
+            .expect("sequence should resolve");
+
+        assert_eq!(command, "'/bin/sh' -c 'set -e\nprintf '\\''ok'\\''\n'");
+    }
+
+    #[test]
+    fn sandbox_run_sequence_rejects_command_and_sequence_together() {
+        let error = resolve_sandbox_run_command(
+            Some("printf ok".to_string()),
+            vec!["printf later".to_string()],
+            None,
+        )
+        .expect_err("command plus sequence should fail");
+
+        assert_eq!(
+            error,
+            "stateful sandbox run accepts either --command or --sequence, not both"
+        );
+    }
+
+    #[test]
+    fn sandbox_run_sequence_rejects_sequence_shell_without_sequence() {
+        let error = resolve_sandbox_run_command(None, Vec::new(), Some("/bin/zsh".to_string()))
+            .expect_err("sequence-shell without sequence should fail");
+
+        assert_eq!(
+            error,
+            "stateful sandbox run --sequence-shell requires --sequence"
+        );
+    }
+
+    #[test]
+    fn sandbox_run_sequence_rejects_non_absolute_shell() {
+        let error = resolve_sandbox_run_command(
+            None,
+            vec!["printf ok".to_string()],
+            Some("zsh".to_string()),
+        )
+        .expect_err("relative shell should fail");
+
+        assert_eq!(
+            error,
+            "stateful sandbox run --sequence-shell requires an absolute shell path"
+        );
+    }
+
+    #[test]
+    fn sandbox_run_bash_parser_accepts_json_output_flag() {
+        let invocation = parse_sandbox_run_bash_invocation(
+            "stateful sandbox run --json --fs read-only --network disabled --command 'printf ok'",
+        )
+        .expect("sandbox run --json should parse for trusted Bash authorization");
+
+        assert_eq!(invocation.request.fs, SandboxFsProfile::ReadOnly);
+        assert_eq!(invocation.request.network, SandboxNetworkPolicy::Disabled);
+        assert_eq!(invocation.request.command, "printf ok");
+    }
+
+    #[test]
+    fn git_profile_commit_message_flag_consumes_unquoted_remainder() {
+        let words = parse_git_profile_command(
+            "git commit -m docs: clarify methodology validation boundaries",
+        )
+        .expect("git profile should parse commit message");
+
+        assert_eq!(
+            words,
+            vec![
+                "git",
+                "commit",
+                "-m",
+                "docs: clarify methodology validation boundaries",
+            ]
+        );
+    }
+
+    #[test]
     fn sandbox_run_rejects_raw_ps_process_inspection() {
         let request = SandboxRunRequest {
             fs: SandboxFsProfile::ReadOnly,
             network: SandboxNetworkPolicy::Disabled,
             purpose: None,
+            agent_id: None,
+            workspace_id: None,
             reservation_id: None,
             write_targets: Vec::new(),
             create_targets: Vec::new(),
@@ -4543,6 +4105,8 @@ mod tests {
             fs: SandboxFsProfile::ReadOnly,
             network: SandboxNetworkPolicy::Disabled,
             purpose: None,
+            agent_id: None,
+            workspace_id: None,
             reservation_id: None,
             write_targets: Vec::new(),
             create_targets: Vec::new(),
@@ -4585,6 +4149,8 @@ mod tests {
                 fs: SandboxFsProfile::ReadOnly,
                 network: SandboxNetworkPolicy::Disabled,
                 purpose: None,
+                agent_id: None,
+                workspace_id: None,
                 reservation_id: None,
                 write_targets: Vec::new(),
                 create_targets: Vec::new(),
@@ -4615,6 +4181,8 @@ mod tests {
             fs: SandboxFsProfile::ReadOnly,
             network: SandboxNetworkPolicy::Disabled,
             purpose: None,
+            agent_id: None,
+            workspace_id: None,
             reservation_id: None,
             write_targets: Vec::new(),
             create_targets: Vec::new(),
@@ -4628,6 +4196,22 @@ mod tests {
 
         validate_sandbox_run_request_shape(&request)
             .expect("literal ps argument should not be treated as process inspection");
+    }
+
+    #[test]
+    fn sandbox_run_timeout_resolution_defaults_overrides_and_clamps_zero() {
+        assert_eq!(
+            sandbox_run_timeout_duration(None),
+            Duration::from_secs(3600)
+        );
+        assert_eq!(
+            sandbox_run_timeout_duration(Some(17)),
+            Duration::from_secs(17)
+        );
+        assert_eq!(
+            sandbox_run_timeout_duration(Some(0)),
+            Duration::from_secs(1)
+        );
     }
 
     fn sandbox_output(status: &'static str, exit_code: Option<i32>) -> SandboxRunOutput {
@@ -5187,7 +4771,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_tmp_fragment_sanitizes_session_ids_for_path_components() {
+    fn sandbox_tmp_fragment_sanitizes_agent_ids_for_path_components() {
         assert_eq!(sandbox_tmp_fragment("session/id"), "session-id");
         assert_eq!(sandbox_tmp_fragment(".."), "session");
         assert_eq!(sandbox_tmp_fragment(""), "session");
@@ -5404,6 +4988,8 @@ mod tests {
             fs: SandboxFsProfile::External,
             network: SandboxNetworkPolicy::Enabled,
             purpose: None,
+            agent_id: None,
+            workspace_id: None,
             reservation_id: None,
             write_targets: vec!["/tmp/stateful-outside.txt".to_string()],
             create_targets: Vec::new(),

@@ -332,7 +332,7 @@ fn server_start_command_always_prints_join_command() {
 }
 
 struct TestFixture {
-    root: PathBuf,
+    _root: tempfile::TempDir,
     paths: GlobalPaths,
     codex_config: PathBuf,
     repo: PathBuf,
@@ -340,27 +340,20 @@ struct TestFixture {
 
 impl TestFixture {
     fn new(name: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("stateful-lan-{name}-{}", std::process::id()));
-        if root.exists() {
-            fs::remove_dir_all(&root).expect("old temp root should remove");
-        }
-        fs::create_dir_all(&root).expect("temp root should create");
-        let paths = GlobalPaths::new(root.join("home"));
-        let codex_config = root.join("codex").join("config.toml");
-        let repo = root.join("repo");
+        let root = tempfile::Builder::new()
+            .prefix(&format!("stateful-lan-{name}-"))
+            .tempdir()
+            .expect("temp dir should create");
+        let paths = GlobalPaths::new(root.path().join("home"));
+        let codex_config = root.path().join("codex").join("config.toml");
+        let repo = root.path().join("repo");
         fs::create_dir_all(&repo).expect("repo dir should create");
         Self {
-            root,
+            _root: root,
             paths,
             codex_config,
             repo,
         }
-    }
-}
-
-impl Drop for TestFixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
     }
 }
 

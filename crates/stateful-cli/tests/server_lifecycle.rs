@@ -497,7 +497,7 @@ fn foreground_server_does_not_write_runtime_when_bind_fails() {
             "--port",
             &port.to_string(),
         ])
-        .env("STATEFUL_HOME", &home)
+        .env("STATEFUL_HOME", home.path())
         .output()
         .expect("stateful binary should run");
 
@@ -522,7 +522,7 @@ fn detached_server_reports_child_startup_error_when_bind_fails() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
         .args(["server", "start", "--port", &port.to_string()])
-        .env("STATEFUL_HOME", &home)
+        .env("STATEFUL_HOME", home.path())
         .output()
         .expect("stateful binary should run");
 
@@ -567,7 +567,7 @@ fn detached_server_start_registers_runtime_without_parent_lock_timeout() {
                 "--workspace-id",
                 "share",
             ])
-            .env("STATEFUL_HOME", &home)
+            .env("STATEFUL_HOME", home.path())
             .output()
             .expect("stateful binary should run");
 
@@ -575,13 +575,12 @@ fn detached_server_start_registers_runtime_without_parent_lock_timeout() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("Address already in use") {
                 last_bind_race = stderr.into_owned();
-                let _ = fs::remove_dir_all(&home);
                 continue;
             }
             panic!("detached start should succeed, stderr: {stderr}");
         }
 
-        let contents = fs::read_to_string(home.join("runtime/server.json"))
+        let contents = fs::read_to_string(home.path().join("runtime/server.json"))
             .expect("runtime file should exist");
         let runtime: ServerRuntime =
             serde_json::from_str(&contents).expect("runtime file should be valid JSON");
@@ -590,7 +589,7 @@ fn detached_server_start_registers_runtime_without_parent_lock_timeout() {
 
         let stop_output = Command::new(env!("CARGO_BIN_EXE_stateful"))
             .args(["server", "stop"])
-            .env("STATEFUL_HOME", &home)
+            .env("STATEFUL_HOME", home.path())
             .output()
             .expect("stateful stop should run");
         assert!(
@@ -604,12 +603,11 @@ fn detached_server_start_registers_runtime_without_parent_lock_timeout() {
     panic!("detached start exhausted port-race retries; last stderr: {last_bind_race}");
 }
 
-fn temp_home(name: &str) -> std::path::PathBuf {
-    let home = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
-    if home.exists() {
-        fs::remove_dir_all(&home).expect("old home should be removable");
-    }
-    home
+fn temp_home(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("{name}-"))
+        .tempdir()
+        .expect("temp dir should create")
 }
 
 fn fake_response(status: u16, body: &'static str) -> String {

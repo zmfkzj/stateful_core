@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -125,6 +126,10 @@ def codex_token_usage_from_output(output: str):
     return total
 
 
+CONTAINER_WORKSPACE = "/workspace"
+CONTAINER_HOME = "/root"
+
+
 ARCHIVE_EXCLUDED_TOP_LEVEL = {
     ".cache",
     ".codex",
@@ -135,6 +140,7 @@ ARCHIVE_EXCLUDED_TOP_LEVEL = {
     ".stateful",
     ".stateful_core",
     ".stateful-tmp",
+    "executable",
 }
 
 ARCHIVE_EXCLUDED_PARTS = {
@@ -184,35 +190,7 @@ def archive_workspace(args, instance_dir: Path):
     submission_path = getattr(args, "submission_path", None)
     if submission_path is not None:
         return Path(submission_path)
-    container_tar = "/tmp/programbench-submission.tar.gz"
-    subprocess.run(
-        [
-            resolve_host_binary(args.docker_bin),
-            "exec",
-            args.container_id,
-            "tar",
-            "-czf",
-            container_tar,
-            "-C",
-            "/workspace",
-            ".",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        [
-            resolve_host_binary(args.docker_bin),
-            "cp",
-            f"{args.container_id}:{container_tar}",
-            str(instance_dir / "submission.tar.gz"),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return instance_dir / "submission.tar.gz"
+    return archive_airlock_workspace(args.airlock, instance_dir)
 
 
 def copy_workspace_from_container(args, airlock: str) -> None:
@@ -229,15 +207,103 @@ def docker_exec_command(args, *inner: str) -> list[str]:
     return [resolve_host_binary(args.docker_bin), "exec", "-w", "/workspace", args.container_id, *inner]
 
 
-def airlock_env(airlock: str) -> dict[str, str]:
+def container_env(agent: str | None = None) -> dict[str, str]:
+    env = {
+        "HOME": CONTAINER_HOME,
+        "STATEFUL_HOME": f"{CONTAINER_HOME}/.stateful",
+        "CODEX_HOME": f"{CONTAINER_HOME}/.codex",
+    }
+    if agent == "omp":
+        env["PI_CODING_AGENT_DIR"] = f"{CONTAINER_HOME}/.omp/profiles/stateful/agent"
+    return env
+
+
+def docker_exec_env_args(env: dict[str, str] | None) -> list[str]:
+    if not env:
+        return []
+    args: list[str] = []
+    for key in sorted(env):
+        args.extend(["-e", f"{key}={env[key]}"])
+    return args
+
+
+def docker_exec(args, *inner: str, env: dict[str, str] | None = None) -> list[str]:
+    return [
+        resolve_host_binary(getattr(args, "docker_bin", "docker")),
+        "exec",
+        "-w",
+        CONTAINER_WORKSPACE,
+        *docker_exec_env_args(env),
+        getattr(args, "container_id", "programbench-container"),
+        *inner,
+    ]
+
+
+def airlock_env(airlock: str, stateful_binary: str | None = None) -> dict[str, str]:
     env = os.environ.copy()
     for key in list(env):
-        if key.startswith("STATEFUL_") or key == "CODEX_THREAD_ID":
+        if key.startswith("STATEFUL_"):
             env.pop(key)
     env["HOME"] = airlock
-    env["STATEFUL_HOME"] = airlock
+    env["STATEFUL_HOME"] = str(Path(airlock) / ".stateful")
     env["CODEX_HOME"] = str(Path(airlock) / ".codex")
+    if stateful_binary is not None:
+        prepend_binary_dir_to_path(env, stateful_binary)
     return env
+
+
+def format_process_failure(label: str, returncode: int, stdout: str, stderr: str) -> str:
+    parts = [f"{label} exited {returncode}"]
+    if stdout:
+        parts.append(f"stdout:\n{stdout.strip()}")
+    if stderr:
+        parts.append(f"stderr:\n{stderr.strip()}")
+    return "\n".join(parts)
+
+
+def stage_smoke_workspace(airlock: str) -> tempfile.TemporaryDirectory[str]:
+    staged = tempfile.TemporaryDirectory(prefix="programbench-smoke-")
+    source_root = Path(airlock)
+    staged_root = Path(staged.name)
+    for path in sorted(source_root.rglob("*")):
+        relative = path.relative_to(source_root)
+        if not archive_member_allowed(relative):
+            continue
+        target = staged_root / relative
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif path.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+    return staged
+
+
+def smoke_compile_airlock(airlock: str, args) -> None:
+    try:
+        staged = stage_smoke_workspace(airlock)
+        try:
+            subprocess.run(
+                [resolve_host_binary(args.docker_bin), "cp", f"{staged.name}/.", f"{args.container_id}:{CONTAINER_WORKSPACE}/"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=args.timeout_seconds,
+            )
+        finally:
+            staged.cleanup()
+        subprocess.run(
+            docker_exec(args, "bash", "-lc", "chmod +x ./compile.sh && ./compile.sh"),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout_seconds,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            format_process_failure("compile.sh", exc.returncode, output_text(exc.stdout), output_text(exc.stderr))
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"compile.sh timed out after {args.timeout_seconds}s") from exc
 
 
 def initialize_airlock_git_repo(args, airlock: str) -> None:
@@ -258,17 +324,24 @@ def resolve_host_binary(binary: str) -> str:
         return binary
     return str(path.resolve())
 
+def prepend_binary_dir_to_path(env: dict[str, str], binary: str) -> None:
+    resolved = Path(resolve_host_binary(binary))
+    if resolved.parent == Path("."):
+        return
+    directory = str(resolved.parent)
+    parts = [part for part in env.get("PATH", "").split(os.pathsep) if part and part != directory]
+    env["PATH"] = os.pathsep.join([directory, *parts])
+
 
 def run_stateful_command(args, airlock: str, *stateful_args: str) -> None:
-    stateful_binary = resolve_host_binary(args.stateful_binary)
     subprocess.run(
-        [stateful_binary, *stateful_args],
+        [resolve_host_binary(args.stateful_binary), *stateful_args],
         check=True,
         capture_output=True,
         text=True,
         timeout=args.timeout_seconds,
         cwd=airlock,
-        env=airlock_env(airlock),
+        env=airlock_env(airlock, args.stateful_binary),
     )
 
 
@@ -282,7 +355,7 @@ def stop_stateful_server(args, airlock: str) -> None:
         text=True,
         timeout=args.timeout_seconds,
         cwd=airlock,
-        env=airlock_env(airlock),
+        env=airlock_env(airlock, args.stateful_binary),
     )
 
 
@@ -296,58 +369,57 @@ def install_stateful_for_codex(args, airlock: str) -> None:
 
 
 def run_agent(args, prompt):
-    with tempfile.TemporaryDirectory(prefix="programbench-airlock-") as airlock:
-        env = airlock_env(airlock)
+    airlock = getattr(args, "airlock", "/tmp/programbench-airlock")
+    env = airlock_env(airlock, args.stateful_binary if args.stateful else None)
+    if hasattr(args, "airlock") and hasattr(args, "container_id"):
         copy_workspace_from_container(args, airlock)
-        try:
-            if args.stateful:
-                install_stateful_for_codex(args, airlock)
-                enable_stateful_repo(args, airlock)
+    try:
+        if args.stateful:
+            install_stateful_for_codex(args, airlock)
+            enable_stateful_repo(args, airlock)
 
-            command = [
-                resolve_host_binary(args.codex_bin),
-                "-c",
-                "sandbox_workspace_write.network_access=false",
+        command = [
+            resolve_host_binary(args.codex_bin),
+            "-c",
+            "sandbox_workspace_write.network_access=false",
+        ]
+        if args.subagent:
+            command.extend(["-c", "features.multi_agent=true"])
+        command.extend(
+            [
+                "exec",
+                "--json",
+                *([] if args.stateful else ["--ignore-user-config"]),
+                "--ignore-rules",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--cd",
+                airlock,
+                "--sandbox",
+                "workspace-write",
             ]
-            if args.subagent:
-                command.extend(["-c", "features.multi_agent=true"])
-            command.extend(
-                [
-                    "exec",
-                    "--json",
-                    *([] if args.stateful else ["--ignore-user-config"]),
-                    "--ignore-rules",
-                    "--skip-git-repo-check",
-                    "--ephemeral",
-                    "--cd",
-                    airlock,
-                    "--sandbox",
-                    "workspace-write",
-                ]
+        )
+        if args.model:
+            command.extend(["--model", args.model])
+        command.append(prompt)
+        try:
+            return subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=args.timeout_seconds,
+                cwd=airlock,
+                env=env,
             )
-            if args.model:
-                command.extend(["--model", args.model])
-            command.append(prompt)
-            try:
-                return subprocess.run(
-                    command,
-                    cwd=airlock,
-                    capture_output=True,
-                    text=True,
-                    timeout=args.timeout_seconds,
-                    env=env,
-                )
-            finally:
-                if hasattr(args, "condition_dir"):
-                    instance_dir = Path(args.condition_dir) / args.instance_id
-                    try:
-                        args.submission_path = str(archive_airlock_workspace(airlock, instance_dir))
-                    except Exception as exc:  # noqa: BLE001 - preserve agent logs before reporting archive failure.
-                        args.submission_path = str(instance_dir / "submission.tar.gz")
-                        args.archive_error = str(exc)
         finally:
-            if args.stateful:
-                stop_stateful_server(args, airlock)
+            if hasattr(args, "condition_dir"):
+                try:
+                    smoke_compile_airlock(airlock, args)
+                except Exception as exc:  # noqa: BLE001 - preserve submission for failed compile diagnostics.
+                    args.smoke_compile_error = str(exc)
+    finally:
+        if args.stateful:
+            stop_stateful_server(args, airlock)
 
 
 def build_base_parser() -> argparse.ArgumentParser:
@@ -391,7 +463,7 @@ def prompt_for_args(args) -> str:
     if max_turns is not None:
         prompt += f"\n\nBenchmark max turns: {max_turns}."
     if args.subagent:
-        prompt += f"\n\nUse at least {args.subagent_min_count} native subagents before implementation."
+        prompt += "\n\norchestrate"
     return prompt
 
 
@@ -445,6 +517,8 @@ def run_main(
     error = None
     cleanup_error = None
 
+    airlock_tmp = tempfile.TemporaryDirectory(prefix="programbench-airlock-")
+    args.airlock = airlock_tmp.name
     try:
         result = run_agent_func(args, prompt_for_args(args))
         stdout = output_text(result.stdout)
@@ -466,6 +540,8 @@ def run_main(
     (instance_dir / "agent.stderr.log").write_text(stderr, encoding="utf-8")
 
     archive_error = getattr(args, "archive_error", None)
+    smoke_compile_error = getattr(args, "smoke_compile_error", None)
+    workspace_copy_error = getattr(args, "workspace_copy_error", None)
     submission_path = instance_dir / "submission.tar.gz"
     try:
         submission_path = archive_workspace(args, instance_dir)
@@ -473,6 +549,12 @@ def run_main(
         archive_error = str(exc)
         if error is None:
             error = f"archive failed: {exc}"
+    if workspace_copy_error is not None and error is None:
+        exit_code = 1
+        error = f"workspace copy failed: {workspace_copy_error}"
+    if smoke_compile_error is not None and error is None:
+        exit_code = 1
+        error = f"smoke compile failed: {smoke_compile_error}"
     finished_at_ms = now_ms()
     metadata = {
         "instance_id": args.instance_id,
@@ -488,6 +570,10 @@ def run_main(
     }
     if archive_error is not None:
         metadata["archive_error"] = archive_error
+    if workspace_copy_error is not None:
+        metadata["workspace_copy_error"] = workspace_copy_error
+    if smoke_compile_error is not None:
+        metadata["smoke_compile_error"] = smoke_compile_error
     if cleanup_error is not None:
         metadata["cleanup_error"] = cleanup_error
     subagent_used = observed_subagent_used(stdout, stderr)
@@ -497,6 +583,7 @@ def run_main(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    airlock_tmp.cleanup()
     return exit_code
 
 

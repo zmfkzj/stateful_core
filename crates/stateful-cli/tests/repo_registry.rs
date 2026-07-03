@@ -17,6 +17,7 @@ fn default_allowed_tools() -> Vec<String> {
         "multi_agent_v1send_input",
         "task",
         "yield",
+        "parallel_tool_calls",
         "lsp",
         "glob",
         "ask",
@@ -267,36 +268,24 @@ fn tool_allowlist_rejects_empty_or_control_character_tool_names() {
 }
 
 struct TestFixture {
-    root: std::path::PathBuf,
+    root: tempfile::TempDir,
     paths: GlobalPaths,
 }
 
 impl TestFixture {
     fn new(name: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "stateful-repo-registry-{name}-{}",
-            std::process::id()
-        ));
-        if root.exists() {
-            fs::remove_dir_all(&root).expect("old fixture root should be removable");
-        }
-        fs::create_dir_all(&root).expect("fixture root should be creatable");
+        let root = tempfile::Builder::new()
+            .prefix(&format!("stateful-repo-registry-{name}-"))
+            .tempdir()
+            .expect("temp dir should create");
 
-        let paths = GlobalPaths::new(root.join("home"));
+        let paths = GlobalPaths::new(root.path().join("home"));
         Self { root, paths }
     }
 
     fn create_repo(&self, name: &str) -> std::path::PathBuf {
-        let repo = self.root.join(name);
+        let repo = self.root.path().join(name);
         fs::create_dir_all(repo.join(".git")).expect("git directory should be creatable");
         repo
-    }
-}
-
-impl Drop for TestFixture {
-    fn drop(&mut self) {
-        if self.root.exists() {
-            fs::remove_dir_all(&self.root).expect("fixture root should be removable");
-        }
     }
 }

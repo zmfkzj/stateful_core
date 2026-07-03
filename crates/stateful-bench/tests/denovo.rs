@@ -193,28 +193,40 @@ fn denovo_comparison_indexes_reports_by_condition_and_computes_deltas() {
     let off_off = build_denovo_condition_report(
         "baseline",
         DeNovoCondition::new(false, false),
-        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.5}"#).unwrap()],
+        vec![
+            serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.5}"#)
+                .expect("denovo result fixture should parse"),
+        ],
         1000,
         None,
     );
     let on_off = build_denovo_condition_report(
         "stateful",
         DeNovoCondition::new(true, false),
-        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.8}"#).unwrap()],
+        vec![
+            serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.8}"#)
+                .expect("denovo result fixture should parse"),
+        ],
         1500,
         None,
     );
     let off_on = build_denovo_condition_report(
         "subagent",
         DeNovoCondition::new(false, true),
-        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.7}"#).unwrap()],
+        vec![
+            serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.7}"#)
+                .expect("denovo result fixture should parse"),
+        ],
         1200,
         None,
     );
     let on_on = build_denovo_condition_report(
         "combined",
         DeNovoCondition::new(true, true),
-        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.9}"#).unwrap()],
+        vec![
+            serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.9}"#)
+                .expect("denovo result fixture should parse"),
+        ],
         1800,
         None,
     );
@@ -260,14 +272,20 @@ fn denovo_comparison_reports_duplicate_missing_and_mismatched_axes() {
     let baseline = build_denovo_condition_report(
         "baseline",
         DeNovoCondition::new(false, false),
-        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.5}"#).unwrap()],
+        vec![
+            serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.5}"#)
+                .expect("denovo result fixture should parse"),
+        ],
         1000,
         None,
     );
     let mut duplicate_baseline = build_denovo_condition_report(
         "duplicate-baseline",
         DeNovoCondition::new(false, false),
-        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.9}"#).unwrap()],
+        vec![
+            serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.9}"#)
+                .expect("denovo result fixture should parse"),
+        ],
         1000,
         None,
     );
@@ -275,14 +293,20 @@ fn denovo_comparison_reports_duplicate_missing_and_mismatched_axes() {
     let stateful = build_denovo_condition_report(
         "stateful",
         DeNovoCondition::new(true, false),
-        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.8}"#).unwrap()],
+        vec![
+            serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.8}"#)
+                .expect("denovo result fixture should parse"),
+        ],
         1500,
         None,
     );
     let combined = build_denovo_condition_report(
         "combined",
         DeNovoCondition::new(true, true),
-        vec![serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.95}"#).unwrap()],
+        vec![
+            serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.95}"#)
+                .expect("denovo result fixture should parse"),
+        ],
         1800,
         None,
     );
@@ -1186,11 +1210,11 @@ score = 1.0 if "stateful" in args.config else 0.5
         base_config: "configs/tasks/denovoswe.yaml".into(),
         conditions: vec![
             parse_denovo_condition("stateful:off,subagent:off,config:configs/tasks/denovoswe.yaml")
-                .unwrap(),
+                .expect("off condition fixture should parse"),
             parse_denovo_condition(
                 "stateful:on,subagent:off,config:configs/tasks/denovoswe-stateful.yaml",
             )
-            .unwrap(),
+            .expect("stateful condition fixture should parse"),
         ],
         agent: DeNovoAgentKind::Official,
         codex_bin: "codex".to_string(),

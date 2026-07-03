@@ -1,12 +1,11 @@
 [workspace]
 resolver = "3"
 members = [
-  "crates/stateful-core",
-  "crates/stateful-store",
-  "crates/stateful-server",
-  "crates/stateful-cli",
-  "crates/stateful-mcp",
-  "crates/stateful-bench",
+    "crates/stateful-core",
+    "crates/stateful-store",
+    "crates/stateful-server",
+    "crates/stateful-cli",
+    "crates/stateful-bench",
 ]
 
 [workspace.package]
@@ -14,21 +13,20 @@ edition = "2024"
 license = "AGPL-3.0-only"
 rust-version = "1.85"
 readme = "README.md"
-keywords = ["agents", "coordination", "state", "codex", "mcp"]
+keywords = ["agents", "coordination", "state", "codex"]
 categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 anyhow = "1"
 axum = "0.8"
-camino = { version = "1", features = ["serde1"] }
 clap = { version = "4", features = ["derive"] }
-globset = "0.4"
 rusqlite = { version = "0.33", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 signal-hook = "0.3"
 thiserror = "2"
+tempfile = "3"
 time = { version = "0.3", features = ["serde", "macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-stream = "0.1"

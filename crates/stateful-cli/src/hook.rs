@@ -11,7 +11,6 @@ use serde_json::json;
 use stateful_core::normalize_relative_path;
 
 use crate::outbox::queue_session_heartbeat_outbox;
-use crate::runtime::write_current_session_file_for_explicit_session;
 use crate::sandbox::{
     SandboxFsProfile, parse_sandbox_process_find_bash_invocation,
     parse_sandbox_run_bash_invocation, validate_process_find_request,
@@ -22,10 +21,10 @@ use crate::shell_command::{
     first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
 };
 use crate::{
-    CurrentSession, GlobalPaths, HookCommand, HookRuntime, ProtocolEnvelopeArgs, RepoGate,
-    RepoIdentity, ServerRuntime, discover_runtime_with_global, effective_workspace_id_for_repo,
-    ensure_server, get_json, post_json, protocol_envelope, record_unclassified_tool_for_repo,
-    repo_gate, repo_identity_for_enabled_repo, runtime_env_override_is_configured,
+    GlobalPaths, HookCommand, HookRuntime, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
+    ServerRuntime, discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server,
+    get_json, post_json, protocol_envelope, record_unclassified_tool_for_repo, repo_gate,
+    repo_identity_for_enabled_repo, runtime_env_override_is_configured,
     tool_allowed_for_enabled_repo,
 };
 
@@ -104,7 +103,7 @@ impl HookOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OmpSessionStartOutput {
     pub decision: &'static str,
-    pub session_id: String,
+    pub agent_id: String,
     pub workspace_id: String,
     pub notifications_stream: OmpNotificationsStream,
 }
@@ -113,7 +112,7 @@ pub struct OmpSessionStartOutput {
 pub struct OmpNotificationsStream {
     pub base_url: String,
     pub authorization: String,
-    pub session_id: String,
+    pub agent_id: String,
     pub workspace_id: String,
 }
 
@@ -156,12 +155,7 @@ fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
             println!("{}", outcome.to_stdout_json());
         }
         HookCommand::SessionStart => {
-            match handle_omp_session_start_with_identity(
-                &input,
-                &runtime,
-                &repo_root,
-                identity.as_ref(),
-            ) {
+            match handle_omp_session_start_with_identity(&input, &runtime, identity.as_ref()) {
                 Ok(output) => println!("{}", serde_json::to_string(&output)?),
                 Err(error) => eprintln!("stateful omp session-start warning: {error}"),
             }
@@ -178,6 +172,7 @@ fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
         }
         HookCommand::Stop => {
             let input: OmpSessionEventInput = serde_json::from_str(&input)?;
+            input.validate()?;
             post_omp_session_event(
                 &runtime,
                 "/v1/activity/finalize",
@@ -278,6 +273,7 @@ fn handle_omp_pre_tool_use_with_identity(
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<OmpHookOutcome> {
     let input: OmpPreToolUseInput = serde_json::from_str(input)?;
+    input.validate()?;
     let global_paths = GlobalPaths::from_env().ok();
     match omp_pre_tool_action(&input, repo_root, cwd, global_paths.as_ref())? {
         OmpPreToolAction::Allow => Ok(OmpHookOutcome::Allow),
@@ -388,6 +384,7 @@ fn is_omp_safe_without_repo_write_authorization(tool_name: &str) -> bool {
         "browser",
         "find",
         "generate_image",
+        "glob",
         "grep",
         "irc",
         "lazy_edit_resume",
@@ -400,6 +397,7 @@ fn is_omp_safe_without_repo_write_authorization(tool_name: &str) -> bool {
         "search_tool_bm25",
         "task",
         "yield",
+        "parallel_tool_calls",
         "todo",
         "web_search",
     ]
@@ -474,8 +472,8 @@ fn omp_hook_authorize_purpose(
         let matches_intent = item.get("kind").and_then(serde_json::Value::as_str)
             == Some("reservation")
             && item.get("freshness").and_then(serde_json::Value::as_str) == Some("live")
-            && item.get("session_id").and_then(serde_json::Value::as_str)
-                == Some(input.session_id.as_str())
+            && item.get("agent_id").and_then(serde_json::Value::as_str)
+                == Some(input.agent_id.as_str())
             && item.get("workspace_id").and_then(serde_json::Value::as_str) == Some(workspace_id);
         if !matches_intent {
             continue;
@@ -508,6 +506,10 @@ fn authorize_omp_targets(
     identity: Option<&RepoIdentity>,
     targets: Vec<PatchTarget>,
 ) -> anyhow::Result<OmpHookOutcome> {
+    if let Some(outcome) = omp_external_native_write_prompt(input, &targets, repo_root, cwd)? {
+        return Ok(outcome);
+    }
+
     let Some(targets) = normalize_targets(targets, repo_root, cwd)? else {
         return Ok(OmpHookOutcome::Block {
             reason: format!("{} target is outside the enabled repo", input.tool_name),
@@ -576,7 +578,7 @@ fn authorize_omp_targets(
                 let reason = if let Some(repo_root) = repo_root {
                     if repeated_denial_seen(
                         repo_root,
-                        &input.session_id,
+                        &input.agent_id,
                         &target.path,
                         &decision.reason_code,
                     ) {
@@ -596,6 +598,84 @@ fn authorize_omp_targets(
     }
 }
 
+fn omp_external_native_write_prompt(
+    input: &OmpPreToolUseInput,
+    targets: &[PatchTarget],
+    repo_root: Option<&Path>,
+    cwd: Option<&Path>,
+) -> anyhow::Result<Option<OmpHookOutcome>> {
+    let tool_name = runtime_tool_name_leaf(&input.tool_name);
+    if !(tool_name.eq_ignore_ascii_case("edit") || tool_name.eq_ignore_ascii_case("write")) {
+        return Ok(None);
+    }
+    let Some(repo_root) = repo_root else {
+        return Ok(None);
+    };
+    let mut external_targets = Vec::new();
+    let mut internal_targets = 0;
+    for target in targets {
+        match target.action {
+            "write_file" => {
+                if normalize_file_tool_target(&target.path, Some(repo_root), cwd)?.is_some() {
+                    internal_targets += 1;
+                } else {
+                    external_targets.push(omp_external_target_display(&target.path, cwd));
+                }
+            }
+            "move_file" => {
+                for path in [&target.path, target.new_path.as_deref().unwrap_or("")] {
+                    if path.is_empty() {
+                        continue;
+                    }
+                    if normalize_file_tool_target(path, Some(repo_root), cwd)?.is_some() {
+                        internal_targets += 1;
+                    } else {
+                        external_targets.push(omp_external_target_display(path, cwd));
+                    }
+                }
+            }
+            _ => return Ok(None),
+        }
+    }
+    if external_targets.is_empty() {
+        return Ok(None);
+    }
+    if internal_targets > 0 {
+        return Ok(Some(OmpHookOutcome::Block {
+            reason: format!(
+                "{} mixes repo-internal and repo-external targets; split the operation before retrying",
+                input.tool_name
+            ),
+        }));
+    }
+
+    let action = if tool_name.eq_ignore_ascii_case("edit") {
+        "edit"
+    } else {
+        "write"
+    };
+    Ok(Some(OmpHookOutcome::Prompt {
+        title: format!("Approve external {action}"),
+        message: format!(
+            "Stateful is requesting approval for a repo-external OMP {action}.\n\nTargets:\n{}\n\nSet stateful.autoApprove to true to skip this prompt.",
+            external_targets.join("\n")
+        ),
+    }))
+}
+
+fn omp_external_target_display(path: &str, cwd: Option<&Path>) -> String {
+    let path = Path::new(path.trim());
+    if path.is_absolute() {
+        return normalize_path(path.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+    }
+    let base = cwd.unwrap_or_else(|| Path::new("."));
+    normalize_path(base.join(path))
+        .to_string_lossy()
+        .to_string()
+}
+
 fn release_omp_auto_claims(
     runtime: &ServerRuntime,
     input: &OmpPreToolUseInput,
@@ -603,10 +683,89 @@ fn release_omp_auto_claims(
     paths: &BTreeSet<String>,
 ) {
     if !paths.is_empty() {
-        release_pre_tool_authorized_claims(runtime, &input.session_id, workspace_id, paths);
+        release_pre_tool_authorized_claims(runtime, &input.agent_id, workspace_id, paths);
     }
 }
 
+fn authorization_payload_for_target(
+    target: &PatchTarget,
+    repo_root: Option<&Path>,
+    purpose: Option<&str>,
+    reservation_id: Option<&str>,
+    queue_on_conflict: bool,
+) -> serde_json::Value {
+    let mut payload = json!({
+        "action": target.action,
+        "path": target.path,
+    });
+    if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
+        payload["base_observations"] = json!([observation]);
+    }
+    if queue_on_conflict {
+        payload["queue_on_conflict"] = json!(true);
+    }
+    if let Some(purpose) = purpose {
+        payload["purpose"] = json!(purpose);
+    }
+    if let Some(new_path) = &target.new_path {
+        payload["old_path"] = json!(target.path);
+        payload["new_path"] = json!(new_path);
+    }
+    if let Some(reservation_id) = reservation_id {
+        payload["reservation_id"] = json!(reservation_id);
+    }
+    payload
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "authorization envelope carries hook context"
+)]
+fn authorization_request_body(
+    runtime: &ServerRuntime,
+    agent_id: &str,
+    workspace_id: &str,
+    identity: Option<&RepoIdentity>,
+    event: &'static str,
+    source_ref: &'static str,
+    tool_name: &str,
+    payload: serde_json::Value,
+) -> serde_json::Value {
+    protocol_envelope(ProtocolEnvelopeArgs {
+        runtime,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: agent_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        identity: identity.cloned(),
+        source_kind: "hook",
+        event,
+        source_ref,
+        source_tool_name: Some(tool_name),
+        payload,
+    })
+}
+
+fn post_authorize_decision(
+    runtime: &ServerRuntime,
+    body: &serde_json::Value,
+) -> Result<AuthorizeDecision, String> {
+    let response = post_json(runtime, "/v1/authorize", body)
+        .map_err(|error| authorization_unavailable_reason(&error))?;
+
+    if !(200..300).contains(&response.status_code) {
+        return Err(format!(
+            "stateful authorization failed with HTTP {}: {}",
+            response.status_code, response.body
+        ));
+    }
+
+    serde_json::from_str(&response.body).map_err(|error| authorization_unavailable_reason(&error))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "OMP authorization payload needs request context"
+)]
 fn post_omp_authorize_target(
     input: &OmpPreToolUseInput,
     runtime: &ServerRuntime,
@@ -617,53 +776,21 @@ fn post_omp_authorize_target(
     reservation_id: Option<&str>,
     purpose: &str,
 ) -> Result<AuthorizeDecision, OmpHookOutcome> {
-    let mut payload = json!({
-        "action": target.action,
-        "path": target.path,
-    });
-    if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
-        payload["base_observations"] = json!([observation]);
-    }
-    payload["queue_on_conflict"] = json!(true);
-    payload["purpose"] = json!(purpose);
-    if let Some(new_path) = &target.new_path {
-        payload["old_path"] = json!(target.path);
-        payload["new_path"] = json!(new_path);
-    }
-    if let Some(reservation_id) = reservation_id {
-        payload["reservation_id"] = json!(reservation_id);
-    }
-    let mut body = protocol_envelope(ProtocolEnvelopeArgs {
+    let payload =
+        authorization_payload_for_target(target, repo_root, Some(purpose), reservation_id, true);
+    let mut body = authorization_request_body(
         runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
-        session_id: input.session_id.clone(),
-        workspace_id: workspace_id.to_string(),
-        identity: identity.cloned(),
-        source_kind: "hook",
-        event: "omp_pre_tool_use",
-        source_ref: "hook:omp_pre_tool_use",
-        source_tool_name: Some(input.tool_name.as_str()),
+        &input.agent_id,
+        workspace_id,
+        identity,
+        "omp_pre_tool_use",
+        "hook:omp_pre_tool_use",
+        &input.tool_name,
         payload,
-    });
+    );
     body["metadata"] = input.audit_metadata();
 
-    let response =
-        post_json(runtime, "/v1/authorize", &body).map_err(|error| OmpHookOutcome::Block {
-            reason: authorization_unavailable_reason(&error),
-        })?;
-
-    if !(200..300).contains(&response.status_code) {
-        return Err(OmpHookOutcome::Block {
-            reason: format!(
-                "stateful authorization failed with HTTP {}: {}",
-                response.status_code, response.body
-            ),
-        });
-    }
-
-    serde_json::from_str(&response.body).map_err(|error| OmpHookOutcome::Block {
-        reason: authorization_unavailable_reason(&error),
-    })
+    post_authorize_decision(runtime, &body).map_err(|reason| OmpHookOutcome::Block { reason })
 }
 
 fn should_auto_declare_omp_tool_reservation(
@@ -696,7 +823,7 @@ fn declare_and_claim_omp_pre_tool_reservation(
     let mut body = protocol_envelope(ProtocolEnvelopeArgs {
         runtime,
         request_id: uuid::Uuid::new_v4().to_string(),
-        session_id: input.session_id.clone(),
+        agent_id: input.agent_id.clone(),
         workspace_id: workspace_id.to_string(),
         identity: identity.cloned(),
         source_kind: "hook",
@@ -742,7 +869,7 @@ fn declare_and_claim_omp_pre_tool_reservation(
         runtime,
         "/v1/claim/acquire",
         &json!({
-            "session_id": input.session_id.clone(),
+            "agent_id": input.agent_id.clone(),
             "workspace_id": workspace_id,
             "reservation_id": reservation_id.clone(),
             "paths": files_planned,
@@ -768,16 +895,42 @@ fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {
     let Some(edit_input) = input.get("input").and_then(serde_json::Value::as_str) else {
         return Vec::new();
     };
-    edit_input
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let header = line.strip_prefix('[')?.strip_suffix(']')?;
-            let (path, _) = header.split_once('#')?;
+    let mut targets = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut current_target_index: Option<usize> = None;
+    for line in edit_input.lines().map(str::trim) {
+        if let Some(header) = line
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            let Some((path, _)) = header.split_once('#') else {
+                continue;
+            };
             let path = path.trim();
-            (!path.is_empty()).then(|| PatchTarget::write(path))
-        })
-        .collect()
+            if path.is_empty() {
+                current_path = None;
+                current_target_index = None;
+                continue;
+            }
+            current_path = Some(path.to_string());
+            current_target_index = Some(targets.len());
+            targets.push(PatchTarget::write(path));
+            continue;
+        }
+
+        let Some(destination) = line
+            .strip_prefix("MV ")
+            .map(str::trim)
+            .filter(|destination| !destination.is_empty())
+        else {
+            continue;
+        };
+        let (Some(path), Some(index)) = (current_path.as_deref(), current_target_index) else {
+            continue;
+        };
+        targets[index] = PatchTarget::move_file(path, destination);
+    }
+    targets
 }
 
 pub fn handle_omp_session_start_with_runtime(
@@ -785,6 +938,7 @@ pub fn handle_omp_session_start_with_runtime(
     runtime: &ServerRuntime,
 ) -> anyhow::Result<OmpSessionStartOutput> {
     let input: OmpSessionEventInput = serde_json::from_str(input)?;
+    input.validate()?;
     let workspace_id = input
         .workspace_id
         .clone()
@@ -798,7 +952,7 @@ pub fn handle_omp_session_start_with_runtime(
     )?;
     Ok(omp_session_start_output(
         runtime,
-        &input.session_id,
+        &input.agent_id,
         workspace_id,
     ))
 }
@@ -806,18 +960,14 @@ pub fn handle_omp_session_start_with_runtime(
 fn handle_omp_session_start_with_identity(
     input: &str,
     runtime: &ServerRuntime,
-    repo_root: &Path,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<OmpSessionStartOutput> {
     let input: OmpSessionEventInput = serde_json::from_str(input)?;
+    input.validate()?;
     let workspace_id = input
         .workspace_id
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, identity));
-    write_current_session_file_for_explicit_session(
-        repo_root,
-        &CurrentSession::new(input.session_id.clone(), workspace_id.clone()),
-    )?;
     post_omp_session_event(
         runtime,
         "/v1/session/register",
@@ -827,24 +977,24 @@ fn handle_omp_session_start_with_identity(
     )?;
     Ok(omp_session_start_output(
         runtime,
-        &input.session_id,
+        &input.agent_id,
         workspace_id,
     ))
 }
 
 fn omp_session_start_output(
     runtime: &ServerRuntime,
-    session_id: &str,
+    agent_id: &str,
     workspace_id: String,
 ) -> OmpSessionStartOutput {
     OmpSessionStartOutput {
         decision: "allow",
-        session_id: session_id.to_string(),
+        agent_id: agent_id.to_string(),
         workspace_id: workspace_id.clone(),
         notifications_stream: OmpNotificationsStream {
             base_url: runtime.base_url.clone(),
             authorization: format!("Bearer {}", runtime.token),
-            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
             workspace_id,
         },
     }
@@ -855,6 +1005,7 @@ pub fn handle_omp_post_tool_use_with_runtime(
     runtime: &ServerRuntime,
 ) -> anyhow::Result<()> {
     let input: OmpSessionEventInput = serde_json::from_str(input)?;
+    input.validate()?;
     post_omp_post_tool_use_event(runtime, &input, None, None)
 }
 
@@ -865,6 +1016,7 @@ fn handle_omp_post_tool_use_with_identity(
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
     let input: OmpSessionEventInput = serde_json::from_str(input)?;
+    input.validate()?;
     post_omp_post_tool_use_event(runtime, &input, repo_root, identity)
 }
 
@@ -905,28 +1057,15 @@ fn refresh_omp_post_tool_claim_observations(
         .workspace_id
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, Some(identity)));
-    let mut paths = BTreeSet::new();
-    for target in targets {
-        paths.insert(target.path);
-        if let Some(new_path) = target.new_path {
-            paths.insert(new_path);
-        }
-    }
+    let paths = target_paths(targets);
 
-    for path in paths {
-        let body = json!({
-            "session_id": input.session_id,
-            "workspace_id": workspace_id,
-            "path": path,
-            "root": identity.root,
-        });
-        let Ok(response) = post_json(runtime, "/v1/claim/refresh-observation", &body) else {
-            continue;
-        };
-        if !(200..300).contains(&response.status_code) {
-            continue;
-        }
-    }
+    refresh_claim_observations_for_paths(
+        runtime,
+        &input.agent_id,
+        &workspace_id,
+        &identity.root,
+        &paths,
+    );
 }
 
 fn release_omp_post_tool_claims(
@@ -948,27 +1087,9 @@ fn release_omp_post_tool_claims(
         .workspace_id
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, Some(identity)));
-    let mut paths = BTreeSet::new();
-    for target in targets {
-        paths.insert(target.path);
-        if let Some(new_path) = target.new_path {
-            paths.insert(new_path);
-        }
-    }
+    let paths = target_paths(targets);
 
-    for path in paths {
-        let body = json!({
-            "session_id": input.session_id,
-            "workspace_id": workspace_id,
-            "path": path,
-        });
-        let Ok(response) = post_json(runtime, "/v1/claim/release", &body) else {
-            continue;
-        };
-        if !(200..300).contains(&response.status_code) {
-            continue;
-        }
-    }
+    release_claims_for_paths(runtime, &input.agent_id, &workspace_id, &paths);
 }
 
 fn omp_post_tool_refresh_targets(
@@ -1019,8 +1140,9 @@ fn post_omp_session_event(
         .workspace_id
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, identity));
+    input.validate()?;
     let mut body = json!({
-        "session_id": &input.session_id,
+        "agent_id": &input.agent_id,
         "workspace_id": workspace_id,
         "source": {
             "kind": "hook",
@@ -1051,14 +1173,12 @@ fn post_omp_session_event(
 fn prepare_pre_tool_use_runtime(
     repo_root: &Path,
     paths: &GlobalPaths,
-    input: &str,
+    _input: &str,
 ) -> anyhow::Result<ServerRuntime> {
     if !runtime_env_override_is_configured() {
         ensure_server(paths)?;
     }
-    let runtime = discover_runtime_with_global(repo_root, paths)?;
-    remember_current_session(repo_root, &runtime, input)?;
-    Ok(runtime)
+    discover_runtime_with_global(repo_root, paths)
 }
 
 pub fn handle_session_start_in_repo(
@@ -1077,7 +1197,6 @@ pub fn handle_session_start_in_repo(
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
-    remember_current_session(&repo_root, &runtime, input)?;
     let identity = repo_identity(&paths, &repo_root)?;
     handle_session_start_with_runtime(input, &runtime, Some(&identity))
 }
@@ -1098,7 +1217,6 @@ pub fn handle_post_tool_use_in_repo(
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
-    remember_current_session(&repo_root, &runtime, input)?;
     let identity = repo_identity(&paths, &repo_root)?;
     if let Err(error) =
         handle_post_tool_use_with_runtime(input, &runtime, Some(&repo_root), Some(&identity))
@@ -1108,7 +1226,7 @@ pub fn handle_post_tool_use_in_repo(
         queue_session_heartbeat_outbox(
             &paths,
             &workspace_id,
-            input.stateful_session_id(),
+            input.stateful_agent_id(),
             &error.to_string(),
         )?;
     }
@@ -1132,14 +1250,13 @@ pub fn handle_user_prompt_submit_in_repo(
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(String::new()),
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
-    remember_current_session(&repo_root, &runtime, input)?;
     let identity = repo_identity(&paths, &repo_root)?;
     let input: UserPromptSubmitInput = serde_json::from_str(input)?;
-    if user_prompt_context_rendered(&repo_root, input.stateful_session_id()) {
+    if user_prompt_context_rendered(&repo_root, input.stateful_agent_id()) {
         return Ok(String::new());
     }
     let prompt_text = handle_user_prompt_submit_with_runtime(&input, &runtime, Some(&identity))?;
-    mark_user_prompt_context_rendered(&repo_root, input.stateful_session_id());
+    mark_user_prompt_context_rendered(&repo_root, input.stateful_agent_id());
     Ok(prompt_text)
 }
 
@@ -1156,25 +1273,8 @@ pub fn handle_stop_in_repo(input: &str, repo_root: impl AsRef<Path>) -> anyhow::
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
-    remember_current_session(&repo_root, &runtime, input)?;
     let identity = repo_identity(&paths, &repo_root)?;
     handle_stop_with_runtime(input, &runtime, Some(&identity))
-}
-
-fn remember_current_session(
-    repo_root: &Path,
-    runtime: &ServerRuntime,
-    input: &str,
-) -> anyhow::Result<()> {
-    let input: SessionEventInput = serde_json::from_str(input)?;
-    let identity = GlobalPaths::from_env()
-        .ok()
-        .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok());
-    let workspace_id = effective_workspace_id(runtime, identity.as_ref());
-    write_current_session_file_for_explicit_session(
-        repo_root,
-        &CurrentSession::new(input.stateful_session_id(), workspace_id),
-    )
 }
 
 fn handle_session_start_with_runtime(
@@ -1186,7 +1286,7 @@ fn handle_session_start_with_runtime(
     post_session_event(
         runtime,
         "/v1/session/register",
-        input.stateful_session_id(),
+        input.stateful_agent_id(),
         identity,
     )
 }
@@ -1201,7 +1301,7 @@ fn handle_post_tool_use_with_runtime(
     post_session_event(
         runtime,
         "/v1/session/heartbeat",
-        input.stateful_session_id(),
+        input.stateful_agent_id(),
         identity,
     )?;
     refresh_post_tool_claim_observations(&input, runtime, repo_root, identity);
@@ -1214,27 +1314,27 @@ fn handle_user_prompt_submit_with_runtime(
     runtime: &ServerRuntime,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<String> {
-    let prompt_text = render_context_prompt_text(runtime, input.stateful_session_id(), identity)?;
+    let prompt_text = render_context_prompt_text(runtime, input.stateful_agent_id(), identity)?;
     Ok(with_stateful_command_policy_reminder(prompt_text))
 }
 
 fn render_context_prompt_text(
     runtime: &ServerRuntime,
-    session_id: &str,
+    agent_id: &str,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<String> {
-    Ok(render_context_response(runtime, session_id, identity, None)?.prompt_text)
+    Ok(render_context_response(runtime, agent_id, identity, None)?.prompt_text)
 }
 
 fn context_render_request_body(
     runtime: &ServerRuntime,
-    session_id: &str,
+    agent_id: &str,
     identity: Option<&RepoIdentity>,
     resource: Option<&str>,
 ) -> serde_json::Value {
     let workspace_id = effective_workspace_id(runtime, identity);
     let mut body = json!({
-        "session_id": session_id,
+        "agent_id": agent_id,
         "workspace_id": workspace_id,
         "mode": "brief"
     });
@@ -1258,11 +1358,11 @@ fn context_render_request_body(
 
 fn render_context_response(
     runtime: &ServerRuntime,
-    session_id: &str,
+    agent_id: &str,
     identity: Option<&RepoIdentity>,
     resource: Option<&str>,
 ) -> anyhow::Result<ContextRenderResponse> {
-    let body = context_render_request_body(runtime, session_id, identity, resource);
+    let body = context_render_request_body(runtime, agent_id, identity, resource);
     let response = post_json(runtime, "/v1/context/render", &body)?;
 
     if !(200..300).contains(&response.status_code) {
@@ -1277,33 +1377,33 @@ fn render_context_response(
     Ok(response)
 }
 
-fn user_prompt_context_rendered(repo_root: &Path, session_id: &str) -> bool {
-    user_prompt_context_marker_path(repo_root, session_id).exists()
+fn user_prompt_context_rendered(repo_root: &Path, agent_id: &str) -> bool {
+    user_prompt_context_marker_path(repo_root, agent_id).exists()
 }
 
-fn mark_user_prompt_context_rendered(repo_root: &Path, session_id: &str) {
-    let path = user_prompt_context_marker_path(repo_root, session_id);
+fn mark_user_prompt_context_rendered(repo_root: &Path, agent_id: &str) {
+    let path = user_prompt_context_marker_path(repo_root, agent_id);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let _ = fs::write(path, b"rendered\n");
 }
 
-fn user_prompt_context_marker_path(repo_root: &Path, session_id: &str) -> PathBuf {
+fn user_prompt_context_marker_path(repo_root: &Path, agent_id: &str) -> PathBuf {
     repo_root
         .join(".stateful_core")
         .join("runtime")
         .join("prompt_context")
-        .join(format!("{session_id}.sent"))
+        .join(format!("{agent_id}.sent"))
 }
 
 fn repeated_denial_marker_path(
     repo_root: &Path,
-    session_id: &str,
+    agent_id: &str,
     path: &str,
     reason_code: &str,
 ) -> PathBuf {
-    let session_key = marker_component(session_id);
+    let session_key = marker_component(agent_id);
     let reason_key = marker_component(reason_code);
     let path_key = marker_component(path);
     repo_root
@@ -1327,8 +1427,8 @@ fn marker_component(value: &str) -> String {
     encoded
 }
 
-fn repeated_denial_seen(repo_root: &Path, session_id: &str, path: &str, reason_code: &str) -> bool {
-    let marker = repeated_denial_marker_path(repo_root, session_id, path, reason_code);
+fn repeated_denial_seen(repo_root: &Path, agent_id: &str, path: &str, reason_code: &str) -> bool {
+    let marker = repeated_denial_marker_path(repo_root, agent_id, path, reason_code);
     let seen = marker.exists();
     if !seen {
         if let Some(parent) = marker.parent() {
@@ -1357,7 +1457,7 @@ fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
 fn stateful_command_policy_reminder() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Stateful command policy reminder:\n- Use `state_context_render` only for planning/manual inspection when active coordination may affect the plan; if you already inspected this turn for the same resource, reuse that result.\n- Before using Bash or eval tools, use the `stateful-command-policy` skill.\n- Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash.\n- Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands.\n- Use `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as the read-only shell fallback when native tools are unavailable or insufficient.\n- Use `{binary} sandbox process find <selector>` for structured process lookup instead of raw `ps` or `pgrep`.\n- Use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>` only after task-level reservation covers the target and the same-reservation file claim is active.\n- Use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` for builds/tests with disposable artifacts.\n- Use `{binary} sandbox run --fs git --network disabled --command 'git <args>'` for local git operations; enable network only for remote git operations.\n- Use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` for GitHub PR inspection or creation.",
+        "Stateful command policy reminder:\n- Use `state_context_render` only for planning/manual inspection when active coordination may affect the plan; if you already inspected this turn for the same resource, reuse that result.\n- Before using Bash or eval tools, use the `stateful-command-policy` skill.\n- Use active Stateful native coordination tools only when they appear in the tool list, for example `state_reservation_declare` and `state_claim_acquire`; runtime-specific names must be copied exactly. If those tools are absent, use OMP native edit/write auto-declare, lazy resume helpers, or an existing `reservation_id` with trusted sandbox write-targets. Do not run `stateful reservation declare` through Bash.\n- Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted `{binary} sandbox run` or `{binary} sandbox process find` commands.\n- Use `{binary} sandbox run --fs read-only --network disabled ...` for read-only shell fallback, `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> ...` for builds/tests, and `{binary} sandbox run --fs write-targets --write-target <file> ...` for command-shaped edits.\n- Use `{binary} sandbox run --fs git --network disabled ...` for local git, `{binary} sandbox run --fs git --network enabled ...` only for explicit remote git operations, and `{binary} sandbox run --fs github-pr --network enabled ...` for GitHub PR operations."
     )
 }
 
@@ -1370,7 +1470,7 @@ fn handle_stop_with_runtime(
     post_session_event(
         runtime,
         "/v1/activity/finalize",
-        input.stateful_session_id(),
+        input.stateful_agent_id(),
         identity,
     )
 }
@@ -1378,12 +1478,12 @@ fn handle_stop_with_runtime(
 fn post_session_event(
     runtime: &ServerRuntime,
     path: &str,
-    session_id: &str,
+    agent_id: &str,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
     let workspace_id = effective_workspace_id(runtime, identity);
     let mut body = json!({
-        "session_id": session_id,
+        "agent_id": agent_id,
         "workspace_id": workspace_id,
     });
     if let Some(identity) = identity {
@@ -1422,28 +1522,15 @@ fn refresh_post_tool_claim_observations(
         return;
     };
     let workspace_id = effective_workspace_id(runtime, Some(identity));
-    let mut paths = BTreeSet::new();
-    for target in targets {
-        paths.insert(target.path);
-        if let Some(new_path) = target.new_path {
-            paths.insert(new_path);
-        }
-    }
+    let paths = target_paths(targets);
 
-    for path in paths {
-        let body = json!({
-            "session_id": input.stateful_session_id(),
-            "workspace_id": workspace_id,
-            "path": path,
-            "root": identity.root,
-        });
-        let Ok(response) = post_json(runtime, "/v1/claim/refresh-observation", &body) else {
-            continue;
-        };
-        if !(200..300).contains(&response.status_code) {
-            continue;
-        }
-    }
+    refresh_claim_observations_for_paths(
+        runtime,
+        input.stateful_agent_id(),
+        &workspace_id,
+        &identity.root,
+        &paths,
+    );
 }
 
 fn release_post_tool_claims(
@@ -1462,27 +1549,9 @@ fn release_post_tool_claims(
         return;
     };
     let workspace_id = effective_workspace_id(runtime, Some(identity));
-    let mut paths = BTreeSet::new();
-    for target in targets {
-        paths.insert(target.path);
-        if let Some(new_path) = target.new_path {
-            paths.insert(new_path);
-        }
-    }
+    let paths = target_paths(targets);
 
-    for path in paths {
-        let body = json!({
-            "session_id": input.stateful_session_id(),
-            "workspace_id": workspace_id,
-            "path": path,
-        });
-        let Ok(response) = post_json(runtime, "/v1/claim/release", &body) else {
-            continue;
-        };
-        if !(200..300).contains(&response.status_code) {
-            continue;
-        }
-    }
+    release_claims_for_paths(runtime, input.stateful_agent_id(), &workspace_id, &paths);
 }
 
 fn post_tool_refresh_targets(
@@ -1526,6 +1595,11 @@ fn handle_pre_tool_use_with_runtime(
     cwd: Option<&Path>,
 ) -> anyhow::Result<HookOutcome> {
     let input: PreToolUseInput = serde_json::from_str(input)?;
+    if let Err(error) = input.validate() {
+        return Ok(HookOutcome::Deny {
+            reason: format!("stateful hook rejected invalid input: {error}"),
+        });
+    }
     let global_paths = GlobalPaths::from_env().ok();
     let identity = repo_root.and_then(|repo_root| {
         global_paths
@@ -1629,6 +1703,7 @@ fn is_builtin_safe_tool(tool_name: &str) -> bool {
         "view_image",
         "task",
         "yield",
+        "parallel_tool_calls",
         "spawn_agent",
         "multi_agent_v1spawn_agent",
         "wait_agent",
@@ -1669,20 +1744,14 @@ fn is_canonical_stateful_mcp_tool(tool_name: &str) -> bool {
             | "state.claim.acquire"
             | "state_claim_release"
             | "state.claim.release"
-            | "state_activity_observe"
-            | "state.activity.observe"
             | "state_activity_finalize"
             | "state.activity.finalize"
-            | "state_conflicts_check"
-            | "state.conflicts.check"
             | "state_current_read"
             | "state.current.read"
             | "state_events_read"
             | "state.events.read"
             | "state_context_render"
             | "state.context.render"
-            | "state_reconcile_ack"
-            | "state.reconcile.ack"
             | "state_notifications_poll"
             | "state.notifications.poll"
             | "state_resume_next"
@@ -1758,54 +1827,25 @@ fn deny_stateful_coordination_bash(command: &str) -> Option<HookOutcome> {
     if !command_mentions_stateful_coordination(command) {
         return None;
     }
-    Some(bash_policy_deny(stateful_coordination_mcp_guidance()))
+    Some(bash_policy_deny(stateful_coordination_tool_guidance()))
 }
 
 fn command_mentions_stateful_coordination(command: &str) -> bool {
     let Ok(words) = split_simple_command_words(command) else {
         return false;
     };
-    match words.get(1).map(String::as_str) {
-        Some("reservation") => true,
-        Some("mcp")
-            if words.get(2).is_some_and(|word| word == "call")
-                && words
-                    .get(3)
-                    .is_some_and(|tool| is_stateful_coordination_mcp_tool(tool)) =>
-        {
-            true
-        }
-        _ => false,
-    }
+    matches!(words.get(1).map(String::as_str), Some("reservation"))
+        || matches!(
+            (
+                words.get(1).map(String::as_str),
+                words.get(2).map(String::as_str)
+            ),
+            (Some("mcp"), Some("call"))
+        )
 }
 
-fn is_stateful_coordination_mcp_tool(tool_name: &str) -> bool {
-    if is_stateful_control_plane_tool(tool_name) {
-        return true;
-    }
-    matches!(
-        tool_name,
-        "state_reservation_declare"
-            | "state.reservation.declare"
-            | "state_reservation_request"
-            | "state.reservation.request"
-            | "state_reservation_claim"
-            | "state.reservation.claim"
-            | "state_reservation_cancel"
-            | "state.reservation.cancel"
-            | "state_claim_acquire"
-            | "state.claim.acquire"
-            | "state_claim_release"
-            | "state.claim.release"
-            | "state_notifications_poll"
-            | "state.notifications.poll"
-            | "state_resume_next"
-            | "state.resume.next"
-    )
-}
-
-fn stateful_coordination_mcp_guidance() -> &'static str {
-    "Use canonical Stateful MCP tool names such as `state_reservation_declare` and `state_claim_acquire`. If the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash."
+fn stateful_coordination_tool_guidance() -> &'static str {
+    "Use active Stateful native coordination tools only when they appear in the tool list, for example `state_reservation_declare` and `state_claim_acquire`; runtime-specific names must be copied exactly. If those tools are absent, use OMP native edit/write auto-declare or lazy resume helpers instead of inventing tools. Do not run `stateful reservation declare` or legacy `stateful mcp call` through Bash."
 }
 
 fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
@@ -1963,7 +2003,7 @@ fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
 fn bash_policy_guidance() -> String {
     let binary = stateful_binary_for_guidance();
     format!(
-        "Use the `stateful-command-policy` skill before Bash or eval tools; use `state_context_render` only for planning/manual inspection when active coordination may affect the plan. Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands. Use canonical Stateful MCP tool names (`state_reservation_declare`, `state_claim_acquire`) for coordination; if the active tool list exposes only runtime-specific tool names, call the exact shown equivalent such as Codex `mcp__stateful__state_reservation_declare` or OMP `mcp__stateful_state_reservation_declare`. Do not run `stateful reservation declare` or `stateful mcp call` through Bash. For file search and inspection, use native read/search tools first and `{binary} sandbox run --fs read-only --network disabled --command <cmd>` only as fallback. For structured process lookup, use `{binary} sandbox process find <selector>` in Codex or built-in Bash with `{binary} sandbox process find <selector>` in OMP instead of raw `ps` or `pgrep`. For command-shaped writes, ensure task-level reservation covers the target, acquire the same-reservation claim, then use `{binary} sandbox run --fs write-targets --write-target <file> --command <cmd>`. For builds/tests, use `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`. For local git, use `{binary} sandbox run --fs git --network disabled --command 'git <args>'`; enable network only for remote git operations. For GitHub PRs, use `{binary} sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'`.",
+        "Use the `stateful-command-policy` skill before Bash or eval tools; use `state_context_render` only for planning/manual inspection when active coordination may affect the plan. Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted `{binary} sandbox run` or `{binary} sandbox process find` commands. Use `{binary} sandbox run --fs read-only --network disabled --command ...` for read-only shell fallback, `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command ...` for builds/tests, and `{binary} sandbox run --fs write-targets --write-target <file> --command ...` for command-shaped edits. Use `{binary} sandbox run --fs git --network disabled ...` for local git, `{binary} sandbox run --fs git --network enabled ...` only for explicit remote git operations, and `{binary} sandbox run --fs github-pr --network enabled ...` for GitHub PR operations. Use active Stateful native coordination tools only when they appear in the tool list, for example `state_reservation_declare` and `state_claim_acquire`; runtime-specific names must be copied exactly. If those tools are absent, use OMP native edit/write auto-declare or lazy resume helpers instead of inventing tools. Do not run `stateful reservation declare` through Bash."
     )
 }
 
@@ -2468,8 +2508,8 @@ fn hook_authorize_purpose(
         let matches_intent = item.get("kind").and_then(serde_json::Value::as_str)
             == Some("reservation")
             && item.get("freshness").and_then(serde_json::Value::as_str) == Some("live")
-            && item.get("session_id").and_then(serde_json::Value::as_str)
-                == Some(input.stateful_session_id())
+            && item.get("agent_id").and_then(serde_json::Value::as_str)
+                == Some(input.stateful_agent_id())
             && item.get("workspace_id").and_then(serde_json::Value::as_str) == Some(workspace_id);
         if !matches_intent {
             continue;
@@ -2526,84 +2566,43 @@ fn authorize_targets(
     }
 
     let workspace_id = effective_workspace_id(runtime, identity);
-    let session_id = input.stateful_session_id().to_string();
+    let agent_id = input.stateful_agent_id().to_string();
     let mut allowed_paths = BTreeSet::new();
     for target in targets {
         let purpose = hook_authorize_purpose(input, runtime, &target, &workspace_id);
-        let mut payload = json!({
-            "action": target.action,
-            "path": target.path,
-        });
-        if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
-            payload["base_observations"] = json!([observation]);
-        }
-        if let Some(purpose) = purpose {
-            payload["queue_on_conflict"] = json!(true);
-            payload["purpose"] = json!(purpose);
-        }
-        if let Some(new_path) = &target.new_path {
-            payload["old_path"] = json!(target.path);
-            payload["new_path"] = json!(new_path);
-        }
-        if let Some(reservation_id) = input.reservation_id() {
-            payload["reservation_id"] = json!(reservation_id);
-        }
-        let body = protocol_envelope(ProtocolEnvelopeArgs {
+        let payload = authorization_payload_for_target(
+            &target,
+            repo_root,
+            purpose.as_deref(),
+            input.reservation_id(),
+            purpose.is_some(),
+        );
+        let body = authorization_request_body(
             runtime,
-            request_id: uuid::Uuid::new_v4().to_string(),
-            session_id: session_id.clone(),
-            workspace_id: workspace_id.clone(),
-            identity: identity.cloned(),
-            source_kind: "hook",
-            event: "pre_tool_use",
-            source_ref: "hook:pre_tool_use",
-            source_tool_name: Some(input.tool_name.as_str()),
+            &agent_id,
+            &workspace_id,
+            identity,
+            "pre_tool_use",
+            "hook:pre_tool_use",
+            &input.tool_name,
             payload,
-        });
-        let response = match post_json(runtime, "/v1/authorize", &body) {
-            Ok(response) => response,
-            Err(error) => {
-                release_pre_tool_authorized_claims(
-                    runtime,
-                    &session_id,
-                    &workspace_id,
-                    &allowed_paths,
-                );
-                return Ok(HookOutcome::Deny {
-                    reason: authorization_unavailable_reason(&error),
-                });
-            }
-        };
-
-        if !(200..300).contains(&response.status_code) {
-            release_pre_tool_authorized_claims(runtime, &session_id, &workspace_id, &allowed_paths);
-            return Ok(HookOutcome::Deny {
-                reason: format!(
-                    "stateful authorization failed with HTTP {}: {}",
-                    response.status_code, response.body
-                ),
-            });
-        }
-
-        let decision: AuthorizeDecision = match serde_json::from_str(&response.body) {
+        );
+        let decision: AuthorizeDecision = match post_authorize_decision(runtime, &body) {
             Ok(decision) => decision,
-            Err(error) => {
+            Err(reason) => {
                 release_pre_tool_authorized_claims(
                     runtime,
-                    &session_id,
+                    &agent_id,
                     &workspace_id,
                     &allowed_paths,
                 );
-                return Ok(HookOutcome::Deny {
-                    reason: authorization_unavailable_reason(&error),
-                });
+                return Ok(HookOutcome::Deny { reason });
             }
         };
         if decision.decision != "allow" {
-            release_pre_tool_authorized_claims(runtime, &session_id, &workspace_id, &allowed_paths);
+            release_pre_tool_authorized_claims(runtime, &agent_id, &workspace_id, &allowed_paths);
             let reason = if let Some(repo_root) = repo_root {
-                if repeated_denial_seen(repo_root, &session_id, &target.path, &decision.reason_code)
-                {
+                if repeated_denial_seen(repo_root, &agent_id, &target.path, &decision.reason_code) {
                     repeated_denial_reason(&target.path)
                 } else {
                     authorization_denial_reason(decision)
@@ -2624,13 +2623,56 @@ fn authorize_targets(
 
 fn release_pre_tool_authorized_claims(
     runtime: &ServerRuntime,
-    session_id: &str,
+    agent_id: &str,
+    workspace_id: &str,
+    paths: &BTreeSet<String>,
+) {
+    release_claims_for_paths(runtime, agent_id, workspace_id, paths);
+}
+
+fn target_paths(targets: Vec<PatchTarget>) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    for target in targets {
+        paths.insert(target.path);
+        if let Some(new_path) = target.new_path {
+            paths.insert(new_path);
+        }
+    }
+    paths
+}
+
+fn refresh_claim_observations_for_paths(
+    runtime: &ServerRuntime,
+    agent_id: &str,
+    workspace_id: &str,
+    root: &str,
+    paths: &BTreeSet<String>,
+) {
+    for path in paths {
+        let body = json!({
+            "agent_id": agent_id,
+            "workspace_id": workspace_id,
+            "path": path,
+            "root": root,
+        });
+        let Ok(response) = post_json(runtime, "/v1/claim/refresh-observation", &body) else {
+            continue;
+        };
+        if !(200..300).contains(&response.status_code) {
+            continue;
+        }
+    }
+}
+
+fn release_claims_for_paths(
+    runtime: &ServerRuntime,
+    agent_id: &str,
     workspace_id: &str,
     paths: &BTreeSet<String>,
 ) {
     for path in paths {
         let body = json!({
-            "session_id": session_id,
+            "agent_id": agent_id,
             "workspace_id": workspace_id,
             "path": path,
         });
@@ -2674,8 +2716,8 @@ fn authorization_denial_reason(decision: AuthorizeDecision) -> String {
         if let Some(queue_position) = wait.queue_position {
             wait_details.push(format!("queue position {queue_position}"));
         }
-        if let Some(blocking_session_id) = wait.blocking_session_id {
-            wait_details.push(format!("blocked by session {blocking_session_id}"));
+        if let Some(blocking_agent_id) = wait.blocking_agent_id {
+            wait_details.push(format!("blocked by agent {blocking_agent_id}"));
         }
         reason.push_str(&format!(" Track {}.", wait_details.join(", ")));
     }
@@ -2683,14 +2725,14 @@ fn authorization_denial_reason(decision: AuthorizeDecision) -> String {
         "state_notifications_poll",
         "state_resume_next",
         "reread",
-        "state_reservation_claim",
+        "lazy",
     ]
     .iter()
     .all(|term| reason.contains(term));
     if !has_resume_guidance {
         let target = wait.path.as_deref().unwrap_or("the target");
         reason.push_str(&format!(
-            " Resume by polling state_notifications_poll or state_resume_next for wait_id {}; when reserved, reread {}, then call state_reservation_claim with wait_id {} before retrying the write.",
+            " Resume by polling state_notifications_poll or state_resume_next for wait_id {}; when reserved, reread {}, then resume the queued lazy operation or retry the authorized write so the write boundary can claim wait_id {}. Only clients that expose state_reservation_claim should claim manually before retrying.",
             wait.wait_id, target, wait.wait_id
         ));
     }
@@ -2980,13 +3022,24 @@ fn normalize_path(path: PathBuf) -> PathBuf {
     normalized
 }
 
+fn validate_agent_id(agent_id: &str, label: &str) -> anyhow::Result<()> {
+    if agent_id.is_empty() {
+        anyhow::bail!("{label} is set but empty");
+    }
+    if !agent_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        anyhow::bail!("{label} contains unsupported characters");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct OmpPreToolUseInput {
-    session_id: String,
+    agent_id: String,
     #[serde(default)]
-    reservation_id: Option<String>,
-    #[serde(default)]
-    parent_session_id: Option<String>,
+    parent_agent_id: Option<String>,
     #[serde(default)]
     omp_agent_id: Option<String>,
     #[serde(default)]
@@ -2996,16 +3049,22 @@ pub struct OmpPreToolUseInput {
     #[serde(default)]
     yolo: bool,
     #[serde(default)]
+    reservation_id: Option<String>,
+    #[serde(default)]
     commit_id: Option<String>,
     tool_name: String,
     #[serde(default)]
     tool_input: serde_json::Value,
 }
 impl OmpPreToolUseInput {
+    fn validate(&self) -> anyhow::Result<()> {
+        validate_agent_id(&self.agent_id, "agent_id")
+    }
+
     fn audit_metadata(&self) -> serde_json::Value {
         json!({
             "runtime": "omp",
-            "parent_session_id": self.parent_session_id,
+            "parent_agent_id": self.parent_agent_id,
             "omp_agent_id": self.omp_agent_id,
             "yolo": self.yolo,
             "commit_id": self.commit_id,
@@ -3034,9 +3093,9 @@ impl OmpPreToolUseInput {
 
 #[derive(Debug, Deserialize)]
 pub struct OmpSessionEventInput {
-    session_id: String,
+    agent_id: String,
     #[serde(default)]
-    parent_session_id: Option<String>,
+    parent_agent_id: Option<String>,
     #[serde(default)]
     omp_agent_id: Option<String>,
     #[serde(default)]
@@ -3052,10 +3111,14 @@ pub struct OmpSessionEventInput {
 }
 
 impl OmpSessionEventInput {
+    fn validate(&self) -> anyhow::Result<()> {
+        validate_agent_id(&self.agent_id, "agent_id")
+    }
+
     fn audit_metadata(&self) -> serde_json::Value {
         json!({
             "runtime": "omp",
-            "parent_session_id": self.parent_session_id,
+            "parent_agent_id": self.parent_agent_id,
             "omp_agent_id": self.omp_agent_id,
             "commit_id": self.commit_id,
             "cwd": self.cwd,
@@ -3081,18 +3144,19 @@ struct PreToolUseInput {
 
 #[derive(Debug, Deserialize)]
 struct RuntimeHookInput {
-    session_id: String,
-    #[serde(default)]
-    thread_id: Option<String>,
+    #[serde(alias = "session_id")]
+    agent_id: String,
 }
 
 impl RuntimeHookInput {
-    fn stateful_session_id(&self) -> &str {
-        self.thread_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|thread_id| !thread_id.is_empty())
-            .unwrap_or(&self.session_id)
+    fn stateful_agent_id(&self) -> &str {
+        &self.agent_id
+    }
+}
+
+impl RuntimeHookInput {
+    fn validate(&self) -> anyhow::Result<()> {
+        validate_agent_id(&self.agent_id, "agent_id")
     }
 }
 
@@ -3103,8 +3167,8 @@ struct HookCwdInput {
 }
 
 impl PreToolUseInput {
-    fn stateful_session_id(&self) -> &str {
-        self.runtime.stateful_session_id()
+    fn stateful_agent_id(&self) -> &str {
+        self.runtime.stateful_agent_id()
     }
 
     fn command(&self) -> Option<&str> {
@@ -3127,6 +3191,12 @@ impl PreToolUseInput {
             &self.tool_input,
             &["command", "patch", "input", "cmd", "diff"],
         )
+    }
+}
+
+impl PreToolUseInput {
+    fn validate(&self) -> anyhow::Result<()> {
+        self.runtime.validate()
     }
 }
 
@@ -3166,8 +3236,8 @@ struct AuthorizeWait {
     path: Option<String>,
     #[serde(default)]
     queue_position: Option<u64>,
-    #[serde(default)]
-    blocking_session_id: Option<String>,
+    #[serde(default, rename = "blocking_agent_id", alias = "blocking_agent_id")]
+    blocking_agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3205,14 +3275,14 @@ struct ContextRenderResponse {
 }
 
 impl SessionStartInput {
-    fn stateful_session_id(&self) -> &str {
-        self.runtime.stateful_session_id()
+    fn stateful_agent_id(&self) -> &str {
+        self.runtime.stateful_agent_id()
     }
 }
 
 impl SessionEventInput {
-    fn stateful_session_id(&self) -> &str {
-        self.runtime.stateful_session_id()
+    fn stateful_agent_id(&self) -> &str {
+        self.runtime.stateful_agent_id()
     }
 
     fn patch_text(&self) -> Option<&str> {
@@ -3224,8 +3294,8 @@ impl SessionEventInput {
 }
 
 impl UserPromptSubmitInput {
-    fn stateful_session_id(&self) -> &str {
-        self.runtime.stateful_session_id()
+    fn stateful_agent_id(&self) -> &str {
+        self.runtime.stateful_agent_id()
     }
 }
 
@@ -3234,23 +3304,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_hook_input_prefers_thread_id_when_present() {
+    fn runtime_hook_input_uses_explicit_agent_id() {
         let input = RuntimeHookInput {
-            session_id: "codex-session-1".to_string(),
-            thread_id: Some("codex-thread-1".to_string()),
+            agent_id: "codex-agent-1".to_string(),
         };
 
-        assert_eq!(input.stateful_session_id(), "codex-thread-1");
+        assert_eq!(input.stateful_agent_id(), "codex-agent-1");
     }
 
     #[test]
-    fn runtime_hook_input_falls_back_to_session_id_without_thread_id() {
-        let input = RuntimeHookInput {
-            session_id: "codex-session-1".to_string(),
-            thread_id: None,
-        };
+    fn runtime_hook_input_uses_codex_session_id_parameter() {
+        let input: RuntimeHookInput = serde_json::from_value(serde_json::json!({
+            "session_id": "019f1a3f-0e81-7250-8597-24dd8ef18fb4"
+        }))
+        .expect("Codex session_id parameter should deserialize as active agent id");
 
-        assert_eq!(input.stateful_session_id(), "codex-session-1");
+        assert_eq!(
+            input.stateful_agent_id(),
+            "019f1a3f-0e81-7250-8597-24dd8ef18fb4"
+        );
     }
 
     #[test]
@@ -3332,16 +3404,10 @@ mod tests {
             "reminder should mention structured process lookup: {reminder}"
         );
         assert!(
-            reminder.contains("built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands"),
+            reminder.contains("built-in Bash with trusted")
+                && reminder.contains("sandbox run")
+                && reminder.contains("sandbox process find"),
             "reminder should mention built-in Bash trusted Stateful commands: {reminder}"
-        );
-        assert!(
-            reminder.contains("sandbox run --fs git --network disabled"),
-            "reminder should default local git to network disabled: {reminder}"
-        );
-        assert!(
-            reminder.contains("sandbox run --fs github-pr --network enabled"),
-            "reminder should mention GitHub PR profile: {reminder}"
         );
         assert!(
             reminder.contains(&current_exe),
@@ -3362,7 +3428,9 @@ mod tests {
             "denial guidance should mention networked git exception: {guidance}"
         );
         assert!(
-            guidance.contains("built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands"),
+            guidance.contains("built-in Bash with trusted")
+                && guidance.contains("sandbox run")
+                && guidance.contains("sandbox process find"),
             "denial guidance should mention built-in Bash trusted Stateful commands: {guidance}"
         );
         for removed_tool in ["process_find", "sandbox_bash", "ext_ro_bash", "ext_rw_bash"] {
@@ -3382,6 +3450,49 @@ mod tests {
     }
 
     #[test]
+    fn omp_session_start_rejects_legacy_agent_id_input() {
+        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret", "workspace", 7);
+        let temp = std::env::temp_dir().join(format!(
+            "stateful-omp-legacy-session-id-{}",
+            std::process::id()
+        ));
+        let repo = temp.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir should create");
+        let input = serde_json::json!({
+            "session_id": "old-session",
+            "workspace_id": "workspace",
+            "cwd": repo.display().to_string(),
+        });
+
+        let error = handle_omp_session_start_with_runtime(&input.to_string(), &runtime)
+            .expect_err("legacy agent_id should not be accepted");
+
+        assert!(
+            error.to_string().contains("agent_id"),
+            "legacy agent_id error should mention agent_id: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn omp_session_start_rejects_invalid_agent_id_input() {
+        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret", "workspace", 7);
+        let input = serde_json::json!({
+            "agent_id": "bad agent id",
+            "workspace_id": "workspace",
+            "cwd": "/repo",
+        });
+
+        let error = handle_omp_session_start_with_runtime(&input.to_string(), &runtime)
+            .expect_err("invalid agent_id should not be accepted");
+
+        assert!(
+            error.to_string().contains("agent_id"),
+            "invalid agent_id error should mention agent_id: {error}"
+        );
+    }
+
+    #[test]
     fn context_render_request_body_includes_resource_when_target_is_known() {
         let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret", "local", 7);
         let identity = RepoIdentity {
@@ -3394,7 +3505,7 @@ mod tests {
         let body =
             context_render_request_body(&runtime, "session-a", Some(&identity), Some("src/lib.rs"));
 
-        assert_eq!(body["session_id"], "session-a");
+        assert_eq!(body["agent_id"], "session-a");
         assert_eq!(body["workspace_id"], "workspace-worktree-a");
         assert_eq!(body["mode"], "brief");
         assert_eq!(body["resource"], "src/lib.rs");
@@ -3429,8 +3540,8 @@ mod tests {
         let cwd = repo.join("src");
         std::fs::create_dir_all(&cwd).expect("repo dirs should create");
         let input = OmpSessionEventInput {
-            session_id: "omp-session-1".to_string(),
-            parent_session_id: None,
+            agent_id: "omp-session-1".to_string(),
+            parent_agent_id: None,
             omp_agent_id: None,
             workspace_id: None,
             cwd: Some(cwd),
@@ -3453,8 +3564,8 @@ mod tests {
         let repo = temp.join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir should create");
         let input = OmpSessionEventInput {
-            session_id: "omp-session-1".to_string(),
-            parent_session_id: None,
+            agent_id: "omp-session-1".to_string(),
+            parent_agent_id: None,
             omp_agent_id: None,
             workspace_id: None,
             cwd: Some(repo.clone()),

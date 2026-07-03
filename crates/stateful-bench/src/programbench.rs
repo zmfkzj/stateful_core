@@ -3,7 +3,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, ExitStatus},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -18,8 +18,13 @@ const DEFAULT_PROGRAMBENCH_BIN: &str = "programbench";
 const DEFAULT_DOCKER_BIN: &str = "docker";
 const DEFAULT_CODEX_BIN: &str = "codex";
 const DEFAULT_OMP_BIN: &str = "omp";
+const DEFAULT_PROGRAMBENCH_AGENT_DOCKER_OMP_BIN: &str = DEFAULT_OMP_BIN;
+const DEFAULT_PROGRAMBENCH_AGENT_DOCKER_STATEFUL_BINARY: &str = "/usr/local/bin/stateful";
+const DEFAULT_PROGRAMBENCH_AGENT_DOCKER_HOME: &str = "/home/stateful";
 const DEFAULT_BENCHMARK_MAX_TURNS: usize = 500;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 7200;
+// ponytail: fixed adapter lifecycle grace; make configurable only if setup exceeds it.
+const PROGRAMBENCH_ADAPTER_LIFECYCLE_GRACE_SECONDS: u64 = 30 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -30,6 +35,10 @@ pub enum ProgramBenchAgentKind {
 }
 
 #[derive(Debug, Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "clap derive keeps command fields flat"
+)]
 pub enum ProgramBenchCommand {
     Run {
         #[arg(long, default_value = DEFAULT_PROGRAMBENCH_RUNS)]
@@ -42,6 +51,8 @@ pub enum ProgramBenchCommand {
         condition: Vec<String>,
         #[arg(long)]
         model: Option<String>,
+        #[arg(long)]
+        thinking: Option<String>,
         #[arg(long, default_value_t = DEFAULT_BENCHMARK_MAX_TURNS)]
         benchmark_max_turns: usize,
         #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECONDS)]
@@ -64,6 +75,14 @@ pub enum ProgramBenchCommand {
         codex_bin: String,
         #[arg(long, default_value = DEFAULT_OMP_BIN)]
         omp_bin: String,
+        #[arg(long)]
+        agent_docker_image: Option<String>,
+        #[arg(long, default_value = DEFAULT_PROGRAMBENCH_AGENT_DOCKER_OMP_BIN)]
+        agent_docker_omp_bin: String,
+        #[arg(long, default_value = DEFAULT_PROGRAMBENCH_AGENT_DOCKER_STATEFUL_BINARY)]
+        agent_docker_stateful_binary: String,
+        #[arg(long, default_value = DEFAULT_PROGRAMBENCH_AGENT_DOCKER_HOME)]
+        agent_docker_home: String,
     },
     Eval {
         #[arg(long)]
@@ -142,9 +161,14 @@ pub struct ProgramBenchInstanceRunOptions {
     pub omp_bin: String,
     pub stateful_binary: String,
     pub model: Option<String>,
+    pub thinking: Option<String>,
     pub benchmark_max_turns: usize,
     pub timeout_seconds: u64,
     pub subagent_min_count: usize,
+    pub agent_docker_image: Option<String>,
+    pub agent_docker_omp_bin: String,
+    pub agent_docker_stateful_binary: String,
+    pub agent_docker_home: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +178,7 @@ pub struct ProgramBenchRunOptions {
     pub agent: ProgramBenchAgentKind,
     pub conditions: Vec<ProgramBenchCondition>,
     pub model: Option<String>,
+    pub thinking: Option<String>,
     pub benchmark_max_turns: usize,
     pub timeout_seconds: u64,
     pub filter: Option<String>,
@@ -165,8 +190,11 @@ pub struct ProgramBenchRunOptions {
     pub stateful_binary: String,
     pub codex_bin: String,
     pub omp_bin: String,
+    pub agent_docker_image: Option<String>,
+    pub agent_docker_omp_bin: String,
+    pub agent_docker_stateful_binary: String,
+    pub agent_docker_home: String,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramBenchEvalOptions {
     pub run_dir: PathBuf,
@@ -219,6 +247,8 @@ pub struct ProgramBenchInstanceMetadata {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_copy_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_used: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1014,8 +1044,6 @@ where
 
 pub fn default_programbench_conditions() -> Vec<ProgramBenchCondition> {
     vec![
-        ProgramBenchCondition::new(false, false),
-        ProgramBenchCondition::new(true, false),
         ProgramBenchCondition::new(false, true),
         ProgramBenchCondition::new(true, true),
     ]
@@ -1036,7 +1064,7 @@ pub fn parse_programbench_condition(input: &str) -> Result<ProgramBenchCondition
     }
     Ok(ProgramBenchCondition::new(
         stateful.unwrap_or(false),
-        subagent.unwrap_or(false),
+        subagent.unwrap_or(true),
     ))
 }
 
@@ -1314,11 +1342,19 @@ fn run_programbench_instance(
         omp_bin: options.omp_bin.clone(),
         stateful_binary: options.stateful_binary.clone(),
         model: options.model.clone(),
+        thinking: options.thinking.clone(),
         benchmark_max_turns: options.benchmark_max_turns,
         timeout_seconds: options.timeout_seconds,
         subagent_min_count: 3,
+        agent_docker_image: options.agent_docker_image.clone(),
+        agent_docker_omp_bin: options.agent_docker_omp_bin.clone(),
+        agent_docker_stateful_binary: options.agent_docker_stateful_binary.clone(),
+        agent_docker_home: options.agent_docker_home.clone(),
     })?;
-    let adapter_result = execute_recipe_command_status(&command);
+    let adapter_result = execute_recipe_command_status(
+        &command,
+        programbench_adapter_execution_timeout(Duration::from_secs(options.timeout_seconds)),
+    );
     remove_programbench_container(&options.docker_bin, &container_id);
     adapter_result.with_context(|| format!("failed to execute {}", command_line(&command)))?;
 
@@ -1502,6 +1538,20 @@ pub fn build_programbench_agent_command(
         ProgramBenchAgentKind::OmpCli => {
             args.push("--omp-bin".to_string());
             args.push(options.omp_bin);
+            if let Some(thinking) = options.thinking {
+                args.push("--thinking".to_string());
+                args.push(thinking);
+            }
+            if let Some(agent_docker_image) = options.agent_docker_image {
+                args.push("--agent-docker-image".to_string());
+                args.push(agent_docker_image);
+                args.push("--agent-docker-omp-bin".to_string());
+                args.push(options.agent_docker_omp_bin);
+                args.push("--agent-docker-stateful-binary".to_string());
+                args.push(options.agent_docker_stateful_binary);
+                args.push("--agent-docker-home".to_string());
+                args.push(options.agent_docker_home);
+            }
         }
     }
 
@@ -1537,6 +1587,7 @@ pub fn run_programbench_cli(command: ProgramBenchCommand) -> Result<()> {
             agent,
             condition,
             model,
+            thinking,
             benchmark_max_turns,
             timeout_seconds,
             filter,
@@ -1548,6 +1599,10 @@ pub fn run_programbench_cli(command: ProgramBenchCommand) -> Result<()> {
             stateful_binary,
             codex_bin,
             omp_bin,
+            agent_docker_image,
+            agent_docker_omp_bin,
+            agent_docker_stateful_binary,
+            agent_docker_home,
         } => {
             let metadata = run_programbench_matrix(ProgramBenchRunOptions {
                 output_dir,
@@ -1555,6 +1610,7 @@ pub fn run_programbench_cli(command: ProgramBenchCommand) -> Result<()> {
                 agent,
                 conditions: planned_programbench_conditions(&condition)?,
                 model,
+                thinking,
                 benchmark_max_turns,
                 timeout_seconds,
                 filter,
@@ -1566,6 +1622,10 @@ pub fn run_programbench_cli(command: ProgramBenchCommand) -> Result<()> {
                 stateful_binary,
                 codex_bin,
                 omp_bin,
+                agent_docker_image,
+                agent_docker_omp_bin,
+                agent_docker_stateful_binary,
+                agent_docker_home,
             })?;
             println!("{}", serde_json::to_string_pretty(&metadata)?);
         }
@@ -1627,12 +1687,58 @@ fn execute_recipe_command(command: &ProgramBenchRecipeCommand) -> Result<()> {
     Ok(())
 }
 
-fn execute_recipe_command_status(command: &ProgramBenchRecipeCommand) -> Result<ExitStatus> {
-    ProcessCommand::new(&command.program)
+fn programbench_adapter_execution_timeout(adapter_timeout: Duration) -> Duration {
+    adapter_timeout.saturating_add(Duration::from_secs(
+        PROGRAMBENCH_ADAPTER_LIFECYCLE_GRACE_SECONDS,
+    ))
+}
+
+fn execute_recipe_command_status(
+    command: &ProgramBenchRecipeCommand,
+    timeout: Duration,
+) -> Result<ExitStatus> {
+    let mut child = ProcessCommand::new(&command.program)
         .args(&command.args)
         .envs(&command.env)
-        .status()
-        .with_context(|| format!("failed to execute {}", command_line(command)))
+        .spawn()
+        .with_context(|| format!("failed to execute {}", command_line(command)))?;
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("failed to wait for {}", command_line(command)))?
+        {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            let kill_error = child.kill().err();
+            let wait_deadline = Instant::now() + Duration::from_millis(100);
+            while Instant::now() < wait_deadline {
+                if child
+                    .try_wait()
+                    .with_context(|| format!("failed to wait for {}", command_line(command)))?
+                    .is_some()
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if let Some(error) = kill_error {
+                bail!(
+                    "ProgramBench command timed out after {timeout:?} and failed to kill child: {error}: {}",
+                    command_line(command)
+                );
+            }
+            bail!(
+                "ProgramBench command timed out after {timeout:?}: {}",
+                command_line(command)
+            );
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
 }
 
 fn command_line(command: &ProgramBenchRecipeCommand) -> String {
@@ -1707,12 +1813,46 @@ fn path_arg(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     fn env_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
             .iter()
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn execute_recipe_command_status_times_out_slow_command() {
+        let command = ProgramBenchRecipeCommand {
+            program: "sleep".to_string(),
+            args: vec!["2".to_string()],
+            env: BTreeMap::new(),
+        };
+
+        let started = Instant::now();
+        let result = execute_recipe_command_status(&command, Duration::from_millis(50));
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "expected timeout error for slow command, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "timeout returned after {elapsed:?}, expected it before the child sleep completed"
+        );
+    }
+
+    #[test]
+    fn programbench_adapter_execution_timeout_includes_lifecycle_grace() {
+        let adapter_timeout = Duration::from_secs(7200);
+
+        assert_eq!(
+            programbench_adapter_execution_timeout(adapter_timeout),
+            Duration::from_secs(9000),
+            "Rust wrapper timeout must allow stateful setup plus the full Python adapter timeout"
+        );
     }
 
     #[test]

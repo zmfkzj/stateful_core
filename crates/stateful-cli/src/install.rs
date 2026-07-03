@@ -12,7 +12,6 @@ use std::{
 };
 
 use anyhow::Context;
-use serde_json::json;
 
 use crate::{GlobalPaths, RepoRegistry};
 
@@ -190,7 +189,6 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
     let extension_path = agent_dir
         .join("extensions")
         .join("stateful-omp-extension.js");
-    let mcp_path = agent_dir.join("mcp.json");
     let command_policy_skill_path = omp_command_policy_skill_path(&agent_dir);
     let rule_path = omp_required_rule_path(&agent_dir);
     plan.summary = format!(
@@ -200,7 +198,6 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
     );
     plan.files.push(config_path);
     plan.files.push(extension_path);
-    plan.files.push(mcp_path);
     plan.files.push(command_policy_skill_path);
     plan.files
         .extend(omp_command_policy_support_file_paths(&agent_dir));
@@ -227,7 +224,6 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
     let extension_path = agent_dir
         .join("extensions")
         .join("stateful-omp-extension.js");
-    let mcp_path = agent_dir.join("mcp.json");
     fs::create_dir_all(
         extension_path
             .parent()
@@ -236,12 +232,8 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    if let Some(parent) = mcp_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     write_omp_config(&config_path, &extension_path, options.update)?;
     write_omp_extension(&extension_path, &options.binary_path)?;
-    write_omp_mcp_config(&mcp_path, &options.binary_path)?;
     write_omp_command_policy_skill(&agent_dir)?;
     write_omp_command_policy_support_files(&agent_dir)?;
     write_omp_required_rule(&agent_dir)?;
@@ -1094,14 +1086,7 @@ fn global_codex_config_block(
         r#"{GLOBAL_CODEX_BLOCK_START}
 {STATEFUL_APPROVAL_POLICY}
 
-{features_section}[mcp_servers.stateful]
-command = {}
-args = ["mcp", "serve"]
-env_vars = ["CODEX_THREAD_ID", "STATEFUL_CODEX_RUN_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN"]
-startup_timeout_sec = 20
-default_tools_approval_mode = "approve"
-
-[[hooks.SessionStart]]
+{features_section}[[hooks.SessionStart]]
 matcher = "startup|resume|clear|compact"
 
 [[hooks.SessionStart.hooks]]
@@ -1140,7 +1125,6 @@ command = {}
 statusMessage = "Finalizing stateful activity"
 {GLOBAL_CODEX_BLOCK_END}
 "#,
-        toml_string(binary_path),
         toml_string(&format!("{hook_prefix} session-start")),
         toml_string(&format!("{hook_prefix} user-prompt-submit")),
         toml_string(&format!("{hook_prefix} pre-tool-use")),
@@ -1288,7 +1272,7 @@ fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow
         &mut lines,
         "stateful",
         "autoApprove",
-        "false",
+        "true",
         update_existing,
     )?;
     ensure_omp_child_scalar(&mut lines, "eval", "py", "false", update_existing)?;
@@ -1434,1256 +1418,9 @@ fn finish_omp_yaml_lines(lines: Vec<String>) -> String {
 
 fn write_omp_extension(extension_path: &Path, binary_path: &str) -> anyhow::Result<()> {
     let binary_json = serde_json::to_string(binary_path)?;
-    let contents = format!(
-        r#"import {{ spawnSync }} from "node:child_process";
-import {{ createHash }} from "node:crypto";
-import {{ closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync }} from "node:fs";
-import {{ basename, delimiter, dirname, extname, resolve }} from "node:path";
-import {{ fileURLToPath }} from "node:url";
-
-const STATEFUL = {binary_json};
-const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
-const OMP_AGENT_CONFIG = resolve(EXTENSION_DIR, "..", "config.yml");
-const BENCHMARK_SOURCE_BLOCK_ENV = "STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS";
- 
-let verifiedBareStatefulPath = null;
-
-function statefulBinaryDigest(path) {{
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
-}}
-
-function executableFile(path) {{
-  try {{
-    const stat = statSync(path);
-    return stat.isFile() && (stat.mode & 0o111) !== 0;
-  }} catch {{
-    return false;
-  }}
-}}
-
-function firstPathStateful(cwd) {{
-  const base = cwd || process.cwd();
-  for (const entry of String(process.env.PATH || "").split(delimiter)) {{
-    const directory = entry ? resolve(base, entry) : base;
-    const candidate = resolve(directory, "stateful");
-    if (executableFile(candidate)) return candidate;
-  }}
-  return null;
-}}
-
-function verifyBareStateful(cwd) {{
-  verifiedBareStatefulPath = null;
-  const candidate = firstPathStateful(cwd);
-  if (!candidate) return false;
-  try {{
-    if (statefulBinaryDigest(candidate) !== statefulBinaryDigest(STATEFUL)) return false;
-    verifiedBareStatefulPath = candidate;
-    return true;
-  }} catch {{
-    verifiedBareStatefulPath = null;
-    return false;
-  }}
-}}
-
-function bareStatefulStillVerified() {{
-  if (!verifiedBareStatefulPath) return false;
-  try {{
-    return statefulBinaryDigest(verifiedBareStatefulPath) === statefulBinaryDigest(STATEFUL);
-  }} catch {{
-    return false;
-  }}
-}}
-
-function isTrustedStatefulCommand(word) {{
-  if (word === STATEFUL) return true;
-  if (word !== "stateful") return false;
-  return bareStatefulStillVerified();
-}}
-
-
-function runStatefulHook(event, payload) {{
-  const result = spawnSync(STATEFUL, ["hook", "omp", event], {{
-    input: JSON.stringify(payload),
-    encoding: "utf8",
-  }});
-  if (result.status !== 0) {{
-    return {{ decision: "block", reason: result.stderr || "stateful hook failed" }};
-  }}
-  const text = (result.stdout || "").trim();
-  return text ? JSON.parse(text) : {{ decision: "allow" }};
-}}
-
-function isYolo(event, ctx) {{
-  const values = [
-    event?.yolo,
-    event?.autoApprove,
-    event?.approvalMode,
-    ctx?.yolo,
-    ctx?.autoApprove,
-    ctx?.approvalMode,
-    ctx?.config?.approvalMode,
-    ctx?.config?.tools?.approvalMode,
-  ];
-  return values.some((value) => value === true || value === "yolo" || value === "auto-approve");
-}}
-
-function firstString(...values) {{
-  for (const value of values) {{
-    if (typeof value === "string" && value.trim().length > 0) return value;
-  }}
-  return undefined;
-}}
-
-function sessionIdFromString(value, prefix = "omp") {{
-  if (typeof value !== "string") return undefined;
-  const id = value.trim();
-  if (!id) return undefined;
-  if (/^[A-Za-z0-9_-]+$/.test(id)) return id;
-  return prefix + "-" + createHash("sha256").update(id).digest("hex").slice(0, 32);
-}}
-
-function readFirstLine(path) {{
-  const fd = openSync(path, "r");
-  try {{
-    const buffer = Buffer.alloc(4096);
-    const bytes = readSync(fd, buffer, 0, buffer.length, 0);
-    return buffer.toString("utf8", 0, bytes).split(/\r?\n/, 1)[0];
-  }} finally {{
-    closeSync(fd);
-  }}
-}}
-
-function sessionIdFromSessionFile(sessionFile) {{
-  const path = firstString(sessionFile);
-  if (!path) return undefined;
-  try {{
-    const id = sessionIdFromString(JSON.parse(readFirstLine(path))?.id);
-    if (id) return id;
-  }} catch (_) {{}}
-  return sessionIdFromString(basename(path, extname(path))) || sessionIdFromString(path);
-}}
-
-function sessionIdFromSessionManager(sessionManager) {{
-  return firstString(
-    sessionIdFromSessionFile(sessionManager?.getSessionFile?.()),
-    sessionIdFromString(sessionManager?.getLeafId?.(), "omp-leaf")
-  );
-}}
-
-function detectSessionId(event, ctx) {{
-  return firstString(
-    sessionIdFromString(event?.sessionId),
-    sessionIdFromString(event?.session_id),
-    sessionIdFromString(event?.session?.id),
-    sessionIdFromString(event?.session?.sessionId),
-    sessionIdFromString(event?.session?.session_id),
-    sessionIdFromString(ctx?.sessionId),
-    sessionIdFromString(ctx?.session_id),
-    sessionIdFromString(ctx?.session?.id),
-    sessionIdFromString(ctx?.session?.sessionId),
-    sessionIdFromString(ctx?.session?.session_id),
-    sessionIdFromSessionManager(ctx?.sessionManager)
-  );
-}}
-
-function sessionId(event, ctx) {{
-  const id = detectSessionId(event, ctx);
-  if (id) {{
-    process.env.STATEFUL_SESSION_ID = id;
-  }} else {{
-    delete process.env.STATEFUL_SESSION_ID;
-  }}
-  return id;
-}}
-
-function reservationIdFromValue(value) {{
-  if (typeof value !== "string") return undefined;
-  const id = value.trim();
-  return id.length > 0 ? id : undefined;
-}}
-
-function reservationId(event, decision) {{
-  return firstString(
-    reservationIdFromValue(event?.reservation_id),
-    reservationIdFromValue(event?.reservationId),
-    reservationIdFromValue(event?.input?.reservation_id),
-    reservationIdFromValue(event?.input?.reservationId),
-    reservationIdFromValue(decision?.reservation_id),
-    reservationIdFromValue(decision?.wait?.reservation_id),
-    reservationIdFromValue(decision?.reservation?.reservation_id),
-    reservationIdFromValue(decision?.reservation?.wait_id),
-    reservationIdFromValue(decision?.reservation?.id)
-  );
-}}
-
-let reservationStreamAbort;
-const seenReservationWaitIds = new Set();
-
-function stopReservationStream() {{
-  if (reservationStreamAbort) {{
-    reservationStreamAbort.abort();
-    reservationStreamAbort = undefined;
-  }}
-}}
-
-function sleepWithAbort(ms, signal) {{
-  return new Promise((resolve) => {{
-    const timer = setTimeout(resolve, ms);
-    if (signal) {{
-      signal.addEventListener("abort", () => {{
-        clearTimeout(timer);
-        resolve();
-      }}, {{ once: true }});
-    }}
-  }});
-}}
-
-function reservationStreamUrl(stream) {{
-  const base = String(stream.base_url || "").replace(/\/+$/, "");
-  return base + "/v1/notifications/stream?session_id=" + encodeURIComponent(stream.session_id) + "&workspace_id=" + encodeURIComponent(stream.workspace_id);
-}}
-
-function reservationResumeUrl(stream) {{
-  const base = String(stream.base_url || "").replace(/\/+$/, "");
-  return base + "/v1/resume/next";
-}}
-
-function reservationMessage(notification) {{
-  const payload = notification?.payload || {{}};
-  const target = payload.relative_path || "the reserved target";
-  const waitId = payload.wait_id || "unknown";
-  const reservationId = payload.reservation_id || waitId;
-  const action = payload.action || "write";
-  const purpose = payload.purpose;
-  const lines = [
-    "Stateful reservation is ready for " + target + ".",
-    "wait_id: " + waitId,
-    "reservation_id: " + reservationId,
-    "action: " + action,
-  ];
-  if (typeof purpose === "string" && purpose.trim().length > 0) {{
-    lines.push("purpose: " + purpose.trim());
-  }}
-  lines.push("Next: reread the target, then call state_reservation_claim with this reservation_id before retrying the write.");
-  return lines.join("\n");
-}}
-
-function deliverReservationNotification(pi, notification) {{
-  const payload = notification?.payload || {{}};
-  const waitId = payload.wait_id;
-  if (!waitId || seenReservationWaitIds.has(waitId)) {{
-    return;
-  }}
-  if (typeof pi?.sendMessage !== "function") {{
-    return;
-  }}
-  const text = reservationMessage(notification);
-  try {{
-    pi.sendMessage(
-      {{
-        customType: "stateful_reservation_ready",
-        content: text,
-        display: true,
-        details: notification,
-      }},
-      {{ triggerTurn: true, deliverAs: "nextTurn" }}
-    );
-    seenReservationWaitIds.add(waitId);
-  }} catch (_) {{}}
-}}
-
-async function checkReservationResume(pi, stream, signal) {{
-  if (typeof fetch !== "function" || signal?.aborted) return;
-  try {{
-    const response = await fetch(reservationResumeUrl(stream), {{
-      method: "POST",
-      headers: {{
-        authorization: stream.authorization,
-        "content-type": "application/json",
-      }},
-      body: JSON.stringify({{ session_id: stream.session_id, workspace_id: stream.workspace_id }}),
-      signal,
-    }});
-    if (!response.ok) return;
-    const body = await response.json();
-    if (body?.resume_available && body?.reservation) {{
-      deliverReservationNotification(pi, {{
-        notification_id: "resume:" + body.reservation.wait_id,
-        workspace_id: stream.workspace_id,
-        kind: "reservation_granted",
-        payload: {{
-          wait_id: body.reservation.wait_id,
-          reservation_id: body.reservation.reservation_id || body.reservation.wait_id,
-          relative_path: body.reservation.relative_path,
-          action: body.reservation.action,
-          purpose: body.reservation.purpose,
-          reservation_expires_at: body.reservation.reservation_expires_at,
-        }},
-        required_next_action: body.required_next_action,
-      }});
-    }}
-  }} catch (_) {{}}
-}}
-
-function processReservationSseBlock(pi, block) {{
-  let event = "message";
-  const data = [];
-  for (const rawLine of block.split(/\r?\n/)) {{
-    const line = rawLine.trimEnd();
-    if (line.startsWith("event:")) event = line.slice(6).trim();
-    if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
-  }}
-  if (event !== "reservation_granted" || data.length === 0) return;
-  try {{
-    deliverReservationNotification(pi, JSON.parse(data.join("\n")));
-  }} catch (_) {{}}
-}}
-
-function processReservationSseBuffer(pi, buffer) {{
-  buffer = buffer.replace(/\r\n/g, "\n");
-  let cursor = 0;
-  for (;;) {{
-    const next = buffer.indexOf("\n\n", cursor);
-    if (next === -1) break;
-    processReservationSseBlock(pi, buffer.slice(cursor, next));
-    cursor = next + 2;
-  }}
-  return buffer.slice(cursor);
-}}
-
-function startReservationStream(pi, stream) {{
-  if (!stream?.base_url || !stream?.authorization || !stream?.session_id || !stream?.workspace_id) return;
-  if (typeof fetch !== "function" || typeof TextDecoder !== "function") return;
-  stopReservationStream();
-  const controller = new AbortController();
-  reservationStreamAbort = controller;
-  const signal = controller.signal;
-  const run = async () => {{
-    let backoffMs = 1000;
-    await checkReservationResume(pi, stream, signal);
-    while (!signal.aborted) {{
-      try {{
-        const response = await fetch(reservationStreamUrl(stream), {{
-          headers: {{ authorization: stream.authorization, accept: "text/event-stream" }},
-          signal,
-        }});
-        if (!response.ok || !response.body?.getReader) throw new Error("reservation stream unavailable");
-        backoffMs = 1000;
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        for (;;) {{
-          const {{ done, value }} = await reader.read();
-          if (done || signal.aborted) break;
-          buffer = processReservationSseBuffer(pi, buffer + decoder.decode(value, {{ stream: true }}));
-        }}
-      }} catch (_) {{
-        if (signal.aborted) return;
-        await checkReservationResume(pi, stream, signal);
-        await sleepWithAbort(backoffMs, signal);
-        backoffMs = Math.min(backoffMs * 2, 30000);
-      }}
-    }}
-  }};
-  run().catch(() => {{}});
-}}
-
-
-const EXTERNAL_GRANT_DEFAULT_MAX_USES = 5;
-const EXTERNAL_GRANT_MAX_USES_LIMIT = 20;
-const EXTERNAL_GRANT_DEFAULT_TTL_MS = 10 * 60 * 1000;
-const EXTERNAL_GRANT_MAX_TTL_MS = 60 * 60 * 1000;
-const externalBashGrants = new Map();
-
-
-function stringList(value) {{
-  if (Array.isArray(value)) {{
-    return value.filter((item) => typeof item === "string" && item.trim().length > 0);
-  }}
-  if (typeof value === "string" && value.trim().length > 0) {{
-    return [value];
-  }}
-  return [];
-}}
-
-
-const lazyEditOperations = new Map();
-let lazyEditOperationCounter = 0;
-const lazyWriteOperations = new Map();
-let lazyWriteOperationCounter = 0;
-const lazyBashOperations = new Map();
-let lazyBashOperationCounter = 0;
-
-function extractWaitId(reason) {{
-  const match = String(reason || "").match(/wait_id ([A-Za-z0-9_-]+)/);
-  return match ? match[1] : "";
-}}
-
-function extractReservationId(reason) {{
-  const match = String(reason || "").match(/reservation_id[: ]+([A-Za-z0-9_-]+)/);
-  return match ? match[1] : "";
-}}
-
-function structuredLazyEditOperationId(decision) {{
-  return decision?.wait?.wait_id
-    || decision?.reservation?.wait_id
-    || decision?.reservation?.id
-    || extractWaitId(decision?.reason)
-    || extractWaitId(decision?.message);
-}}
-
-function structuredLazyWriteOperationId(decision) {{
-  return decision?.wait?.wait_id
-    || decision?.reservation?.wait_id
-    || decision?.reservation?.id
-    || extractWaitId(decision?.reason)
-    || extractWaitId(decision?.message);
-}}
-
-function structuredLazyReservationId(event, decision) {{
-  return reservationId(event, decision)
-    || extractReservationId(decision?.reason)
-    || extractReservationId(decision?.message)
-    || "";
-}}
-
-function nextLazyEditOperationId() {{
-  lazyEditOperationCounter += 1;
-  return "lazy-edit-" + Date.now().toString(36) + "-" + lazyEditOperationCounter.toString(36);
-}}
-
-function nextLazyWriteOperationId() {{
-  lazyWriteOperationCounter += 1;
-  return "lazy-write-" + Date.now().toString(36) + "-" + lazyWriteOperationCounter.toString(36);
-}}
-
-function nextLazyBashOperationId() {{
-  lazyBashOperationCounter += 1;
-  return "lazy-bash-" + Date.now().toString(36) + "-" + lazyBashOperationCounter.toString(36);
-}}
-
-function editPatchTargets(input) {{
-  const patch = String(input?.input || "");
-  const targets = [];
-  for (const line of patch.split(/\r?\n/)) {{
-    const match = line.match(/^\[([^#\]\r\n]+)#[0-9A-Fa-f]{{4}}\]$/);
-    if (match) targets.push(match[1]);
-  }}
-  return [...new Set(targets)];
-}}
-
-function safeLazyOperationTarget(target) {{
-  return typeof target === "string"
-    && target.length > 0
-    && !target.startsWith("/")
-    && !target.includes("\\")
-    && !target.includes(":")
-    && !target.split("/").some((part) => part === "" || part === "." || part === "..");
-}}
-
-function readOperationBases(cwd, targets) {{
-  const bases = new Map();
-  for (const target of targets) {{
-    const path = resolve(cwd, target);
-    bases.set(target, existsSync(path) ? readFileSync(path, "utf8") : null);
-  }}
-  return bases;
-}}
-
-function rememberLazyEditOperation(event, ctx, decision) {{
-  if (event?.toolName !== "edit") return "";
-  const targets = editPatchTargets(event.input || {{}});
-  if (targets.length === 0 || !targets.every(safeLazyOperationTarget)) return "";
-  const operationId = structuredLazyEditOperationId(decision) || nextLazyEditOperationId();
-  lazyEditOperations.set(operationId, {{
-    operation_id: operationId,
-    session_id: sessionId(event, ctx),
-    reservation_id: structuredLazyReservationId(event, decision),
-    cwd: ctx.cwd,
-    tool_name: event.toolName,
-    tool_input: event.input || {{}},
-    targets,
-    bases: readOperationBases(ctx.cwd, targets),
-    blocked_reason: decision?.reason || "",
-  }});
-  return operationId;
-}}
-
-function writeToolTarget(input) {{
-  const target = String(input?.path || "").trim();
-  return safeLazyOperationTarget(target) ? target : "";
-}}
-
-function rememberLazyWriteOperation(event, ctx, decision) {{
-  if (event?.toolName !== "write") return "";
-  const target = writeToolTarget(event.input || {{}});
-  if (!target) return "";
-  const operationId = structuredLazyWriteOperationId(decision) || nextLazyWriteOperationId();
-  const targets = [target];
-  lazyWriteOperations.set(operationId, {{
-    operation_id: operationId,
-    session_id: sessionId(event, ctx),
-    reservation_id: structuredLazyReservationId(event, decision),
-    cwd: ctx.cwd,
-    tool_name: event.toolName,
-    tool_input: event.input || {{}},
-    targets,
-    bases: readOperationBases(ctx.cwd, targets),
-    blocked_reason: decision?.reason || "",
-  }});
-  return operationId;
-}}
-
-function normalizedStatefulCommandWords(words) {{
-  const normalized = [...words];
-  if (normalized[0] === "stateful") normalized[0] = STATEFUL;
-  return normalized;
-}}
-
-function rememberLazyBashOperation(event, ctx, decision) {{
-  if (event?.toolName !== "bash" && event?.toolName !== "functions.bash") return "";
-  if (!decision?.externalGrantParams || !Array.isArray(decision?.words)) return "";
-  const operationId = nextLazyBashOperationId();
-  lazyBashOperations.set(operationId, {{
-    operation_id: operationId,
-    session_id: sessionId(event, ctx),
-    cwd: ctx.cwd,
-    tool_name: event.toolName,
-    tool_input: event.input || {{}},
-    command: String(event?.input?.command || ""),
-    command_words: normalizedStatefulCommandWords(decision.words),
-    grant_params: decision.externalGrantParams,
-  }});
-  return operationId;
-}}
-
-function textToLines(text) {{
-  if (text === "") return {{ lines: [], trailing: false }};
-  const trailing = text.endsWith("\n");
-  const body = trailing ? text.slice(0, -1) : text;
-  return {{ lines: body.length ? body.split("\n") : [], trailing }};
-}}
-
-function linesToText(lines, trailing) {{
-  return lines.join("\n") + (trailing && lines.length ? "\n" : "");
-}}
-
-function readPatchBody(lines, cursor) {{
-  const body = [];
-  while (cursor < lines.length && lines[cursor].startsWith("+")) {{
-    body.push(lines[cursor].slice(1));
-    cursor += 1;
-  }}
-  return {{ body, cursor }};
-}}
-
-function parseOmpLinePatch(patch) {{
-  const lines = String(patch || "").replace(/\r\n/g, "\n").split("\n");
-  const files = new Map();
-  let current = null;
-  for (let i = 0; i < lines.length;) {{
-    const line = lines[i];
-    if (line === "*** Begin Patch" || line === "*** End Patch") {{ i += 1; continue; }}
-    if (!line) {{ i += 1; continue; }}
-    const header = line.match(/^\[([^#\]\r\n]+)#[0-9A-Fa-f]{{4}}\]$/);
-    if (header) {{
-      current = header[1];
-      if (!files.has(current)) files.set(current, []);
-      i += 1;
-      continue;
-    }}
-    if (!current) throw new Error("lazy_edit_resume patch missing file header");
-    if (/^(SWAP|DEL)\.BLK |^INS\.BLK\.POST /.test(line)) {{
-      throw new Error("lazy_edit_resume supports line edits only; regenerate patch for block operations");
-    }}
-    let match = line.match(/^SWAP ([1-9]\d*)\.=([1-9]\d*):$/);
-    if (match) {{
-      const read = readPatchBody(lines, i + 1);
-      files.get(current).push({{ kind: "swap", start: Number(match[1]), end: Number(match[2]), body: read.body }});
-      i = read.cursor;
-      continue;
-    }}
-    match = line.match(/^DEL ([1-9]\d*)(?:\.=([1-9]\d*))?$/);
-    if (match) {{
-      files.get(current).push({{ kind: "del", start: Number(match[1]), end: Number(match[2] || match[1]), body: [] }});
-      i += 1;
-      continue;
-    }}
-    match = line.match(/^INS\.(HEAD|TAIL):$/);
-    if (match) {{
-      const read = readPatchBody(lines, i + 1);
-      files.get(current).push({{ kind: "ins", pos: match[1].toLowerCase(), line: 0, body: read.body }});
-      i = read.cursor;
-      continue;
-    }}
-    match = line.match(/^INS\.(PRE|POST) ([1-9]\d*):$/);
-    if (match) {{
-      const read = readPatchBody(lines, i + 1);
-      files.get(current).push({{ kind: "ins", pos: match[1].toLowerCase(), line: Number(match[2]), body: read.body }});
-      i = read.cursor;
-      continue;
-    }}
-    throw new Error("unsupported lazy_edit_resume patch line: " + line);
-  }}
-  return files;
-}}
-
-function validateOmpLinePatchBases(cwd, editsByFile, bases) {{
-  for (const target of editsByFile.keys()) {{
-    const filePath = resolve(cwd, target);
-    const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : null;
-    if (current !== (bases.get(target) ?? null)) {{
-      return {{ status: "stale", message: target + " changed since operation was queued" }};
-    }}
-  }}
-  return null;
-}}
-
-function applyOmpLinePatch(cwd, patch, bases) {{
-  const editsByFile = parseOmpLinePatch(patch);
-  const stale = validateOmpLinePatchBases(cwd, editsByFile, bases);
-  if (stale) return stale;
-  for (const [target, edits] of editsByFile.entries()) {{
-    const filePath = resolve(cwd, target);
-    const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : null;
-    const text = current || "";
-    const split = textToLines(text);
-    const applied = split.lines.slice();
-    const ordered = edits.slice().sort((a, b) => {{
-      const aLine = a.kind === "ins" ? (a.pos === "tail" ? Number.MAX_SAFE_INTEGER : a.line) : a.start;
-      const bLine = b.kind === "ins" ? (b.pos === "tail" ? Number.MAX_SAFE_INTEGER : b.line) : b.start;
-      return bLine - aLine;
-    }});
-    for (const edit of ordered) {{
-      if (edit.kind === "swap") {{
-        if (edit.start < 1 || edit.end < edit.start || edit.end > applied.length) throw new Error("invalid SWAP range for " + target);
-        applied.splice(edit.start - 1, edit.end - edit.start + 1, ...edit.body);
-      }} else if (edit.kind === "del") {{
-        if (edit.start < 1 || edit.end < edit.start || edit.end > applied.length) throw new Error("invalid DEL range for " + target);
-        applied.splice(edit.start - 1, edit.end - edit.start + 1);
-      }} else if (edit.kind === "ins") {{
-        const index = edit.pos === "head" ? 0 : edit.pos === "tail" ? applied.length : edit.pos === "pre" ? edit.line - 1 : edit.line;
-        if (index < 0 || index > applied.length) throw new Error("invalid INS anchor for " + target);
-        applied.splice(index, 0, ...edit.body);
-      }}
-    }}
-    writeFileSync(filePath, linesToText(applied, split.trailing || text === ""), "utf8");
-  }}
-  return {{ status: "applied", message: "lazy edit applied" }};
-}}
-
-function applyOmpWrite(cwd, operation) {{
-  const target = operation.targets[0];
-  const stale = validateOmpLinePatchBases(cwd, new Map([[target, []]]), operation.bases);
-  if (stale) return stale;
-  const filePath = resolve(cwd, target);
-  mkdirSync(dirname(filePath), {{ recursive: true }});
-  writeFileSync(filePath, String(operation.tool_input?.content ?? ""), "utf8");
-  return {{ status: "applied", message: "lazy write applied" }};
-}}
-
-function emptyToolOutputText(text) {{
-  if (!String(text || "").trim()) return "No output.";
-  return String(text);
-}}
-
-function lazyToolResult(status, text, details) {{
-  return {{
-    isError: status !== "applied",
-    content: [{{ type: "text", text: emptyToolOutputText(text) }}],
-    details,
-  }};
-}}
-
-function bashResumeText(result) {{
-  if (result.error) return result.error.message || String(result.error);
-  const stdout = String(result.stdout || "");
-  const stderr = String(result.stderr || "");
-  const text = stdout + stderr;
-  return text.trim().length ? text : "Command exited with code " + result.status;
-}}
-
-
-
-
-function hasExternalWriteScope(params) {{
-  return stringList(params.write_targets).length > 0
-    || stringList(params.create_targets).length > 0
-    || stringList(params.write_dirs).length > 0;
-}}
-
-
-function normalizedStringList(value) {{
-  return stringList(value).map((item) => item.trim()).sort();
-}}
-
-function externalGrantSettings(params) {{
-  const requestedMaxUses = params.grant_max_uses ?? params.grantMaxUses;
-  const requestedTtlSeconds = params.grant_expires_seconds ?? params.grantExpiresSeconds;
-  let maxUses = EXTERNAL_GRANT_DEFAULT_MAX_USES;
-  if (requestedMaxUses !== undefined) {{
-    if (!Number.isInteger(requestedMaxUses) || requestedMaxUses < 1 || requestedMaxUses > EXTERNAL_GRANT_MAX_USES_LIMIT) {{
-      throw new Error("external sandbox grant grant_max_uses must be an integer from 1 to " + EXTERNAL_GRANT_MAX_USES_LIMIT);
-    }}
-    maxUses = requestedMaxUses;
-  }}
-  let ttlMs = EXTERNAL_GRANT_DEFAULT_TTL_MS;
-  if (requestedTtlSeconds !== undefined) {{
-    if (!Number.isInteger(requestedTtlSeconds) || requestedTtlSeconds < 1 || requestedTtlSeconds > EXTERNAL_GRANT_MAX_TTL_MS / 1000) {{
-      throw new Error("external sandbox grant grant_expires_seconds must be an integer from 1 to " + (EXTERNAL_GRANT_MAX_TTL_MS / 1000));
-    }}
-    ttlMs = requestedTtlSeconds * 1000;
-  }}
-  return {{ maxUses, ttlMs }};
-}}
-
-function externalGrantDescriptor(params) {{
-  return {{
-    purpose: params.purpose.trim(),
-    write_targets: normalizedStringList(params.write_targets),
-    create_targets: normalizedStringList(params.create_targets),
-    write_dirs: normalizedStringList(params.write_dirs),
-    connect_sockets: normalizedStringList(params.connect_sockets),
-    allow_signal: params.allow_signal === true,
-    network: typeof params.network === "string" ? params.network : "default",
-  }};
-}}
-
-
-function externalGrantKey(params) {{
-  return JSON.stringify(externalGrantDescriptor(params));
-}}
-
-function pruneExternalBashGrants(now) {{
-  for (const [key, grant] of externalBashGrants) {{
-    if (grant.expiresAt <= now || grant.uses >= grant.maxUses) {{
-      externalBashGrants.delete(key);
-    }}
-  }}
-}}
-
-function configBool(value) {{
-  return value === true || value === "true" || value === "1" || value === "yes" || value === "on";
-}}
-
-function benchmarkSourceBlockPatterns() {{
-  const raw = process.env[BENCHMARK_SOURCE_BLOCK_ENV];
-  if (!raw) return [];
-  try {{
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {{
-      return parsed.map((item) => String(item || "").trim()).filter(Boolean);
-    }}
-  }} catch (_) {{}}
-  return String(raw).split(/[\r\n,]+/).map((item) => item.trim()).filter(Boolean);
-}}
-
-function benchmarkSourcePatternMatches(text, pattern) {{
-  const lowerPattern = pattern.toLowerCase();
-  if (lowerPattern === "upstream" || lowerPattern === "upstream/") {{
-    return /(^|[^a-z0-9_-])upstream(?:\\/|[^a-z0-9_-]|$)/.test(text);
-  }}
-  return text.includes(lowerPattern);
-}}
-
-
-function benchmarkSourceBlockReason(event) {{
-  const patterns = benchmarkSourceBlockPatterns();
-  if (patterns.length === 0) return "";
-  const text = (String(event?.toolName || "") + "\n" + JSON.stringify(event?.input || {{}})).toLowerCase();
-  for (const pattern of patterns) {{
-    if (benchmarkSourcePatternMatches(text, pattern)) {{
-      return "DeNovo benchmark blocked target upstream source access before tool execution: " + pattern;
-    }}
-  }}
-  return "";
-}}
-
-function configTextAutoApprove(text) {{
-  const value = "(?:true|\\\"true\\\"|'true'|1|\\\"1\\\"|'1'|yes|\\\"yes\\\"|'yes'|on|\\\"on\\\"|'on')";
-  const body = String(text || "");
-  return new RegExp("(^|\\n)\\s*stateful\\.autoApprove\\s*:\\s*" + value + "\\s*(?:#.*)?(?:\\n|$)", "i").test(body)
-    || new RegExp("(^|\\n)stateful\\s*:\\s*\\n(?:[ \\t]+[^\\n]*\\n)*?[ \\t]+autoApprove\\s*:\\s*" + value + "\\s*(?:#.*)?(?:\\n|$)", "i").test(body);
-}}
-
-function statefulConfigFileAutoApprove() {{
-  const configPaths = [
-    OMP_AGENT_CONFIG,
-    process.env.HOME ? resolve(process.env.HOME, ".omp/profiles/stateful/agent/config.yml") : "",
-  ].filter(Boolean);
-  for (const configPath of configPaths) {{
-    try {{
-      if (configTextAutoApprove(readFileSync(configPath, "utf8"))) return true;
-    }} catch (_) {{}}
-  }}
-  return false;
-}}
-
-function statefulPromptAutoApproveConfig(ctx) {{
-  return configBool(ctx?.config?.stateful?.autoApprove)
-    || configBool(ctx?.config?.stateful?.auto_approve)
-    || configBool(ctx?.config?.["stateful.autoApprove"])
-    || configBool(ctx?.config?.["stateful.auto_approve"])
-    || configBool(ctx?.stateful?.autoApprove)
-    || configBool(ctx?.stateful?.auto_approve)
-    || statefulConfigFileAutoApprove();
-}}
-
-function shouldAutoApproveStatefulPrompt(ctx, _params) {{
-  return statefulPromptAutoApproveConfig(ctx);
-}}
-
-function recordExternalBashGrant(params, now) {{
-  const key = externalGrantKey(params);
-  const settings = externalGrantSettings(params);
-  const approvedAt = now ?? Date.now();
-  externalBashGrants.set(key, {{
-    expiresAt: approvedAt + settings.ttlMs,
-    maxUses: settings.maxUses,
-    uses: 1,
-  }});
-}}
-
-function approveExternalBashGrantWithoutPrompt(params) {{
-  const now = Date.now();
-  pruneExternalBashGrants(now);
-  const key = externalGrantKey(params);
-  const existing = externalBashGrants.get(key);
-  if (existing && existing.expiresAt > now && existing.uses < existing.maxUses) {{
-    existing.uses += 1;
-    return true;
-  }}
-  recordExternalBashGrant(params, now);
-  return true;
-}}
-
-function externalBashApprovalMessage(params) {{
-  const descriptor = externalGrantDescriptor(params);
-  const settings = externalGrantSettings(params);
-  const scope = [
-    ...descriptor.write_targets.map((path) => "write-target: " + path),
-    ...descriptor.create_targets.map((path) => "create-target: " + path),
-    ...descriptor.write_dirs.map((path) => "write-dir: " + path),
-    ...descriptor.connect_sockets.map((path) => "connect-socket: " + path),
-    ...(descriptor.allow_signal ? ["allow-signal"] : []),
-    "network: " + descriptor.network,
-  ];
-  const examples = stringList(params.approval_examples);
-  return [
-    "Stateful is requesting a scoped repo-external sandbox grant.",
-    "",
-    "Purpose:",
-    descriptor.purpose,
-    "",
-    "Allowed external write/socket/signal scope:",
-    scope.length ? scope.join("\n") : "No declared external write/socket/signal scope.",
-    "",
-    "Grant limits:",
-    "max uses: " + settings.maxUses,
-    "expires in seconds: " + Math.floor(settings.ttlMs / 1000),
-    "",
-    "Command examples:",
-    examples.length ? examples.map((example) => "- " + example).join("\n") : "- Commands may vary, but must stay within the purpose and scope above.",
-    "",
-    "Raw command text is intentionally hidden from this approval prompt.",
-  ].join("\n");
-}}
-
-async function confirmExternalBashGrant(ctx, params, signal) {{
-  if (signal?.aborted) return false;
-  let abortHandler;
-  const abortPromise = signal ? new Promise((resolve) => {{
-    abortHandler = () => resolve(false);
-    signal.addEventListener("abort", abortHandler, {{ once: true }});
-  }}) : undefined;
-  try {{
-    const confirmPromise = ctx.ui.confirm(
-      "Approve external sandbox grant",
-      externalBashApprovalMessage(params)
-    );
-    return abortPromise
-      ? await Promise.race([confirmPromise, abortPromise])
-      : await confirmPromise;
-  }} finally {{
-    if (signal && abortHandler) {{
-      signal.removeEventListener("abort", abortHandler);
-    }}
-  }}
-}}
-
-async function ensureExternalBashGrant(ctx, params, signal) {{
-  const now = Date.now();
-  pruneExternalBashGrants(now);
-  const key = externalGrantKey(params);
-  const existing = externalBashGrants.get(key);
-  if (existing && existing.expiresAt > now && existing.uses < existing.maxUses) {{
-    existing.uses += 1;
-    return true;
-  }}
-  const approved = await confirmExternalBashGrant(ctx, params, signal);
-  if (!approved) return false;
-  recordExternalBashGrant(params, Date.now());
-  return true;
-}}
-
-function splitStatefulCommandWords(command) {{
-  const words = [];
-  let current = "";
-  let quote = null;
-  for (let index = 0; index < command.length; index += 1) {{
-    const ch = command[index];
-    if (quote) {{
-      if (ch === quote) {{
-        quote = null;
-      }} else {{
-        current += ch;
-      }}
-      continue;
-    }}
-    if (ch === "'" || ch === "\"") {{
-      quote = ch;
-      continue;
-    }}
-    if (ch === "\\" || ch === "`" || ch === "\n" || ch === "\r") {{
-      throw new Error("Bash wrapper must be a single stateful sandbox command");
-    }}
-    if (ch === "$" && command[index + 1] === "(") {{
-      throw new Error("Bash wrapper must not use command substitution");
-    }}
-    if (";|&<>".includes(ch)) {{
-      throw new Error("Bash wrapper must be a single stateful sandbox command");
-    }}
-    if (/\s/.test(ch)) {{
-      if (current) {{
-        words.push(current);
-        current = "";
-      }}
-      continue;
-    }}
-    current += ch;
-  }}
-  if (quote) throw new Error("Bash wrapper command has unterminated quotes");
-  if (current) words.push(current);
-  return words;
-}}
-
-function parseStatefulSandboxRunWords(words) {{
-  if (words.length < 4 || words[1] !== "sandbox" || words[2] !== "run") {{
-    return {{ allow: false, reason: "Bash commands must use stateful sandbox run" }};
-  }}
-  const params = {{
-    fs: "read-only",
-    purpose: "",
-    write_targets: [],
-    create_targets: [],
-    write_dirs: [],
-    connect_sockets: [],
-    allow_signal: false,
-    network: undefined,
-    command: "",
-  }};
-  for (let index = 3; index < words.length; index += 1) {{
-    const arg = words[index];
-    const nextValue = (name) => {{
-      index += 1;
-      if (index >= words.length || !words[index]) throw new Error("stateful sandbox run " + name + " requires a value");
-      return words[index];
-    }};
-    if (arg === "--fs") params.fs = nextValue("--fs");
-    else if (arg === "--purpose") params.purpose = nextValue("--purpose");
-    else if (arg === "--write-target") params.write_targets.push(nextValue("--write-target"));
-    else if (arg === "--create-target") params.create_targets.push(nextValue("--create-target"));
-    else if (arg === "--write-dir") params.write_dirs.push(nextValue("--write-dir"));
-    else if (arg === "--connect-socket") params.connect_sockets.push(nextValue("--connect-socket"));
-    else if (arg === "--network") params.network = nextValue("--network");
-    else if (arg === "--timeout-seconds") nextValue("--timeout-seconds");
-    else if (arg === "--stream-events") continue;
-    else if (arg === "--allow-signal") params.allow_signal = true;
-    else if (arg === "--command") params.command = nextValue("--command");
-    else throw new Error("unsupported stateful sandbox run argument `" + arg + "`");
-  }}
-  if (!params.command) return {{ allow: false, reason: "stateful sandbox run requires exactly one --command" }};
-  if (params.fs === "external" && !params.purpose.trim()) {{
-    return {{ allow: false, reason: "stateful sandbox run --fs external requires --purpose" }};
-  }}
-  if (params.fs === "external" && (hasExternalWriteScope(params) || stringList(params.connect_sockets).length > 0 || params.allow_signal === true)) {{
-    return {{ allow: true, externalGrantParams: params }};
-  }}
-  return {{ allow: true }};
-}}
-
-function parseStatefulProcessFindWords(words) {{
-  if (words.length < 5 || words[1] !== "sandbox" || words[2] !== "process" || words[3] !== "find") {{
-    return {{ allow: false, reason: "Bash commands must use stateful sandbox process find" }};
-  }}
-  return {{ allow: true }};
-}}
-
-function statefulBashPassthroughDecision(command) {{
-  try {{
-    const words = splitStatefulCommandWords(String(command || "").trim());
-    if (words.length === 0) return {{ allow: false, reason: "Bash command is empty" }};
-    if (!isTrustedStatefulCommand(words[0])) {{
-      return {{ allow: false, reason: "OMP raw Bash is denied; use the trusted stateful sandbox command" }};
-    }}
-    let decision;
-    if (words[1] === "sandbox" && words[2] === "run") decision = parseStatefulSandboxRunWords(words);
-    else if (words[1] === "sandbox" && words[2] === "process" && words[3] === "find") decision = parseStatefulProcessFindWords(words);
-    else decision = {{ allow: false, reason: "Bash commands must use stateful sandbox run or stateful sandbox process find" }};
-    if (decision.allow) decision.words = words;
-    return decision;
-  }} catch (error) {{
-    return {{ allow: false, reason: error instanceof Error ? error.message : String(error) }};
-  }}
-}}
-
-
-export default function statefulOmpExtension(pi) {{
-  pi.setLabel("Stateful");
-  pi.on("tool_call", async (event, ctx) => {{
-    if (event?.toolName !== "bash" && event?.toolName !== "functions.bash") return;
-    const decision = statefulBashPassthroughDecision(event?.input?.command);
-    if (!decision.allow) return {{ block: true, reason: decision.reason }};
-    if (decision.externalGrantParams) {{
-      const params = decision.externalGrantParams;
-      if (shouldAutoApproveStatefulPrompt(ctx, params)) {{
-        approveExternalBashGrantWithoutPrompt(params);
-        return;
-      }}
-      if (typeof ctx?.ui?.confirm !== "function") {{
-        const operationId = rememberLazyBashOperation(event, ctx, decision);
-        const suffix = operationId
-          ? "\n\nQueued lazy bash operation_id: " + operationId + "\nNext: approve the external sandbox grant, then call lazy_bash_resume with this operation_id."
-          : "";
-        return {{ block: true, reason: "Built-in Bash external sandbox command requires OMP UI confirmation; use stateful.autoApprove to skip this prompt." + suffix }};
-      }}
-      const signal = undefined;
-      const approved = await ensureExternalBashGrant(ctx, params, signal);
-      if (!approved) return {{ block: true, reason: "user denied stateful external sandbox grant" }};
-    }}
-  }});
-  pi.registerTool({{
-    name: "lazy_edit_resume",
-    label: "Lazy Edit Resume",
-    description: "Resume a blocked OMP edit operation after the needed reservation or claim is ready. Applies only strict line-based OMP edit patches captured in this live extension session.",
-    parameters: {{
-      type: "object",
-      properties: {{
-        operation_id: {{ type: "string", description: "Queued lazy edit operation id; either a Stateful wait_id or a generated live-session id printed in the block message." }},
-      }},
-      required: ["operation_id"],
-    }},
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {{
-      const operationId = String(params?.operation_id || "").trim();
-      const operation = lazyEditOperations.get(operationId);
-      if (!operation) {{
-        return lazyToolResult("failed", "lazy edit operation not found in this live OMP extension session", {{ operation_id: operationId }});
-      }}
-      const authorization = runStatefulHook("pre-tool-use", {{
-        session_id: operation.session_id,
-        reservation_id: operation.reservation_id || undefined,
-        cwd: operation.cwd || ctx.cwd,
-        yolo: true,
-        tool_name: operation.tool_name,
-        tool_input: operation.tool_input,
-      }});
-      if (authorization.decision !== "allow") {{
-        return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy edit resume", {{ operation_id: operationId, authorization }});
-      }}
-      let result;
-      try {{
-        result = applyOmpLinePatch(operation.cwd || ctx.cwd, operation.tool_input?.input || "", operation.bases);
-      }} catch (error) {{
-        result = {{ status: "failed", message: error instanceof Error ? error.message : String(error) }};
-      }}
-      if (result.status === "applied") {{
-        lazyEditOperations.delete(operationId);
-        runStatefulHook("post-tool-use", {{
-          session_id: operation.session_id,
-          cwd: operation.cwd || ctx.cwd,
-          tool_name: operation.tool_name,
-          tool_input: operation.tool_input,
-        }});
-      }}
-      return lazyToolResult(result.status, result.message, {{ operation_id: operationId, targets: operation.targets }});
-    }},
-  }});
-  pi.registerTool({{
-    name: "lazy_write_resume",
-    label: "Lazy Write Resume",
-    description: "Resume a blocked OMP write operation after the needed reservation or claim is ready. Replays only write operations captured in this live extension session and fails if the target changed while queued.",
-    parameters: {{
-      type: "object",
-      properties: {{
-        operation_id: {{ type: "string", description: "Queued lazy write operation id; either a Stateful wait_id or a generated live-session id printed in the block message." }},
-      }},
-      required: ["operation_id"],
-    }},
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {{
-      const operationId = String(params?.operation_id || "").trim();
-      const operation = lazyWriteOperations.get(operationId);
-      if (!operation) {{
-        return lazyToolResult("failed", "lazy write operation not found in this live OMP extension session", {{ operation_id: operationId }});
-      }}
-      const authorization = runStatefulHook("pre-tool-use", {{
-        session_id: operation.session_id,
-        reservation_id: operation.reservation_id || undefined,
-        cwd: operation.cwd || ctx.cwd,
-        yolo: true,
-        tool_name: operation.tool_name,
-        tool_input: operation.tool_input,
-      }});
-      if (authorization.decision !== "allow") {{
-        return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy write resume", {{ operation_id: operationId, authorization }});
-      }}
-      let result;
-      try {{
-        result = applyOmpWrite(operation.cwd || ctx.cwd, operation);
-      }} catch (error) {{
-        result = {{ status: "failed", message: error instanceof Error ? error.message : String(error) }};
-      }}
-      if (result.status === "applied") {{
-        lazyWriteOperations.delete(operationId);
-        runStatefulHook("post-tool-use", {{
-          session_id: operation.session_id,
-          cwd: operation.cwd || ctx.cwd,
-          tool_name: operation.tool_name,
-          tool_input: operation.tool_input,
-        }});
-      }}
-      return lazyToolResult(result.status, result.message, {{ operation_id: operationId, targets: operation.targets }});
-    }},
-  }});
-  pi.registerTool({{
-    name: "lazy_bash_resume",
-    label: "Lazy Bash Resume",
-    description: "Resume a blocked OMP Bash command after approving an external sandbox grant.",
-    parameters: {{
-      type: "object",
-      properties: {{
-        operation_id: {{ type: "string", description: "Queued lazy bash operation id printed in the block message." }},
-      }},
-      required: ["operation_id"],
-    }},
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {{
-      const operationId = String(params?.operation_id || "").trim();
-      const operation = lazyBashOperations.get(operationId);
-      if (!operation) {{
-        return lazyToolResult("failed", "lazy bash operation not found in this live OMP extension session", {{ operation_id: operationId }});
-      }}
-      if (typeof ctx?.ui?.confirm !== "function" && !shouldAutoApproveStatefulPrompt(ctx, operation.grant_params)) {{
-        return lazyToolResult("failed", "lazy bash resume requires OMP UI confirmation or stateful.autoApprove", {{ operation_id: operationId }});
-      }}
-      const approved = shouldAutoApproveStatefulPrompt(ctx, operation.grant_params)
-        ? approveExternalBashGrantWithoutPrompt(operation.grant_params)
-        : await ensureExternalBashGrant(ctx, operation.grant_params, signal);
-      if (!approved) {{
-        return lazyToolResult("failed", "user denied stateful external sandbox grant", {{ operation_id: operationId }});
-      }}
-      const authorization = runStatefulHook("pre-tool-use", {{
-        session_id: operation.session_id,
-        cwd: operation.cwd || ctx.cwd,
-        yolo: true,
-        tool_name: operation.tool_name,
-        tool_input: operation.tool_input,
-      }});
-      if (authorization.decision !== "allow") {{
-        return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy bash resume", {{ operation_id: operationId, authorization }});
-      }}
-      const words = operation.command_words || [];
-      const result = spawnSync(words[0], words.slice(1), {{
-        cwd: operation.cwd || ctx.cwd,
-        encoding: "utf8",
-      }});
-      if (result.status === 0) {{
-        lazyBashOperations.delete(operationId);
-        runStatefulHook("post-tool-use", {{
-          session_id: operation.session_id,
-          cwd: operation.cwd || ctx.cwd,
-          tool_name: operation.tool_name,
-          tool_input: operation.tool_input,
-        }});
-      }}
-      return lazyToolResult(result.status === 0 ? "applied" : "failed", bashResumeText(result), {{ operation_id: operationId, exit_code: result.status }});
-    }},
-  }});
-  pi.on("session_start", async (event, ctx) => {{
-    verifyBareStateful(ctx.cwd);
-    const result = runStatefulHook("session-start", {{
-      session_id: sessionId(event, ctx),
-      cwd: ctx.cwd,
-    }});
-    startReservationStream(pi, result?.notifications_stream);
-  }});
-  pi.on("tool_call", async (event, ctx) => {{
-    const benchmarkBlockReason = benchmarkSourceBlockReason(event);
-    if (benchmarkBlockReason) return {{ block: true, reason: benchmarkBlockReason }};
-    const decision = runStatefulHook("pre-tool-use", {{
-      session_id: sessionId(event, ctx),
-      reservation_id: reservationId(event),
-      cwd: ctx.cwd,
-      yolo: isYolo(event, ctx),
-      tool_name: event.toolName,
-      tool_input: event.input || {{}},
-    }});
-    if (decision.decision === "prompt" && !shouldAutoApproveStatefulPrompt(ctx, event.input || {{}})) {{
-      if (typeof ctx?.ui?.confirm !== "function") {{
-        return {{
-          block: true,
-          reason: "Stateful requested approval, but OMP UI confirmation is unavailable.",
-        }};
-      }}
-      const approved = await ctx.ui.confirm(
-        decision.title || "Approve stateful action",
-        decision.message || decision.reason || "Approve this stateful action?"
-      );
-      if (!approved) {{
-        return {{ block: true, reason: decision.reason || "Blocked by user" }};
-      }}
-    }}
-    if (decision.decision === "block") {{
-      const editOperationId = rememberLazyEditOperation(event, ctx, decision);
-      const writeOperationId = rememberLazyWriteOperation(event, ctx, decision);
-      const suffix = editOperationId
-        ? "\n\nQueued lazy edit operation_id: " + editOperationId + "\nNext: when reservation or claim is ready, call lazy_edit_resume with this operation_id."
-        : writeOperationId
-          ? "\n\nQueued lazy write operation_id: " + writeOperationId + "\nNext: when reservation or claim is ready, call lazy_write_resume with this operation_id."
-          : "";
-      return {{ block: true, reason: decision.reason + suffix }};
-    }}
-  }});
-  pi.on("tool_result", async (event, ctx) => {{
-    runStatefulHook("post-tool-use", {{
-      session_id: sessionId(event, ctx),
-      cwd: ctx.cwd,
-      tool_name: event.toolName,
-      tool_input: event.input || {{}},
-    }});
-  }});
-  pi.on("session_shutdown", async (event, ctx) => {{
-    stopReservationStream();
-    runStatefulHook("stop", {{
-      session_id: sessionId(event, ctx),
-      cwd: ctx.cwd,
-    }});
-  }});
-}};
-"#
-    );
+    let contents = include_str!("../assets/stateful-omp-extension.js")
+        .replace("__STATEFUL_BINARY_JSON__", &binary_json);
     write_or_replace_text_file_with_mode(extension_path, &contents, private_file_mode())
-}
-
-fn write_omp_mcp_config(mcp_path: &Path, binary_path: &str) -> anyhow::Result<()> {
-    let contents = serde_json::to_string_pretty(&json!({
-        "mcpServers": {
-            "stateful": {
-                "type": "stdio",
-                "command": binary_path,
-                "args": ["mcp", "serve"]
-            }
-        }
-    }))?;
-    write_or_replace_text_file_with_mode(mcp_path, &format!("{contents}\n"), private_file_mode())
 }
 
 fn shell_quote_posix(value: &str) -> anyhow::Result<String> {
@@ -2864,6 +1601,139 @@ mod tests {
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
     }
 
+    #[test]
+    fn omp_extension_derives_agent_id_from_session_manager_only() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "stateful-omp-extension-agent-id-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("temp dir should be creatable");
+        let extension_path = temp_dir.join("stateful.js");
+
+        write_omp_extension(&extension_path, "/usr/local/bin/stateful")
+            .expect("extension should be written");
+        let contents = fs::read_to_string(&extension_path).expect("extension should be readable");
+
+        let helper_start = contents
+            .find("function firstString")
+            .expect("identity helpers should be generated");
+        let helper_end = contents[helper_start..]
+            .find("\n\nfunction reservationIdFromValue")
+            .map(|offset| helper_start + offset)
+            .expect("identity helpers should end before reservationIdFromValue");
+        let script = format!(
+            "{}\nlet missing;\ntry {{ agentId({{ agent_id: 'adapter-agent', session: {{ id: 'legacy-session' }} }}, {{}}); }} catch (error) {{ missing = error.message; }}\nconst branchCtx = {{ sessionManager: {{ getSessionId: () => '019f1a33-e3c1-7000-b2a6-d16cc4f05a52', getLeafId: () => 'leaf_42' }} }};\nconst sessionCtx = {{ sessionManager: {{ getSessionId: () => '019f1a33-e3c1-7000-b2a6-d16cc4f05a53', getLeafId: () => undefined }} }};\nconst values = [agentId({{ agent_id: 'ignored-adapter' }}, branchCtx), agentId({{ session: {{ id: 'ignored-session' }} }}, sessionCtx), missing];\nconsole.log(JSON.stringify(values));",
+            &contents[helper_start..helper_end]
+        );
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .expect("node should execute generated extension helper");
+
+        assert!(
+            output.status.success(),
+            "node failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("stdout should be utf8"),
+            "[\"omp-019f1a33-e3c1-7000-b2a6-d16cc4f05a52-leaf_42\",\"omp-019f1a33-e3c1-7000-b2a6-d16cc4f05a53\",\"Stateful requires OMP ctx.sessionManager.getSessionId() to derive the active agent_id; no session id was available, so Stateful actions are disabled for this agent.\"]\n"
+        );
+
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
+    }
+
+    #[test]
+    fn omp_extension_allows_sandbox_run_sequence_preflight() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "stateful-omp-extension-sequence-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("temp dir should be creatable");
+        let extension_path = temp_dir.join("stateful.js");
+
+        write_omp_extension(&extension_path, "/usr/local/bin/stateful")
+            .expect("extension should be written");
+        let contents = fs::read_to_string(&extension_path).expect("extension should be readable");
+
+        let helper_start = contents
+            .find("function quoteStatefulCommandWord")
+            .expect("sandbox parser helpers should be generated");
+        let helper_end = contents[helper_start..]
+            .find("\n\nexport default function statefulOmpExtension")
+            .map(|offset| helper_start + offset)
+            .expect("sandbox parser helpers should end before extension export");
+        let helpers = &contents[helper_start..helper_end];
+        let script = format!(
+            "function isTrustedStatefulCommand() {{ return true; }}\n{}\nconst decision = statefulBashPassthroughDecision(\"stateful sandbox run --fs read-only --network disabled --sequence 'printf ok'\", \"/repo\");\nconsole.log(JSON.stringify([decision.allow, decision.reason || '', decision.words.includes('--sequence')]));",
+            helpers
+        );
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .expect("node should execute generated extension helper");
+
+        assert!(
+            output.status.success(),
+            "node failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("stdout should be utf8"),
+            "[true,\"\",true]\n"
+        );
+
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
+    }
+
+    #[test]
+    fn omp_extension_denies_git_profiles_with_sequence_preflight() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "stateful-omp-extension-git-sequence-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("temp dir should be creatable");
+        let extension_path = temp_dir.join("stateful.js");
+
+        write_omp_extension(&extension_path, "/usr/local/bin/stateful")
+            .expect("extension should be written");
+        let contents = fs::read_to_string(&extension_path).expect("extension should be readable");
+
+        let helper_start = contents
+            .find("function quoteStatefulCommandWord")
+            .expect("sandbox parser helpers should be generated");
+        let helper_end = contents[helper_start..]
+            .find("\n\nexport default function statefulOmpExtension")
+            .map(|offset| helper_start + offset)
+            .expect("sandbox parser helpers should end before extension export");
+        let helpers = &contents[helper_start..helper_end];
+        let script = format!(
+            "function isTrustedStatefulCommand() {{ return true; }}\n{}\nconst git = statefulBashPassthroughDecision(\"stateful sandbox run --fs git --network disabled --sequence 'git status'\", \"/repo\");\nconst pr = statefulBashPassthroughDecision(\"stateful sandbox run --fs github-pr --network enabled --sequence 'gh pr status'\", \"/repo\");\nconsole.log(JSON.stringify([[git.allow, git.reason || ''], [pr.allow, pr.reason || '']]));",
+            helpers
+        );
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .expect("node should execute generated extension helper");
+
+        assert!(
+            output.status.success(),
+            "node failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("stdout should be utf8"),
+            "[[false,\"git profile requires a single git command\"],[false,\"github-pr profile requires a single gh pr command\"]]\n"
+        );
+
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
+    }
     #[test]
     fn omp_stateful_required_rule_is_always_apply() {
         let rule = omp_stateful_required_rule();

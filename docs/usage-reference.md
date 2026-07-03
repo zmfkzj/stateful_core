@@ -31,8 +31,7 @@ Installs global stateful files, writes global `skills/stateful-command-policy/`
 `subagent-write-recovery.md`) and
 `skills/dispatching-parallel-agents/SKILL.md`, writes Codex external sandbox
 prompt rules under the Codex config directory's `rules/stateful.rules`, and
-merges the stateful block into Codex
-config. The merged config enables hooks, registers the `stateful` MCP server, and
+merges the stateful block into Codex config. The merged config enables hooks and
 adds lifecycle hooks for:
 
 - `SessionStart` for `startup`, `resume`, `clear`, and `compact`
@@ -64,7 +63,7 @@ The target OMP profile keys are:
 
 ```yaml
 tools.approvalMode: yolo
-stateful.autoApprove: false
+stateful.autoApprove: true
 bash.enabled: true
 eval.py: false
 eval.js: false
@@ -90,14 +89,14 @@ Installed OMP support:
   preflight.
 - Built-in Bash for strict trusted `stateful sandbox process find ...` process
   inspection commands.
-- External write/create/write-dir/socket/signal scope asks for a scoped OMP UI
-  grant by default; `stateful.autoApprove: true` skips only that
-  Stateful-owned prompt while sandbox scope validation, hooks,
-  reservation/claim checks, and grant limits still apply. The approval prompt
-  omits raw command text and grants matching calls keyed by purpose plus
-  write/create/write-dir/socket/signal/network scope until expiry or max uses;
-  defaults are 5 uses and 600 seconds. When auto-approval is enabled, no prompt
-  is shown.
+- External write/create/write-dir/socket/signal scope and repo-external OMP
+  native `edit`/`write` file targets auto-approve the scoped Stateful-owned
+  OMP grant prompt by default through `stateful.autoApprove: true`, while
+  sandbox scope validation, hooks, reservation/claim checks, and grant limits
+  still apply. Set `stateful.autoApprove: false` to require the prompt. The
+  approval prompt omits raw command text and grants matching calls keyed by
+  purpose plus write/create/write-dir/socket/signal/network scope until expiry
+  or max uses; defaults are 5 uses and 600 seconds.
 - `lazy_bash_resume` for a blocked external Bash command that could not prompt
   for its scoped grant on the original tool call. The live extension stores the
   trusted `stateful sandbox run --fs external ...` command, asks for the same
@@ -105,14 +104,16 @@ Installed OMP support:
   stored command.
 - `lazy_edit_resume` for strict replay of blocked, line-based OMP `edit` patches.
   The live extension stores the original patch after `missing_reservation`,
-  `missing_claim`, or claim-conflict denials; after the agent fixes the missing
-  scope or receives a claimable reservation, it re-authorizes the original edit,
-  checks the file has not changed since queue time, then applies the stored
-  line-based patch.
+  `missing_claim`, or claim-conflict denials. If the lazy operation captured a
+  `wait_id`, resume first claims that queued reservation; generated no-wait
+  operation ids still require the agent to fix missing scope or claim externally.
+  Resume then re-authorizes the original edit, checks the file has not changed
+  since queue time, and applies the stored line-based patch.
 - `lazy_write_resume` for replay of blocked full OMP `write` content. It uses the
-  same queued wait id or generated operation id path, re-authorizes after the
-  agent fixes the missing scope or receives a claimable reservation, and fails
-  if the target changed since the write was queued.
+  same queued wait id or generated operation id path: captured wait ids are
+  claimed before re-authorization, generated no-wait ids need the missing scope
+  or claim resolved externally, and replay fails if the target changed since the
+  write was queued.
 
 
 ### Repo allowlist
@@ -124,8 +125,8 @@ stateful repos list
 ```
 
 Global hooks are gated by the repo allowlist. Disabled repos are left alone:
-hooks do not start the server or append outbox records, and MCP calls report
-that the repo is not enabled.
+hooks do not start the server or append outbox records, and native state calls
+report that the repo is not enabled.
 
 ## Server Lifecycle
 
@@ -144,9 +145,9 @@ form.
 ## LAN Runtime Sharing
 
 Use LAN mode when one Mac should host the stateful HTTP runtime for another Mac.
-The MCP adapter still runs locally inside each Codex process, and the remote Mac
-should reach the runtime through an SSH tunnel so the bearer token is not sent to
-a non-loopback `http://` address.
+Agent-facing native tools and hooks on the remote Mac should reach the runtime
+through an SSH tunnel so the bearer token is not sent to a non-loopback
+`http://` address.
 
 On the host Mac:
 
@@ -162,7 +163,7 @@ ssh -L 43873:127.0.0.1:43873 <host-mac>
 stateful server join http://127.0.0.1:43873 --token <token>
 ```
 
-This installs global stateful/Codex MCP configuration and writes remote runtime
+This installs global stateful/Codex configuration and writes remote runtime
 discovery under `$STATEFUL_HOME/runtime/server.json`. It does not enable the
 current repo. To enable the current repo on the remote Mac, pass:
 
@@ -177,17 +178,17 @@ run the printed join command as-is; it includes the matching workspace id.
 
 ## Manual Coordination Commands
 
-In active Codex or OMP sessions, prefer MCP tools over shelling out to
-`stateful reservation ...` or `stateful mcp call ...`; lifecycle hooks bind the active
-runtime session as the Stateful session id.
+In active Codex or OMP sessions, prefer the active Stateful coordination tools
+over shelling out to `stateful reservation ...`; lifecycle hooks bind the active
+`agent_id` and `workspace_id`.
 
-Manual CLI use outside active hooks can pass session and workspace explicitly.
+Manual CLI use outside active hooks can pass an explicit agent and workspace.
 Capture the returned `reservation_id` and pass it through later write
 authorization steps:
 
 ```bash
 reservation_id=$(stateful reservation declare \
-  --session-id demo \
+  --agent-id demo-agent \
   --workspace-id <workspace> \
   --purpose "Update README content requested by the user." \
   README.md | jq -r '.reservation_id')
@@ -209,8 +210,8 @@ Notes:
 - Declarations add to the session's active scope under that `reservation_id`.
 - Re-declaring the same path updates the purpose used for future claim
   acquisition.
-- MCP `state_claim_acquire` uses `reservation_id` plus `paths: string[]` to
-  acquire one or more exact file or directory resources from that reservation.
+- `state_claim_acquire` uses `reservation_id` plus `paths: string[]` to acquire
+  one or more exact file or directory resources from that reservation.
 - Writes must carry the same `reservation_id` through native edit/write
   integration or `stateful sandbox run --reservation-id <reservation_id>`.
 - `request` creates or returns an idempotent queued or claimable (`reserved`)
@@ -220,6 +221,11 @@ Notes:
   purpose.
 - Native edit hooks and sandbox `write-targets` authorization may lazy-claim a
   claimable request at the retry write boundary.
+- Operator TTLs: active reservations start at 15 minutes and heartbeat only up
+  to 60 minutes from declaration. Active claims expire after 300 seconds without
+  heartbeat. Claimable reservations expire after 120 seconds, so poll/resume or
+  lazy resume promptly after being unblocked; blocked or finalized work must
+  reread and get fresh authority before writing.
 
 Resume commands:
 
@@ -228,7 +234,15 @@ stateful notifications poll
 stateful resume next
 ```
 
-Reservation notifications and resume payloads include the stored request purpose.
+`stateful notifications poll` returns pending notifications and marks returned
+notifications delivered. The `/v1/notifications/stream` SSE endpoint sends
+replayable reservation notifications with `id: <sequence>` and the same
+per-agent/workspace `sequence` in JSON data. Stream delivery is not marked
+delivered until the next connection sends `Last-Event-ID` / `last-event-id`;
+then the server acknowledges notifications through that sequence and replays
+later pending notifications. `stateful resume next` remains the
+durable recovery path for still-active claimable reservations. Reservation
+notifications and resume payloads include the stored request purpose.
 
 ## CLI Overview
 
@@ -236,7 +250,7 @@ Common commands:
 
 - `stateful install [--yes]`
 - `stateful install --agent codex [--yes] [--codex-config <path>] [--binary <path>]`
-- `stateful install --agent omp [--yes] [--update]`
+- `stateful install --agent omp [--yes] [--update] [--binary <path>]`
 - `stateful enable [--repo <path>]`, `stateful disable`, `stateful repos list`
 - `stateful tools list`, `stateful tools allow <tool>`, `stateful tools deny <tool>`
 - `stateful server start|restart|status|stop|join`
@@ -247,8 +261,6 @@ Common commands:
 - `stateful sandbox run ...`
 - `stateful sandbox process find ...`
 - `stateful codex ...`
-- `stateful mcp serve`
-- `stateful mcp call <tool> [arguments_json]`
 - `stateful sync-outbox`
 - `stateful hook codex <event>`
 - `stateful hook omp <event>`
@@ -265,31 +277,34 @@ entries; both hooks record unknown tool names into this list.
 This allowlist does not bypass hard-denied write or execution classifications.
 Write/execute paths still require the normal stateful authorization flow.
 
-## Hooks And Sessions
+## Hooks And Identity
 
-`SessionStart` registers the active session and writes the current-session file
-used by CLI and MCP calls. In OMP, `stateful hook omp session-start` stores
-`process.env.STATEFUL_SESSION_ID` from explicit event/ctx ids
-(`event.sessionId`, `event.session_id`, session fields), falling back to the
-`ctx.sessionManager.getSessionFile()` header/stem and then `getLeafId()` before
-session-aware MCP tools run. In Codex,
-`UserPromptSubmit` renders current-state context.
+`SessionStart` registers the active `agent_id` and `workspace_id` for hook and
+state operations. In OMP, the extension/native tool bridge derives the Stateful
+`agent_id` from `ctx.sessionManager.getSessionId()` plus
+`ctx.sessionManager.getLeafId()` when present. The generated id is
+`omp-${sessionId}-${leafId}` with a leaf id and `omp-${sessionId}` without one;
+if `getSessionId()` is unavailable or invalid, OMP Stateful actions fail closed.
+Agents do not maintain current-session files, select coordination identity
+through environment variables, or provide event/ctx agent and session fields. In
+Codex, hooks receive Codex's `session_id` parameter and map it to Stateful
+`agent_id`; `UserPromptSubmit` renders current-state context.
 
 `PreToolUse` authorizes supported tool actions. Server-side authorization records
-an implicit session heartbeat for the checked session. `PostToolUse` records
+an implicit agent heartbeat for the checked agent. `PostToolUse` records
 activity or heartbeats; Codex `PostToolUse` also releases authorizing
 same-reservation repo-write claims after completed native edit and
 `write-targets` transactions. `Stop` posts
-`state_activity_finalize`, finalizing activity and releasing the session's
+`state_activity_finalize`, finalizing activity and releasing the agent's
 claims.
 
-Hooks write `.stateful_core/runtime/sessions/<session_id>.json` plus the current
-session alias `.stateful_core/runtime/session.json`. Session-bound callers use
-`STATEFUL_SESSION_ID` to select the matching session-bound file, except Codex MCP
-callers prefer `CODEX_THREAD_ID` when it is present. If no session environment
-variable is present, callers fall back to `.stateful_core/runtime/session.json`
-only after verifying that its `session_id` has a matching session-bound file with
-identical contents.
+Stateful no longer exposes an agent-facing current-session fallback. The removed
+legacy path wrote `.stateful_core/runtime/sessions/<session_id>.json` plus the
+alias `.stateful_core/runtime/session.json` and allowed callers to choose state
+through session environment variables. Active integrations now pass explicit
+identity into hooks and native tools; OMP derives that identity from
+`ctx.sessionManager` instead of legacy session files or event/ctx identity
+fields.
 
 ## Write Authorization
 
@@ -307,20 +322,36 @@ The v1 authorization API supports:
 
 Task-level reservation authorizes writes only when its file set includes the exact file or directory resource and the write supplies that `reservation_id`. Directory scope authorizes only `write_directory` for the exact directory resource. File writes, deletes, renames, and moves require exact file scopes for the affected paths; directory scope does not authorize them.
 
+Shipped v1 queueing is single-path `write_file` or `write_directory`; multi-resource queueing and `rename_file`/`move_file` queueing are target-model only.
+
 Writes without matching active reservation are denied. A write is allowed only
 when the `reservation_id` has active scope for the target and an active claim
 under the same `reservation_id` covers the target. Conflicting claims outside
 the authorizing reservation block writes. A blocked writer can queue with
-`queue_on_conflict`; after promotion, the reservation notification and resume
-payload carry the stored request purpose, and the session with the claimable
-reservation must reread the target.
+`queue_on_conflict`; after promotion, poll and SSE reservation notifications and
+resume payloads carry the stored request purpose, and the agent with the
+claimable reservation must reread the target.
 
-Repo file edits should use native edit tools with hook-visible targets after
-task-level reservation covers the target and a successful same-reservation file
-claim. Hooks extract the native tool target, call `/v1/authorize` with the
-operation-specific action and `reservation_id`, allow the edit only after an
-allow decision, and release the authorizing claim after the completed write
-transaction.
+OMP native `edit` and `write` use auto-declare/claim as the default simple-write
+path when no explicit reservation id is supplied and the only denial is missing
+reservation/scope. Other repo file edits should use native edit tools with
+hook-visible targets after task-level reservation covers the target and a
+successful same-reservation file claim. Hooks extract the native tool target,
+call `/v1/authorize` with the operation-specific action and `reservation_id`,
+allow the edit only after an allow decision, and release the authorizing claim
+after the completed write transaction.
+
+Choose the path by operation shape:
+
+| Operation | Use |
+| --- | --- |
+| Simple OMP repo file edit/write | Native `edit`/`write`; auto-declare/claim handles missing reservation/scope when no explicit `reservation_id` is supplied. |
+| Planned repo edit/delete/move or multi-file work | Declare a reservation, acquire exact same-reservation claims, then use native edit/write with that `reservation_id`. |
+| Script or generator mutates repo files | `stateful sandbox run --fs write-targets --reservation-id <reservation_id>` with exact `--write-target` / `--create-target` flags. |
+| Build, test, or package command | `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`. |
+| `git ...` | `--fs git`; keep network disabled for local git, enable it only for remote git. |
+| `gh pr list|view|status|create` | `--fs github-pr --network enabled`. |
+| Repo-external command | `--fs external --purpose <purpose>`; add exact absolute external write/create/dir scope only for writes. |
 
 ## Sandbox Profiles
 
@@ -336,6 +367,12 @@ sandbox profile that matches the command.
 | `github-pr` | Non-interactive `gh pr list|view|status|create` commands. |
 | `external` | Repo-external shell operations with a purpose; add explicit external write/create/dir scope only when needed. |
 
+`stateful sandbox run` defaults to command-like pass-through: the wrapped
+command's `stdout`, `stderr`, and exit code become the wrapper's `stdout`,
+`stderr`, and exit code. Add `--json` when callers need the structured result
+envelope with `status`, `exit_code`, captured streams, and authorization
+metadata.
+
 Examples:
 
 ```bash
@@ -347,6 +384,22 @@ stateful sandbox run --fs github-pr --network enabled --command 'gh pr status'
 stateful sandbox run --fs external --purpose "inspect external tool version" --command 'some-external-tool --version'
 ```
 
+For multi-step sandboxed work, keep the outer wrapper single and use repeated `--sequence` flags:
+
+```bash
+stateful sandbox run --fs external --network enabled \
+  --purpose "launch benchmark" \
+  --connect-socket /Users/arthur/.colima/default/docker.sock \
+  --write-dir /Users/arthur/stateful_bench_runs \
+  --sequence-shell /bin/zsh \
+  --sequence 'set -euo pipefail' \
+  --sequence 'set -a; source /Users/arthur/.api.env; set +a' \
+  --sequence 'mkdir -p /Users/arthur/stateful_bench_runs/denovo/runs /Users/arthur/stateful_bench_runs/logs' \
+  --sequence 'tmux -S /Users/arthur/stateful_bench_runs/tmux-denovo.sock new-session -d -s run-1 "cd /Users/arthur/Code/stateful_core && cargo run --quiet -p stateful-bench -- --help > /Users/arthur/stateful_bench_runs/logs/run-1.log 2>&1"'
+```
+
+Do not write `stateful sandbox run ... && stateful sandbox run ...` through OMP built-in Bash; that is still an outer shell wrapper and remains blocked. The `git` and `github-pr` profiles reject `--sequence` because they intentionally validate a single direct `git` or `gh pr` command.
+
 Codex process inspection uses `stateful sandbox process find`:
 
 ```bash
@@ -355,34 +408,35 @@ stateful sandbox process find --contains denovo_codex_agent
 ```
 
 In OMP, use built-in Bash with a single trusted
-`stateful sandbox process find ...` command after Stateful preflight. Result JSON
-includes safe process metadata fields: `pid`, `ppid`, `pgid`, `user`, `uid`,
-`stat`, `start`, `etime`, `time`, `pcpu`, `pmem`, `rss`, `vsz`, `nice`, `pri`,
-`tty`, and `comm`. Command strings, argv, and environment data are never exposed
-in result JSON.
+`stateful sandbox process find ...` command after Stateful preflight. By
+default stdout is the safe process list JSON array. Add `--json` only when
+automation needs the structured envelope with `status` and `processes`. Each
+process entry includes safe metadata fields: `pid`, `ppid`, `pgid`, `user`,
+`uid`, `stat`, `start`, `etime`, `time`, `pcpu`, `pmem`, `rss`, `vsz`, `nice`,
+`pri`, `tty`, and `comm`. Command strings, argv, and environment data are
+never exposed.
 
-## HTTP And MCP Surface
+## HTTP And Native Tool Surface
 
 The HTTP server exposes `/health`, `/v1/current`, `/v1/events`,
-`/v1/runtime/identity`, and POST endpoints for session registration,
+`/v1/runtime/identity`, and POST endpoints for agent registration,
 heartbeats, reservation declaration, reservation request, reservation claim, reservation cancel,
 claims, activity observation/finalization, authorization, conflict checks,
 context rendering, reconciliation ack, notifications, resume, and outbox sync.
 
-The MCP adapter exposes agent-friendly tool names mapped to dotted protocol
-names:
+Integrations that expose native Stateful tools use agent-friendly tool names.
+Agent identity tools use native names directly; other tools map to dotted
+protocol names:
 
-- `state_session_register` / `state.session.register`
-- `state_session_heartbeat` / `state.session.heartbeat`
+- `state_session_register` — registers the injected `agent_id`/`workspace_id`
+- `state_session_heartbeat` — heartbeats the injected `agent_id`/`workspace_id`
 - `state_reservation_declare` / `state.reservation.declare`
 - `state_reservation_request` / `state.reservation.request`
 - `state_reservation_claim` / `state.reservation.claim`
 - `state_reservation_cancel` / `state.reservation.cancel`
 - `state_claim_acquire` / `state.claim.acquire`
 - `state_claim_release` / `state.claim.release`
-- `state_activity_observe` / `state.activity.observe`
 - `state_activity_finalize` / `state.activity.finalize`
-- `state_conflicts_check` / `state.conflicts.check`
 - `state_current_read` / `state.current.read`
 - `state_events_read` / `state.events.read`
 - `state_context_render` / `state.context.render`
@@ -391,9 +445,14 @@ names:
 denial recovery should use reservation, claim, resume, and the denial's direct
 next action instead of rendering ambient context.
 
-- `state_reconcile_ack` / `state.reconcile.ack`
 - `state_notifications_poll` / `state.notifications.poll`
 - `state_resume_next` / `state.resume.next`
+
+The shipped OMP extension registers `lazy_edit_resume`, `lazy_write_resume`, and
+`lazy_bash_resume`; it does not register the full `state_*` coordination tool
+surface. OMP agents use the active tool list: call `state_*` tools only when they
+are exposed, otherwise rely on native `edit`/`write` auto-declare, lazy resume,
+or a write boundary with an existing `reservation_id`.
 
 `state_claim_acquire` takes `reservation_id` and `paths: string[]`; each path
 must match active exact file or directory reservation scope under that
@@ -403,10 +462,11 @@ server requests with `path` are still accepted for compatibility.
 `state_claim_release` remains single-resource and takes `path: string`.
 
 `state_file_write` / `state.file.write` and `state_bash_write` /
-`state.bash.write` were removed. Use native edit tools with hook-visible targets
-for file edits after task-level reservation and exact same-reservation claim,
-and use `stateful sandbox run --fs write-targets --reservation-id <reservation_id> ...`
-for command-shaped writes.
+`state.bash.write` were removed. Use OMP native `edit`/`write` auto-declare/claim
+for the default simple-write path. Other file edits require hook-visible native
+edit targets after task-level reservation and exact same-reservation claim.
+Command-shaped writes require `stateful sandbox run --fs write-targets
+--reservation-id <reservation_id> ...` with an already-authorized reservation.
 
 The `/v1/authorize` endpoint and the reservation declare/request/claim/cancel
 endpoints require the `stateful.v1` request envelope with `payload`. Flat legacy
@@ -428,9 +488,7 @@ when `STATEFUL_HOME` is unset. That directory can contain `config.yml`,
 and repo metadata under `repos/`.
 
 Repo hook runtime state lives under `.stateful_core/`. That directory can contain
-`runtime/server.json`, `runtime/session.json`, session-bound
-`runtime/sessions/*.json` files, local `state.db`, and outbox JSONL files under
-`outbox/`.
+`runtime/server.json`, local `state.db`, and outbox JSONL files under `outbox/`.
 
 Commit reusable documentation and source code, not local generated state. For
 public source archives, prefer `git archive` or a clean clone instead of a
@@ -443,13 +501,13 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
 - `STATEFUL_SERVER_URL` and `STATEFUL_SERVER_TOKEN` override runtime discovery
   when both are set. The referenced server must expose the current runtime
   capabilities.
-- `STATEFUL_SESSION_ID` selects the session-bound current-session file at
-  `.stateful_core/runtime/sessions/<session_id>.json` for MCP tools and other
-  session-bound callers. The OMP extension sets it from explicit event/ctx ids
-  (`event.sessionId`, `event.session_id`, session fields), or from the
-  `ctx.sessionManager.getSessionFile()` header/stem and then `getLeafId()`
-  when those are absent; Codex MCP resolution prefers
-  `CODEX_THREAD_ID` when present.
+- Legacy agent-facing identity environment variables were removed. Active Codex
+  and OMP integrations inject `agent_id` and `workspace_id` into hooks and
+  native tools; OMP derives `agent_id` from `ctx.sessionManager.getSessionId()`
+  plus `getLeafId()` when present and fails closed when the session id is
+  unavailable or invalid. Agents should not set environment variables, use
+  process ids, repair runtime session files, or provide event/ctx agent and
+  session fields to select coordination identity.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
   authorize Bash. Bash authorization goes through a trusted
   `<absolute-stateful-binary> sandbox run` wrapper command.
@@ -471,9 +529,10 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
 - `programbench`: run Codex or OMP agents on ProgramBench instances, evaluate the
   resulting `submission.tar.gz` artifacts with official ProgramBench tooling, and
   report stateful/no-state quality plus time/token efficiency deltas.
-  ProgramBench Codex/OMP runs use host CLI adapters in an empty temporary
-  airlock seeded from the target container's `/workspace`; see the ProgramBench
-  guide for the run-behavior details.
+  ProgramBench host Codex/OMP runs use an empty temporary airlock seeded from
+  the target container's `/workspace`; OMP Docker runs use a separate agent
+  container as the sandbox boundary before smoke compile in the live target
+  container. See the ProgramBench guide for details.
 
 For DeNovoSWE, new official-style run commands should pass `--prompt-version v2`;
 the CLI's default remains compatible with historical behavior. See
@@ -497,7 +556,7 @@ Use these PR title forms:
 ```text
 fix(hook): reject stateful coordination through Bash
 feat(cli): add sandboxed git status support
-feat(mcp)!: rename the claim acquisition method
+feat(native-tools)!: rename the claim acquisition method
 docs: clarify sandbox write targets
 chore: update release automation
 ```
@@ -516,9 +575,8 @@ configured release rules are:
 
 The release configuration uses manifest-driven `release-please` with the Rust
 `cargo-workspace` plugin and a linked version group for the public crates:
-`stateful-core`, `stateful-store`, `stateful-server`, `stateful-cli`, and
-`stateful-mcp`. The benchmark crate is `publish = false` and is not a release
-component.
+`stateful-core`, `stateful-store`, `stateful-server`, and `stateful-cli`. The
+benchmark crate is `publish = false` and is not a release component.
 
 The release workflow uses `GITHUB_TOKEN` by default. Configure a repository
 secret named `RELEASE_PLEASE_TOKEN` with a suitable personal access token when

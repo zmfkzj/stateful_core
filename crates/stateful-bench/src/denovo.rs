@@ -72,7 +72,7 @@ const DEFAULT_OMP_BIN: &str = "omp";
 const DEFAULT_OMP_AGENT_DOCKER_STATEFUL_BINARY: &str = "/usr/local/bin/stateful";
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.4-mini";
 const DEFAULT_OMP_MODEL: &str = "deepseek-v4-flash";
-const DEFAULT_CODEX_REASONING_EFFORT: &str = "low";
+const DEFAULT_BENCHMARK_REASONING_EFFORT: &str = "high";
 const DEFAULT_CODEX_MODEL_CONTEXT_WINDOW: usize = 256000;
 const DEFAULT_CODEX_TEMPERATURE: &str = "1";
 const DEFAULT_CODEX_MAX_TURNS: usize = 500;
@@ -90,6 +90,10 @@ pub enum DeNovoAgentKind {
 }
 
 #[derive(Debug, Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "clap derive keeps command fields flat"
+)]
 pub enum DeNovoCommand {
     Extract {
         #[arg(long)]
@@ -146,7 +150,7 @@ pub enum DeNovoCommand {
         agent_docker_sandbox: DeNovoAgentDockerSandbox,
         #[arg(long)]
         benchmark_model: Option<String>,
-        #[arg(long, default_value = DEFAULT_CODEX_REASONING_EFFORT)]
+        #[arg(long, default_value = DEFAULT_BENCHMARK_REASONING_EFFORT)]
         benchmark_reasoning_effort: String,
         #[arg(long, default_value_t = DEFAULT_CODEX_MODEL_CONTEXT_WINDOW)]
         benchmark_model_context_window: usize,
@@ -685,7 +689,7 @@ fn push_repeated(args: &mut Vec<String>, flag: &str, values: Vec<String>) {
     }
 }
 
-fn path_arg(path: &PathBuf) -> String {
+fn path_arg(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 

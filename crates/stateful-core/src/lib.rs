@@ -5,7 +5,7 @@ mod reconcile;
 mod types;
 
 pub use context::{
-    CURRENT_SESSION_SCOPE_SOURCE_REF, ContextPackage, CurrentEvidenceKind, CurrentFreshness,
+    AGENT_CONTEXT_SCOPE_SOURCE_REF, ContextPackage, CurrentEvidenceKind, CurrentFreshness,
     CurrentItem, CurrentItemKind, CurrentSeverity, RenderMode, render_prompt_text,
 };
 pub use path::{
@@ -16,8 +16,8 @@ pub use policy::{
 };
 pub use reconcile::ReconciliationDecision;
 pub use types::{
-    ActorType, Decision, DecisionKind, ProtocolVersion, RequestEnvelope, SessionIdentity,
-    SourceKind, SourceRef, WorkspaceIdentity,
+    ActorType, AgentIdentity, Decision, DecisionKind, ProtocolVersion, RequestEnvelope, SourceKind,
+    SourceRef, WorkspaceIdentity,
 };
 
 pub const CRATE_NAME: &str = "stateful-core";

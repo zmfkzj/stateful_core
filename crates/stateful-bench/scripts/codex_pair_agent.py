@@ -19,7 +19,7 @@ DEFAULT_BENCHMARK_MODEL = "gpt-5.4-mini"
 DEFAULT_BENCHMARK_REASONING_EFFORT = "low"
 DEFAULT_NATIVE_SUBAGENT_MIN_COUNT = 3
 EMPTY_STOP_RETRY_CAP = 1
-STATEFUL_INTEGRATION_FULL = "hooks-mcp-skill"
+STATEFUL_INTEGRATION_FULL = "hooks-skill"
 STATEFUL_INTEGRATION_HOOKS_ONLY = "hooks-only"
 STATEFUL_INTEGRATION_NONE = "none"
 NESTED_CODEX_HOME_ROOT_ENV = "STATEFUL_NESTED_CODEX_HOME_ROOT"
@@ -31,21 +31,19 @@ COMMAND_POLICY_SKILL_PATH = Path("skills") / COMMAND_POLICY_SKILL / "SKILL.md"
 STATEFUL_BENCH_CONFIG_MARKER = "# stateful-bench nested Codex integration"
 FALLBACK_COMMAND_POLICY_SKILL = """---
 name: stateful-command-policy
-description: Detailed procedure for using Stateful MCP coordination, claims, sandbox profiles, and hook-denial recovery after a Stateful rule or denial says this policy applies
+description: Detailed procedure for using Stateful coordination tools, claims, sandbox profiles, and hook-denial recovery after a Stateful rule or denial says this policy applies
 ---
 
 # Stateful Command Policy
 
 This skill is the procedural manual. Rules and hook denials decide when Stateful
-policy applies. First inspect current state with the active Stateful MCP tool
-names, then declare a task-level reservation covering the known file set and
-acquire matching same-session claims before native edits. Use canonical names in
-guidance (`state_current_read`,
-`state_reservation_declare`, `state_claim_acquire`) and switch to runtime-specific
-aliases only when those are the active tool names, such as Codex
-`mcp__stateful__state_reservation_declare` or OMP
-`mcp__stateful_state_reservation_declare`. Do not run stateful MCP calls through
-Bash. Use the sandbox-run wrappers printed by hook denials for shell commands.
+policy applies. First inspect current state with the active Stateful tool names,
+then declare a task-level reservation covering the known file set and acquire
+same-agent claims before native edits. Use canonical names in guidance
+(`state_current_read`, `state_reservation_declare`, `state_claim_acquire`) and
+switch to runtime-specific aliases only when those are the active tool names.
+Do not run legacy `stateful mcp call` through Bash. Use the sandbox-run wrappers
+printed by hook denials for shell commands.
 """
 RESUME_PROMPT = """\
 The previous Codex exec turn stopped because of a token/context limit.
@@ -101,14 +99,14 @@ class CodexRunResult:
         returncode: int,
         stdout: str,
         stderr: str,
-        session_id: str | None,
+        codex_session_id: str | None,
         resumeable_token_failure: bool,
         empty_stop: bool,
     ) -> None:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
-        self.session_id = session_id
+        self.codex_session_id = codex_session_id
         self.resumeable_token_failure = resumeable_token_failure
         self.empty_stop = empty_stop
 
@@ -211,20 +209,9 @@ def stateful_hook_overrides(stateful_binary: str) -> list[str]:
 
 def stateful_codex_config(
     stateful_binary: str,
-    include_mcp: bool = True,
     base_config: str | None = None,
 ) -> str:
     hook_prefix = f"{shlex.quote(stateful_binary)} hook codex"
-    mcp_config = ""
-    if include_mcp:
-        mcp_config = f"""
-[mcp_servers.stateful]
-command = {toml_string(stateful_binary)}
-args = ["mcp", "serve"]
-env_vars = ["CODEX_THREAD_ID", "STATEFUL_CODEX_RUN_ID", "STATEFUL_SERVER_URL", "STATEFUL_SERVER_TOKEN", "STATEFUL_SESSION_ID"]
-startup_timeout_sec = 20
-default_tools_approval_mode = "approve"
-"""
     base_config_text = ""
     provider_config = codex_provider_config_fragment(base_config)
     if provider_config:
@@ -236,7 +223,6 @@ default_tools_approval_mode = "approve"
 [features]
 hooks = true
 
-{mcp_config}
 [[hooks.SessionStart]]
 matcher = "startup|resume|clear|compact"
 
@@ -312,7 +298,6 @@ def write_text_file(path: Path, contents: str) -> None:
 def write_stateful_codex_integration(
     env: dict[str, str],
     stateful_binary: str,
-    include_mcp: bool = True,
     include_skill: bool = True,
     base_config: str | None = None,
 ) -> None:
@@ -321,7 +306,6 @@ def write_stateful_codex_integration(
         codex_home / "config.toml",
         stateful_codex_config(
             stateful_binary,
-            include_mcp=include_mcp,
             base_config=base_config,
         ),
     )
@@ -402,7 +386,7 @@ def codex_command(
     return command
 
 
-def codex_resume_command(command: list[str], session_id: str) -> list[str]:
+def codex_resume_command(command: list[str], codex_session_id: str) -> list[str]:
     exec_index = command.index("exec")
     resume = command[: exec_index + 1] + ["resume"]
     tail = command[exec_index + 1 :]
@@ -441,7 +425,7 @@ def codex_resume_command(command: list[str], session_id: str) -> list[str]:
         elif arg == "-":
             pass
         index += 1
-    resume.extend([session_id, "-"])
+    resume.extend([codex_session_id, "-"])
     return resume
 
 
@@ -468,7 +452,7 @@ def run_codex_once(
         returncode=completed.returncode,
         stdout=stdout,
         stderr=stderr,
-        session_id=codex_session_id_from_output(stdout),
+        codex_session_id=codex_session_id_from_output(stdout),
         resumeable_token_failure=codex_output_has_resumeable_token_failure(stdout, stderr),
         empty_stop=completed.returncode == 0 and codex_output_is_empty_stop(stdout, stderr),
     )
@@ -484,7 +468,7 @@ def run_codex_with_resume(
     result_observer=None,
 ) -> int:
     pending_resume_failures: list[CodexRunResult] = []
-    session_id: str | None = None
+    codex_session_id: str | None = None
     resume_attempts = 0
     empty_stop_attempts = 0
     current_command = command
@@ -498,16 +482,16 @@ def run_codex_with_resume(
             env,
             runner=runner,
         )
-        if result.session_id:
-            session_id = result.session_id
+        if result.codex_session_id:
+            codex_session_id = result.codex_session_id
         if result_observer is not None:
             result_observer(result)
 
         if result.resumeable_token_failure:
-            if session_id and resume_attempts < max_resumes:
+            if codex_session_id and resume_attempts < max_resumes:
                 resume_attempts += 1
                 pending_resume_failures.append(result)
-                current_command = codex_resume_command(command, session_id)
+                current_command = codex_resume_command(command, codex_session_id)
                 current_prompt = RESUME_PROMPT
                 continue
             emit_codex_results(pending_resume_failures, suppress_resumeable_failures=False)
@@ -515,9 +499,9 @@ def run_codex_with_resume(
             return result.returncode if result.returncode != 0 else 1
 
         if result.empty_stop:
-            if session_id and empty_stop_attempts < EMPTY_STOP_RETRY_CAP:
+            if codex_session_id and empty_stop_attempts < EMPTY_STOP_RETRY_CAP:
                 empty_stop_attempts += 1
-                current_command = codex_resume_command(command, session_id)
+                current_command = codex_resume_command(command, codex_session_id)
                 current_prompt = EMPTY_STOP_PROMPT
                 continue
             emit_codex_results(pending_resume_failures, suppress_resumeable_failures=True)
@@ -526,7 +510,7 @@ def run_codex_with_resume(
         if result.returncode == 0:
             emit_codex_results(pending_resume_failures, suppress_resumeable_failures=True)
             for attempt in range(1, resume_attempts + 1):
-                print_resume_event(session_id=session_id, attempt=attempt)
+                print_resume_event(codex_session_id=codex_session_id, attempt=attempt)
             emit_codex_result(result, suppress_resumeable_failures=False)
             return 0
 
@@ -555,13 +539,13 @@ def emit_codex_result(result: CodexRunResult, suppress_resumeable_failures: bool
         sys.stderr.flush()
 
 
-def print_resume_event(session_id: str | None, attempt: int) -> None:
+def print_resume_event(codex_session_id: str | None, attempt: int) -> None:
     sys.stdout.write(
         json.dumps(
             {
                 "type": "stateful_bench.resume",
                 "attempt": attempt,
-                "session_id": session_id,
+                "codex_session_id": codex_session_id,
                 "reason": "token_context_limit",
             },
             sort_keys=True,
@@ -726,7 +710,6 @@ def codex_environment(
         return None
 
     env = dict(source_env)
-    env.pop("STATEFUL_SESSION_ID", None)
     pair_fragment = path_fragment(workspace.parent.name or workspace.name)
     agent_fragment = path_fragment(task_path.stem)
     scope_digest = path_scope_digest(task_path, workspace)
@@ -743,18 +726,8 @@ def codex_environment(
     return env
 
 
-def benchmark_source_env(
-    mode: str,
-    session_id: str | None,
-    base_env: dict[str, str] | None = None,
-    preserve_stateful_session: bool = True,
-) -> dict[str, str]:
+def benchmark_source_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ if base_env is None else base_env)
-    env.pop("STATEFUL_SESSION_ID", None)
-    if mode == "stateful" and preserve_stateful_session:
-        if not session_id:
-            raise ValueError("session_id is required in stateful mode")
-        env["STATEFUL_SESSION_ID"] = session_id
     return env
 
 
@@ -867,7 +840,6 @@ def prepare_codex_environment(
         write_stateful_codex_integration(
             env,
             stateful_binary,
-            include_mcp=stateful_integration == STATEFUL_INTEGRATION_FULL,
             include_skill=stateful_integration == STATEFUL_INTEGRATION_FULL,
             base_config=base_config_toml,
         )
@@ -948,8 +920,6 @@ def main() -> int:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--mode", choices=["stateful", "no-state"], required=True)
     parser.add_argument("--stateful-binary", required=True)
-    parser.add_argument("--session-id")
-    parser.add_argument("--workspace-id")
     parser.add_argument("--benchmark-model", default=DEFAULT_BENCHMARK_MODEL)
     parser.add_argument("--benchmark-reasoning-effort", default=DEFAULT_BENCHMARK_REASONING_EFFORT)
     parser.add_argument("--benchmark-model-context-window", type=int)
@@ -973,8 +943,6 @@ def main() -> int:
     parser.add_argument("--max-resumes", type=int, default=1)
     args = parser.parse_args()
 
-    if args.mode == "stateful" and (not args.session_id or not args.workspace_id):
-        parser.error("--session-id and --workspace-id are required in stateful mode")
     if args.max_resumes < 0:
         parser.error("--max-resumes must be non-negative")
     if args.subagent_min_count < 1:
@@ -988,12 +956,10 @@ def main() -> int:
     if args.mode == "stateful":
         stateful_instruction = f"""
 Before any file modification, inspect the code enough to identify the production
-file or files you plan to edit, then use the stateful MCP tools to declare a
-task-level reservation covering the known file set and acquire same-session file
-claims for the planned files. Do not pass a manual session id; use the current
-Codex thread session provided
-by the stateful hooks. If reservation declaration or claim acquisition fails, stop
-without editing.
+file or files you plan to edit, then use the active Stateful tools to declare a
+task-level reservation covering the known file set and acquire same-agent file
+claims for the planned files. If reservation declaration or claim acquisition
+fails, stop without editing.
 """
     max_turns_instruction = ""
     if args.benchmark_max_turns is not None:
@@ -1028,11 +994,7 @@ When finished, leave the working tree with only the production code fix for this
 task.
 """.strip()
 
-    source_env = benchmark_source_env(
-        args.mode,
-        args.session_id,
-        preserve_stateful_session=not args.enable_native_subagent,
-    )
+    source_env = benchmark_source_env()
     command = codex_command(
         workspace=workspace,
         mode=args.mode,

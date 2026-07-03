@@ -1,9 +1,10 @@
 use clap::Parser;
 use stateful_cli::{
     Cli, CodexSandboxMode, Command, GlobalPaths, HookCommand, HookRuntime, InstallAgent,
-    McpCommand, NotificationsCommand, ReposCommand, ResumeCommand, SandboxCommand,
-    SandboxFsProfile, SandboxNetworkPolicy, ServerCommand, ToolsCommand, allow_tool_for_repo,
-    doctor_report_with_global, enable_repo, record_unclassified_tool_for_repo,
+    NotificationsCommand, OmpInstallOptions, ReposCommand, ResumeCommand, SandboxCommand,
+    SandboxFsProfile, SandboxNetworkPolicy, SandboxProcessCommand, ServerCommand, ToolsCommand,
+    allow_tool_for_repo, apply_omp_install, doctor_report_with_global, enable_repo,
+    record_unclassified_tool_for_repo,
 };
 use std::{fs, path::PathBuf, process::Command as ProcessCommand};
 
@@ -18,26 +19,36 @@ fn parses_sandbox_run_read_only_defaults() {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             command,
+            sequences,
+            sequence_shell,
             timeout_seconds,
             stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::ReadOnly);
             assert_eq!(network, SandboxNetworkPolicy::Disabled);
             assert_eq!(purpose, None);
+            assert_eq!(agent_id, None);
+            assert_eq!(workspace_id, None);
             assert_eq!(reservation_id, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!json);
             assert!(!stream_events);
-            assert_eq!(command, "rg auth src");
+            assert_eq!(command, Some("rg auth src".to_string()));
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
             assert_eq!(timeout_seconds, None);
         }
         other => panic!("expected sandbox run command, got {other:?}"),
@@ -45,14 +56,90 @@ fn parses_sandbox_run_read_only_defaults() {
 }
 
 #[test]
-fn doctor_labels_legacy_hooks_json_without_counting_it_as_installed() {
-    let temp = std::env::temp_dir().join(format!(
-        "stateful-doctor-legacy-hooks-{}",
-        std::process::id()
-    ));
-    if temp.exists() {
-        fs::remove_dir_all(&temp).expect("old temp root should remove");
+fn parses_sandbox_run_sequence() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "run",
+        "--fs",
+        "external",
+        "--purpose",
+        "launch benchmark",
+        "--sequence-shell",
+        "/bin/zsh",
+        "--sequence",
+        "set -euo pipefail",
+        "--sequence",
+        "printf ok",
+    ])
+    .expect("sandbox run sequence should parse");
+
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Run {
+            command,
+            sequences,
+            sequence_shell,
+            ..
+        }) => {
+            assert_eq!(command, None);
+            assert_eq!(sequence_shell, Some("/bin/zsh".to_string()));
+            assert_eq!(
+                sequences,
+                vec!["set -euo pipefail".to_string(), "printf ok".to_string()]
+            );
+        }
+        other => panic!("expected sandbox run command, got {other:?}"),
     }
+}
+
+#[test]
+fn parses_sandbox_run_json_flag() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "run",
+        "--json",
+        "--command",
+        "printf ok",
+    ])
+    .expect("sandbox run --json should parse");
+
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Run { json, command, .. }) => {
+            assert!(json);
+            assert_eq!(command, Some("printf ok".to_string()));
+        }
+        other => panic!("expected sandbox run command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_sandbox_process_find_json_flag() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "process",
+        "find",
+        "--json",
+        "--contains",
+        "denovo_codex_agent",
+    ])
+    .expect("sandbox process find --json should parse");
+
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Process {
+            command: SandboxProcessCommand::Find { contains, .. },
+        }) => {
+            assert_eq!(contains, vec!["denovo_codex_agent"]);
+        }
+        other => panic!("expected sandbox process find command, got {other:?}"),
+    }
+}
+
+#[test]
+fn doctor_labels_legacy_hooks_json_without_counting_it_as_installed() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should create");
+    let temp = temp_dir.path();
     let repo = temp.join("repo");
     let hooks_dir = repo.join(".codex");
     fs::create_dir_all(&hooks_dir).expect("hooks dir should create");
@@ -74,8 +161,6 @@ fn doctor_labels_legacy_hooks_json_without_counting_it_as_installed() {
     assert!(report.legacy_hooks_json);
     assert!(report.legacy_repo_state_db);
     assert!(!report.installed);
-
-    fs::remove_dir_all(&temp).expect("temp root should remove");
 }
 
 #[test]
@@ -107,12 +192,17 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             command,
+            sequences,
+            sequence_shell,
             timeout_seconds,
             stream_events,
         }) => {
@@ -120,13 +210,18 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(purpose, None);
             assert_eq!(reservation_id, None);
+            assert_eq!(agent_id, None);
+            assert_eq!(workspace_id, None);
             assert_eq!(write_targets, vec!["README.md"]);
             assert_eq!(create_targets, vec!["docs/new.md"]);
             assert_eq!(write_dirs, vec!["tmp"]);
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!json);
             assert!(!stream_events);
-            assert_eq!(command, "printf x > README.md");
+            assert_eq!(command, Some("printf x > README.md".to_string()));
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
             assert_eq!(timeout_seconds, Some(12));
         }
         other => panic!("expected sandbox run command, got {other:?}"),
@@ -156,12 +251,17 @@ fn parses_sandbox_run_git_profile() {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             command,
+            sequences,
+            sequence_shell,
             timeout_seconds,
             stream_events,
         }) => {
@@ -169,13 +269,18 @@ fn parses_sandbox_run_git_profile() {
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(purpose, None);
             assert_eq!(reservation_id, None);
+            assert_eq!(agent_id, None);
+            assert_eq!(workspace_id, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!json);
             assert!(!stream_events);
-            assert_eq!(command, "git fetch --all");
+            assert_eq!(command, Some("git fetch --all".to_string()));
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
             assert_eq!(timeout_seconds, Some(30));
         }
         other => panic!("expected sandbox run command, got {other:?}"),
@@ -205,12 +310,17 @@ fn parses_sandbox_run_github_pr_profile() {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             command,
+            sequences,
+            sequence_shell,
             timeout_seconds,
             stream_events,
         }) => {
@@ -218,13 +328,18 @@ fn parses_sandbox_run_github_pr_profile() {
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(purpose, None);
             assert_eq!(reservation_id, None);
+            assert_eq!(agent_id, None);
+            assert_eq!(workspace_id, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!json);
             assert!(!stream_events);
-            assert_eq!(command, "gh pr status");
+            assert_eq!(command, Some("gh pr status".to_string()));
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
             assert_eq!(timeout_seconds, Some(30));
         }
         other => panic!("expected sandbox run command, got {other:?}"),
@@ -254,12 +369,17 @@ fn parses_sandbox_run_build_profile() {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             command,
+            sequences,
+            sequence_shell,
             timeout_seconds,
             stream_events,
         }) => {
@@ -267,13 +387,18 @@ fn parses_sandbox_run_build_profile() {
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(purpose, None);
             assert_eq!(reservation_id, None);
+            assert_eq!(agent_id, None);
+            assert_eq!(workspace_id, None);
             assert!(write_targets.is_empty());
             assert!(create_targets.is_empty());
             assert!(write_dirs.is_empty());
             assert!(connect_sockets.is_empty());
             assert!(!allow_signal);
+            assert!(!json);
             assert!(!stream_events);
-            assert_eq!(command, "npm test");
+            assert_eq!(command, Some("npm test".to_string()));
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
             assert_eq!(timeout_seconds, Some(60));
         }
         other => panic!("expected sandbox run command, got {other:?}"),
@@ -281,11 +406,23 @@ fn parses_sandbox_run_build_profile() {
 }
 
 #[test]
-fn sandbox_run_rejects_missing_command() {
-    let error = Cli::try_parse_from(["stateful", "sandbox", "run"])
-        .expect_err("sandbox run requires --command");
+fn parses_sandbox_run_without_command_for_runtime_validation() {
+    let cli = Cli::try_parse_from(["stateful", "sandbox", "run"])
+        .expect("sandbox run command resolution validates missing command");
 
-    assert!(error.to_string().contains("--command"));
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Run {
+            command,
+            sequences,
+            sequence_shell,
+            ..
+        }) => {
+            assert_eq!(command, None);
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
+        }
+        other => panic!("expected sandbox run command, got {other:?}"),
+    }
 }
 
 #[test]
@@ -296,6 +433,8 @@ fn parses_nested_codex_benchmark_sandbox_command() {
         "run-nested-codex-benchmark",
         "--purpose",
         "run nested Codex chaos benchmark",
+        "--agent-id",
+        "agent-a",
         "--write-dir",
         "target",
         "--codex-home-root",
@@ -310,6 +449,8 @@ fn parses_nested_codex_benchmark_sandbox_command() {
     match cli.command {
         Command::Sandbox(SandboxCommand::RunNestedCodexBenchmark {
             purpose,
+            agent_id,
+            workspace_id,
             write_dir,
             codex_home_root,
             docker_socket,
@@ -317,6 +458,8 @@ fn parses_nested_codex_benchmark_sandbox_command() {
             timeout_seconds,
         }) => {
             assert_eq!(purpose, "run nested Codex chaos benchmark");
+            assert_eq!(agent_id, "agent-a");
+            assert_eq!(workspace_id, None);
             assert_eq!(write_dir, "target");
             assert_eq!(codex_home_root, "target/nested-codex-homes/run-1");
             assert_eq!(docker_socket, None);
@@ -335,6 +478,8 @@ fn parses_nested_codex_benchmark_sandbox_command_with_docker_socket() {
         "run-nested-codex-benchmark",
         "--purpose",
         "run nested Codex chaos benchmark",
+        "--agent-id",
+        "agent-a",
         "--write-dir",
         "target",
         "--codex-home-root",
@@ -432,30 +577,42 @@ fn parses_sandbox_run_external_profile() {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             timeout_seconds,
             command,
+            sequences,
+            sequence_shell,
             stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::External);
             assert_eq!(purpose, Some("install rebuilt binaries".to_string()));
             assert_eq!(reservation_id, None);
+            assert_eq!(agent_id, None);
+            assert_eq!(workspace_id, None);
             assert_eq!(write_targets, vec!["/opt/stateful/bin/stateful"]);
             assert_eq!(create_targets, vec!["/opt/stateful/bin/stateful-bench"]);
             assert_eq!(write_dirs, vec!["/opt/stateful/bin"]);
             assert_eq!(connect_sockets, vec!["/private/tmp/tmux-501/default"]);
             assert!(allow_signal);
+            assert!(!json);
             assert_eq!(network, SandboxNetworkPolicy::Enabled);
             assert_eq!(timeout_seconds, Some(10));
             assert!(!stream_events);
             assert_eq!(
                 command,
-                "install -m 755 target/release/stateful /opt/stateful/bin/stateful"
+                Some(
+                    "install -m 755 target/release/stateful /opt/stateful/bin/stateful".to_string()
+                )
             );
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
         }
         other => panic!("expected sandbox external run command, got {other:?}"),
     }
@@ -653,6 +810,55 @@ fn parses_install_agent_omp_command() {
 }
 
 #[test]
+fn omp_extension_uses_strict_agent_id_identity() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should create");
+    let temp = temp_dir.path();
+    let agent_dir = temp.join("agent");
+
+    apply_omp_install(OmpInstallOptions {
+        yes: true,
+        paths: GlobalPaths::new(temp.join("home")),
+        binary_path: "/usr/local/bin/stateful".to_string(),
+        project_config_path: None,
+        omp_agent_dir: Some(agent_dir.clone()),
+        update: true,
+    })
+    .expect("OMP install should write generated extension");
+
+    let extension = fs::read_to_string(agent_dir.join("extensions/stateful-omp-extension.js"))
+        .expect("generated OMP extension should be readable");
+
+    assert!(extension.contains("function agentIdFragmentFromString"));
+    assert!(extension.contains("function sessionManagerString"));
+    assert!(extension.contains("function detectAgentId(_event, ctx)"));
+    assert!(extension.contains("sessionManagerString(ctx, \"getSessionId\", sessionIdFromString)"));
+    assert!(
+        extension.contains("sessionManagerString(ctx, \"getLeafId\", agentIdFragmentFromString)")
+    );
+    assert!(extension.contains("`omp-${sessionId}-${leafId}`"));
+    assert!(extension.contains("agent_id"));
+    assert!(!extension.contains("event?.agentId"));
+    assert!(!extension.contains("event?.agent_id"));
+    assert!(!extension.contains("event?.agent?.id"));
+    assert!(!extension.contains("ctx?.agentId"));
+    assert!(!extension.contains("ctx?.agent_id"));
+    assert!(!extension.contains("ctx?.agent?.id"));
+    assert!(!extension.contains("event?.sessionId"));
+    assert!(!extension.contains("event?.session_id"));
+    assert!(!extension.contains("event?.session?.id"));
+    assert!(!extension.contains("ctx?.sessionId"));
+    assert!(!extension.contains("ctx?.session_id"));
+    assert!(!extension.contains("ctx?.session?.id"));
+    assert!(!extension.contains("ctx?.runtime?.sessionId"));
+    assert!(!extension.contains("ctx?.runtime?.session?.id"));
+    assert!(!extension.contains("process.env.STATEFUL_SESSION_ID"));
+    assert!(!extension.contains("sessionIdFromSessionManager"));
+    assert!(!extension.contains("function processAgentId"));
+    assert!(!extension.contains("omp-pid-"));
+    assert!(extension.contains("missingAgentIdReason"));
+}
+
+#[test]
 fn rejects_install_codex_subcommand() {
     assert!(Cli::try_parse_from(["stateful", "install", "codex", "--yes"]).is_err());
 }
@@ -705,10 +911,8 @@ fn parses_tools_allow_list_and_deny_commands() {
 
 #[test]
 fn tools_list_prints_allowed_and_unclassified_tools() {
-    let root = std::env::temp_dir().join(format!("stateful-tools-list-{}", std::process::id()));
-    if root.exists() {
-        fs::remove_dir_all(&root).expect("old fixture root should be removable");
-    }
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let root = temp.path();
     let paths = GlobalPaths::new(root.join("home"));
     let repo = root.join("repo");
     fs::create_dir_all(repo.join(".git")).expect("git directory should be creatable");
@@ -744,6 +948,7 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
             "multi_agent_v1send_input",
             "task",
             "yield",
+            "parallel_tool_calls",
             "lsp",
             "glob",
             "ask",
@@ -767,8 +972,6 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
         json["unclassified_tools"],
         serde_json::json!(["FutureWriteTool"])
     );
-
-    fs::remove_dir_all(&root).expect("fixture root should be removable");
 }
 
 #[test]
@@ -777,7 +980,7 @@ fn parses_notifications_poll_command() {
         "stateful",
         "notifications",
         "poll",
-        "--session-id",
+        "--agent-id",
         "s1",
         "--workspace-id",
         "w1",
@@ -787,9 +990,9 @@ fn parses_notifications_poll_command() {
     assert!(matches!(
         cli.command,
         Command::Notifications(NotificationsCommand::Poll {
-            ref session_id,
+            ref agent_id,
             ref workspace_id,
-        }) if session_id.as_deref() == Some("s1")
+        }) if agent_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
     ));
 }
@@ -800,7 +1003,7 @@ fn parses_resume_next_command() {
         "stateful",
         "resume",
         "next",
-        "--session-id",
+        "--agent-id",
         "s1",
         "--workspace-id",
         "w1",
@@ -810,9 +1013,9 @@ fn parses_resume_next_command() {
     assert!(matches!(
         cli.command,
         Command::Resume(ResumeCommand::Next {
-            ref session_id,
+            ref agent_id,
             ref workspace_id,
-        }) if session_id.as_deref() == Some("s1")
+        }) if agent_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
     ));
 }
@@ -854,7 +1057,7 @@ fn reservation_declare_command_parses_file_scopes() {
         "stateful",
         "reservation",
         "declare",
-        "--session-id",
+        "--agent-id",
         "s1",
         "--workspace-id",
         "w1",
@@ -868,11 +1071,11 @@ fn reservation_declare_command_parses_file_scopes() {
     assert!(matches!(
         cli.command,
         Command::Reservation(stateful_cli::ReservationCommand::Declare {
-            ref session_id,
+            ref agent_id,
             ref workspace_id,
             ref purpose,
             ref files_planned,
-        }) if session_id.as_deref() == Some("s1")
+        }) if agent_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
             && purpose == "Fix auth validation behavior."
             && files_planned == &vec!["src/auth.ts".to_string(), "src/session/".to_string()]
@@ -880,7 +1083,7 @@ fn reservation_declare_command_parses_file_scopes() {
 }
 
 #[test]
-fn reservation_declare_command_can_default_session_and_workspace() {
+fn reservation_declare_command_can_default_agent_and_workspace() {
     let cli = Cli::try_parse_from([
         "stateful",
         "reservation",
@@ -889,12 +1092,12 @@ fn reservation_declare_command_can_default_session_and_workspace() {
         "Fix auth validation behavior.",
         "src/auth.ts",
     ])
-    .expect("reservation declare command should parse without explicit session flags");
+    .expect("reservation declare command should parse without explicit identity flags");
 
     assert!(matches!(
         cli.command,
         Command::Reservation(stateful_cli::ReservationCommand::Declare {
-            session_id: None,
+            agent_id: None,
             workspace_id: None,
             ref purpose,
             ref files_planned,
@@ -926,8 +1129,8 @@ fn reservation_claim_command_parses_wait_id() {
         "stateful",
         "reservation",
         "claim",
-        "--session-id",
-        "s1",
+        "--agent-id",
+        "agent-a",
         "--workspace-id",
         "w1",
         "--wait-id",
@@ -938,11 +1141,11 @@ fn reservation_claim_command_parses_wait_id() {
     assert!(matches!(
         cli.command,
         Command::Reservation(stateful_cli::ReservationCommand::Claim {
-            ref session_id,
+            ref agent_id,
             ref workspace_id,
             ref wait_id,
             ..
-        }) if session_id.as_deref() == Some("s1")
+        }) if agent_id.as_deref() == Some("agent-a")
             && workspace_id.as_deref() == Some("w1")
             && wait_id == "wait-1"
     ));
@@ -977,7 +1180,7 @@ fn reservation_request_command_parses_request_id_action_and_path() {
         "stateful",
         "reservation",
         "request",
-        "--session-id",
+        "--agent-id",
         "s1",
         "--workspace-id",
         "w1",
@@ -995,14 +1198,14 @@ fn reservation_request_command_parses_request_id_action_and_path() {
     assert!(matches!(
         cli.command,
         Command::Reservation(stateful_cli::ReservationCommand::Request {
-            ref session_id,
+            ref agent_id,
             ref workspace_id,
             ref request_id,
             reservation_id: _,
             ref action,
             ref path,
             ref purpose,
-        }) if session_id.as_deref() == Some("s1")
+        }) if agent_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
             && request_id == "request-1"
             && action == "write_file"
@@ -1017,7 +1220,7 @@ fn reservation_cancel_command_parses_request_id() {
         "stateful",
         "reservation",
         "cancel",
-        "--session-id",
+        "--agent-id",
         "s1",
         "--workspace-id",
         "w1",
@@ -1029,10 +1232,10 @@ fn reservation_cancel_command_parses_request_id() {
     assert!(matches!(
         cli.command,
         Command::Reservation(stateful_cli::ReservationCommand::Cancel {
-            ref session_id,
+            ref agent_id,
             ref workspace_id,
             ref request_id,
-        }) if session_id.as_deref() == Some("s1")
+        }) if agent_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
             && request_id == "request-1"
     ));
@@ -1270,25 +1473,4 @@ fn parses_server_restart_subcommand() {
         } => {}
         other => panic!("expected server restart command, got {other:?}"),
     }
-}
-
-#[test]
-fn mcp_call_command_parses_tool_and_arguments() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "mcp",
-        "call",
-        "state.session.heartbeat",
-        r#"{"session_id":"s1","workspace_id":"w1"}"#,
-    ])
-    .expect("mcp call command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Mcp(McpCommand::Call {
-            ref tool_name,
-            ref arguments_json
-        }) if tool_name == "state.session.heartbeat"
-            && arguments_json.as_deref() == Some(r#"{"session_id":"s1","workspace_id":"w1"}"#)
-    ));
 }

@@ -8,7 +8,7 @@ This document locks the product and implementation decisions for the next v1
 hardening pass. The project should move beyond the current prototype surface and
 implement the stricter recommended direction for scheduling, sandboxed tests,
 protocol metadata, policy routing, local security, IDE save gating, structured
-MCP writes, doctor checks, and deployment UX.
+native-tool writes, doctor checks, and deployment UX.
 
 The prototype remains local-only. Team-shared, cross-machine, and hosted sync
 are still out of scope.
@@ -31,16 +31,18 @@ in place instead of creating a duplicate or permanently consuming the key.
 `reservation/claim` is the manual reservation claim path. It creates
 active reservation scope and active claims only for the reservation owner.
 Clients must reread the target for the claimable reservation before writing.
-Manual MCP/CLI flows then call `state_reservation_claim` or
-`stateful reservation claim --wait-id <id>`; native edit hooks and sandbox
-`write-targets` authorization may lazy-claim the reservation at the retried write boundary.
+Manual native-tool or CLI flows then call `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or
+`stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>`;
+native edit hooks and sandbox `write-targets` authorization may lazy-claim the reservation at the retried write boundary.
 
 Current implementation status: `/v1/reservation/request`, `/v1/reservation/claim`, and
-`/v1/reservation/cancel` are implemented with MCP tools and CLI commands. Immediate
-availability returns a `reserved` request state, which is the current API spelling
-for a claimable reservation; that session must still reread the target. Manual
-MCP/CLI flows call `state_reservation_claim`; hook and sandbox authorization
-sources may lazy-claim the reservation when the write is retried.
+`/v1/reservation/cancel` are implemented with native tools and CLI commands.
+Immediate availability returns a `reserved` request state, which is the current
+API spelling for a claimable reservation; that agent must still reread the
+target. Manual native-tool or CLI flows call
+`state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or
+`stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>`;
+hook and sandbox authorization sources may lazy-claim the reservation when the write is retried.
 
 `reservation/cancel` cancels queued or claimable (`reserved`) requests owned by
 the caller. It must not cancel another session's reservation or reorder waiters.
@@ -61,23 +63,25 @@ stateful sandbox run --fs build --network enabled --write-dir test-run --command
 Hook-mediated Bash must be a single strict invocation of the trusted absolute
 `stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
 <cmd>`. The build profile writes disposable artifacts under
-`/tmp/stateful/<session>/<scratch-purpose>/`; source-tree edits use native edit tools
-with hook-visible targets, such as Codex `apply_patch` or Edit, after exact
-reservation declaration and a successful same-reservation file claim. The completed write
-transaction releases the authorizing claim. Command-shaped source writes require
+`/tmp/stateful/<session>/<scratch-purpose>/`; OMP native `edit`/`write` can
+auto-declare/claim exact tool-visible file scope for the default simple-write
+path. Other source-tree edits use native edit tools with hook-visible targets,
+such as Codex `apply_patch` or Edit, after exact reservation declaration and a
+successful same-reservation file claim. The completed write transaction releases
+the authorizing claim. Command-shaped source writes require
 exact `--write-target <file>` or `--create-target <file>` entries.
 
 ## Protocol Envelope
 
-Envelope-enforced write authorization, reservation, and reconciliation HTTP requests
-must use a v1 envelope:
+Envelope-enforced write authorization and reservation HTTP requests must use a
+v1 envelope:
 
 ```json
 {
   "protocol_version": "stateful.v1",
   "request_id": "stable-idempotency-key",
-  "session": {
-    "session_id": "s1",
+  "identity": {
+    "agent_id": "agent-1",
     "actor_id": "agent-1",
     "actor_type": "agent"
   },
@@ -97,14 +101,14 @@ must use a v1 envelope:
 }
 ```
 
-Lifecycle session events are intentionally smaller in the shipped OMP adapter:
-`SessionStart`, `PostToolUse`, and `Stop`/finalize post flat session-event
-bodies with `session_id`, `workspace_id`, `source`, and `metadata`. OMP
-`PreToolUse` authorization remains envelope-based.
+Lifecycle session events and reconciliation acknowledgements are intentionally
+smaller in shipped adapters/server routes: `SessionStart`, `PostToolUse`,
+`Stop`/finalize, and `reconcile_ack` post flat bodies with their route-specific
+fields. OMP `PreToolUse` authorization remains envelope-based.
 
 Recommended rollout:
 
-1. Add shared envelope builders in CLI, hook, MCP, and outbox callers.
+1. Add shared envelope builders in CLI, hook, native-tool, and outbox callers.
 2. Add server parsing that accepts both envelope and legacy bodies while tests
    prove all internal callers have migrated.
 3. Fail closed for legacy side-effecting requests.
@@ -155,22 +159,24 @@ Filesystem watcher inference remains out of scope for this pass.
 
 ## Repo File Edits
 
-MCP file-write tools are not the current repo edit path. Repo file edits should
-use native edit tools with hook-visible targets, such as Codex `apply_patch` or
-Edit, after task-level reservation covers the target and a successful same-reservation file claim.
-Hooks normalize hook-exposed targets, call the same policy service as MCP and
-CLI, fail closed on missing state, protocol mismatch, or denied authorization,
-record activity after successful edits, and release the authorizing claim after
-the completed write transaction.
+OMP native `edit`/`write` can auto-declare/claim exact tool-visible file scope
+for the default simple-write path when no explicit reservation id is supplied and
+the only denial is missing reservation/scope. Other repo file edits should use
+native edit tools with hook-visible targets, such as Codex `apply_patch` or
+Edit, after task-level reservation covers the target and a successful
+same-reservation file claim. Hooks normalize hook-exposed targets, call the same
+policy service as native tools and CLI, fail closed on missing state, protocol
+mismatch, or denied authorization, record activity after successful edits, and
+release the authorizing claim after the completed write transaction.
 
-Command-shaped writes remain outside MCP and must use
+Command-shaped writes remain outside native tools and must use
 `stateful sandbox run --fs write-targets` with exact `--write-target <file>` or
 `--create-target <file>` entries. Artifact-producing tests use
 `--fs build --network enabled --write-dir <scratch-purpose>`, which writes
 disposable artifacts under `/tmp/stateful/<session>/<scratch-purpose>/`.
 
 Structured git writes should remain narrower than arbitrary git. `stateful
-commit` remains the default local wrapper, while MCP git tools can expose
+commit` remains the default local wrapper, while native git tools can expose
 specific staged/commit operations only after authorization.
 
 ## Expiration And Retention
@@ -211,7 +217,7 @@ Expand `stateful doctor` from install/config checks to actionable diagnostics:
 - SQLite migration/version inspection
 - sandbox-run smoke checks
 - repo enabled/disabled status
-- hook and MCP installation status
+- hook and native-tool installation status
 - prescriptive next action for common failure modes
 
 ## Deployment UX
@@ -238,7 +244,7 @@ distribution story for hook-capable agents:
 ## Implementation Order
 
 1. Done: remove `reservation wait` docs.
-2. Done: add protocol envelope builders for CLI, hook, MCP, and outbox.
+2. Done: add protocol envelope builders for CLI, hook, native-tool, and outbox.
 3. Done: add server protocol parser and migration tests.
 4. Done: introduce policy service and move `/v1/authorize` first.
 5. Done: implement explicit `reservation/request`, `reservation/claim`, and

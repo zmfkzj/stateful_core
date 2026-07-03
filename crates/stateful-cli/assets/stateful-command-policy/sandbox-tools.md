@@ -2,7 +2,7 @@
 
 Choose the narrowest existing entry point before writing a command.
 
-For OMP entries below, strict trusted bare `stateful` means session-start preflight has hash-verified the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted. Arbitrary raw Bash/eval remains denied.
+For OMP entries below, strict trusted bare `stateful` means session-start or per-tool preflight has hash-verified the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted. Arbitrary raw Bash/eval remains denied.
 
 | Need | Codex | OMP | Do not use |
 | --- | --- | --- | --- |
@@ -14,7 +14,7 @@ For OMP entries below, strict trusted bare `stateful` means session-start prefli
 | Remote git | same git profile with `--network enabled` | same | raw git, config-mutating remote setup |
 | GitHub PR list/view/status/create | `sandbox run --fs github-pr --network enabled --command 'gh pr ...'` | built-in Bash with strict trusted `stateful sandbox run --fs github-pr ...` | raw `gh`, browser/editor PR flows |
 | Read-only external shell command | `sandbox run --fs external --purpose ... --command ...` | built-in Bash with strict trusted `stateful sandbox run --fs external ...` | raw Bash/eval |
-| External write/socket/signal scope | `sandbox run --fs external` with explicit scope | built-in Bash with strict trusted `stateful sandbox run --fs external ...`; prompts unless `stateful.autoApprove: true` | repo-internal profiles for external writes |
+| External write/socket/signal scope | `sandbox run --fs external` with explicit scope | built-in Bash with strict trusted `stateful sandbox run --fs external ...`; repo-external native `edit`/`write` file targets also auto-approve by default through `stateful.autoApprove: true` and prompt only when `stateful.autoApprove: false` is configured | repo-internal profiles for external writes |
 | Nested Codex benchmark | `sandbox run-nested-codex-benchmark ...` | not a generic OMP command path | generic relaxed profiles or nested wrapping |
 
 ## Git And PR Rules
@@ -23,6 +23,7 @@ For OMP entries below, strict trusted bare `stateful` means session-start prefli
 - Use network only for remote git operations such as `fetch`, `pull`, or `push`.
 - The git profile rejects explicit write targets and protects persistent config/hooks. It rejects shell-dispatching options, path/exec overrides, inline/config-env config, disallowed subcommands such as `init` and `submodule`, branch upstream persistence, `push -u`, `rebase --exec`, grep pager dispatch, archive/fetch/push exec overrides, and config-mutating remote subcommands such as `add`, `set-url`, `rename`, and `remove`.
 - Use the `github-pr` profile only for `gh pr <list|view|status|create>`. Use external read-only commands for other read-only `gh` calls, such as `gh api` or Actions log inspection.
+- The `git` and `github-pr` profiles reject `--sequence` because they intentionally validate a single direct `git` or `gh pr` command.
 
 ## Build And Temp Rules
 
@@ -51,8 +52,8 @@ For OMP entries below, strict trusted bare `stateful` means session-start prefli
 ## Avoid In Bash Or Eval Tools
 
 - Raw Bash/eval for repo-internal commands, including quick `rg`, `git status`, `sed`, or language snippets.
-- Shell wrappers around sandbox commands: environment assignments, command substitutions, outer redirects/pipelines, multiple commands, duplicate `--command`, or untrusted executable paths.
-- Session-repair probes such as `stateful hook codex session-start`, `stateful hook omp session-start`, `stateful current`, `stateful notifications`, `stateful resume`, `stateful reservation declare/request/claim`, `strings <stateful>`, shell snapshots, or manual `STATEFUL_SESSION_ID`.
+- Shell wrappers around sandbox commands: environment assignments, command substitutions, outer redirects/pipelines, multiple commands, duplicate `--command`, or untrusted executable paths. For multi-step sandboxed work, use repeated `--sequence <cmd>` flags on one `stateful sandbox run ...` invocation instead of outer `&&`/`;`.
+- Session-repair probes such as `stateful hook codex session-start`, `stateful hook omp session-start`, `stateful current`, `stateful notifications`, `stateful resume`, `stateful reservation declare/request/claim`, `strings <stateful>`, shell snapshots, or manual legacy session environment variables.
 - Shell writes outside sandbox `--command`: `>`, `>>`, heredocs, and `| tee`.
 - Direct mutation through raw `rm`, `mv`, `cp`, `mkdir`, `touch`, `chmod`, or `chown`.
 - Raw process inspection (`ps`, `pgrep`, `ps auxww`, `ps -ef`, `ps -eo ...`) inside sandbox commands.

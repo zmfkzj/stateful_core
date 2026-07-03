@@ -16,7 +16,7 @@ fn structured_commit_rejects_empty_message() {
         repo_root: root.path().to_path_buf(),
         message: " ".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: None,
     });
@@ -61,7 +61,7 @@ fn structured_commit_rejects_broad_pathspecs() {
             repo_root: root.path().to_path_buf(),
             message: "docs: add plan".to_string(),
             paths,
-            session_id: Some("s1".to_string()),
+            agent_id: Some("s1".to_string()),
             workspace_id: Some("w1".to_string()),
             authorize: Some(Box::new(|_action, path| {
                 panic!("broad pathspec `{path}` should be rejected before authorization")
@@ -89,7 +89,7 @@ fn structured_commit_normalizes_current_dir_file_paths() {
         repo_root: root.path().to_path_buf(),
         message: "docs: add plan".to_string(),
         paths: vec!["./docs/./plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -113,7 +113,7 @@ fn structured_commit_preserves_whitespace_in_explicit_file_paths() {
         repo_root: root.path().to_path_buf(),
         message: "docs: add spaced report".to_string(),
         paths: vec!["docs/report.md ".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -160,7 +160,7 @@ fn structured_commit_allows_explicit_tracked_file_under_ignored_directory() {
         repo_root: root.path().to_path_buf(),
         message: "docs: update ignored plan".to_string(),
         paths: vec!["docs/superpowers/plans/implementation.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -197,7 +197,7 @@ fn structured_commit_rejects_deleted_tracked_directory_before_staging() {
         repo_root: root.path().to_path_buf(),
         message: "docs: remove plan".to_string(),
         paths: vec!["docs".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|_action, path| {
             panic!("directory pathspec `{path}` should be rejected before authorization")
@@ -229,7 +229,7 @@ fn structured_commit_rejects_unrelated_staged_changes() {
         repo_root: root.path().to_path_buf(),
         message: "docs: add plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: None,
     });
@@ -257,7 +257,7 @@ fn structured_commit_authorizes_deleted_files_as_delete_file() {
         repo_root: root.path().to_path_buf(),
         message: "docs: remove plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(move |action, path| {
             authorized_for_closure
@@ -291,7 +291,7 @@ fn structured_commit_does_not_allow_deleted_file_under_write_authorization() {
         repo_root: root.path().to_path_buf(),
         message: "docs: remove plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(path, "docs/plan.md");
@@ -326,7 +326,7 @@ fn structured_commit_rejects_write_to_delete_race_after_authorization() {
         repo_root: root.path().to_path_buf(),
         message: "docs: update plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(move |action, path| {
             assert_eq!(action, "write_file");
@@ -367,7 +367,7 @@ fn structured_commit_rejects_delete_to_write_race_after_authorization() {
         repo_root: root.path().to_path_buf(),
         message: "docs: restore plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(move |action, path| {
             assert_eq!(action, "delete_file");
@@ -420,7 +420,7 @@ fn structured_commit_rejects_pre_commit_hook_write_to_delete_action_change() {
         repo_root: root.path().to_path_buf(),
         message: "docs: update plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -471,7 +471,7 @@ fn structured_commit_rejects_pre_commit_hook_delete_to_write_action_change() {
         repo_root: root.path().to_path_buf(),
         message: "docs: restore plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "delete_file");
@@ -519,7 +519,7 @@ fn structured_commit_uses_validated_index_when_hook_changes_worktree_without_sta
         repo_root: root.path().to_path_buf(),
         message: "docs: update plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -558,7 +558,7 @@ fn structured_commit_provides_git_locator_env_to_hooks() {
         repo_root: root.path().to_path_buf(),
         message: "docs: add plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -594,7 +594,7 @@ fn structured_commit_rejects_prepare_commit_msg_hook_action_change() {
         repo_root: root.path().to_path_buf(),
         message: "docs: update plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -642,7 +642,7 @@ fn structured_commit_runs_commit_msg_hook_before_committing() {
         repo_root: root.path().to_path_buf(),
         message: "docs: add plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -682,7 +682,7 @@ fn structured_commit_runs_post_commit_hook_after_successful_commit() {
         repo_root: root.path().to_path_buf(),
         message: "docs: add plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -716,7 +716,7 @@ fn structured_commit_rejects_unstaged_rename_across_explicit_paths() {
         repo_root: root.path().to_path_buf(),
         message: "docs: rename plan".to_string(),
         paths: vec!["docs/old.md".to_string(), "docs/new.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|_action, _path| Ok(()))),
     });
@@ -744,7 +744,7 @@ fn structured_commit_rejects_staged_git_mv_across_explicit_paths() {
         repo_root: root.path().to_path_buf(),
         message: "docs: rename plan".to_string(),
         paths: vec!["docs/old.md".to_string(), "docs/new.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|_action, _path| Ok(()))),
     });
@@ -777,7 +777,7 @@ fn structured_commit_allows_copied_file_status_as_new_file() {
         repo_root: root.path().to_path_buf(),
         message: "docs: copy template".to_string(),
         paths: vec!["docs/copy.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(move |action, path| {
             authorized_for_commit
@@ -818,7 +818,7 @@ fn structured_commit_allows_independent_delete_and_add_across_explicit_paths() {
         repo_root: root.path().to_path_buf(),
         message: "docs: replace plan files".to_string(),
         paths: vec!["docs/old.md".to_string(), "docs/new.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(move |action, path| {
             authorized_for_closure
@@ -858,7 +858,7 @@ fn structured_commit_stages_only_explicit_paths_and_commits() {
         repo_root: root.path().to_path_buf(),
         message: "docs: add plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -899,7 +899,7 @@ fn structured_commit_restores_original_index_after_commit_hook_failure() {
         repo_root: root.path().to_path_buf(),
         message: "docs: update plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -939,7 +939,7 @@ fn structured_commit_clears_index_after_initial_commit_hook_failure() {
         repo_root: root.path().to_path_buf(),
         message: "docs: initial plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -988,7 +988,7 @@ fn structured_commit_rejects_unrelated_index_entries_added_by_successful_hook() 
         repo_root: root.path().to_path_buf(),
         message: "docs: update plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -1045,7 +1045,7 @@ fn structured_commit_restores_unrelated_index_entries_added_by_failed_hook() {
         repo_root: root.path().to_path_buf(),
         message: "docs: update plan".to_string(),
         paths: vec!["docs/plan.md".to_string()],
-        session_id: Some("s1".to_string()),
+        agent_id: Some("s1".to_string()),
         workspace_id: Some("w1".to_string()),
         authorize: Some(Box::new(|action, path| {
             assert_eq!(action, "write_file");
@@ -1099,33 +1099,23 @@ fn git_output(root: &std::path::Path, args: &[&str]) -> String {
 }
 
 mod tempfile_root {
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-    };
+    use std::path::Path;
 
     pub struct TempRoot {
-        path: PathBuf,
+        root: tempfile::TempDir,
     }
 
     impl TempRoot {
         pub fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
-            if path.exists() {
-                fs::remove_dir_all(&path).expect("old temp root should be removable");
-            }
-            fs::create_dir_all(&path).expect("temp root should be creatable");
-            Self { path }
+            let root = tempfile::Builder::new()
+                .prefix(&format!("{name}-"))
+                .tempdir()
+                .expect("temp dir should create");
+            Self { root }
         }
 
         pub fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempRoot {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
+            self.root.path()
         }
     }
 }

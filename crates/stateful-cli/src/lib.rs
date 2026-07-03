@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{
+    io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -11,7 +12,6 @@ mod global_paths;
 mod hook;
 mod install;
 mod lan;
-mod mcp;
 mod outbox;
 mod push;
 mod repo_registry;
@@ -42,7 +42,6 @@ pub use lan::{
     join_server_runtime, print_server_start_result, server_join_commands,
     server_start_runtime_result, start_server_runtime,
 };
-pub use mcp::{call_mcp_tool_in_repo, handle_mcp_jsonrpc_in_repo, serve_mcp_stdio_in_repo};
 pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime, sync_outbox_with_runtime};
 pub use push::{PushRequest, PushResult, run_structured_push};
 pub use repo_registry::{
@@ -53,18 +52,15 @@ pub use repo_registry::{
     workspace_id_for_enabled_repo, workspace_id_for_repo_identity,
 };
 pub use runtime::{
-    CurrentSession, HttpResponse, ProtocolEnvelopeArgs, ReservationCancelArgs,
-    ReservationClaimArgs, ReservationDeclareArgs, ReservationRequestArgs, STATEFUL_SESSION_ID_ENV,
-    ServerRuntime, cancel_reservation_via_http, claim_reservation_via_http,
-    declare_reservation_via_http, discover_runtime, discover_runtime_with_global,
-    discover_runtime_with_optional_global, get_json, global_state_db_path, post_json,
-    protocol_envelope, read_current_session_file, read_current_session_file_for_session,
-    request_reservation_via_http, reservation_cancel_protocol_body,
-    reservation_claim_protocol_body, reservation_declare_protocol_body,
-    reservation_request_protocol_body, runtime_env_override_is_configured, runtime_from_remote,
-    runtime_has_required_identity, runtime_identity_matches_pid, write_current_session_file,
-    write_current_session_file_for_current_stateful_session,
-    write_current_session_file_for_session, write_global_runtime_file, write_runtime_file,
+    AgentContext, HttpResponse, ProtocolEnvelopeArgs, ReservationCancelArgs, ReservationClaimArgs,
+    ReservationDeclareArgs, ReservationRequestArgs, ServerRuntime, cancel_reservation_via_http,
+    claim_reservation_via_http, declare_reservation_via_http, discover_runtime,
+    discover_runtime_with_global, discover_runtime_with_optional_global, get_json,
+    global_state_db_path, post_json, protocol_envelope, request_reservation_via_http,
+    reservation_cancel_protocol_body, reservation_claim_protocol_body,
+    reservation_declare_protocol_body, reservation_request_protocol_body,
+    runtime_env_override_is_configured, runtime_from_remote, runtime_has_required_identity,
+    runtime_identity_matches_pid, validate_agent_id, write_global_runtime_file, write_runtime_file,
 };
 pub use sandbox::{SandboxFsProfile, SandboxNetworkPolicy};
 pub use server_lifecycle::{
@@ -141,8 +137,6 @@ pub enum Command {
     Resume(ResumeCommand),
     #[command(subcommand)]
     Reservation(ReservationCommand),
-    #[command(subcommand)]
-    Mcp(McpCommand),
     SyncOutbox,
     #[command(subcommand)]
     Hook(HookRuntime),
@@ -211,6 +205,10 @@ pub enum SandboxCommand {
         purpose: Option<String>,
         #[arg(long)]
         reservation_id: Option<String>,
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
+        #[arg(long = "workspace-id")]
+        workspace_id: Option<String>,
         #[arg(long = "write-target")]
         write_targets: Vec<String>,
         #[arg(long = "create-target")]
@@ -222,7 +220,13 @@ pub enum SandboxCommand {
         #[arg(long)]
         allow_signal: bool,
         #[arg(long)]
-        command: String,
+        json: bool,
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long = "sequence")]
+        sequences: Vec<String>,
+        #[arg(long = "sequence-shell")]
+        sequence_shell: Option<String>,
         #[arg(long)]
         timeout_seconds: Option<u64>,
         #[arg(long, hide = true)]
@@ -235,6 +239,10 @@ pub enum SandboxCommand {
     RunNestedCodexBenchmark {
         #[arg(long)]
         purpose: String,
+        #[arg(long = "agent-id")]
+        agent_id: String,
+        #[arg(long = "workspace-id")]
+        workspace_id: Option<String>,
         #[arg(long = "write-dir")]
         write_dir: String,
         #[arg(long = "codex-home-root")]
@@ -263,15 +271,17 @@ pub enum SandboxProcessCommand {
         process_groups: Vec<u32>,
         #[arg(long = "field")]
         fields: Vec<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ReservationCommand {
     Declare {
-        #[arg(long)]
-        session_id: Option<String>,
-        #[arg(long)]
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
+        #[arg(long = "workspace-id")]
         workspace_id: Option<String>,
         #[arg(long)]
         purpose: String,
@@ -279,9 +289,9 @@ pub enum ReservationCommand {
         files_planned: Vec<String>,
     },
     Request {
-        #[arg(long)]
-        session_id: Option<String>,
-        #[arg(long)]
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
+        #[arg(long = "workspace-id")]
         workspace_id: Option<String>,
         #[arg(long)]
         request_id: String,
@@ -295,9 +305,9 @@ pub enum ReservationCommand {
         purpose: String,
     },
     Claim {
-        #[arg(long)]
-        session_id: Option<String>,
-        #[arg(long)]
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
+        #[arg(long = "workspace-id")]
         workspace_id: Option<String>,
         #[arg(long)]
         reservation_id: Option<String>,
@@ -305,9 +315,9 @@ pub enum ReservationCommand {
         wait_id: String,
     },
     Cancel {
-        #[arg(long)]
-        session_id: Option<String>,
-        #[arg(long)]
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
+        #[arg(long = "workspace-id")]
         workspace_id: Option<String>,
         #[arg(long)]
         request_id: String,
@@ -340,8 +350,8 @@ pub enum ToolsCommand {
 #[derive(Debug, Subcommand)]
 pub enum NotificationsCommand {
     Poll {
-        #[arg(long)]
-        session_id: Option<String>,
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
         #[arg(long)]
         workspace_id: Option<String>,
     },
@@ -350,20 +360,11 @@ pub enum NotificationsCommand {
 #[derive(Debug, Subcommand)]
 pub enum ResumeCommand {
     Next {
-        #[arg(long)]
-        session_id: Option<String>,
+        #[arg(long = "agent-id")]
+        agent_id: Option<String>,
         #[arg(long)]
         workspace_id: Option<String>,
     },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum McpCommand {
-    Call {
-        tool_name: String,
-        arguments_json: Option<String>,
-    },
-    Serve,
 }
 
 #[derive(Debug, Subcommand)]
@@ -590,15 +591,22 @@ pub fn run() -> anyhow::Result<()> {
             network,
             purpose,
             reservation_id,
+            agent_id,
+            workspace_id,
             write_targets,
             create_targets,
             write_dirs,
             connect_sockets,
             allow_signal,
+            json,
             command,
+            sequences,
+            sequence_shell,
             timeout_seconds,
             stream_events,
         }) => {
+            let command = sandbox::resolve_sandbox_run_command(command, sequences, sequence_shell)
+                .map_err(anyhow::Error::msg)?;
             let paths = GlobalPaths::from_env()?;
             let repo_root = current_repo_root_or_current_dir()?;
             let output = match sandbox::run_sandbox_in_repo(
@@ -609,6 +617,8 @@ pub fn run() -> anyhow::Result<()> {
                     network,
                     purpose,
                     reservation_id,
+                    agent_id,
+                    workspace_id,
                     write_targets,
                     create_targets,
                     write_dirs,
@@ -630,13 +640,17 @@ pub fn run() -> anyhow::Result<()> {
                     return Err(error);
                 }
             };
-            println!("{}", serde_json::to_string(&output)?);
+            let rendered = render_sandbox_run_cli_output(&output, json)?;
+            std::io::stdout().write_all(&rendered.stdout)?;
+            std::io::stderr().write_all(&rendered.stderr)?;
             if let Some(exit_code) = sandbox::sandbox_run_cli_exit_code(&output) {
                 std::process::exit(exit_code);
             }
         }
         Command::Sandbox(SandboxCommand::RunNestedCodexBenchmark {
             purpose,
+            agent_id,
+            workspace_id,
             write_dir,
             codex_home_root,
             docker_socket,
@@ -650,6 +664,8 @@ pub fn run() -> anyhow::Result<()> {
                 &paths,
                 codex_benchmark::NestedCodexBenchmarkSandboxRequest {
                     purpose,
+                    agent_id,
+                    workspace_id,
                     write_dir,
                     codex_home_root,
                     docker_socket,
@@ -682,6 +698,7 @@ pub fn run() -> anyhow::Result<()> {
                     parent_pids,
                     process_groups,
                     fields,
+                    json,
                 },
         }) => {
             let output = sandbox::run_sandbox_process_find(sandbox::SandboxProcessFindRequest {
@@ -692,7 +709,9 @@ pub fn run() -> anyhow::Result<()> {
                 process_groups,
                 fields,
             })?;
-            println!("{}", serde_json::to_string(&output)?);
+            let rendered = render_sandbox_process_find_cli_output(&output, json)?;
+            std::io::stdout().write_all(&rendered.stdout)?;
+            std::io::stderr().write_all(&rendered.stderr)?;
         }
         Command::Enable { repo } => {
             let paths = GlobalPaths::from_env()?;
@@ -750,52 +769,52 @@ pub fn run() -> anyhow::Result<()> {
             );
         }
         Command::Notifications(NotificationsCommand::Poll {
-            session_id,
+            agent_id,
             workspace_id,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (session_id, workspace_id) =
-                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let (agent_id, workspace_id) =
+                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
             let response = post_json(
                 &runtime,
                 "/v1/notifications/poll",
                 &serde_json::json!({
-                    "session_id": session_id,
+                    "agent_id": agent_id,
                     "workspace_id": workspace_id,
                 }),
             )?;
             print_http_response(response)?;
         }
         Command::Resume(ResumeCommand::Next {
-            session_id,
+            agent_id,
             workspace_id,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (session_id, workspace_id) =
-                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let (agent_id, workspace_id) =
+                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
             let response = post_json(
                 &runtime,
                 "/v1/resume/next",
                 &serde_json::json!({
-                    "session_id": session_id,
+                    "agent_id": agent_id,
                     "workspace_id": workspace_id,
                 }),
             )?;
             print_http_response(response)?;
         }
         Command::Reservation(ReservationCommand::Declare {
-            session_id,
+            agent_id,
             workspace_id,
             purpose,
             files_planned,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (session_id, workspace_id) =
-                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let (agent_id, workspace_id) =
+                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
             let response = declare_reservation_via_http(
                 &runtime,
                 ReservationDeclareArgs {
-                    session_id,
+                    agent_id,
                     workspace_id,
                     purpose,
                     files_planned,
@@ -807,7 +826,7 @@ pub fn run() -> anyhow::Result<()> {
             print_http_response(response)?;
         }
         Command::Reservation(ReservationCommand::Request {
-            session_id,
+            agent_id,
             workspace_id,
             request_id,
             reservation_id,
@@ -816,12 +835,12 @@ pub fn run() -> anyhow::Result<()> {
             purpose,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (session_id, workspace_id) =
-                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let (agent_id, workspace_id) =
+                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
             let response = request_reservation_via_http(
                 &runtime,
                 ReservationRequestArgs {
-                    session_id,
+                    agent_id,
                     workspace_id,
                     request_id,
                     reservation_id,
@@ -836,18 +855,18 @@ pub fn run() -> anyhow::Result<()> {
             print_http_response(response)?;
         }
         Command::Reservation(ReservationCommand::Claim {
-            session_id,
+            agent_id,
             workspace_id,
             wait_id,
             reservation_id,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (session_id, workspace_id) =
-                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let (agent_id, workspace_id) =
+                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
             claim_reservation_via_http(
                 &runtime,
                 ReservationClaimArgs {
-                    session_id,
+                    agent_id,
                     workspace_id,
                     wait_id,
                     reservation_id,
@@ -859,17 +878,17 @@ pub fn run() -> anyhow::Result<()> {
             println!("claimed stateful reservation");
         }
         Command::Reservation(ReservationCommand::Cancel {
-            session_id,
+            agent_id,
             workspace_id,
             request_id,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (session_id, workspace_id) =
-                resolve_session_workspace(repo_root.as_path(), &runtime, session_id, workspace_id)?;
+            let (agent_id, workspace_id) =
+                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
             cancel_reservation_via_http(
                 &runtime,
                 ReservationCancelArgs {
-                    session_id,
+                    agent_id,
                     workspace_id,
                     request_id,
                     identity: GlobalPaths::from_env()
@@ -878,21 +897,6 @@ pub fn run() -> anyhow::Result<()> {
                 },
             )?;
             println!("canceled stateful reservation");
-        }
-        Command::Mcp(McpCommand::Call {
-            tool_name,
-            arguments_json,
-        }) => {
-            let arguments = parse_json_arguments(arguments_json)?;
-            let response = call_mcp_tool_in_repo(std::env::current_dir()?, tool_name, arguments)?;
-            print_http_response(response)?;
-        }
-        Command::Mcp(McpCommand::Serve) => {
-            serve_mcp_stdio_in_repo(
-                std::env::current_dir()?,
-                std::io::stdin().lock(),
-                std::io::stdout().lock(),
-            )?;
         }
         Command::Hook(hook) => hook::run_hook(hook)?,
     }
@@ -911,48 +915,24 @@ fn current_repo_root_or_current_dir() -> anyhow::Result<PathBuf> {
     Ok(detect_git_root(&cwd).unwrap_or(cwd))
 }
 
-fn resolve_session_workspace(
+fn resolve_agent_workspace(
     repo_root: &Path,
     runtime: &ServerRuntime,
-    session_id: Option<String>,
+    agent_id: Option<String>,
     workspace_id: Option<String>,
 ) -> anyhow::Result<(String, String)> {
-    let current_session = if session_id.is_none() || workspace_id.is_none() {
-        read_current_session_file(repo_root).ok()
-    } else {
-        None
-    };
-    let session_id = session_id
-        .or_else(|| {
-            current_session
-                .as_ref()
-                .map(|session| session.session_id.clone())
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "session id not provided and no current stateful session file was found"
-            )
-        })?;
-    let workspace_id = workspace_id
-        .or_else(|| current_session.map(|session| session.workspace_id))
-        .unwrap_or_else(|| {
-            GlobalPaths::from_env()
-                .ok()
-                .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok())
-                .map(|identity| {
-                    effective_workspace_id_for_repo(&runtime.workspace_id, Some(&identity))
-                })
-                .unwrap_or_else(|| runtime.workspace_id.clone())
-        });
+    let agent_id =
+        agent_id.ok_or_else(|| anyhow::anyhow!("agent id not provided; pass --agent-id"))?;
+    validate_agent_id(&agent_id, "agent_id")?;
+    let workspace_id = workspace_id.unwrap_or_else(|| {
+        GlobalPaths::from_env()
+            .ok()
+            .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok())
+            .map(|identity| effective_workspace_id_for_repo(&runtime.workspace_id, Some(&identity)))
+            .unwrap_or_else(|| runtime.workspace_id.clone())
+    });
 
-    Ok((session_id, workspace_id))
-}
-
-fn parse_json_arguments(arguments_json: Option<String>) -> anyhow::Result<serde_json::Value> {
-    match arguments_json {
-        Some(arguments_json) => Ok(serde_json::from_str(&arguments_json)?),
-        None => Ok(serde_json::json!({})),
-    }
+    Ok((agent_id, workspace_id))
 }
 
 fn print_http_response(response: HttpResponse) -> anyhow::Result<()> {
@@ -1060,6 +1040,54 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
     }
 }
 
+struct SandboxRunCliOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn render_sandbox_run_cli_output(
+    output: &sandbox::SandboxRunOutput,
+    json: bool,
+) -> anyhow::Result<SandboxRunCliOutput> {
+    if json {
+        let mut stdout = serde_json::to_vec(output)?;
+        stdout.push(b'\n');
+        return Ok(SandboxRunCliOutput {
+            stdout,
+            stderr: Vec::new(),
+        });
+    }
+
+    let mut stderr = output.stderr.as_bytes().to_vec();
+    if output.status != "exited" {
+        if !stderr.is_empty() && !stderr.ends_with(b"\n") {
+            stderr.push(b'\n');
+        }
+        stderr.extend_from_slice(format!("stateful sandbox run {}\n", output.status).as_bytes());
+    }
+
+    Ok(SandboxRunCliOutput {
+        stdout: output.stdout.as_bytes().to_vec(),
+        stderr,
+    })
+}
+
+fn render_sandbox_process_find_cli_output(
+    output: &sandbox::SandboxProcessFindOutput,
+    json: bool,
+) -> anyhow::Result<SandboxRunCliOutput> {
+    let mut stdout = if json {
+        serde_json::to_vec(output)?
+    } else {
+        serde_json::to_vec(&output.processes)?
+    };
+    stdout.push(b'\n');
+    Ok(SandboxRunCliOutput {
+        stdout,
+        stderr: Vec::new(),
+    })
+}
+
 fn default_config_yml() -> &'static str {
     r#"# stateful-core repo policy config
 # These are informational target defaults for this repository.
@@ -1075,4 +1103,73 @@ rename_requires_exact_file_scope: true
 default_write_policy: deny
 event_retention_days: 14
     "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sandbox_output(status: &'static str, exit_code: Option<i32>) -> sandbox::SandboxRunOutput {
+        sandbox::SandboxRunOutput {
+            status,
+            exit_code,
+            stdout: "child-out".to_string(),
+            stderr: "child-err".to_string(),
+            allowed_write_targets: Vec::new(),
+            denied_write_targets: Vec::new(),
+        }
+    }
+
+    fn process_find_output() -> sandbox::SandboxProcessFindOutput {
+        sandbox::SandboxProcessFindOutput {
+            status: "ok",
+            processes: vec![serde_json::json!({ "pid": 202 })],
+        }
+    }
+
+    #[test]
+    fn sandbox_run_cli_default_renders_child_streams_only() {
+        let rendered = render_sandbox_run_cli_output(&sandbox_output("exited", Some(7)), false)
+            .expect("passthrough rendering should succeed");
+
+        assert_eq!(rendered.stdout, b"child-out");
+        assert_eq!(rendered.stderr, b"child-err");
+    }
+
+    #[test]
+    fn sandbox_run_cli_json_renders_result_envelope() {
+        let rendered = render_sandbox_run_cli_output(&sandbox_output("exited", Some(5)), true)
+            .expect("json rendering should succeed");
+        let body: serde_json::Value =
+            serde_json::from_slice(&rendered.stdout).expect("stdout should be json");
+
+        assert_eq!(rendered.stderr, b"");
+        assert_eq!(body["status"], "exited");
+        assert_eq!(body["exit_code"], 5);
+        assert_eq!(body["stdout"], "child-out");
+        assert_eq!(body["stderr"], "child-err");
+    }
+
+    #[test]
+    fn sandbox_process_find_cli_default_renders_processes_only() {
+        let rendered = render_sandbox_process_find_cli_output(&process_find_output(), false)
+            .expect("passthrough rendering should succeed");
+        let body: serde_json::Value =
+            serde_json::from_slice(&rendered.stdout).expect("stdout should be json");
+
+        assert_eq!(rendered.stderr, b"");
+        assert_eq!(body, serde_json::json!([{ "pid": 202 }]));
+    }
+
+    #[test]
+    fn sandbox_process_find_cli_json_renders_status_envelope() {
+        let rendered = render_sandbox_process_find_cli_output(&process_find_output(), true)
+            .expect("json rendering should succeed");
+        let body: serde_json::Value =
+            serde_json::from_slice(&rendered.stdout).expect("stdout should be json");
+
+        assert_eq!(rendered.stderr, b"");
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["processes"], serde_json::json!([{ "pid": 202 }]));
+    }
 }

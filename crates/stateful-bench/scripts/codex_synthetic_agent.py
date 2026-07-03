@@ -258,13 +258,12 @@ def main() -> int:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--mode", choices=["stateful", "no-state"], required=True)
     parser.add_argument("--stateful-binary", required=True)
-    parser.add_argument("--session-id")
+    parser.add_argument("--agent-id")
     parser.add_argument("--workspace-id")
     parser.add_argument("--benchmark-model", default=DEFAULT_BENCHMARK_MODEL)
     parser.add_argument("--benchmark-reasoning-effort", default=DEFAULT_BENCHMARK_REASONING_EFFORT)
     parser.add_argument("--chaos", action="store_true")
     parser.add_argument("--pair-json")
-    parser.add_argument("--agent-id")
     parser.add_argument(
         "--coordination-profile",
         choices=[
@@ -278,8 +277,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.mode == "stateful" and (not args.session_id or not args.workspace_id):
-        parser.error("--session-id and --workspace-id are required in stateful mode")
+    if args.mode == "stateful" and (not args.agent_id or not args.workspace_id):
+        parser.error("--agent-id and --workspace-id are required in stateful mode")
     if args.chaos and (not args.pair_json or not args.agent_id):
         parser.error("--pair-json and --agent-id are required with --chaos")
 
@@ -304,9 +303,9 @@ Stateful coordination ablation profile: stateful_without_claim.
 Stateful coordination:
 - Before your first modification to doc.txt, run exactly:
 
-    {args.stateful_binary} reservation declare --session-id {args.session_id} --workspace-id {args.workspace_id} --purpose "coordinate chaos benchmark edit" doc.txt
+    {args.stateful_binary} reservation declare --agent-id {args.agent_id} --workspace-id {args.workspace_id} --purpose "coordinate chaos benchmark edit" doc.txt
 
-- Use this exact session id and workspace id.
+- Use this exact agent id and workspace id.
 - If a write is denied, read doc.txt again, run the declaration again, and retry once while preserving already visible content.
 """
         if coordination_profile == "stateful_without_replay":

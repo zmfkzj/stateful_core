@@ -53,6 +53,7 @@ fn programbench_metadata_schema_uses_required_instance_fields() {
         exit_code: None,
         error: None,
         archive_error: Some("archive failed".to_string()),
+        workspace_copy_error: None,
         subagent_used: None,
         token_usage: Some(token_usage),
     };
@@ -78,6 +79,8 @@ fn programbench_run_command_parses_defaultable_options() {
         "stateful:on,subagent:off",
         "--model",
         "gpt-5.4-mini",
+        "--thinking",
+        "xhigh",
         "--benchmark-max-turns",
         "500",
         "--timeout-seconds",
@@ -108,6 +111,7 @@ fn programbench_run_command_parses_defaultable_options() {
                 agent: ProgramBenchAgentKind::CodexCli,
                 ref condition,
                 ref model,
+                ref thinking,
                 benchmark_max_turns: 500,
                 timeout_seconds: 7200,
                 ref filter,
@@ -123,6 +127,7 @@ fn programbench_run_command_parses_defaultable_options() {
             && run_id == "pb-dev"
             && condition == &vec!["stateful:on,subagent:off".to_string()]
             && model.as_deref() == Some("gpt-5.4-mini")
+            && thinking.as_deref() == Some("xhigh")
             && filter.as_deref() == Some("ripgrep.*")
             && slice.as_deref() == Some("0:2")
             && programbench_bin == "programbench"
@@ -205,42 +210,38 @@ fn programbench_eval_report_compare_commands_parse() {
 }
 
 #[test]
-fn programbench_condition_parser_accepts_axes_and_defaults_cover_four_conditions() {
-    let condition =
+fn programbench_condition_parser_accepts_axes_and_defaults_to_subagent_on() {
+    let explicit_off =
         parse_programbench_condition("stateful:on,subagent:off").expect("condition should parse");
 
-    assert!(condition.stateful);
-    assert!(!condition.subagent);
-    assert_eq!(condition.id(), "stateful-on_subagent-off");
+    assert!(explicit_off.stateful);
+    assert!(!explicit_off.subagent);
+    assert_eq!(explicit_off.id(), "stateful-on_subagent-off");
+
+    let default_subagent =
+        parse_programbench_condition("stateful:off").expect("condition should parse");
+    assert!(!default_subagent.stateful);
+    assert!(default_subagent.subagent);
+    assert_eq!(default_subagent.id(), "stateful-off_subagent-on");
 
     assert_eq!(
         default_programbench_conditions()
             .iter()
             .map(ProgramBenchCondition::id)
             .collect::<Vec<_>>(),
-        vec![
-            "stateful-off_subagent-off",
-            "stateful-on_subagent-off",
-            "stateful-off_subagent-on",
-            "stateful-on_subagent-on",
-        ]
+        vec!["stateful-off_subagent-on", "stateful-on_subagent-on"]
     );
 }
 
 #[test]
-fn programbench_run_uses_default_four_axis_matrix_when_no_conditions_passed() {
+fn programbench_run_uses_subagent_on_stateful_axis_when_no_conditions_passed() {
     let conditions = planned_programbench_conditions(&[]).expect("default conditions should build");
     assert_eq!(
         conditions
             .iter()
             .map(ProgramBenchCondition::id)
             .collect::<Vec<_>>(),
-        vec![
-            "stateful-off_subagent-off",
-            "stateful-on_subagent-off",
-            "stateful-off_subagent-on",
-            "stateful-on_subagent-on",
-        ]
+        vec!["stateful-off_subagent-on", "stateful-on_subagent-on"]
     );
 }
 
@@ -328,6 +329,7 @@ esac
             r#"#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "{}"
+printf '#!/bin/sh\nprintf ok > executable\n' > compile.sh
 printf '{{"usage":{{"input_tokens":7,"output_tokens":5}}}}\n'
 "#,
             codex_log.display()
@@ -348,6 +350,7 @@ exit 0
             agent: ProgramBenchAgentKind::CodexCli,
             conditions: vec![ProgramBenchCondition::new(true, false)],
             model: None,
+            thinking: None,
             benchmark_max_turns: 500,
             timeout_seconds: 17,
             filter: None,
@@ -359,6 +362,10 @@ exit 0
             stateful_binary: stateful.to_string_lossy().into_owned(),
             codex_bin: codex.to_string_lossy().into_owned(),
             omp_bin: "omp".to_string(),
+            agent_docker_image: None,
+            agent_docker_omp_bin: "omp".to_string(),
+            agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+            agent_docker_home: "/home/stateful".to_string(),
         },
         vec![ProgramBenchDiscoveredInstance {
             instance_id: "owner__repo.abc123".to_string(),
@@ -472,6 +479,7 @@ printf '{{"usage":{{"input_tokens":7,"output_tokens":5}}}}\n'
         agent: ProgramBenchAgentKind::CodexCli,
         conditions: vec![ProgramBenchCondition::new(false, false)],
         model: None,
+        thinking: None,
         benchmark_max_turns: 500,
         timeout_seconds: 17,
         filter: Some("stateful_bench__fake_discovery\\.deadbee$".to_string()),
@@ -483,6 +491,10 @@ printf '{{"usage":{{"input_tokens":7,"output_tokens":5}}}}\n'
         stateful_binary: "stateful".to_string(),
         codex_bin: codex.to_string_lossy().into_owned(),
         omp_bin: "omp".to_string(),
+        agent_docker_image: None,
+        agent_docker_omp_bin: "omp".to_string(),
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_home: "/home/stateful".to_string(),
     })
     .expect("matrix should discover through configured ProgramBench executable");
 
@@ -529,9 +541,14 @@ fn programbench_codex_agent_command_contains_condition_and_paths() {
         omp_bin: "omp".to_string(),
         stateful_binary: "target/debug/stateful".to_string(),
         model: Some("gpt-5.4-mini".to_string()),
+        thinking: None,
         benchmark_max_turns: 500,
         timeout_seconds: 7200,
         subagent_min_count: 3,
+        agent_docker_image: None,
+        agent_docker_omp_bin: "omp".to_string(),
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_home: "/home/stateful".to_string(),
     })
     .expect("codex agent command should build");
 
@@ -557,19 +574,73 @@ fn programbench_omp_agent_command_marks_subagent_condition() {
         omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
         model: None,
+        thinking: Some("xhigh".to_string()),
         benchmark_max_turns: 500,
         timeout_seconds: 7200,
         subagent_min_count: 3,
+        agent_docker_image: None,
+        agent_docker_omp_bin: "omp".to_string(),
+        agent_docker_stateful_binary: "/usr/local/bin/stateful".to_string(),
+        agent_docker_home: "/home/stateful".to_string(),
     })
     .expect("omp agent command should build");
 
+    assert!(has_arg_pair(&command.args, "--thinking", "xhigh"));
     assert!(command.program.ends_with("programbench_omp_agent.py"));
     assert!(has_arg(&command.args, "--subagent"));
     assert!(!has_arg(&command.args, "--stateful"));
 }
 
 #[test]
-fn programbench_codex_adapter_runs_host_agent_in_empty_no_network_airlock() {
+fn programbench_omp_agent_command_passes_agent_docker_options() {
+    let command = build_programbench_agent_command(ProgramBenchInstanceRunOptions {
+        agent: ProgramBenchAgentKind::OmpCli,
+        condition: ProgramBenchCondition::new(true, false),
+        instance_id: "ajeetdsouza__zoxide.67ca1bc".to_string(),
+        container_id: "programbench-container".to_string(),
+        condition_dir: "runs/pb/conditions/stateful-on_subagent-off".into(),
+        docker_bin: "docker".to_string(),
+        codex_bin: "codex".to_string(),
+        omp_bin: "host-omp".to_string(),
+        stateful_binary: "/host/stateful".to_string(),
+        model: Some("openai-codex/gpt-5.5".to_string()),
+        thinking: Some("xhigh".to_string()),
+        benchmark_max_turns: 500,
+        timeout_seconds: 7200,
+        subagent_min_count: 3,
+        agent_docker_image: Some("stateful/omp-agent:test".to_string()),
+        agent_docker_omp_bin: "/opt/omp/bin/omp".to_string(),
+        agent_docker_stateful_binary: "/opt/stateful/bin/stateful".to_string(),
+        agent_docker_home: "/home/bench-agent".to_string(),
+    })
+    .expect("omp agent command should build");
+
+    assert!(command.program.ends_with("programbench_omp_agent.py"));
+    assert!(has_arg_pair(
+        &command.args,
+        "--agent-docker-image",
+        "stateful/omp-agent:test",
+    ));
+    assert!(has_arg_pair(
+        &command.args,
+        "--agent-docker-omp-bin",
+        "/opt/omp/bin/omp",
+    ));
+    assert!(has_arg_pair(
+        &command.args,
+        "--agent-docker-stateful-binary",
+        "/opt/stateful/bin/stateful",
+    ));
+    assert!(has_arg_pair(
+        &command.args,
+        "--agent-docker-home",
+        "/home/bench-agent",
+    ));
+    assert!(has_arg_pair(&command.args, "--thinking", "xhigh"));
+}
+
+#[test]
+fn programbench_codex_adapter_runs_host_agent_and_container_smoke_compile() {
     let output = run_python_adapter(
         &programbench_codex_agent_path(),
         r#"import json
@@ -583,11 +654,10 @@ def fake_run(command, **kwargs):
         "command": command,
         "timeout": kwargs.get("timeout"),
         "cwd": str(kwargs.get("cwd")),
-        "env_home": kwargs.get("env", {}).get("HOME"),
-        "env_stateful_home": kwargs.get("env", {}).get("STATEFUL_HOME"),
+        "home": (kwargs.get("env") or {}).get("HOME"),
+        "stateful_home": (kwargs.get("env") or {}).get("STATEFUL_HOME"),
     })
-    stdout = '{"usage":{"input_tokens":1}}\n' if command[0] == "codex" else ""
-    return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+    return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
 
 mod.subprocess.run = fake_run
 args = types.SimpleNamespace(
@@ -604,16 +674,15 @@ args = types.SimpleNamespace(
 )
 prompt = mod.prompt_for_args(args)
 result = mod.run_agent(args, prompt)
-agent_call_record = next(call for call in calls if call["command"][0] == "codex")
-agent_call = agent_call_record["command"]
+agent_call_record = next(call for call in calls if call["command"] and call["command"][0] == "codex")
 print(json.dumps({
     "calls": calls,
-    "agent_call": agent_call,
+    "agent_command": agent_call_record["command"],
+    "agent_cwd": agent_call_record["cwd"],
+    "agent_home": agent_call_record["home"],
+    "agent_stateful_home": agent_call_record["stateful_home"],
     "prompt": prompt,
     "returncode": result.returncode,
-    "cd_value": agent_call[agent_call.index("--cd") + 1],
-    "home": agent_call_record["env_home"],
-    "stateful_home": agent_call_record["env_stateful_home"],
 }))
 "#,
     );
@@ -621,14 +690,7 @@ print(json.dumps({
         serde_json::from_str(&output).expect("captured calls should be JSON");
 
     assert_eq!(
-        observed["calls"]
-            .as_array()
-            .expect("calls should be array")
-            .len(),
-        6
-    );
-    assert_eq!(
-        observed["calls"][1]["command"],
+        observed["calls"][0]["command"],
         serde_json::json!([
             "/usr/local/bin/stateful",
             "install",
@@ -638,20 +700,20 @@ print(json.dumps({
         ])
     );
     assert_eq!(
-        observed["calls"][2]["command"],
+        observed["calls"][1]["command"],
         serde_json::json!(["git", "init", "-q"])
     );
     assert_eq!(
-        observed["calls"][3]["command"],
+        observed["calls"][2]["command"],
         serde_json::json!([
             "/usr/local/bin/stateful",
             "enable",
             "--repo",
-            observed["cd_value"].as_str().unwrap()
+            "/tmp/programbench-airlock"
         ])
     );
     assert_eq!(
-        observed["agent_call"],
+        observed["agent_command"],
         serde_json::json!([
             "codex",
             "-c",
@@ -662,7 +724,7 @@ print(json.dumps({
             "--skip-git-repo-check",
             "--ephemeral",
             "--cd",
-            observed["cd_value"],
+            "/tmp/programbench-airlock",
             "--sandbox",
             "workspace-write",
             "--model",
@@ -670,18 +732,18 @@ print(json.dumps({
             observed["prompt"]
         ])
     );
-    assert_ne!(observed["cd_value"], "/workspace");
-    assert_eq!(observed["calls"][4]["timeout"], 123);
-    assert_eq!(observed["home"], observed["cd_value"]);
-    assert_eq!(observed["stateful_home"], observed["cd_value"]);
-    let prompt = observed["prompt"]
-        .as_str()
-        .expect("prompt should be a string");
-    assert!(prompt.contains("Benchmark max turns: 321."));
-    assert!(prompt.contains("The current directory is the ProgramBench workspace"));
-    assert!(prompt.contains(
-        "Do not run internet, package-manager, source-control, or host filesystem commands."
-    ));
+    assert_eq!(observed["agent_cwd"], "/tmp/programbench-airlock");
+    assert_eq!(observed["agent_home"], "/tmp/programbench-airlock");
+    assert_eq!(
+        observed["agent_stateful_home"],
+        "/tmp/programbench-airlock/.stateful"
+    );
+    assert!(
+        observed["prompt"]
+            .as_str()
+            .expect("prompt should be a string")
+            .contains("Benchmark max turns: 321.")
+    );
     assert_eq!(observed["returncode"], 0);
 }
 
@@ -741,14 +803,12 @@ def fake_run(command, **kwargs):
 mod.subprocess.run = fake_run
 args = types.SimpleNamespace(stateful_binary="./stateful", timeout_seconds=123)
 mod.run_stateful_command(args, "/tmp/programbench-airlock", "install")
-print(json.dumps(calls[-1]))
+print(json.dumps(calls[-1]["command"]))
 "#,
     );
     let observed: serde_json::Value =
         serde_json::from_str(&output).expect("stateful command should be JSON");
-    let binary = observed["command"][0]
-        .as_str()
-        .expect("binary should be a string");
+    let binary = observed[0].as_str().expect("binary should be a string");
     assert_ne!(binary, "./stateful");
     assert!(binary.ends_with("/stateful"));
 }
@@ -770,16 +830,16 @@ def fake_run(command, **kwargs):
 mod.subprocess.run = fake_run
 args = types.SimpleNamespace(stateful_binary="stateful", timeout_seconds=123)
 mod.run_stateful_command(args, "/tmp/programbench-airlock", "install")
-print(json.dumps(calls[-1]))
+print(json.dumps(calls[-1]["command"]))
 "#,
     );
     let observed: serde_json::Value =
         serde_json::from_str(&output).expect("stateful command should be JSON");
-    assert_eq!(observed["command"][0], "stateful");
+    assert_eq!(observed[0], "stateful");
 }
 
 #[test]
-fn programbench_airlock_env_scrubs_parent_stateful_session() {
+fn programbench_airlock_env_scrubs_parent_stateful_values() {
     let output = run_python_adapter(
         &programbench_codex_agent_path(),
         r#"import json
@@ -788,9 +848,6 @@ import os
 for key in [
     "STATEFUL_SERVER_URL",
     "STATEFUL_SERVER_TOKEN",
-    "STATEFUL_SESSION_ID",
-    "STATEFUL_CODEX_RUN_ID",
-    "CODEX_THREAD_ID",
 ]:
     os.environ[key] = "parent"
 
@@ -803,9 +860,6 @@ print(json.dumps({
         "CODEX_HOME",
         "STATEFUL_SERVER_URL",
         "STATEFUL_SERVER_TOKEN",
-        "STATEFUL_SESSION_ID",
-        "STATEFUL_CODEX_RUN_ID",
-        "CODEX_THREAD_ID",
     ]
 }, sort_keys=True))
 "#,
@@ -814,13 +868,13 @@ print(json.dumps({
         serde_json::from_str(&output).expect("airlock env should be JSON");
 
     assert_eq!(observed["HOME"], "/tmp/programbench-airlock");
-    assert_eq!(observed["STATEFUL_HOME"], "/tmp/programbench-airlock");
+    assert_eq!(
+        observed["STATEFUL_HOME"],
+        "/tmp/programbench-airlock/.stateful"
+    );
     assert_eq!(observed["CODEX_HOME"], "/tmp/programbench-airlock/.codex");
     assert_eq!(observed["STATEFUL_SERVER_URL"], serde_json::Value::Null);
     assert_eq!(observed["STATEFUL_SERVER_TOKEN"], serde_json::Value::Null);
-    assert_eq!(observed["STATEFUL_SESSION_ID"], serde_json::Value::Null);
-    assert_eq!(observed["STATEFUL_CODEX_RUN_ID"], serde_json::Value::Null);
-    assert_eq!(observed["CODEX_THREAD_ID"], serde_json::Value::Null);
 }
 
 #[test]
@@ -845,6 +899,42 @@ print(json.dumps({"prompt": mod.prompt_for_args(args)}))
         .expect("prompt should be a string");
     assert!(!prompt.contains("docker-shim"));
     assert!(prompt.contains("The current directory is the ProgramBench workspace"));
+}
+
+#[test]
+fn programbench_prompt_uses_orchestrate_only_for_subagent_on() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import types
+
+base_args = dict(
+    docker_bin="./docker-shim",
+    container_id="programbench-container",
+    benchmark_max_turns=None,
+    subagent_min_count=3,
+)
+off_args = types.SimpleNamespace(**base_args, subagent=False)
+on_args = types.SimpleNamespace(**base_args, subagent=True)
+print(json.dumps({
+    "off_prompt": mod.prompt_for_args(off_args),
+    "on_prompt": mod.prompt_for_args(on_args),
+}))
+"#,
+    );
+    let observed: serde_json::Value = serde_json::from_str(&output).expect("prompt should be JSON");
+    let off_prompt = observed["off_prompt"]
+        .as_str()
+        .expect("off prompt should be a string");
+    let on_prompt = observed["on_prompt"]
+        .as_str()
+        .expect("on prompt should be a string");
+
+    assert!(!off_prompt.contains("orchestrate"));
+    let custom_prompt = on_prompt
+        .strip_prefix(off_prompt)
+        .expect("subagent-on prompt should extend the subagent-off prompt");
+    assert_eq!(custom_prompt, "\n\norchestrate");
 }
 
 #[test]
@@ -885,7 +975,7 @@ print(json.dumps({"command": result.args}))
 }
 
 #[test]
-fn programbench_omp_adapter_resolves_relative_omp_binary_before_airlock_chdir() {
+fn programbench_omp_adapter_leaves_relative_omp_binary_for_path_lookup() {
     let output = run_python_adapter(
         &programbench_omp_agent_path(),
         r#"import json
@@ -901,6 +991,7 @@ def fake_omp(command, *, cwd, env, timeout_seconds):
 
 mod.subprocess.run = fake_run
 mod.run_omp_command = fake_omp
+mod.omp_auth_source_agent_dir = lambda env: None
 args = types.SimpleNamespace(
     docker_bin="docker",
     container_id="programbench-container",
@@ -919,11 +1010,7 @@ print(json.dumps({"command": result.args}))
     );
     let observed: serde_json::Value =
         serde_json::from_str(&output).expect("captured command should be JSON");
-    let binary = observed["command"][0]
-        .as_str()
-        .expect("binary should be a string");
-    assert_ne!(binary, "./omp");
-    assert!(binary.ends_with("/omp"));
+    assert_eq!(observed["command"][0], "./omp");
 }
 
 #[test]
@@ -954,7 +1041,6 @@ print(json.dumps(calls))
         serde_json::from_str(&output).expect("stateful setup calls should be JSON");
     let calls = observed.as_array().expect("calls should be array");
 
-    assert_eq!(calls.len(), 2);
     assert_eq!(
         calls[0]["command"],
         serde_json::json!(["git", "init", "-q"])
@@ -973,7 +1059,7 @@ print(json.dumps(calls))
 }
 
 #[test]
-fn programbench_omp_adapter_runs_host_agent_in_empty_airlock_after_stateful_setup() {
+fn programbench_omp_adapter_runs_host_agent_and_container_smoke_compile() {
     let output = run_python_adapter(
         &programbench_omp_agent_path(),
         r#"import json
@@ -987,9 +1073,6 @@ def fake_run(command, **kwargs):
         "command": command,
         "timeout": kwargs.get("timeout"),
         "cwd": str(kwargs.get("cwd")),
-        "env_home": kwargs.get("env", {}).get("HOME"),
-        "env_stateful_home": kwargs.get("env", {}).get("STATEFUL_HOME"),
-        "env_agent_dir": kwargs.get("env", {}).get("PI_CODING_AGENT_DIR"),
     })
     return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
 
@@ -1004,15 +1087,16 @@ def fake_omp(command, *, cwd, env, timeout_seconds):
     })
     return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
 
-
 mod.subprocess.run = fake_run
 mod.run_omp_command = fake_omp
+mod.omp_auth_source_agent_dir = lambda env: None
 args = types.SimpleNamespace(
     docker_bin="docker",
     container_id="programbench-container",
     omp_bin="omp",
     stateful_binary="/usr/local/bin/stateful",
     model="gpt-5.4-mini",
+    thinking="xhigh",
     benchmark_max_turns=654,
     timeout_seconds=456,
     stateful=True,
@@ -1021,17 +1105,15 @@ args = types.SimpleNamespace(
 )
 prompt = mod.prompt_for_args(args)
 result = mod.run_agent(args, prompt)
-agent_call_record = next(call for call in calls if call["command"][0] == "omp")
-agent_call = agent_call_record["command"]
+agent_call_record = next(call for call in calls if call["command"] and call["command"][0] == "omp")
 print(json.dumps({
     "calls": calls,
-    "agent_call": agent_call,
+    "agent_command": agent_call_record["command"],
     "prompt": prompt,
     "returncode": result.returncode,
-    "cwd": agent_call_record["cwd"],
-    "cwd_value": agent_call[agent_call.index("--cwd") + 1],
-    "home": agent_call_record["env_home"],
-    "stateful_home": agent_call_record["env_stateful_home"],
+    "agent_cwd": agent_call_record["cwd"],
+    "agent_home": agent_call_record["env_home"],
+    "agent_stateful_home": agent_call_record["env_stateful_home"],
     "agent_dir": agent_call_record["env_agent_dir"],
 }))
 "#,
@@ -1040,14 +1122,7 @@ print(json.dumps({
         serde_json::from_str(&output).expect("captured calls should be JSON");
 
     assert_eq!(
-        observed["calls"]
-            .as_array()
-            .expect("calls should be array")
-            .len(),
-        6
-    );
-    assert_eq!(
-        observed["calls"][1]["command"],
+        observed["calls"][0]["command"],
         serde_json::json!([
             "/usr/local/bin/stateful",
             "install",
@@ -1057,24 +1132,24 @@ print(json.dumps({
         ])
     );
     assert_eq!(
-        observed["calls"][2]["command"],
+        observed["calls"][1]["command"],
         serde_json::json!(["git", "init", "-q"])
     );
     assert_eq!(
-        observed["calls"][3]["command"],
+        observed["calls"][2]["command"],
         serde_json::json!([
             "/usr/local/bin/stateful",
             "enable",
             "--repo",
-            observed["cwd_value"].as_str().unwrap()
+            "/tmp/programbench-airlock"
         ])
     );
     assert_eq!(
-        observed["agent_call"],
+        observed["agent_command"],
         serde_json::json!([
             "omp",
             "--cwd",
-            observed["cwd_value"],
+            "/tmp/programbench-airlock",
             "--mode",
             "json",
             "--no-session",
@@ -1084,30 +1159,528 @@ print(json.dumps({
             "stateful",
             "--model",
             "gpt-5.4-mini",
+            "--thinking",
+            "xhigh",
             "-p",
             observed["prompt"]
         ])
     );
-    assert_eq!(observed["cwd"], observed["cwd_value"]);
-    assert_ne!(observed["cwd_value"], "/workspace");
-    assert_eq!(observed["calls"][4]["timeout"], 456);
-    assert_eq!(observed["home"], observed["cwd_value"]);
-    assert_eq!(observed["stateful_home"], observed["cwd_value"]);
+    assert_eq!(observed["agent_cwd"], "/tmp/programbench-airlock");
+    assert_eq!(observed["agent_home"], "/tmp/programbench-airlock");
+    assert_eq!(
+        observed["agent_stateful_home"],
+        "/tmp/programbench-airlock/.stateful"
+    );
     assert_eq!(
         observed["agent_dir"],
-        format!(
-            "{}/.omp/profiles/stateful/agent",
-            observed["cwd_value"].as_str().unwrap()
-        )
+        "/tmp/programbench-airlock/.omp/profiles/stateful/agent"
     );
     assert!(
         observed["prompt"]
             .as_str()
             .expect("prompt should be a string")
-            .contains("Benchmark max turns: 654."),
-        "prompt should include benchmark max turns: {observed}"
+            .contains("Benchmark max turns: 654.")
     );
     assert_eq!(observed["returncode"], 0);
+}
+
+#[test]
+fn programbench_omp_adapter_runs_agent_docker_container_when_configured() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+docker_calls = []
+host_commands = []
+host_omp_calls = []
+
+def fake_run(command, **kwargs):
+    if command and command[0] == "docker":
+        docker_calls.append(command)
+        if command[1] == "run":
+            return subprocess.CompletedProcess(command, 0, stdout="agent-container-id\n", stderr="")
+        if command[1] == "exec" and "/opt/omp/bin/omp" in command:
+            return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":11,"output_tokens":7}}\n', stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+    host_commands.append(command)
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+def fake_omp(command, *, cwd, env, timeout_seconds):
+    host_omp_calls.append(command)
+    return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":11,"output_tokens":7}}\n', stderr="")
+
+mod.subprocess.run = fake_run
+mod.run_omp_command = fake_omp
+mod.omp_auth_source_agent_dir = lambda env: None
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    omp_bin="host-omp",
+    stateful_binary="/host/stateful",
+    model="gpt-5.4-mini",
+    benchmark_max_turns=654,
+    timeout_seconds=456,
+    stateful=True,
+    subagent=False,
+    subagent_min_count=3,
+    airlock="/tmp/programbench-airlock",
+    agent_docker_image="stateful/omp-agent:test",
+    agent_docker_omp_bin="/opt/omp/bin/omp",
+    agent_docker_stateful_binary="/opt/stateful/bin/stateful",
+    agent_docker_home="/home/bench-agent",
+)
+result = mod.run_agent(args, mod.prompt_for_args(args))
+print(json.dumps({
+    "docker_calls": docker_calls,
+    "host_commands": host_commands,
+    "host_omp_calls": host_omp_calls,
+    "returncode": result.returncode,
+    "usage": mod.omp_token_usage_from_output(result.stdout),
+}))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("captured calls should be JSON");
+    let docker_calls = observed["docker_calls"]
+        .as_array()
+        .expect("docker calls should be array");
+
+    assert_eq!(observed["host_omp_calls"], serde_json::json!([]));
+    assert_eq!(observed["host_commands"], serde_json::json!([]));
+    assert!(docker_calls.iter().any(|call| call
+        == &serde_json::json!([
+            "docker",
+            "cp",
+            "programbench-container:/workspace/.",
+            "/tmp/programbench-airlock"
+        ])));
+    assert!(docker_calls.iter().any(|call| {
+        docker_call_starts_with(call, &["docker", "run"])
+            && docker_call_contains_arg(call, "stateful/omp-agent:test")
+            && docker_call_has_sequence(call, &["sleep", "infinity"])
+    }));
+    assert!(docker_calls.iter().any(|call| call
+        == &serde_json::json!([
+            "docker",
+            "cp",
+            "/tmp/programbench-airlock/.",
+            "agent-container-id:/workspace/"
+        ])));
+    assert!(docker_calls.iter().any(|call| docker_call_execs(
+        call,
+        "agent-container-id",
+        &[
+            "/opt/stateful/bin/stateful",
+            "install",
+            "--agent",
+            "omp",
+            "--yes"
+        ],
+    )));
+    assert!(docker_calls.iter().any(|call| docker_call_execs(
+        call,
+        "agent-container-id",
+        &["git", "init", "-q"],
+    )));
+    assert!(docker_calls.iter().any(|call| docker_call_execs(
+        call,
+        "agent-container-id",
+        &[
+            "/opt/stateful/bin/stateful",
+            "enable",
+            "--repo",
+            "/workspace"
+        ],
+    )));
+    assert!(docker_calls.iter().any(|call| docker_call_execs(
+        call,
+        "agent-container-id",
+        &[
+            "/opt/omp/bin/omp",
+            "--cwd",
+            "/workspace",
+            "--mode",
+            "json",
+            "--no-session",
+            "--approval-mode",
+            "yolo",
+            "--profile",
+            "stateful",
+        ],
+    )));
+    assert!(
+        docker_calls
+            .iter()
+            .any(|call| docker_call_contains_env(call, "HOME=/home/bench-agent"))
+    );
+    assert!(docker_calls.iter().any(|call| call
+        == &serde_json::json!([
+            "docker",
+            "cp",
+            "agent-container-id:/workspace/.",
+            "/tmp/programbench-airlock"
+        ])));
+    assert!(
+        docker_calls
+            .iter()
+            .any(|call| call == &serde_json::json!(["docker", "rm", "-f", "agent-container-id"]))
+    );
+    assert_eq!(observed["returncode"], 0);
+    assert_eq!(observed["usage"]["input_tokens"], 11);
+    assert_eq!(observed["usage"]["output_tokens"], 7);
+}
+
+#[test]
+fn programbench_omp_adapter_disables_nested_omp_sandbox_in_agent_docker() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+docker_calls = []
+
+def fake_run(command, **kwargs):
+    if command and command[0] == "docker":
+        docker_calls.append(command)
+        if command[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(command, 0, stdout="agent-container-id\n", stderr="")
+        if command[:2] == ["docker", "exec"] and "/opt/omp/bin/omp" in command:
+            return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+mod.subprocess.run = fake_run
+mod.omp_auth_source_agent_dir = lambda env: None
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    omp_bin="host-omp",
+    stateful_binary="/host/stateful",
+    model="gpt-5.4-mini",
+    benchmark_max_turns=123,
+    timeout_seconds=456,
+    stateful=True,
+    subagent=False,
+    subagent_min_count=3,
+    airlock="/tmp/programbench-airlock",
+    agent_docker_image="stateful/omp-agent:test",
+    agent_docker_omp_bin="/opt/omp/bin/omp",
+    agent_docker_stateful_binary="/opt/stateful/bin/stateful",
+    agent_docker_home="/home/bench-agent",
+)
+mod.run_agent(args, mod.prompt_for_args(args))
+print(json.dumps(docker_calls))
+"#,
+    );
+    let docker_calls: Vec<serde_json::Value> =
+        serde_json::from_str(&output).expect("docker calls should be JSON");
+
+    assert!(docker_calls.iter().any(|call| docker_call_execs(
+        call,
+        "agent-container-id",
+        &[
+            "/opt/stateful/bin/stateful",
+            "install",
+            "--agent",
+            "omp",
+            "--yes"
+        ],
+    )));
+    assert!(docker_calls.iter().any(|call| docker_call_execs(
+        call,
+        "agent-container-id",
+        &[
+            "/opt/stateful/bin/stateful",
+            "enable",
+            "--repo",
+            "/workspace"
+        ],
+    )));
+    assert!(docker_calls.iter().any(|call| {
+        docker_call_execs(
+            call,
+            "agent-container-id",
+            &["/opt/omp/bin/omp", "--cwd", "/workspace"],
+        ) && docker_call_contains_env(call, "STATEFUL_OMP_SANDBOX=off")
+    }));
+}
+
+#[test]
+fn programbench_omp_adapter_records_agent_docker_copy_back_error_separately() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import subprocess
+import tempfile
+import types
+from pathlib import Path
+
+def fake_run(command, **kwargs):
+    if command and command[0] == "docker":
+        if command[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(command, 0, stdout="agent-container-id\n", stderr="")
+        if command[:2] == ["docker", "cp"] and command[2] == "agent-container-id:/workspace/.":
+            raise RuntimeError("copy denied from agent")
+        if command[:2] == ["docker", "exec"] and "/opt/omp/bin/omp" in command:
+            return subprocess.CompletedProcess(command, 137, stdout="", stderr="killed\n")
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+mod.subprocess.run = fake_run
+mod.omp_auth_source_agent_dir = lambda env: None
+
+with tempfile.TemporaryDirectory() as condition_dir:
+    args = types.SimpleNamespace(
+        condition_dir=condition_dir,
+        instance_id="owner__repo.abc123",
+        condition_id="stateful-on_subagent-off",
+        container_id="programbench-container",
+        docker_bin="docker",
+        omp_bin="host-omp",
+        stateful_binary="/host/stateful",
+        model="gpt-5.4-mini",
+        benchmark_max_turns=123,
+        timeout_seconds=456,
+        stateful=True,
+        subagent=False,
+        subagent_min_count=3,
+        agent_docker_image="stateful/omp-agent:test",
+        agent_docker_omp_bin="/opt/omp/bin/omp",
+        agent_docker_stateful_binary="/opt/stateful/bin/stateful",
+        agent_docker_home="/home/bench-agent",
+    )
+    exit_code = mod.run_main(
+        args,
+        agent_name="omp-cli",
+        exited_error_prefix="omp",
+        token_usage_from_output=mod.omp_token_usage_from_output,
+        run_agent_func=mod.run_agent,
+    )
+    metadata = json.loads((Path(condition_dir) / "owner__repo.abc123" / "instance.json").read_text())
+    observed = {
+        "exit_code": exit_code,
+        "metadata_exit_code": metadata.get("exit_code"),
+        "error": metadata.get("error"),
+        "workspace_copy_error": metadata.get("workspace_copy_error"),
+        "smoke_compile_error": metadata.get("smoke_compile_error"),
+    }
+print(json.dumps(observed))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("adapter observation should be JSON");
+
+    assert_eq!(observed["exit_code"], 137);
+    assert_eq!(observed["metadata_exit_code"], 137);
+    assert_eq!(observed["error"], "omp exited 137");
+    assert_eq!(observed["workspace_copy_error"], "copy denied from agent");
+    assert_eq!(observed["smoke_compile_error"], serde_json::Value::Null);
+}
+
+#[test]
+fn programbench_omp_adapter_passes_parent_stateful_runtime_to_agent_docker() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import os
+import subprocess
+import types
+
+docker_exec_envs = []
+
+def exec_env(command):
+    env = {}
+    index = 0
+    while index < len(command) - 1:
+        if command[index] == "-e":
+            key, _, value = command[index + 1].partition("=")
+            env[key] = value
+            index += 2
+        else:
+            index += 1
+    return env
+
+def fake_run(command, **kwargs):
+    if command[:2] == ["docker", "run"]:
+        return subprocess.CompletedProcess(command, 0, stdout="agent-container-id\n", stderr="")
+    if command[:2] == ["docker", "exec"] and (
+        "/opt/stateful/bin/stateful" in command or "/opt/omp/bin/omp" in command
+    ):
+        docker_exec_envs.append(exec_env(command))
+        if "/opt/omp/bin/omp" in command:
+            return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+mod.subprocess.run = fake_run
+mod.omp_auth_source_agent_dir = lambda env: None
+os.environ["STATEFUL_SERVER_URL"] = "http://127.0.0.1:43873"
+os.environ["STATEFUL_SERVER_TOKEN"] = "parent-token"
+
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    omp_bin="host-omp",
+    stateful_binary="/host/stateful",
+    model="gpt-5.4-mini",
+    benchmark_max_turns=123,
+    timeout_seconds=456,
+    stateful=True,
+    subagent=False,
+    subagent_min_count=3,
+    airlock="/tmp/programbench-airlock",
+    agent_docker_image="stateful/omp-agent:test",
+    agent_docker_omp_bin="/opt/omp/bin/omp",
+    agent_docker_stateful_binary="/opt/stateful/bin/stateful",
+    agent_docker_home="/home/bench-agent",
+)
+mod.run_agent(args, mod.prompt_for_args(args))
+print(json.dumps(docker_exec_envs))
+"#,
+    );
+    let docker_exec_envs: Vec<serde_json::Value> =
+        serde_json::from_str(&output).expect("captured docker exec envs should be JSON");
+
+    assert_eq!(docker_exec_envs.len(), 3);
+    for env in docker_exec_envs {
+        assert_eq!(env["HOME"], "/home/bench-agent");
+        assert_eq!(
+            env["PI_CODING_AGENT_DIR"],
+            "/home/bench-agent/.omp/profiles/stateful/agent"
+        );
+        assert_eq!(env["STATEFUL_HOME"], "/home/bench-agent/.stateful");
+        assert_eq!(
+            env["STATEFUL_SERVER_URL"],
+            "http://host.docker.internal:43873"
+        );
+        assert_eq!(env["STATEFUL_SERVER_TOKEN"], "parent-token");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn programbench_omp_adapter_preserves_execute_only_executable_when_copying_to_agent_container() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r##"import json
+import pathlib
+import subprocess
+import tempfile
+import types
+
+docker_calls = []
+cp_modes = []
+
+def fake_run(command, **kwargs):
+    docker_calls.append(command)
+    if command[:2] == ["docker", "cp"] and command[2].endswith("/."):
+        cp_modes.append(executable.stat().st_mode & 0o777)
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+mod.subprocess.run = fake_run
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    timeout_seconds=123,
+)
+
+with tempfile.TemporaryDirectory() as tmp:
+    airlock = pathlib.Path(tmp)
+    executable = airlock / "executable"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o111)
+    (airlock / "README.md").write_text("readable\n")
+
+    mod.copy_airlock_to_agent_container(args, str(airlock), "agent-container-id")
+
+    print(json.dumps({
+        "cp_modes": cp_modes,
+        "docker_calls": docker_calls,
+        "restored_mode": executable.stat().st_mode & 0o777,
+    }))
+"##,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("copy result should be JSON");
+    let docker_calls = observed["docker_calls"]
+        .as_array()
+        .expect("docker calls should be array");
+
+    assert!(
+        docker_calls.iter().any(|call| {
+            docker_call_starts_with(call, &["docker", "cp"])
+                && call
+                    .as_array()
+                    .and_then(|args| args.get(3))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("agent-container-id:/workspace/")
+        }),
+        "execute-only executable should not prevent copying the airlock into the agent container"
+    );
+    assert_eq!(
+        observed["cp_modes"],
+        serde_json::json!([0o511]),
+        "host executable should be owner-readable only while docker cp reads it"
+    );
+    assert_eq!(
+        observed["restored_mode"],
+        serde_json::json!(0o111),
+        "host executable mode should be restored after docker cp"
+    );
+    assert!(
+        docker_calls.iter().any(|call| docker_call_execs(
+            call,
+            "agent-container-id",
+            &["chmod", "111", "/workspace/executable"],
+        )),
+        "copied executable should be chmodded back to its original mode inside the agent container"
+    );
+}
+
+#[test]
+fn programbench_omp_adapter_prepends_stateful_binary_dir_to_agent_path() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+def fake_run(command, **kwargs):
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+def fake_omp(command, *, cwd, env, timeout_seconds):
+    return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
+        "path": env.get("PATH", ""),
+        "stateful_dir": "/opt/stateful/bin",
+    }), stderr="")
+
+mod.subprocess.run = fake_run
+mod.run_omp_command = fake_omp
+mod.omp_auth_source_agent_dir = lambda env: None
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    omp_bin="omp",
+    stateful_binary="/opt/stateful/bin/stateful",
+    model=None,
+    benchmark_max_turns=321,
+    timeout_seconds=123,
+    stateful=True,
+    subagent=False,
+    subagent_min_count=3,
+)
+result = mod.run_agent(args, mod.prompt_for_args(args))
+print(result.stdout)
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("captured env should be JSON");
+    let path = observed["path"].as_str().expect("PATH should be a string");
+
+    assert_eq!(
+        path.split(':').next(),
+        observed["stateful_dir"].as_str(),
+        "agent PATH should prefer the stateful binary directory so bare `stateful` works"
+    );
 }
 
 #[test]
@@ -1313,14 +1886,17 @@ def fake_omp(command, *, cwd, env, timeout_seconds):
         "stateful_server_url": env.get("STATEFUL_SERVER_URL"),
         "stateful_server_token": env.get("STATEFUL_SERVER_TOKEN"),
         "stateful_home": env.get("STATEFUL_HOME"),
+        "auth_source": env.get("OMP_AUTH_SOURCE_AGENT_DIR"),
     })
     return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
 
 
 mod.subprocess.run = fake_run
 mod.run_omp_command = fake_omp
+mod.omp_auth_source_agent_dir = lambda env: None
 os.environ["STATEFUL_SERVER_URL"] = "http://127.0.0.1:43873"
 os.environ["STATEFUL_SERVER_TOKEN"] = "parent-token"
+os.environ["OMP_AUTH_SOURCE_AGENT_DIR"] = "/host/source-agent"
 
 args = types.SimpleNamespace(
     docker_bin="docker",
@@ -1343,12 +1919,11 @@ print(json.dumps(agent_env))
 
     assert_eq!(observed["stateful_server_url"], "http://127.0.0.1:43873");
     assert_eq!(observed["stateful_server_token"], "parent-token");
-    assert!(
-        observed["stateful_home"]
-            .as_str()
-            .expect("stateful home should be set")
-            .contains("programbench-airlock-")
+    assert_eq!(
+        observed["stateful_home"],
+        "/tmp/programbench-airlock/.stateful"
     );
+    assert_eq!(observed["auth_source"], serde_json::Value::Null);
 }
 
 #[test]
@@ -1431,6 +2006,12 @@ with tempfile.TemporaryDirectory() as root:
     (airlock / ".omp" / "profiles" / "stateful" / "agent" / "agent.db").write_text("secret", encoding="utf-8")
     (airlock / ".stateful_core").mkdir()
     (airlock / ".stateful_core" / "runtime.json").write_text("stateful", encoding="utf-8")
+    (airlock / "config.yml").write_text("stateful", encoding="utf-8")
+    (airlock / "state.db").write_bytes(b"sqlite")
+    (airlock / "repos").mkdir()
+    (airlock / "repos" / "repo.db").write_text("stateful", encoding="utf-8")
+    (airlock / "runtime").mkdir()
+    (airlock / "runtime" / "server.pid").write_text("123", encoding="utf-8")
     (airlock / ".git").mkdir()
     (airlock / ".git" / "config").write_text("git", encoding="utf-8")
     (airlock / "Library" / "Caches" / "com.apple.python").mkdir(parents=True)
@@ -1452,17 +2033,23 @@ print(json.dumps(names))
 
     assert!(names.iter().any(|name| name.ends_with("compile.sh")));
     assert!(names.iter().any(|name| name.ends_with("main.c")));
+    assert!(names.iter().all(|name| {
+        !name.ends_with("/executable")
+            && !name.contains(".git")
+            && !name.contains(".omp")
+            && !name.contains(".stateful")
+            && !name.contains("Library/Caches")
+            && !name.contains("__pycache__")
+            && !name.ends_with(".pyc")
+            && !name.contains(".pytest_cache")
+    }));
+    assert!(names.iter().any(|name| name.ends_with("config.yml")));
+    assert!(names.iter().any(|name| name.ends_with("state.db")));
+    assert!(names.iter().any(|name| name.ends_with("repos/repo.db")));
     assert!(
-        names.iter().all(|name| {
-            !name.contains(".git")
-                && !name.contains(".omp")
-                && !name.contains(".stateful")
-                && !name.contains("Library/Caches")
-                && !name.contains("__pycache__")
-                && !name.ends_with(".pyc")
-                && !name.contains(".pytest_cache")
-        }),
-        "archive must not contain agent/runtime/cache files: {names:?}"
+        names
+            .iter()
+            .any(|name| name.ends_with("runtime/server.pid"))
     );
 }
 
@@ -1559,6 +2146,166 @@ print(json.dumps(observed))
         "permission denied reading executable"
     );
     assert_eq!(observed["error"], serde_json::Value::Null);
+}
+
+#[test]
+fn programbench_adapter_marks_smoke_compile_failure() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import subprocess
+import tempfile
+import types
+from pathlib import Path
+
+def fake_agent(args, prompt):
+    args.smoke_compile_error = "compile.sh exited 1"
+    args.submission_path = str(Path(args.condition_dir) / args.instance_id / "submission.tar.gz")
+    return subprocess.CompletedProcess(["codex"], 0, stdout="agent stdout\n", stderr="")
+
+with tempfile.TemporaryDirectory() as condition_dir:
+    args = types.SimpleNamespace(
+        condition_dir=condition_dir,
+        instance_id="owner__repo.abc123",
+        condition_id="stateful-off_subagent-on",
+        container_id="programbench-container",
+        docker_bin="docker",
+        timeout_seconds=123,
+        subagent=True,
+        stateful=False,
+        benchmark_max_turns=500,
+        subagent_min_count=3,
+    )
+    exit_code = mod.run_main(
+        args,
+        agent_name="codex-cli",
+        exited_error_prefix="codex",
+        token_usage_from_output=mod.codex_token_usage_from_output,
+        run_agent_func=fake_agent,
+    )
+    metadata = json.loads((Path(condition_dir) / "owner__repo.abc123" / "instance.json").read_text())
+    observed = {
+        "exit_code": exit_code,
+        "metadata_exit_code": metadata.get("exit_code"),
+        "error": metadata.get("error"),
+        "smoke_compile_error": metadata.get("smoke_compile_error"),
+    }
+print(json.dumps(observed))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("adapter observation should be JSON");
+
+    assert_eq!(observed["exit_code"], 1);
+    assert_eq!(observed["metadata_exit_code"], 1);
+    assert_eq!(
+        observed["error"],
+        "smoke compile failed: compile.sh exited 1"
+    );
+    assert_eq!(observed["smoke_compile_error"], "compile.sh exited 1");
+}
+
+#[test]
+fn programbench_container_native_smoke_compile_runs_in_workspace() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r##"import json
+import subprocess
+import tempfile
+import types
+from pathlib import Path
+
+calls = []
+copied_names = []
+
+def fake_run(command, **kwargs):
+    calls.append({
+        "command": command,
+        "cwd": str(kwargs.get("cwd")),
+        "timeout": kwargs.get("timeout"),
+    })
+    if command[1] == "cp":
+        copied_root = Path(command[2].removesuffix("/."))
+        copied_names.extend(sorted(str(path.relative_to(copied_root)) for path in copied_root.rglob("*")))
+    (airlock / "executable").write_text("replacement", encoding="utf-8")
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+mod.subprocess.run = fake_run
+
+with tempfile.TemporaryDirectory() as root:
+    airlock = Path(root)
+    (airlock / "executable").write_text("seed binary", encoding="utf-8")
+    (airlock / "compile.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\nprintf replacement > executable\n", encoding="utf-8")
+    (airlock / ".omp").mkdir()
+    (airlock / ".omp" / "agent.db").write_text("secret", encoding="utf-8")
+    (airlock / ".stateful").mkdir()
+    (airlock / ".stateful" / "state.db").write_text("runtime", encoding="utf-8")
+    (airlock / "main.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
+    args = types.SimpleNamespace(
+        docker_bin="docker",
+        container_id="programbench-container",
+        timeout_seconds=5,
+    )
+    mod.smoke_compile_airlock(str(airlock), args)
+    observed = {
+        "calls": calls,
+        "copied_names": copied_names,
+        "executable": (airlock / "executable").read_text(encoding="utf-8"),
+    }
+print(json.dumps(observed))
+"##,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("smoke compile observation should be JSON");
+
+    assert_eq!(observed["calls"][0]["command"][0], "docker");
+    assert_eq!(observed["calls"][0]["command"][1], "cp");
+    assert!(
+        observed["calls"][0]["command"][2]
+            .as_str()
+            .expect("copy source should be a string")
+            .ends_with("/.")
+    );
+    assert_eq!(
+        observed["calls"][0]["command"][3],
+        "programbench-container:/workspace/"
+    );
+    assert_eq!(
+        observed["calls"][1]["command"],
+        serde_json::json!([
+            "docker",
+            "exec",
+            "-w",
+            "/workspace",
+            "programbench-container",
+            "bash",
+            "-lc",
+            "chmod +x ./compile.sh && ./compile.sh"
+        ])
+    );
+    assert_eq!(observed["calls"][1]["cwd"], "None");
+    assert_eq!(observed["calls"][1]["timeout"], 5);
+    assert_eq!(observed["executable"], "replacement");
+    let copied_names = observed["copied_names"]
+        .as_array()
+        .expect("copied names should be array");
+    assert!(
+        copied_names
+            .iter()
+            .any(|name| name.as_str() == Some("compile.sh"))
+    );
+    assert!(
+        copied_names
+            .iter()
+            .any(|name| name.as_str() == Some("main.c"))
+    );
+    assert!(
+        copied_names
+            .iter()
+            .all(|name| !name.as_str().unwrap_or_default().contains(".omp")
+                && !name.as_str().unwrap_or_default().contains(".stateful")
+                && name.as_str() != Some("executable"))
+    );
 }
 
 #[test]
@@ -2149,6 +2896,7 @@ fn instance_metadata(
         exit_code: Some(if error.is_some() { 1 } else { 0 }),
         error: error.map(str::to_string),
         archive_error: None,
+        workspace_copy_error: None,
         subagent_used,
         token_usage: Some(token_usage),
     }
@@ -2195,6 +2943,10 @@ fn condition_report(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test fixture builder mirrors report fields"
+)]
 fn condition_report_with_instances(
     condition_id: &str,
     stateful: bool,
@@ -2349,4 +3101,67 @@ fn temp_root(prefix: &str) -> PathBuf {
 
 fn has_arg(args: &[String], value: &str) -> bool {
     args.iter().any(|arg| arg == value)
+}
+
+fn has_arg_pair(args: &[String], key: &str, value: &str) -> bool {
+    args.windows(2).any(|pair| pair == [key, value])
+}
+
+fn docker_call_starts_with(call: &serde_json::Value, prefix: &[&str]) -> bool {
+    let Some(args) = call.as_array().map(|args| {
+        args.iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+    }) else {
+        return false;
+    };
+    args.starts_with(prefix)
+}
+
+fn docker_call_contains_arg(call: &serde_json::Value, expected: &str) -> bool {
+    call.as_array().is_some_and(|args| {
+        args.iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|arg| arg == expected)
+    })
+}
+
+fn docker_call_has_sequence(call: &serde_json::Value, expected: &[&str]) -> bool {
+    let Some(args) = call.as_array().map(|args| {
+        args.iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+    }) else {
+        return false;
+    };
+    args.windows(expected.len())
+        .any(|window| window == expected)
+}
+
+fn docker_call_execs(call: &serde_json::Value, container_id: &str, inner_prefix: &[&str]) -> bool {
+    let Some(args) = call.as_array().map(|args| {
+        args.iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+    }) else {
+        return false;
+    };
+    if args.len() < 3 || args[0] != "docker" || args[1] != "exec" {
+        return false;
+    }
+    let Some(container_index) = args.iter().position(|arg| *arg == container_id) else {
+        return false;
+    };
+    args[container_index + 1..].starts_with(inner_prefix)
+}
+
+fn docker_call_contains_env(call: &serde_json::Value, assignment: &str) -> bool {
+    let Some(args) = call.as_array().map(|args| {
+        args.iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+    }) else {
+        return false;
+    };
+    args.windows(2).any(|pair| pair == ["-e", assignment])
 }

@@ -20,14 +20,14 @@ pub struct RequestEnvelope {
     pub protocol_version: ProtocolVersion,
     pub request_id: String,
     pub observed_at: String,
-    pub session: SessionIdentity,
+    pub agent: AgentIdentity,
     pub workspace: WorkspaceIdentity,
     pub source: SourceRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionIdentity {
-    pub session_id: String,
+pub struct AgentIdentity {
+    pub agent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     pub actor_id: String,
@@ -35,7 +35,7 @@ pub struct SessionIdentity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session_id: Option<String>,
+    pub parent_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_actor_id: Option<String>,
 }
@@ -53,7 +53,6 @@ pub struct WorkspaceIdentity {
 #[serde(rename_all = "lowercase")]
 pub enum SourceKind {
     Hook,
-    Mcp,
     Cli,
     Watcher,
     Ide,

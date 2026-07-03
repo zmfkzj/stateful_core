@@ -1,8 +1,27 @@
 # Current-State Coordination
 
-This document summarizes the initial product direction for observing and
-coordinating the present activity of agents, sessions, and humans working in the
-same codebase.
+This page is a rationale and index for current-state coordination. The shipped
+contract details are authoritative in [README](../README.md),
+[Implementation Contract](implementation-contract.md), [State Model](state-model.md),
+and [Architecture](architecture.md). When this page says `target`, `future`, or
+`should`, treat it as direction rather than shipped behavior unless the canonical
+docs above say otherwise.
+
+## Shipped v1 vs Target
+
+Use this table as a quick boundary; the linked canonical docs remain authoritative.
+
+| Capability | Status | Safe to rely on today | Canonical detail |
+| --- | --- | --- | --- |
+| Exact file/directory scope rules | Shipped v1 | Exact file scopes authorize exact file writes; directory scopes authorize only exact `write_directory` for the exact directory resource and do not authorize child file/delete/rename/move actions. | [State Model](state-model.md), [Implementation Contract](implementation-contract.md), [Usage Reference](usage-reference.md) |
+| FIFO single-path `write_file`/`write_directory` queueing | Shipped v1 | A wait request stores one path and schedules only `write_file` or `write_directory`. | [Implementation Contract](implementation-contract.md), this page's Wait Queue section |
+| Lazy resume notifications | Shipped v1 | Poll/SSE/`resume next` expose claimable reservations; OMP lazy edit/write resume can replay captured writes after claiming and rereading. | [Implementation Contract](implementation-contract.md), [Usage Reference](usage-reference.md) |
+| Human-write observation and reconciliation blocks | Partial | Shipped hooks compare claim-time file observations for active exact file claims; watcher/IDE human-save blocks are target behavior. | [README](../README.md), [Architecture](architecture.md), [Implementation Contract](implementation-contract.md) |
+| Cross-workspace repo warnings | Target | Local v1 coordinates one workspace boundary; repo-relative warnings across workspaces, worktrees, or branches are future behavior. | [State Model](state-model.md), [Architecture](architecture.md) |
+| Phase-aware authorization | Partial | Shipped writes require active, unexpired reservation scope and active same-reservation claims; finalization or expiration ends authority. Direct phase-as-policy-input behavior is implementation-specific beyond canonical state-model wording. | [State Model](state-model.md), [Implementation Contract](implementation-contract.md) |
+| Continuous claim fencing | Target | Shipped v1 consumes/releases claims at write boundaries; later writes must reread and reacquire or claim a promoted reservation. Continuous claim-id fencing through a native write or long command is target behavior. | [State Model](state-model.md), [Implementation Contract](implementation-contract.md), [Usage Reference](usage-reference.md) |
+| Multi-resource queueing | Target | Shipped scheduling is single-path; atomic all-or-nothing multi-resource queueing is target-model behavior. | [State Model](state-model.md), [Implementation Contract](implementation-contract.md) |
+| Rename/move queueing | Target | `rename_file` and `move_file` are immediate authorization actions requiring exact source and destination scopes/claims; conflicting rename/move queueing waits for the multi-resource scheduler. | [Implementation Contract](implementation-contract.md), [Usage Reference](usage-reference.md) |
 
 ## Problem
 
@@ -59,11 +78,12 @@ An agent activity state should be compact, fresh, and directly useful for
 coordination.
 
 ```text
-session_id
+agent_id
+workspace_id
 actor_id
 actor_type: agent | subagent | human | system
 owner_id
-parent_session_id
+parent_agent_id
 parent_actor_id
 workspace
 branch
@@ -170,9 +190,10 @@ Each promoted waiter receives a short claimable reservation (the shipped API
 state is `reserved`). Claimable reservations prevent a later session from taking
 the same resource ahead of an earlier conflicting waiter, but they are not active
 write authority. The promotion records a pending notification payload containing
-the wait queue row's stored, non-empty purpose. The session with the claimable
-reservation must reread the target. Manual MCP/CLI flows then call
-`state_reservation_claim` / `stateful reservation claim --wait-id <id>` before writing;
+the wait queue row's stored, non-empty purpose. The agent with the claimable
+reservation must reread the target. Manual native-tool or CLI flows then call
+`state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or
+`stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>` before writing;
 the claim uses the stored reservation purpose, and clients do not provide a new
 claim purpose. Native edit hooks and sandbox `write-targets` authorization can
 lazy-claim the claimable reservation when the write is retried. Claiming creates
@@ -181,26 +202,35 @@ claimable reservation TTL is 120 seconds. If a claimable reservation expires
 without being claimed, the server may promote the next eligible FIFO waiter.
 
 Resume is notification-driven rather than process-driven. The state server
-records a pending notification with the stored purpose when it promotes a
-claimable reservation. Agents and orchestrators discover that signal by polling
-notifications, asking for the next claimable reservation, or receiving that
-context from a lifecycle hook. Polling returns each pending notification once and
-marks it delivered; callers that miss or discard a poll response should use
+records a pending notification with the stored purpose and a monotonic
+per-target-agent/workspace `sequence` when it promotes a claimable reservation.
+Agents and orchestrators discover that signal by polling notifications,
+subscribing to the SSE stream, asking for the next claimable reservation, or
+receiving that context from a lifecycle hook. Polling returns each pending
+notification once and marks returned notifications delivered. The SSE stream
+sends each notification as `id: <sequence>` with the same `sequence` in the JSON
+event data, and stream delivery alone does not mark the notification delivered.
+On reconnect, `Last-Event-ID` / `last-event-id` acknowledges all notifications
+through that sequence, then the server replays later pending notifications.
+Callers that miss or discard a poll response or SSE event should use
 `stateful resume next` / `state_resume_next` to rediscover any still-active
-claimable reservation and its stored purpose. The state server does not wake a sleeping
-Codex process by itself; external orchestration can build on the notification
-and resume APIs.
+claimable reservation and its stored purpose. The state server does not wake a
+sleeping Codex process by itself; external orchestration can build on the
+notification and resume APIs.
 
-Full scheduling works through immediate request/response plus polling. Reservation
-request APIs return `queued`, `reserved` (claimable reservation), `claimed`,
-`canceled`, or `expired` state without blocking indefinitely. Immediate
-availability creates a claimable reservation with API state `reserved`; the
-session must still reread the target. Manual MCP/CLI flows claim with
-`state_reservation_claim` / `stateful reservation claim --wait-id <id>` before retrying;
+Full scheduling works through immediate request/response plus replayable
+notification delivery. Reservation request APIs return `queued`, `reserved`
+(claimable reservation), `claimed`, `canceled`, or `expired` state without
+blocking indefinitely. Immediate availability creates a claimable reservation
+with API state `reserved`; the agent must still reread the target. Manual
+native-tool or CLI flows claim with
+`state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or
+`stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>` before retrying;
 the server uses the stored reservation purpose. Native edit hooks and sandbox
 `write-targets` authorization can lazy-claim at the retry write boundary.
-Waiting is handled by polling `stateful notifications poll` or `stateful resume
-next`; both reservation surfaces expose the stored purpose.
+Waiting is handled by polling `stateful notifications poll`, subscribing to the
+SSE stream, or using `stateful resume next`; all reservation surfaces expose the
+stored purpose.
 `stateful reservation wait --timeout` is not part of the v1 hardening implementation.
 
 `request_id` and non-empty `purpose` are required for idempotency and live state
@@ -213,8 +243,8 @@ replace the original purpose. Repeating an expired request requeues the same
 waiter in place, preserving its original FIFO row while requiring a new
 reservation and claim before writing. A queued or claimable (`reserved`) request can be
 canceled explicitly with `state_reservation_cancel` /
-`stateful reservation cancel --request-id <id>`. Session or activity finalization
-releases that session's active claims, cancels that session's queued and
+`stateful reservation cancel --request-id <id>`. Stop or activity finalization
+releases that agent's active claims, cancels that agent's queued and
 claimable (`reserved`) requests, and promotes the next eligible waiter for any
 released or canceled resource.
 
@@ -229,11 +259,11 @@ Instead, important actions should pass through a state protocol:
 ```text
 before important action -> authorize against current state
 after important action  -> observe and update current state
-before session stops    -> require final status
+before active agent stops    -> require final status
 ```
 
 For the first implementation, supported write actions are blocked unless the
-session has active reservation. Conflict enforcement is advisory but blocking where
+active agent has active reservation. Conflict enforcement is advisory but blocking where
 supported runtime adapters expose a hookable action. Hard global locks are a
 later policy decision.
 
@@ -243,316 +273,34 @@ The chosen MVP direction is:
 
 ```text
 Codex lifecycle hooks and OMP extension hooks
-+ MCP tools
++ native Stateful coordination tools
 + state server
 ```
 
 This gives useful control without forking Codex or changing the default OMP
 profile.
 
-The prototype supports user-level installation with repo allowlist gating.
-`stateful install --agent codex --yes` configures global Codex hooks and MCP,
-and writes `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
-`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`) and
-`skills/dispatching-parallel-agents/SKILL.md`.
-For OMP, `stateful install --agent omp --yes` writes OMP config containing the
-stateful extension under the OMP `stateful` profile agent directory
-(`~/.omp/profiles/stateful/agent`) and ensures the target keys
-`tools.approvalMode: yolo`, `stateful.autoApprove: false`,
-`bash.enabled: true`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
-and `eval.jl: false`; it removes
-`tools.approval` from the stateful profile because yolo mode delegates safety to
-Stateful hooks. Without `--update`, existing scalar values are preserved and
-only missing keys are inserted; with `--update`, existing target scalar values
-are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
-tools are denied at the host approval and hook levels. The installer also writes
-`rules/stateful-required.md` and `skills/stateful-command-policy/` (`SKILL.md`,
-`omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
-`subagent-write-recovery.md`) under that isolated agent directory: the
-always-apply rule tells the model when
-Stateful policy applies, the `stateful-command-policy` manual keeps the detailed
-procedure, and hooks remain the enforcement boundary. The
-generated extension keeps built-in Bash preflight, edit/write auto-declare/claim,
-and lazy resume tools. Built-in Bash may run only strict trusted
-`stateful sandbox run ...` and `stateful sandbox process find ...` commands
-after Stateful preflight; command execution and process inspection are not
-generated tool calls. External
-write/create/write-dir/socket/signal scope asks for a scoped OMP UI grant by
-default; `stateful.autoApprove: true` skips only that Stateful-owned prompt
-while sandbox scope validation, hooks, reservation/claim checks, and grant
-limits still apply. That grant omits raw command text, shows purpose and
-declared scope, and can cover matching calls until expiry or max uses. When
-auto-approval is enabled, no prompt is shown. Raw Bash and
-Python/JavaScript/JS/Ruby/Julia
-eval-tool calls
-are blocked even if their command text
-invokes `stateful sandbox run`. The OMP
-global/default profile is not modified.
-`stateful enable` opts the current repo into enforcement through the user-level
-install and repo allowlist.
+The runtime details are intentionally not repeated here. Use this page for the
+current-state rationale and queue/resume shape; use the canonical docs for
+shipped hook, tool, sandbox, API, and storage behavior:
 
-```text
-global Codex hooks and MCP config
-isolated OMP `stateful` profile config
-repo allowlist entry
-optional <repo>/.codex/hooks.json compatibility fallback
-<repo>/.stateful/config.yml
-stateful binary available by absolute path or PATH lookup
-```
+- [README](../README.md) summarizes shipped status and operator-facing use.
+- [Implementation Contract](implementation-contract.md) is the concrete v1
+  source for installation, hooks, native Stateful tools, lazy resume,
+  `write-targets`, OMP scoped UI grant behavior, API, storage, and tests.
+- [State Model](state-model.md) defines active reservation,
+  same-reservation claim, claimable reservation, `wait_id`, `reservation_id`,
+  freshness, queues, and current-state views.
+- [Architecture](architecture.md) defines the hook/native-tool/server split:
+  adapters stay thin, the local HTTP state server owns policy, and native tools
+  are API adapters rather than independent policy engines.
 
-Codex global hooks, repo-local compatibility hooks, and managed Codex hooks
-share the Codex lifecycle model: `SessionStart`, `UserPromptSubmit`,
-`PreToolUse`, `PostToolUse`, and `Stop`. The isolated OMP `stateful` profile
-uses OMP extension entry points for `SessionStart`, `PreToolUse`,
-`PostToolUse`, and `Stop`; OMP does not expose `UserPromptSubmit`. OMP
-`session-start` stores `STATEFUL_SESSION_ID` from explicit event/ctx ids
-(`event.sessionId`, `event.session_id`, session fields), falling back to the
-`ctx.sessionManager.getSessionFile()` header/stem and then `getLeafId()`, and
-persists the same current-session files used by
-session-aware CLI and MCP callers. With that state in place,
-`state_session_register` -> `state_reservation_declare` ->
-`state_claim_acquire` resolves the active OMP session without a caller-supplied
-environment override. OMP native `edit` and `write` pre-tool authorization can
-also auto-declare the exact file scope, acquire same-reservation claims, and
-retry when the only denial is missing reservation/scope and no explicit
-reservation id was supplied; queued conflicts, unavailable runtime,
-changed-target replay, unsupported targets, explicit bad reservation ids, and
-other denials still use lazy resume or normal denial recovery. Plugin packaging
-is deferred to team beta for distribution and update UX, while managed hooks
-remain the long-term organization-enforcement path.
-
-Hook scripts are thin integration adapters. They parse runtime hook input,
-classify runtime-specific tool calls, extract action and targets when supported,
-call the local HTTP state server for store-backed coordination policy, and
-translate the decision back into runtime hook output. Adapter-local policy is
-limited to fail-closed classification and trusted wrapper validation for
-command-shaped execution. V1 implementation is Rust-only, so hooks invoke the
-compiled `stateful` binary.
-
-Envelope-enforced write authorization, reservation, and reconciliation requests
-include `protocol_version`; a major protocol mismatch fails closed on those
-paths. OMP `SessionStart`, `PostToolUse`, and `Stop` lifecycle posts use flat
-session-event bodies with `metadata` and `source`, while OMP `PreToolUse`
-authorization still uses the v1 envelope.
-
-OMP adapters preserve stateful hard blocks: built-in Bash may run only strict
-trusted `stateful sandbox run ...` and `stateful sandbox process find ...`
-commands after Stateful preflight. External write/create/write-dir/socket/signal
-scope asks for a scoped OMP UI grant by default; `stateful.autoApprove: true`
-skips only that Stateful-owned prompt while sandbox scope validation, hooks,
-reservation/claim checks, and grant limits still apply; stateful allow maps to
-allow; and stateful denial or unavailable state maps to block even when OMP yolo
-metadata is present.
-
-### Hook Responsibilities
-
-These responsibilities apply to Codex hooks unless noted. OMP supports
-`SessionStart`, `PreToolUse`, `PostToolUse`, and `Stop`; it does not expose a
-`UserPromptSubmit` hook.
-
-`SessionStart`:
-
-- register the session
-- record workspace, branch, and session id
-- inject relevant active state into the model context
-
-`UserPromptSubmit`:
-
-- extract or request an initial reservation when possible
-- attach nearby active states as context
-
-`PreToolUse`:
-
-- intercept supported tool calls before execution
-- deny supported write calls when the session has no active reservation
-- deny Codex raw Bash with sandbox guidance. For OMP, built-in Bash may run
-  only strict trusted `stateful sandbox run ...` and `stateful sandbox process
-  find ...` commands after Stateful preflight; arbitrary raw Bash and the
-  Python/JavaScript/JS/Ruby/Julia eval tools remain denied at host approval and
-  hook levels. Scoped external writes still ask for a Stateful OMP UI grant by
-  default; `stateful.autoApprove: true` skips only that Stateful-owned prompt
-  while sandbox scope validation, hooks, reservation/claim checks, and grant
-  limits still apply.
-- check whether requested files or resources conflict with active claims
-- deny, warn, or add context based on policy
-
-`PostToolUse`:
-
-- observe supported tool results
-- update files touched, phase, test results, and last result
-- release same-reservation repo-write claims after completed native edit and
-  `write-targets` transactions
-- refresh heartbeat timestamps and claim timestamps only for remaining active
-  claims still covered by active reservation
-
-`Stop`:
-
-- post activity finalization for the session
-- release the session's claims through finalization
-- leave explicit `state_activity_finalize` available for manual final status
-  updates before shutdown
-
-Subagents:
-
-- coordinate in the same workspace state but use their own effective session
-  identity when the adapter exposes one
-- record activity and claims with their own `actor_id`
-- do not receive automatic override authority from a shared owner
-
-### MCP Responsibilities
-
-The MCP surface should expose structured tools for the agent and hooks. Canonical
-callable tool names map to dotted protocol names:
-
-```text
-state_session_register (state.session.register)
-state_session_heartbeat (state.session.heartbeat)
-state_reservation_declare (state.reservation.declare)
-state_reservation_request (state.reservation.request)
-state_reservation_claim (state.reservation.claim)
-state_reservation_cancel (state.reservation.cancel)
-state_claim_acquire (state.claim.acquire)
-state_claim_release (state.claim.release)
-state_activity_observe (state.activity.observe)
-state_activity_finalize (state.activity.finalize)
-state_conflicts_check (state.conflicts.check)
-state_current_read (state.current.read)
-state_events_read (state.events.read)
-state_context_render (state.context.render)
-state_reconcile_ack (state.reconcile.ack)
-state_notifications_poll (state.notifications.poll)
-state_resume_next (state.resume.next)
-```
-
-`state_reservation_declare` and `state_reservation_request` require a non-empty `purpose`.
-The caller must infer that purpose from the user or agent instruction when it is
-not explicit; the server must not synthesize a fallback purpose.
-`state_reservation_declare` also requires non-empty `files_planned`; empty arrays and
-empty or normalized-empty entries are rejected with `missing_scope`.
-`state_reservation_request` also requires a non-empty `path`; empty or
-normalized-empty request paths are rejected with `missing_scope`.
-`state_reservation_request` and `state_reservation_cancel` expose the explicit scheduling
-queue. `state_reservation_claim` takes a `wait_id` only and uses the stored
-reservation purpose; callers must not send a claim purpose.
-
-`state_claim_acquire` accepts `paths: string[]` for batch acquisition from
-active reservation scope. Each entry still becomes a claim on one exact file or
-directory resource; directory claims authorize only exact `write_directory`
-resources, not child file writes. Legacy server requests with `path` remain
-accepted for compatibility, while `state_claim_release` still accepts one
-`path`.
-
-Hooks should call the same state server API as MCP tools so policy remains
-centralized. Native edit tools with hook-visible targets are the repo file edit
-path after reservation and claim; sandbox-run remains the Bash wrapper for
-command-shaped shell writes.
-
-### State Server Responsibilities
-
-The state server is the source of truth for active coordination state.
-
-It should:
-
-- store append-only state events
-- materialize active current state
-- evaluate conflict rules
-- manage claim TTLs
-- expose current-state views for prompt rendering
-- retain historical activity as evidence after expiration
-
-Runtime hook integrations should stay thin. Store-backed coordination policy
-belongs to the server, not to hook scripts. Hook logic should only handle
-runtime parsing, fail-closed unknown-tool handling, and trusted wrapper validation.
-
-V1 persistence is SQLite with append-only event tables and materialized
-current-state views. JSONL may be used for debugging exports, but not as the
-primary store.
-
-V1 transport is local HTTP. Codex hooks, OMP hooks, MCP tools, filesystem
-watchers, and the future IDE extension should call the same local HTTP API. MCP
-remains an adapter, not a separate policy implementation.
-
-Policy evaluation should use one entry point:
-
-```text
-authorize_action(input) -> decision
-```
-
-The shipped `/v1/authorize` decision includes `allow`, `deny`, or `error` plus a
-reason and required next action when needed. A `warn` decision, response-level
-conflicts, rendered context items, and response-level audit-event fields are
-target response vocabulary. Deny decisions are audited as
-`AuthorizationDenied`; shipped lifecycle mutations also append
-`ClaimReleased`, `ReservationClaimed`, `ReservationCanceled`, and `ActivityFinalized`
-events.
-
-### Tool Classification
-
-V1 write enforcement is limited to tool paths where targets can be determined
-reliably:
-
-```text
-namespaced runtime tool names -> classify by leaf
-  (functions.bash as Bash; functions.python/javascript/js/ruby/julia as eval
-  tools; functions.read / functions.search as native read/search)
-native read/search/diff tools -> preferred path for ordinary read work
-native edit tools with hook-visible targets -> enforce by inspecting targets
-  after task-level reservation covers the target and a same-reservation claim; release the claim after the
-  completed write transaction
-Codex Bash read-only inspection that genuinely needs a shell -> require a strict
-  trusted wrapper:
-  <absolute-stateful-binary> sandbox run --fs read-only --network disabled
-  --command <cmd>
-OMP built-in Bash sandbox/process commands -> allow only strict trusted
-  `stateful sandbox run ...` and `stateful sandbox process find ...` commands
-  after Stateful preflight
-Codex process inspection -> use <absolute-stateful-binary> sandbox process find <selector>, not raw ps/pgrep
-Codex Bash command-shaped repo writes -> require the trusted wrapper with
-  --fs write-targets plus explicit --write-target <file>/--create-target <file> values
-test execution -> run through sandbox run --fs build --network enabled with
-  --write-dir <scratch-purpose>; scratch lives under /tmp/stateful/<session>/
-Codex raw Bash, arbitrary OMP raw Bash, or OMP Python/JavaScript/JS/Ruby/Julia eval tools
-  -> deny
-repo-external OMP command-shaped work -> use built-in Bash with a strict trusted `stateful sandbox run --fs external ...` command; write/create/write-dir/socket/signal scope asks for a scoped OMP UI grant by default, and `stateful.autoApprove: true` skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply
-```
-
-Bash denial should tell the agent to use native read/search/diff tools for
-ordinary read work,
-`<absolute-stateful-binary> sandbox run --fs read-only --network disabled
---command <cmd>` for Codex shell-based read-only inspection,
-`<absolute-stateful-binary> sandbox run --fs write-targets --write-target <file> ... --command <cmd>`
-for Codex command-shaped repo writes after reservation and same-reservation claim,
-OMP built-in Bash with strict trusted `stateful sandbox run ...` commands for
-sandbox runs and repo-external work. External write/create/write-dir,
-socket, or signal scope asks for a scoped OMP UI grant by default;
-`stateful.autoApprove: true` skips only that Stateful-owned prompt while
-sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply. Use
-native edit tools for repo file edits.
-
-The read-only sandbox profile is a write-confinement profile. It does not
-provide full process containment, and it cannot be combined with
-`--network enabled`.
-
-There is no command-text authorization path. Command text alone does not
-authorize `rg`, `git diff`, test runners, stateful operational commands, or any
-other Bash command. Test commands should run through the trusted
-`stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
---command <cmd>` wrapper. Repo writes require task-level reservation covering
-the target plus a matching same-reservation claim and must use native edit tools or
-`--fs write-targets` with explicit targets.
-
-Minimum sandboxed test shape:
-
-```text
-stateful sandbox run --fs build --network enabled --write-dir test-run --command <cmd>
-```
-
-The build profile writes disposable artifacts under
-`/tmp/stateful/<session>/<scratch-purpose>/`. Source-tree edits use native edit tools
-with hook-visible targets, such as Codex `apply_patch` or Edit, after exact
-reservation declaration and a successful same-reservation file claim; the completed write
-transaction releases the authorizing claim. Command-shaped source writes must
-use exact `--write-target <file>` or `--create-target <file>` entries.
+The important design point for this rationale: supported writes pass through an
+authorization boundary before mutation, effects are observed afterward, and
+runtime adapters should classify tools only enough to call the state server.
+Lazy resume belongs at the retry boundary: a queued `wait_id` may become a
+claimable reservation, but write authority exists only after the target is
+reread and an active same-reservation claim is created.
 
 ## Conflict Policy
 
@@ -570,8 +318,9 @@ Initial policy should prefer advisory claims:
 - OMP built-in Bash may run only strict trusted `stateful sandbox run ...` and
   `stateful sandbox process find ...` commands after Stateful preflight;
   arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution is
-  denied at host approval and hook levels. Scoped external writes still ask for
-  the Stateful OMP UI grant unless auto-approved.
+  denied at host approval and hook levels. Scoped external writes and repo-external
+  native `edit`/`write` file targets auto-approve the Stateful OMP UI grant by
+  default and ask only when `stateful.autoApprove: false` is configured.
 - directory reservation and directory claim authorize only `write_directory` for the
   exact directory resource; they do not authorize `write_file`, delete, rename,
   or move actions on child paths
@@ -581,7 +330,7 @@ Initial policy should prefer advisory claims:
 - delete without exact file scope: deny
 - rename or move without exact file scope for both source and destination: deny
 - active claim in the hard conflict domain by another actor: deny unless the
-  current session has an explicit user override for that resource
+  current agent has an explicit user override for that resource
 - same `workspace_id` and same normalized `relative_path`: shipped hard conflict
   domain for active claim and wait-queue checks
 - same normalized `absolute_path`: target physical-file hard conflict domain
@@ -774,7 +523,7 @@ claims while the server is unavailable.
 
 Outbox sync uses `outbox_id` as an idempotency key. Replaying the same outbox
 entry must not create duplicate state events. Pending events should be synced in
-local creation order per session; failed entries stay in the outbox with failure
+local creation order per agent; failed entries stay in the outbox with failure
 metadata for later retry or inspection.
 
 V1 has no cached write grace period. A recent successful claim or reservation check is
@@ -784,9 +533,9 @@ not enough to continue writing while the state server is down.
 
 Agent runtime hooks are a practical guardrail, not a complete enforcement
 boundary. They can intercept important supported paths such as shell commands,
-`apply_patch`, and MCP calls, but they do not make the state protocol a full
-security boundary. Post-action hooks also cannot undo side effects that already
-happened.
+`apply_patch`, and native Stateful tool calls, but they do not make the state
+protocol a full security boundary. Post-action hooks also cannot undo side
+effects that already happened.
 
 For OMP, yolo metadata does not downgrade a stateful denial to a warning; deny
 and unavailable-state decisions remain hard blocks.
@@ -819,12 +568,12 @@ authorization orchestration in `stateful-server::policy_service` and uses
 
 ## Initial Decision
 
-Build the first version with Codex lifecycle hooks, OMP extension hooks, MCP
-tools, and a `stateful_core` state server.
+Build the first version with Codex lifecycle hooks, OMP extension hooks, native
+Stateful coordination tools, and a `stateful_core` state server.
 
-The v1 MVP includes Codex and OMP hooks, MCP tools, the state server, sandboxed
-test execution, and explicit reconciliation acknowledgements. Automatic
-human-write observation and reconciliation blocks remain target behavior.
+The v1 MVP includes Codex and OMP hooks, native Stateful tools, the state server,
+sandboxed test execution, and explicit reconciliation acknowledgements.
+Automatic human-write observation and reconciliation blocks remain target behavior.
 
 V1 is local-only. It coordinates one machine/workspace boundary. Team-shared,
 cross-machine, or hosted state sync is deferred to v1.5/v2.
@@ -853,8 +602,9 @@ supported write action + target outside reservation scope -> deny
 Codex raw Bash -> deny; OMP built-in Bash -> allow only strict trusted
   `stateful sandbox run ...` and `stateful sandbox process find ...` commands
   after Stateful preflight; arbitrary raw OMP Bash and Python/JavaScript/JS/Ruby/Julia
-  eval tools -> deny. Scoped external writes still ask for the Stateful OMP UI
-  grant unless auto-approved.
+  eval tools -> deny. Scoped external writes and repo-external native
+  `edit`/`write` file targets auto-approve the Stateful OMP UI grant by default
+  and ask only when `stateful.autoApprove: false` is configured.
 delete action + non-exact file scope -> deny
 rename/move action + non-exact source or destination scope -> deny
 active write claim in hard conflict domain -> deny
@@ -867,15 +617,14 @@ repo-relative conflicts remain warning context in v1.
 
 Explicit overrides and phase-aware authorization are target policy and are not
 implemented in the current server. When implemented, an explicit override can
-allow a direct write
-authorization exception for the current session and resource, but it must not
-reorder existing waiters, steal a claimable reservation, or move the overriding session to
-the head of a queue.
+allow a direct write authorization exception for the current agent and resource,
+but it must not reorder existing waiters, steal a claimable reservation, or move
+the overriding agent to the head of a queue.
 
-A v1 task reservation must be active, unexpired, belong to the same
-session, and include matching exact file or directory scope. Abstract task,
-test, port, or migration reservation can be stored as context but does not permit
-writes. Directory scope authorizes `write_directory` for the exact directory
+A v1 task reservation must be active, unexpired, belong to the same agent, and
+include matching exact file or directory scope. Abstract task, test, port, or
+migration reservation can be stored as context but does not permit writes.
+Directory scope authorizes `write_directory` for the exact directory
 resource; file writes, deletes, renames, and moves require exact file scope.
 
 Resource authorization classes:
@@ -893,7 +642,7 @@ Reservation freshness defaults:
 ```text
 default reservation TTL: 15 minutes
 default claim TTL: 5 minutes
-default reservation TTL: 120 seconds
+default claimable reservation TTL: 120 seconds
 heartbeat extension: shipped for explicit heartbeats and implicit authorize-time
 heartbeat events on active unexpired reservation rows
 maximum rolling reservation lifetime: 60 minutes from declared_at
@@ -917,7 +666,7 @@ Override policy:
 ```text
 automatic override: never allowed
 override authority: explicit user instruction only
-scope: current session + current turn + specific resource
+scope: current agent + current turn + specific resource
 applies to: active claim conflict only
 does not bypass: missing reservation, expired reservation, target blocked/finalized state
 does not bypass: file/directory scope matching
@@ -932,7 +681,7 @@ record and authorization path.
 Prompt context rendering:
 
 ```text
-state_context_render(workspace, session_id, resource?, mode)
+state_context_render(workspace, agent_id, resource?, mode)
 mode: brief | detailed
 sections: Blocking, Required Next Action, Warnings, Nearby Activity, Stale/Expired
 ```

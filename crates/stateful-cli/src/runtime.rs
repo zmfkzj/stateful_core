@@ -8,21 +8,18 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::global_paths::GlobalPaths;
 use crate::repo_registry::RepoIdentity;
 use serde::{Deserialize, Serialize};
 
-pub const STATEFUL_SESSION_ID_ENV: &str = "STATEFUL_SESSION_ID";
-const CODEX_THREAD_ID_ENV: &str = "CODEX_THREAD_ID";
-const STATEFUL_CODEX_RUN_ID_ENV: &str = "STATEFUL_CODEX_RUN_ID";
 const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
 static SECRET_JSON_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReservationDeclareArgs {
-    pub session_id: String,
+    pub agent_id: String,
     pub workspace_id: String,
     pub purpose: String,
     pub files_planned: Vec<String>,
@@ -31,7 +28,7 @@ pub struct ReservationDeclareArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReservationClaimArgs {
-    pub session_id: String,
+    pub agent_id: String,
     pub workspace_id: String,
     pub wait_id: String,
     pub reservation_id: Option<String>,
@@ -40,7 +37,7 @@ pub struct ReservationClaimArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReservationRequestArgs {
-    pub session_id: String,
+    pub agent_id: String,
     pub workspace_id: String,
     pub request_id: String,
     pub reservation_id: Option<String>,
@@ -52,7 +49,7 @@ pub struct ReservationRequestArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReservationCancelArgs {
-    pub session_id: String,
+    pub agent_id: String,
     pub workspace_id: String,
     pub request_id: String,
     pub identity: Option<RepoIdentity>,
@@ -69,15 +66,15 @@ pub struct ServerRuntime {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CurrentSession {
-    pub session_id: String,
+pub struct AgentContext {
+    pub agent_id: String,
     pub workspace_id: String,
 }
 
-impl CurrentSession {
-    pub fn new(session_id: impl Into<String>, workspace_id: impl Into<String>) -> Self {
+impl AgentContext {
+    pub fn new(agent_id: impl Into<String>, workspace_id: impl Into<String>) -> Self {
         Self {
-            session_id: session_id.into(),
+            agent_id: agent_id.into(),
             workspace_id: workspace_id.into(),
         }
     }
@@ -199,8 +196,18 @@ fn sync_parent_dir(path: &Path) -> anyhow::Result<()> {
         anyhow::bail!("runtime file path has no parent");
     };
     let directory = fs::File::open(parent)?;
-    directory.sync_all()?;
+    if let Err(error) = directory.sync_all() {
+        if parent_dir_sync_is_unsupported(&error) {
+            return Ok(());
+        }
+        return Err(error.into());
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+fn parent_dir_sync_is_unsupported(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::Unsupported || matches!(error.raw_os_error(), Some(45 | 95))
 }
 
 #[cfg(not(unix))]
@@ -246,366 +253,6 @@ pub fn discover_runtime_with_optional_global(
         Ok(paths) => discover_runtime_with_global(repo_root, &paths),
         Err(_) => discover_runtime(repo_root),
     }
-}
-
-pub fn write_current_session_file(
-    repo_root: impl AsRef<Path>,
-    session: &CurrentSession,
-) -> anyhow::Result<()> {
-    let repo_root = repo_root.as_ref();
-    write_legacy_current_session_file(repo_root, session)?;
-    Ok(())
-}
-
-pub fn write_current_session_file_for_current_stateful_session(
-    repo_root: impl AsRef<Path>,
-    session: &CurrentSession,
-) -> anyhow::Result<()> {
-    let repo_root = repo_root.as_ref();
-    validate_session_id(&session.session_id, "hook session_id")?;
-    if let Some(session_id) = current_stateful_session_id()? {
-        ensure_current_session_matches_env_session(&session_id, session)?;
-    }
-    write_current_session_file_for_session(repo_root, &session.session_id, session)?;
-    if current_session_file_is_untrusted(&current_session_file_path(repo_root))? {
-        return Ok(());
-    }
-
-    write_legacy_current_session_file(repo_root, session)?;
-    Ok(())
-}
-
-pub(crate) fn write_current_session_file_for_explicit_session(
-    repo_root: impl AsRef<Path>,
-    session: &CurrentSession,
-) -> anyhow::Result<()> {
-    let repo_root = repo_root.as_ref();
-    validate_session_id(&session.session_id, "session_id")?;
-    write_current_session_file_for_session(repo_root, &session.session_id, session)?;
-    if current_session_file_is_untrusted(&current_session_file_path(repo_root))? {
-        return Ok(());
-    }
-
-    write_legacy_current_session_file(repo_root, session)?;
-    Ok(())
-}
-
-fn write_legacy_current_session_file(
-    repo_root: &Path,
-    session: &CurrentSession,
-) -> anyhow::Result<()> {
-    let runtime_dir = ensure_runtime_dir(repo_root)?;
-    let path = runtime_dir.join("session.json");
-    write_plain_file(
-        &path,
-        "current session file",
-        &serde_json::to_string_pretty(session)?,
-    )
-}
-
-pub fn read_current_session_file(repo_root: impl AsRef<Path>) -> anyhow::Result<CurrentSession> {
-    let repo_root = repo_root.as_ref();
-    if let Some(session_id) = current_stateful_session_id()? {
-        return read_current_session_file_for_session(repo_root, &session_id);
-    }
-
-    read_verified_legacy_current_session_file(
-        repo_root,
-        LegacySessionFallback::AllowWithoutSessionBoundFile,
-    )
-}
-
-fn read_legacy_current_session_file(repo_root: &Path) -> anyhow::Result<CurrentSession> {
-    reject_untrusted_runtime_dirs(repo_root, false)?;
-    let contents = read_plain_file_to_string(
-        &current_session_file_path(repo_root),
-        "current session file",
-    )?;
-    Ok(serde_json::from_str(&contents)?)
-}
-
-#[derive(Clone, Copy)]
-enum LegacySessionFallback {
-    AllowWithoutSessionBoundFile,
-    RequireSessionBoundFile,
-}
-
-pub fn read_current_session_file_for_mcp(
-    repo_root: impl AsRef<Path>,
-) -> anyhow::Result<CurrentSession> {
-    let repo_root = repo_root.as_ref();
-    if let Some(session_id) = current_env_session_id(CODEX_THREAD_ID_ENV)? {
-        return read_current_session_file_for_session(repo_root, &session_id);
-    }
-
-    if std::env::var_os(STATEFUL_CODEX_RUN_ID_ENV).is_some() {
-        match read_verified_legacy_current_session_file(
-            repo_root,
-            LegacySessionFallback::RequireSessionBoundFile,
-        ) {
-            Ok(session) => return Ok(session),
-            Err(error) if is_not_found_error(&error) => {}
-            Err(error) => return Err(error),
-        }
-    }
-
-    match read_verified_legacy_current_session_file(
-        repo_root,
-        LegacySessionFallback::RequireSessionBoundFile,
-    ) {
-        Ok(session) => return Ok(session),
-        Err(error) if is_not_found_error(&error) => {}
-        Err(error) => return Err(error),
-    }
-
-    if let Some(session_id) = current_env_session_id(STATEFUL_SESSION_ID_ENV)? {
-        return read_current_session_file_for_session(repo_root, &session_id);
-    }
-
-    read_verified_legacy_current_session_file(
-        repo_root,
-        LegacySessionFallback::RequireSessionBoundFile,
-    )
-}
-
-fn read_verified_legacy_current_session_file(
-    repo_root: &Path,
-    fallback: LegacySessionFallback,
-) -> anyhow::Result<CurrentSession> {
-    let legacy_session = read_legacy_current_session_file(repo_root)?;
-    validate_session_id(
-        &legacy_session.session_id,
-        "current session file session_id",
-    )?;
-
-    let session_bound = match read_current_session_file_for_session(
-        repo_root,
-        &legacy_session.session_id,
-    ) {
-        Ok(session_bound) => session_bound,
-        Err(error) => {
-            if is_not_found_error(&error)
-                && matches!(
-                    fallback,
-                    LegacySessionFallback::AllowWithoutSessionBoundFile
-                )
-                && session_bound_current_session_file_count(repo_root)? == 0
-            {
-                return Ok(legacy_session);
-            }
-            return Err(anyhow::anyhow!(
-                "current session file session_id `{}` has no matching session-bound file: {error}",
-                legacy_session.session_id
-            ));
-        }
-    };
-    if session_bound != legacy_session {
-        anyhow::bail!(
-            "current session file session_id `{}` does not match its session-bound file",
-            legacy_session.session_id
-        );
-    }
-
-    Ok(legacy_session)
-}
-
-fn session_bound_current_session_file_count(repo_root: &Path) -> anyhow::Result<usize> {
-    let sessions_dir = repo_root
-        .join(".stateful_core")
-        .join("runtime")
-        .join("sessions");
-    reject_untrusted_directory_if_present(&sessions_dir, "current session directory")?;
-    let entries = match fs::read_dir(&sessions_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error.into()),
-    };
-
-    let mut session_file_count = 0usize;
-    for entry in entries {
-        let path = entry?.path();
-        if path.extension().is_none_or(|extension| extension != "json") {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() {
-            anyhow::bail!("stateful refuses symlinked current session file");
-        }
-        if !metadata.is_file() {
-            anyhow::bail!("stateful current session file is not a regular file");
-        }
-        if is_hard_linked_file(&metadata) {
-            anyhow::bail!("stateful refuses hard-linked current session file");
-        }
-        session_file_count += 1;
-    }
-
-    Ok(session_file_count)
-}
-
-pub fn write_current_session_file_for_session(
-    repo_root: impl AsRef<Path>,
-    session_file_id: &str,
-    session: &CurrentSession,
-) -> anyhow::Result<()> {
-    let repo_root = repo_root.as_ref();
-    if session_file_id != session.session_id {
-        anyhow::bail!(
-            "session file id `{session_file_id}` must match session_id `{}`",
-            session.session_id
-        );
-    }
-    let path = current_session_file_path_for_session(repo_root, session_file_id)?;
-    let runtime_dir = ensure_runtime_dir(repo_root)?;
-    ensure_plain_directory(&runtime_dir.join("sessions"), "current session directory")?;
-    match read_plain_file_to_string(&path, "current session file") {
-        Ok(contents) => {
-            let existing: CurrentSession = serde_json::from_str(&contents)?;
-            if existing != *session {
-                anyhow::bail!(
-                    "session file `{session_file_id}` is already bound to session `{}`",
-                    existing.session_id
-                );
-            }
-        }
-        Err(error) if is_not_found_error(&error) => {}
-        Err(error) => return Err(error),
-    }
-
-    write_plain_file(
-        &path,
-        "current session file",
-        &serde_json::to_string_pretty(session)?,
-    )?;
-    Ok(())
-}
-
-pub fn read_current_session_file_for_session(
-    repo_root: impl AsRef<Path>,
-    session_file_id: &str,
-) -> anyhow::Result<CurrentSession> {
-    let repo_root = repo_root.as_ref();
-    reject_untrusted_runtime_dirs(repo_root, true)?;
-    let contents = read_plain_file_to_string(
-        &current_session_file_path_for_session(repo_root, session_file_id)?,
-        "current session file",
-    )?;
-    let session: CurrentSession = serde_json::from_str(&contents)?;
-    if session.session_id != session_file_id {
-        anyhow::bail!(
-            "current session file for session `{session_file_id}` contains session_id `{}`",
-            session.session_id
-        );
-    }
-    Ok(session)
-}
-
-fn read_plain_file_to_string(path: &Path, label: &str) -> anyhow::Result<String> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        anyhow::bail!("stateful refuses symlinked {label}");
-    }
-    if !metadata.is_file() {
-        anyhow::bail!("stateful {label} is not a regular file");
-    }
-    if is_hard_linked_file(&metadata) {
-        anyhow::bail!("stateful refuses hard-linked {label}");
-    }
-    Ok(fs::read_to_string(path)?)
-}
-
-fn is_not_found_error(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<std::io::Error>()
-        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-}
-
-fn write_plain_file(path: &Path, label: &str, contents: &str) -> anyhow::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            anyhow::bail!("stateful refuses symlinked {label}");
-        }
-        Ok(metadata) if !metadata.is_file() => {
-            anyhow::bail!("stateful {label} is not a regular file");
-        }
-        Ok(metadata) if is_hard_linked_file(&metadata) => {
-            anyhow::bail!("stateful refuses hard-linked {label}");
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    write_secret_json_file(path, contents)?;
-    Ok(())
-}
-
-fn current_session_file_is_untrusted(path: &Path) -> anyhow::Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(metadata.file_type().is_symlink()
-            || !metadata.is_file()
-            || is_hard_linked_file(&metadata)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn ensure_runtime_dir(repo_root: &Path) -> anyhow::Result<std::path::PathBuf> {
-    let state_dir = repo_root.join(".stateful_core");
-    ensure_plain_directory(&state_dir, "stateful directory")?;
-    let runtime_dir = state_dir.join("runtime");
-    ensure_plain_directory(&runtime_dir, "runtime directory")?;
-    Ok(runtime_dir)
-}
-
-fn reject_untrusted_runtime_dirs(repo_root: &Path, include_sessions: bool) -> anyhow::Result<()> {
-    let state_dir = repo_root.join(".stateful_core");
-    reject_untrusted_directory_if_present(&state_dir, "stateful directory")?;
-    let runtime_dir = state_dir.join("runtime");
-    reject_untrusted_directory_if_present(&runtime_dir, "runtime directory")?;
-    if include_sessions {
-        reject_untrusted_directory_if_present(
-            &runtime_dir.join("sessions"),
-            "current session directory",
-        )?;
-    }
-    Ok(())
-}
-
-fn reject_untrusted_directory_if_present(path: &Path, label: &str) -> anyhow::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            anyhow::bail!("stateful refuses symlinked {label}");
-        }
-        Ok(metadata) if metadata.is_dir() => Ok(()),
-        Ok(_) => anyhow::bail!("stateful {label} is not a directory"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn ensure_plain_directory(path: &Path, label: &str) -> anyhow::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            anyhow::bail!("stateful refuses symlinked {label}");
-        }
-        Ok(metadata) if metadata.is_dir() => Ok(()),
-        Ok(_) => anyhow::bail!("stateful {label} is not a directory"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(path)?;
-            Ok(())
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-#[cfg(unix)]
-fn is_hard_linked_file(metadata: &fs::Metadata) -> bool {
-    metadata.is_file() && metadata.nlink() > 1
-}
-
-#[cfg(not(unix))]
-fn is_hard_linked_file(_metadata: &fs::Metadata) -> bool {
-    false
 }
 
 pub fn post_json(
@@ -729,7 +376,7 @@ pub fn reservation_declare_protocol_body(
     source_ref: &str,
 ) -> serde_json::Value {
     let ReservationDeclareArgs {
-        session_id,
+        agent_id,
         workspace_id,
         purpose,
         files_planned,
@@ -738,7 +385,7 @@ pub fn reservation_declare_protocol_body(
     protocol_envelope(ProtocolEnvelopeArgs {
         runtime,
         request_id: uuid::Uuid::new_v4().to_string(),
-        session_id,
+        agent_id,
         workspace_id,
         identity,
         source_kind,
@@ -759,7 +406,7 @@ pub fn reservation_claim_protocol_body(
     source_ref: &str,
 ) -> serde_json::Value {
     let ReservationClaimArgs {
-        session_id,
+        agent_id,
         workspace_id,
         wait_id,
         reservation_id,
@@ -774,7 +421,7 @@ pub fn reservation_claim_protocol_body(
     protocol_envelope(ProtocolEnvelopeArgs {
         runtime,
         request_id: uuid::Uuid::new_v4().to_string(),
-        session_id,
+        agent_id,
         workspace_id,
         identity,
         source_kind,
@@ -792,7 +439,7 @@ pub fn reservation_request_protocol_body(
     source_ref: &str,
 ) -> serde_json::Value {
     let ReservationRequestArgs {
-        session_id,
+        agent_id,
         workspace_id,
         request_id,
         reservation_id,
@@ -813,7 +460,7 @@ pub fn reservation_request_protocol_body(
     protocol_envelope(ProtocolEnvelopeArgs {
         runtime,
         request_id: uuid::Uuid::new_v4().to_string(),
-        session_id,
+        agent_id,
         workspace_id,
         identity,
         source_kind,
@@ -831,7 +478,7 @@ pub fn reservation_cancel_protocol_body(
     source_ref: &str,
 ) -> serde_json::Value {
     let ReservationCancelArgs {
-        session_id,
+        agent_id,
         workspace_id,
         request_id,
         identity,
@@ -839,7 +486,7 @@ pub fn reservation_cancel_protocol_body(
     protocol_envelope(ProtocolEnvelopeArgs {
         runtime,
         request_id: uuid::Uuid::new_v4().to_string(),
-        session_id,
+        agent_id,
         workspace_id,
         identity,
         source_kind,
@@ -855,7 +502,7 @@ pub fn reservation_cancel_protocol_body(
 pub struct ProtocolEnvelopeArgs<'a> {
     pub runtime: &'a ServerRuntime,
     pub request_id: String,
-    pub session_id: String,
+    pub agent_id: String,
     pub workspace_id: String,
     pub identity: Option<RepoIdentity>,
     pub source_kind: &'a str,
@@ -869,7 +516,7 @@ pub fn protocol_envelope(args: ProtocolEnvelopeArgs<'_>) -> serde_json::Value {
     let ProtocolEnvelopeArgs {
         runtime,
         request_id,
-        session_id,
+        agent_id,
         workspace_id,
         identity,
         source_kind,
@@ -901,9 +548,9 @@ pub fn protocol_envelope(args: ProtocolEnvelopeArgs<'_>) -> serde_json::Value {
         "protocol_version": runtime.protocol_version.as_str(),
         "request_id": request_id,
         "observed_at": now_rfc3339_timestamp(),
-        "session": {
-            "session_id": session_id,
-            "actor_id": format!("stateful-cli:{}", runtime.pid),
+        "agent": {
+            "agent_id": agent_id,
+            "actor_id": agent_id,
             "actor_type": "agent"
         },
         "workspace": {
@@ -932,61 +579,11 @@ fn runtime_file_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf {
         .join("server.json")
 }
 
-fn current_session_file_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf {
-    repo_root
-        .as_ref()
-        .join(".stateful_core")
-        .join("runtime")
-        .join("session.json")
-}
-
-fn current_session_file_path_for_session(
-    repo_root: impl AsRef<Path>,
-    session_file_id: &str,
-) -> anyhow::Result<std::path::PathBuf> {
-    validate_session_id(session_file_id, "session file id")?;
-    Ok(repo_root
-        .as_ref()
-        .join(".stateful_core")
-        .join("runtime")
-        .join("sessions")
-        .join(format!("{session_file_id}.json")))
-}
-
-pub(crate) fn current_stateful_session_id() -> anyhow::Result<Option<String>> {
-    if let Some(session_id) = current_env_session_id(CODEX_THREAD_ID_ENV)? {
-        return Ok(Some(session_id));
-    }
-    current_env_session_id(STATEFUL_SESSION_ID_ENV)
-}
-
-fn current_env_session_id(env_name: &str) -> anyhow::Result<Option<String>> {
-    let Some(session_id) = std::env::var_os(env_name) else {
-        return Ok(None);
-    };
-    let session_id = session_id.to_string_lossy().into_owned();
-    validate_session_id(&session_id, env_name)?;
-    Ok(Some(session_id))
-}
-
-fn ensure_current_session_matches_env_session(
-    env_session_id: &str,
-    session: &CurrentSession,
-) -> anyhow::Result<()> {
-    if env_session_id != session.session_id {
-        anyhow::bail!(
-            "current Stateful session id `{env_session_id}` must match session_id `{}`",
-            session.session_id
-        );
-    }
-    Ok(())
-}
-
-fn validate_session_id(session_id: &str, label: &str) -> anyhow::Result<()> {
-    if session_id.is_empty() {
+pub fn validate_agent_id(agent_id: &str, label: &str) -> anyhow::Result<()> {
+    if agent_id.is_empty() {
         anyhow::bail!("{label} is set but empty");
     }
-    if !session_id
+    if !agent_id
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     {
@@ -1199,4 +796,17 @@ fn read_http_response(stream: &mut TcpStream) -> anyhow::Result<String> {
     }
 
     Ok(String::from_utf8(buffer)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_dir_sync_ignores_enotsup() {
+        let error = std::io::Error::from_raw_os_error(45);
+
+        assert!(parent_dir_sync_is_unsupported(&error));
+    }
 }

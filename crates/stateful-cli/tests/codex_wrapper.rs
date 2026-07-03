@@ -3,7 +3,7 @@ use stateful_cli::{CodexSandboxMode, CodexWrapperOptions, build_codex_invocation
 const LEGACY_TRUSTED_SANDBOX_ENV: &str = "STATEFUL_HOOK_TRUSTED_SANDBOX";
 
 #[test]
-fn codex_wrapper_defaults_to_passthrough_session_configuration() {
+fn codex_wrapper_defaults_to_passthrough_configuration() {
     let invocation = build_codex_invocation(CodexWrapperOptions {
         codex_bin: "/opt/codex/bin/codex".to_string(),
         sandbox: CodexSandboxMode::Passthrough,
@@ -16,13 +16,6 @@ fn codex_wrapper_defaults_to_passthrough_session_configuration() {
     assert_eq!(
         invocation.args,
         vec!["exec".to_string(), "--json".to_string(), "-".to_string()]
-    );
-    assert!(
-        invocation
-            .env
-            .iter()
-            .all(|(key, _)| key != "STATEFUL_CODEX_RUN_ID"),
-        "stateful codex must let Codex provide the Stateful run/thread id"
     );
     assert!(
         invocation
