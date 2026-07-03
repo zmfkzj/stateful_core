@@ -1690,6 +1690,51 @@ mod tests {
 
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
     }
+
+    #[test]
+    fn omp_extension_denies_git_profiles_with_sequence_preflight() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "stateful-omp-extension-git-sequence-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("temp dir should be creatable");
+        let extension_path = temp_dir.join("stateful.js");
+
+        write_omp_extension(&extension_path, "/usr/local/bin/stateful")
+            .expect("extension should be written");
+        let contents = fs::read_to_string(&extension_path).expect("extension should be readable");
+
+        let helper_start = contents
+            .find("function quoteStatefulCommandWord")
+            .expect("sandbox parser helpers should be generated");
+        let helper_end = contents[helper_start..]
+            .find("\n\nexport default function statefulOmpExtension")
+            .map(|offset| helper_start + offset)
+            .expect("sandbox parser helpers should end before extension export");
+        let helpers = &contents[helper_start..helper_end];
+        let script = format!(
+            "function isTrustedStatefulCommand() {{ return true; }}\n{}\nconst git = statefulBashPassthroughDecision(\"stateful sandbox run --fs git --network disabled --sequence 'git status'\", \"/repo\");\nconst pr = statefulBashPassthroughDecision(\"stateful sandbox run --fs github-pr --network enabled --sequence 'gh pr status'\", \"/repo\");\nconsole.log(JSON.stringify([[git.allow, git.reason || ''], [pr.allow, pr.reason || '']]));",
+            helpers
+        );
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .expect("node should execute generated extension helper");
+
+        assert!(
+            output.status.success(),
+            "node failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("stdout should be utf8"),
+            "[[false,\"git profile requires a single git command\"],[false,\"github-pr profile requires a single gh pr command\"]]\n"
+        );
+
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
+    }
     #[test]
     fn omp_stateful_required_rule_is_always_apply() {
         let rule = omp_stateful_required_rule();

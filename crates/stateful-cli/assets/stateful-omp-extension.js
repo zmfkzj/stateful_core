@@ -1074,6 +1074,12 @@ function parseStatefulSandboxRunWords(words) {
   if (params.sequence_shell !== undefined && !/^\//.test(params.sequence_shell)) {
     return { allow: false, reason: "stateful sandbox run --sequence-shell requires an absolute shell path" };
   }
+  if (hasSequence && params.fs === "git") {
+    return { allow: false, reason: "git profile requires a single git command" };
+  }
+  if (hasSequence && params.fs === "github-pr") {
+    return { allow: false, reason: "github-pr profile requires a single gh pr command" };
+  }
   if (params.fs === "external" && !params.purpose.trim()) {
     return { allow: false, reason: "stateful sandbox run --fs external requires --purpose" };
   }
