@@ -687,6 +687,81 @@ fn release_omp_auto_claims(
     }
 }
 
+fn authorization_payload_for_target(
+    target: &PatchTarget,
+    repo_root: Option<&Path>,
+    purpose: Option<&str>,
+    reservation_id: Option<&str>,
+    queue_on_conflict: bool,
+) -> serde_json::Value {
+    let mut payload = json!({
+        "action": target.action,
+        "path": target.path,
+    });
+    if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
+        payload["base_observations"] = json!([observation]);
+    }
+    if queue_on_conflict {
+        payload["queue_on_conflict"] = json!(true);
+    }
+    if let Some(purpose) = purpose {
+        payload["purpose"] = json!(purpose);
+    }
+    if let Some(new_path) = &target.new_path {
+        payload["old_path"] = json!(target.path);
+        payload["new_path"] = json!(new_path);
+    }
+    if let Some(reservation_id) = reservation_id {
+        payload["reservation_id"] = json!(reservation_id);
+    }
+    payload
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "authorization envelope carries hook context"
+)]
+fn authorization_request_body(
+    runtime: &ServerRuntime,
+    agent_id: &str,
+    workspace_id: &str,
+    identity: Option<&RepoIdentity>,
+    event: &'static str,
+    source_ref: &'static str,
+    tool_name: &str,
+    payload: serde_json::Value,
+) -> serde_json::Value {
+    protocol_envelope(ProtocolEnvelopeArgs {
+        runtime,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: agent_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        identity: identity.cloned(),
+        source_kind: "hook",
+        event,
+        source_ref,
+        source_tool_name: Some(tool_name),
+        payload,
+    })
+}
+
+fn post_authorize_decision(
+    runtime: &ServerRuntime,
+    body: &serde_json::Value,
+) -> Result<AuthorizeDecision, String> {
+    let response = post_json(runtime, "/v1/authorize", body)
+        .map_err(|error| authorization_unavailable_reason(&error))?;
+
+    if !(200..300).contains(&response.status_code) {
+        return Err(format!(
+            "stateful authorization failed with HTTP {}: {}",
+            response.status_code, response.body
+        ));
+    }
+
+    serde_json::from_str(&response.body).map_err(|error| authorization_unavailable_reason(&error))
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "OMP authorization payload needs request context"
@@ -701,53 +776,21 @@ fn post_omp_authorize_target(
     reservation_id: Option<&str>,
     purpose: &str,
 ) -> Result<AuthorizeDecision, OmpHookOutcome> {
-    let mut payload = json!({
-        "action": target.action,
-        "path": target.path,
-    });
-    if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
-        payload["base_observations"] = json!([observation]);
-    }
-    payload["queue_on_conflict"] = json!(true);
-    payload["purpose"] = json!(purpose);
-    if let Some(new_path) = &target.new_path {
-        payload["old_path"] = json!(target.path);
-        payload["new_path"] = json!(new_path);
-    }
-    if let Some(reservation_id) = reservation_id {
-        payload["reservation_id"] = json!(reservation_id);
-    }
-    let mut body = protocol_envelope(ProtocolEnvelopeArgs {
+    let payload =
+        authorization_payload_for_target(target, repo_root, Some(purpose), reservation_id, true);
+    let mut body = authorization_request_body(
         runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: input.agent_id.clone(),
-        workspace_id: workspace_id.to_string(),
-        identity: identity.cloned(),
-        source_kind: "hook",
-        event: "omp_pre_tool_use",
-        source_ref: "hook:omp_pre_tool_use",
-        source_tool_name: Some(input.tool_name.as_str()),
+        &input.agent_id,
+        workspace_id,
+        identity,
+        "omp_pre_tool_use",
+        "hook:omp_pre_tool_use",
+        &input.tool_name,
         payload,
-    });
+    );
     body["metadata"] = input.audit_metadata();
 
-    let response =
-        post_json(runtime, "/v1/authorize", &body).map_err(|error| OmpHookOutcome::Block {
-            reason: authorization_unavailable_reason(&error),
-        })?;
-
-    if !(200..300).contains(&response.status_code) {
-        return Err(OmpHookOutcome::Block {
-            reason: format!(
-                "stateful authorization failed with HTTP {}: {}",
-                response.status_code, response.body
-            ),
-        });
-    }
-
-    serde_json::from_str(&response.body).map_err(|error| OmpHookOutcome::Block {
-        reason: authorization_unavailable_reason(&error),
-    })
+    post_authorize_decision(runtime, &body).map_err(|reason| OmpHookOutcome::Block { reason })
 }
 
 fn should_auto_declare_omp_tool_reservation(
@@ -1014,28 +1057,15 @@ fn refresh_omp_post_tool_claim_observations(
         .workspace_id
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, Some(identity)));
-    let mut paths = BTreeSet::new();
-    for target in targets {
-        paths.insert(target.path);
-        if let Some(new_path) = target.new_path {
-            paths.insert(new_path);
-        }
-    }
+    let paths = target_paths(targets);
 
-    for path in paths {
-        let body = json!({
-            "agent_id": input.agent_id,
-            "workspace_id": workspace_id,
-            "path": path,
-            "root": identity.root,
-        });
-        let Ok(response) = post_json(runtime, "/v1/claim/refresh-observation", &body) else {
-            continue;
-        };
-        if !(200..300).contains(&response.status_code) {
-            continue;
-        }
-    }
+    refresh_claim_observations_for_paths(
+        runtime,
+        &input.agent_id,
+        &workspace_id,
+        &identity.root,
+        &paths,
+    );
 }
 
 fn release_omp_post_tool_claims(
@@ -1057,27 +1087,9 @@ fn release_omp_post_tool_claims(
         .workspace_id
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, Some(identity)));
-    let mut paths = BTreeSet::new();
-    for target in targets {
-        paths.insert(target.path);
-        if let Some(new_path) = target.new_path {
-            paths.insert(new_path);
-        }
-    }
+    let paths = target_paths(targets);
 
-    for path in paths {
-        let body = json!({
-            "agent_id": input.agent_id,
-            "workspace_id": workspace_id,
-            "path": path,
-        });
-        let Ok(response) = post_json(runtime, "/v1/claim/release", &body) else {
-            continue;
-        };
-        if !(200..300).contains(&response.status_code) {
-            continue;
-        }
-    }
+    release_claims_for_paths(runtime, &input.agent_id, &workspace_id, &paths);
 }
 
 fn omp_post_tool_refresh_targets(
@@ -1510,28 +1522,15 @@ fn refresh_post_tool_claim_observations(
         return;
     };
     let workspace_id = effective_workspace_id(runtime, Some(identity));
-    let mut paths = BTreeSet::new();
-    for target in targets {
-        paths.insert(target.path);
-        if let Some(new_path) = target.new_path {
-            paths.insert(new_path);
-        }
-    }
+    let paths = target_paths(targets);
 
-    for path in paths {
-        let body = json!({
-            "agent_id": input.stateful_agent_id(),
-            "workspace_id": workspace_id,
-            "path": path,
-            "root": identity.root,
-        });
-        let Ok(response) = post_json(runtime, "/v1/claim/refresh-observation", &body) else {
-            continue;
-        };
-        if !(200..300).contains(&response.status_code) {
-            continue;
-        }
-    }
+    refresh_claim_observations_for_paths(
+        runtime,
+        input.stateful_agent_id(),
+        &workspace_id,
+        &identity.root,
+        &paths,
+    );
 }
 
 fn release_post_tool_claims(
@@ -1550,27 +1549,9 @@ fn release_post_tool_claims(
         return;
     };
     let workspace_id = effective_workspace_id(runtime, Some(identity));
-    let mut paths = BTreeSet::new();
-    for target in targets {
-        paths.insert(target.path);
-        if let Some(new_path) = target.new_path {
-            paths.insert(new_path);
-        }
-    }
+    let paths = target_paths(targets);
 
-    for path in paths {
-        let body = json!({
-            "agent_id": input.stateful_agent_id(),
-            "workspace_id": workspace_id,
-            "path": path,
-        });
-        let Ok(response) = post_json(runtime, "/v1/claim/release", &body) else {
-            continue;
-        };
-        if !(200..300).contains(&response.status_code) {
-            continue;
-        }
-    }
+    release_claims_for_paths(runtime, input.stateful_agent_id(), &workspace_id, &paths);
 }
 
 fn post_tool_refresh_targets(
@@ -2589,73 +2570,33 @@ fn authorize_targets(
     let mut allowed_paths = BTreeSet::new();
     for target in targets {
         let purpose = hook_authorize_purpose(input, runtime, &target, &workspace_id);
-        let mut payload = json!({
-            "action": target.action,
-            "path": target.path,
-        });
-        if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
-            payload["base_observations"] = json!([observation]);
-        }
-        if let Some(purpose) = purpose {
-            payload["queue_on_conflict"] = json!(true);
-            payload["purpose"] = json!(purpose);
-        }
-        if let Some(new_path) = &target.new_path {
-            payload["old_path"] = json!(target.path);
-            payload["new_path"] = json!(new_path);
-        }
-        if let Some(reservation_id) = input.reservation_id() {
-            payload["reservation_id"] = json!(reservation_id);
-        }
-        let body = protocol_envelope(ProtocolEnvelopeArgs {
+        let payload = authorization_payload_for_target(
+            &target,
+            repo_root,
+            purpose.as_deref(),
+            input.reservation_id(),
+            purpose.is_some(),
+        );
+        let body = authorization_request_body(
             runtime,
-            request_id: uuid::Uuid::new_v4().to_string(),
-            agent_id: agent_id.clone(),
-            workspace_id: workspace_id.clone(),
-            identity: identity.cloned(),
-            source_kind: "hook",
-            event: "pre_tool_use",
-            source_ref: "hook:pre_tool_use",
-            source_tool_name: Some(input.tool_name.as_str()),
+            &agent_id,
+            &workspace_id,
+            identity,
+            "pre_tool_use",
+            "hook:pre_tool_use",
+            &input.tool_name,
             payload,
-        });
-        let response = match post_json(runtime, "/v1/authorize", &body) {
-            Ok(response) => response,
-            Err(error) => {
-                release_pre_tool_authorized_claims(
-                    runtime,
-                    &agent_id,
-                    &workspace_id,
-                    &allowed_paths,
-                );
-                return Ok(HookOutcome::Deny {
-                    reason: authorization_unavailable_reason(&error),
-                });
-            }
-        };
-
-        if !(200..300).contains(&response.status_code) {
-            release_pre_tool_authorized_claims(runtime, &agent_id, &workspace_id, &allowed_paths);
-            return Ok(HookOutcome::Deny {
-                reason: format!(
-                    "stateful authorization failed with HTTP {}: {}",
-                    response.status_code, response.body
-                ),
-            });
-        }
-
-        let decision: AuthorizeDecision = match serde_json::from_str(&response.body) {
+        );
+        let decision: AuthorizeDecision = match post_authorize_decision(runtime, &body) {
             Ok(decision) => decision,
-            Err(error) => {
+            Err(reason) => {
                 release_pre_tool_authorized_claims(
                     runtime,
                     &agent_id,
                     &workspace_id,
                     &allowed_paths,
                 );
-                return Ok(HookOutcome::Deny {
-                    reason: authorization_unavailable_reason(&error),
-                });
+                return Ok(HookOutcome::Deny { reason });
             }
         };
         if decision.decision != "allow" {
@@ -2681,6 +2622,49 @@ fn authorize_targets(
 }
 
 fn release_pre_tool_authorized_claims(
+    runtime: &ServerRuntime,
+    agent_id: &str,
+    workspace_id: &str,
+    paths: &BTreeSet<String>,
+) {
+    release_claims_for_paths(runtime, agent_id, workspace_id, paths);
+}
+
+fn target_paths(targets: Vec<PatchTarget>) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    for target in targets {
+        paths.insert(target.path);
+        if let Some(new_path) = target.new_path {
+            paths.insert(new_path);
+        }
+    }
+    paths
+}
+
+fn refresh_claim_observations_for_paths(
+    runtime: &ServerRuntime,
+    agent_id: &str,
+    workspace_id: &str,
+    root: &str,
+    paths: &BTreeSet<String>,
+) {
+    for path in paths {
+        let body = json!({
+            "agent_id": agent_id,
+            "workspace_id": workspace_id,
+            "path": path,
+            "root": root,
+        });
+        let Ok(response) = post_json(runtime, "/v1/claim/refresh-observation", &body) else {
+            continue;
+        };
+        if !(200..300).contains(&response.status_code) {
+            continue;
+        }
+    }
+}
+
+fn release_claims_for_paths(
     runtime: &ServerRuntime,
     agent_id: &str,
     workspace_id: &str,

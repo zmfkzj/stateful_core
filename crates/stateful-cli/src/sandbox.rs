@@ -32,10 +32,21 @@ use crate::{
     discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server, post_json,
     protocol_envelope, repo_gate, repo_identity_for_enabled_repo,
     runtime_env_override_is_configured, shadow_guard,
-    shell_command::{
-        first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
-    },
+    shell_command::{first_word_is_env_assignment, split_simple_command_words},
     validate_agent_id,
+};
+mod parse;
+mod process_find;
+
+pub(crate) use parse::{
+    parse_sandbox_process_find_bash_invocation, parse_sandbox_run_bash_invocation,
+};
+use process_find::process_comm_basename;
+pub use process_find::run_sandbox_process_find;
+pub(crate) use process_find::validate_process_find_request;
+#[cfg(test)]
+use process_find::{
+    filter_process_find_rows, parse_process_find_ps_output, process_find_output_for_rows,
 };
 
 pub(crate) const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
@@ -151,19 +162,6 @@ pub struct SandboxProcessInfo {
     pub tty: String,
     pub comm: String,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SandboxProcessRow {
-    info: SandboxProcessInfo,
-    command: String,
-}
-
-const PROCESS_FIND_DEFAULT_FIELDS: &[&str] = &[
-    "pid", "ppid", "pgid", "user", "uid", "stat", "start", "etime", "time", "pcpu", "pmem", "rss",
-    "vsz", "nice", "pri", "tty", "comm",
-];
-
-const PROCESS_FIND_FORBIDDEN_FIELDS: &[&str] = &["command", "args", "argv", "env"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxAuthorizationDenied {
@@ -614,261 +612,6 @@ pub fn run_sandbox_in_repo(
     })
 }
 
-pub(crate) fn parse_sandbox_run_bash_invocation(
-    command: &str,
-) -> Result<SandboxRunBashInvocation, String> {
-    reject_outer_shell_syntax(
-        command,
-        "Bash wrapper must be a single stateful sandbox run command",
-    )?;
-    let words = split_simple_command_words(command)?;
-    if words.is_empty() {
-        return Err("Bash commands must use stateful sandbox run".to_string());
-    }
-    if first_word_is_env_assignment(&words[0]) {
-        return Err("Bash wrapper must not use outer environment assignments".to_string());
-    }
-    if words.len() < 3 || words[1] != "sandbox" || words[2] != "run" {
-        return Err("Bash commands must use stateful sandbox run".to_string());
-    }
-
-    let mut fs = SandboxFsProfile::ReadOnly;
-    let mut network = SandboxNetworkPolicy::Disabled;
-    let mut purpose = None;
-    let mut reservation_id = None;
-    let mut agent_id = None;
-    let mut workspace_id = None;
-    let mut write_targets = Vec::new();
-    let mut create_targets = Vec::new();
-    let mut write_dirs = Vec::new();
-    let mut connect_sockets = Vec::new();
-    let mut allow_signal = false;
-    let mut inner_command = None;
-    let mut timeout_seconds = None;
-    let mut stream_events = false;
-    let mut index = 3;
-    while index < words.len() {
-        let arg = &words[index];
-        match arg.as_str() {
-            "--" => {
-                return Err("stateful sandbox run does not support argv mode".to_string());
-            }
-            "--fs" => {
-                index += 1;
-                let value = parse_sandbox_run_arg_value(&words, index, "--fs")?;
-                fs = parse_sandbox_fs_profile(&value)?;
-            }
-            "--network" => {
-                index += 1;
-                let value = parse_sandbox_run_arg_value(&words, index, "--network")?;
-                network = parse_sandbox_network_policy(&value)?;
-            }
-            "--purpose" => {
-                if purpose.is_some() {
-                    return Err("stateful sandbox run accepts at most one --purpose".to_string());
-                }
-                index += 1;
-                purpose = Some(parse_sandbox_run_arg_value(&words, index, "--purpose")?);
-            }
-            "--reservation-id" => {
-                if reservation_id.is_some() {
-                    return Err(
-                        "stateful sandbox run accepts at most one --reservation-id".to_string()
-                    );
-                }
-                index += 1;
-                reservation_id = Some(parse_sandbox_run_arg_value(
-                    &words,
-                    index,
-                    "--reservation-id",
-                )?);
-            }
-            "--agent-id" => {
-                if agent_id.is_some() {
-                    return Err("stateful sandbox run accepts at most one --agent-id".to_string());
-                }
-                index += 1;
-                agent_id = Some(parse_sandbox_run_arg_value(&words, index, "--agent-id")?);
-            }
-            "--workspace-id" => {
-                if workspace_id.is_some() {
-                    return Err(
-                        "stateful sandbox run accepts at most one --workspace-id".to_string()
-                    );
-                }
-                index += 1;
-                workspace_id = Some(parse_sandbox_run_arg_value(
-                    &words,
-                    index,
-                    "--workspace-id",
-                )?);
-            }
-            "--write-target" => {
-                index += 1;
-                write_targets.push(parse_sandbox_run_arg_value(
-                    &words,
-                    index,
-                    "--write-target",
-                )?);
-            }
-            "--create-target" => {
-                index += 1;
-                create_targets.push(parse_sandbox_run_arg_value(
-                    &words,
-                    index,
-                    "--create-target",
-                )?);
-            }
-            "--write-dir" => {
-                index += 1;
-                write_dirs.push(parse_sandbox_run_arg_value(&words, index, "--write-dir")?);
-            }
-            "--connect-socket" => {
-                index += 1;
-                connect_sockets.push(parse_sandbox_run_arg_value(
-                    &words,
-                    index,
-                    "--connect-socket",
-                )?);
-            }
-            "--allow-signal" => {
-                allow_signal = true;
-            }
-            "--command" => {
-                if inner_command.is_some() {
-                    return Err("stateful sandbox run requires exactly one --command".to_string());
-                }
-                index += 1;
-                inner_command = Some(parse_sandbox_run_arg_value(&words, index, "--command")?);
-            }
-            "--timeout-seconds" => {
-                index += 1;
-                let timeout = parse_sandbox_run_arg_value(&words, index, "--timeout-seconds")?;
-                timeout_seconds = Some(timeout.parse::<u64>().map_err(|_| {
-                    "stateful sandbox run --timeout-seconds requires an integer value".to_string()
-                })?);
-            }
-            "--json" => {}
-            "--stream-events" => {
-                stream_events = true;
-            }
-            _ => {
-                return Err(format!("unsupported stateful sandbox run argument `{arg}`"));
-            }
-        }
-        index += 1;
-    }
-
-    let Some(command) = inner_command else {
-        return Err("stateful sandbox run requires exactly one --command".to_string());
-    };
-
-    Ok(SandboxRunBashInvocation {
-        executable: words[0].clone(),
-        request: SandboxRunRequest {
-            fs,
-            network,
-            purpose,
-            reservation_id,
-            agent_id,
-            workspace_id,
-            write_targets,
-            create_targets,
-            write_dirs,
-            connect_sockets,
-            allow_signal,
-            command,
-            timeout_seconds,
-            stream_events,
-        },
-    })
-}
-
-pub(crate) fn parse_sandbox_process_find_bash_invocation(
-    command: &str,
-) -> Result<SandboxProcessFindBashInvocation, String> {
-    reject_outer_shell_syntax(
-        command,
-        "Bash wrapper must be a single stateful sandbox process find command",
-    )?;
-    let words = split_simple_command_words(command)?;
-    if words.is_empty() {
-        return Err("Bash commands must use stateful sandbox process find".to_string());
-    }
-    if first_word_is_env_assignment(&words[0]) {
-        return Err("Bash wrapper must not use outer environment assignments".to_string());
-    }
-    if words.len() < 4 || words[1] != "sandbox" || words[2] != "process" || words[3] != "find" {
-        return Err("Bash commands must use stateful sandbox process find".to_string());
-    }
-
-    let mut request = SandboxProcessFindRequest {
-        names: Vec::new(),
-        contains: Vec::new(),
-        pids: Vec::new(),
-        parent_pids: Vec::new(),
-        process_groups: Vec::new(),
-        fields: Vec::new(),
-    };
-    let mut index = 4;
-    while index < words.len() {
-        let arg = &words[index];
-        match arg.as_str() {
-            "--" => {
-                return Err("stateful sandbox process find does not support argv mode".to_string());
-            }
-            "--name" => {
-                index += 1;
-                request
-                    .names
-                    .push(parse_sandbox_run_arg_value(&words, index, "--name")?);
-            }
-            "--contains" => {
-                index += 1;
-                request
-                    .contains
-                    .push(parse_sandbox_run_arg_value(&words, index, "--contains")?);
-            }
-            "--pid" => {
-                index += 1;
-                request
-                    .pids
-                    .push(parse_process_selector_arg(&words, index, "--pid")?);
-            }
-            "--parent-pid" | "--ppid" => {
-                index += 1;
-                request
-                    .parent_pids
-                    .push(parse_process_selector_arg(&words, index, arg)?);
-            }
-            "--process-group" | "--pgid" => {
-                index += 1;
-                request
-                    .process_groups
-                    .push(parse_process_selector_arg(&words, index, arg)?);
-            }
-            "--field" => {
-                index += 1;
-                request
-                    .fields
-                    .push(parse_sandbox_run_arg_value(&words, index, "--field")?);
-            }
-            "--json" => {}
-            _ => {
-                return Err(format!(
-                    "unsupported stateful sandbox process find argument `{arg}`"
-                ));
-            }
-        }
-        index += 1;
-    }
-
-    Ok(SandboxProcessFindBashInvocation {
-        executable: words[0].clone(),
-        request,
-    })
-}
-
 pub(crate) fn validate_sandbox_run_request_shape(
     request: &SandboxRunRequest,
 ) -> anyhow::Result<ValidatedSandboxRunShape> {
@@ -926,79 +669,6 @@ pub(crate) fn validate_sandbox_run_request_shape(
     })
 }
 
-pub(crate) fn validate_process_find_request(
-    request: &SandboxProcessFindRequest,
-) -> anyhow::Result<()> {
-    if request.names.is_empty()
-        && request.contains.is_empty()
-        && request.pids.is_empty()
-        && request.parent_pids.is_empty()
-        && request.process_groups.is_empty()
-    {
-        anyhow::bail!("stateful sandbox process find requires at least one selector");
-    }
-    for name in &request.names {
-        validate_process_name_selector(name)?;
-    }
-    for contains in &request.contains {
-        validate_process_contains_selector(contains)?;
-    }
-    for (label, ids) in [
-        ("--pid", request.pids.as_slice()),
-        ("--parent-pid", request.parent_pids.as_slice()),
-        ("--process-group", request.process_groups.as_slice()),
-    ] {
-        if ids.contains(&0) {
-            anyhow::bail!("stateful sandbox process find {label} selectors must be positive");
-        }
-    }
-
-    validate_process_find_fields(&request.fields)?;
-
-    Ok(())
-}
-
-pub fn run_sandbox_process_find(
-    request: SandboxProcessFindRequest,
-) -> anyhow::Result<SandboxProcessFindOutput> {
-    validate_process_find_request(&request)?;
-    let rows = read_process_find_rows()?;
-    process_find_output_for_rows(&request, rows)
-}
-
-fn parse_process_selector_arg(words: &[String], index: usize, arg: &str) -> Result<u32, String> {
-    let value = parse_sandbox_run_arg_value(words, index, arg)?;
-    value
-        .parse::<u32>()
-        .map_err(|_| format!("stateful sandbox process find argument `{arg}` requires an integer"))
-}
-
-fn parse_sandbox_run_arg_value(
-    words: &[String],
-    index: usize,
-    arg: &str,
-) -> Result<String, String> {
-    words
-        .get(index)
-        .cloned()
-        .ok_or_else(|| format!("stateful sandbox run argument `{arg}` requires a value"))
-}
-
-fn parse_sandbox_fs_profile(value: &str) -> Result<SandboxFsProfile, String> {
-    match value {
-        "read-only" => Ok(SandboxFsProfile::ReadOnly),
-        "write-targets" => Ok(SandboxFsProfile::WriteTargets),
-        "external" => Ok(SandboxFsProfile::External),
-        "build" => Ok(SandboxFsProfile::Build),
-        "git" => Ok(SandboxFsProfile::Git),
-        "github-pr" => Ok(SandboxFsProfile::GithubPr),
-        _ => Err(
-            "stateful sandbox run supports only read-only, write-targets, external, build, git, and github-pr profiles"
-                .to_string(),
-        ),
-    }
-}
-
 pub(crate) fn agent_context_for_sandbox_profile(
     repo_root: &Path,
     paths: &GlobalPaths,
@@ -1017,14 +687,6 @@ pub(crate) fn agent_context_for_sandbox_profile(
         }
     };
     Ok(AgentContext::new(agent_id, workspace_id))
-}
-
-fn parse_sandbox_network_policy(value: &str) -> Result<SandboxNetworkPolicy, String> {
-    match value {
-        "disabled" => Ok(SandboxNetworkPolicy::Disabled),
-        "enabled" => Ok(SandboxNetworkPolicy::Enabled),
-        _ => Err("stateful sandbox run network must be disabled or enabled".to_string()),
-    }
 }
 
 #[expect(
@@ -2040,30 +1702,6 @@ fn validate_profile_network_policy(
     Ok(())
 }
 
-fn validate_process_name_selector(name: &str) -> anyhow::Result<()> {
-    if name.trim().is_empty() {
-        anyhow::bail!("stateful sandbox process find --name must not be empty");
-    }
-    if !name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        anyhow::bail!("stateful sandbox process find --name contains unsupported characters");
-    }
-    Ok(())
-}
-
-fn validate_process_contains_selector(contains: &str) -> anyhow::Result<()> {
-    let trimmed = contains.trim();
-    if trimmed.len() < 3 {
-        anyhow::bail!("stateful sandbox process find --contains must be at least 3 characters");
-    }
-    if trimmed.chars().any(char::is_control) {
-        anyhow::bail!("stateful sandbox process find --contains contains control characters");
-    }
-    Ok(())
-}
-
 fn validate_sandbox_run_process_inspection(command: &str) -> anyhow::Result<()> {
     if sandbox_run_command_invokes_raw_process_inspection(command, 0) {
         anyhow::bail!("process inspection must use stateful sandbox process find");
@@ -2531,212 +2169,6 @@ enum ShellSegmentQuoteState {
     Double,
 }
 
-fn read_process_find_rows() -> anyhow::Result<Vec<SandboxProcessRow>> {
-    let output = Command::new("/bin/ps")
-        .args(["-axo", "pid=,ppid=,pgid=,user=,uid=,stat=,start=,etime=,time=,pcpu=,pmem=,rss=,vsz=,nice=,pri=,tty=,comm=,command="])
-        .output()
-        .or_else(|_| {
-            Command::new("ps")
-                .args(["-axo", "pid=,ppid=,pgid=,user=,uid=,stat=,start=,etime=,time=,pcpu=,pmem=,rss=,vsz=,nice=,pri=,tty=,comm=,command="])
-                .output()
-        })?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "stateful sandbox process find failed to inspect processes: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    parse_process_find_ps_output(&String::from_utf8_lossy(&output.stdout))
-}
-
-fn parse_process_find_ps_output(output: &str) -> anyhow::Result<Vec<SandboxProcessRow>> {
-    let mut rows = Vec::new();
-    for line in output.lines() {
-        let fields = line.split_whitespace().collect::<Vec<_>>();
-        if fields.len() < PROCESS_FIND_DEFAULT_FIELDS.len() {
-            continue;
-        }
-        let pid = parse_process_find_u32_field(fields[0], "pid")?;
-        let ppid = parse_process_find_u32_field(fields[1], "ppid")?;
-        let pgid = parse_process_find_u32_field(fields[2], "pgid")?;
-        let user = fields[3].to_string();
-        let uid = parse_process_find_i32_field(fields[4], "uid")?;
-        let stat = fields[5].to_string();
-        let start = fields[6].to_string();
-        let etime = fields[7].to_string();
-        let time = fields[8].to_string();
-        let pcpu = fields[9].to_string();
-        let pmem = fields[10].to_string();
-        let rss = parse_process_find_u64_field(fields[11], "rss")?;
-        let vsz = parse_process_find_u64_field(fields[12], "vsz")?;
-        let nice = parse_process_find_i32_field(fields[13], "nice")?;
-        let pri = parse_process_find_i32_field(fields[14], "pri")?;
-        let tty = fields[15].to_string();
-        let comm = fields[16].to_string();
-        let command = if fields.len() > PROCESS_FIND_DEFAULT_FIELDS.len() {
-            fields[PROCESS_FIND_DEFAULT_FIELDS.len()..].join(" ")
-        } else {
-            comm.clone()
-        };
-        rows.push(SandboxProcessRow {
-            info: SandboxProcessInfo {
-                pid,
-                ppid,
-                pgid,
-                user,
-                uid,
-                stat,
-                start,
-                etime,
-                time,
-                pcpu,
-                pmem,
-                rss,
-                vsz,
-                nice,
-                pri,
-                tty,
-                comm,
-            },
-            command,
-        });
-    }
-    Ok(rows)
-}
-
-fn parse_process_find_u32_field(value: &str, field: &str) -> anyhow::Result<u32> {
-    value.parse::<u32>().map_err(|_| {
-        anyhow::anyhow!("stateful sandbox process find invalid {field} field `{value}`")
-    })
-}
-
-fn parse_process_find_u64_field(value: &str, field: &str) -> anyhow::Result<u64> {
-    value.parse::<u64>().map_err(|_| {
-        anyhow::anyhow!("stateful sandbox process find invalid {field} field `{value}`")
-    })
-}
-
-fn parse_process_find_i32_field(value: &str, field: &str) -> anyhow::Result<i32> {
-    value.parse::<i32>().map_err(|_| {
-        anyhow::anyhow!("stateful sandbox process find invalid {field} field `{value}`")
-    })
-}
-
-fn filter_process_find_rows(
-    request: &SandboxProcessFindRequest,
-    rows: Vec<SandboxProcessRow>,
-) -> Vec<SandboxProcessInfo> {
-    rows.into_iter()
-        .filter(|row| row.info.pid != std::process::id())
-        .filter(|row| process_find_row_matches(request, row))
-        .map(|row| row.info)
-        .collect()
-}
-
-fn process_find_output_for_rows(
-    request: &SandboxProcessFindRequest,
-    rows: Vec<SandboxProcessRow>,
-) -> anyhow::Result<SandboxProcessFindOutput> {
-    validate_process_find_fields(&request.fields)?;
-    let processes = filter_process_find_rows(request, rows)
-        .into_iter()
-        .map(|process| process_find_info_to_json(&process, &request.fields))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(SandboxProcessFindOutput {
-        status: "ok",
-        processes,
-    })
-}
-
-fn validate_process_find_fields(fields: &[String]) -> anyhow::Result<()> {
-    for field in fields {
-        if PROCESS_FIND_FORBIDDEN_FIELDS.contains(&field.as_str()) {
-            anyhow::bail!("stateful sandbox process find cannot expose field `{field}`");
-        }
-        if !process_find_is_safe_field(field) {
-            anyhow::bail!("stateful sandbox process find unknown field `{field}`");
-        }
-    }
-    Ok(())
-}
-
-fn process_find_is_safe_field(field: &str) -> bool {
-    PROCESS_FIND_DEFAULT_FIELDS.contains(&field)
-}
-
-fn process_find_info_to_json(
-    info: &SandboxProcessInfo,
-    requested_fields: &[String],
-) -> anyhow::Result<Value> {
-    let mut process = serde_json::Map::new();
-    if requested_fields.is_empty() {
-        for field in PROCESS_FIND_DEFAULT_FIELDS {
-            process.insert(
-                (*field).to_string(),
-                process_find_info_field_value(info, field)?,
-            );
-        }
-    } else {
-        for field in requested_fields {
-            process.insert(
-                field.clone(),
-                process_find_info_field_value(info, field.as_str())?,
-            );
-        }
-    }
-    Ok(Value::Object(process))
-}
-
-fn process_find_info_field_value(info: &SandboxProcessInfo, field: &str) -> anyhow::Result<Value> {
-    match field {
-        "pid" => Ok(Value::from(info.pid)),
-        "ppid" => Ok(Value::from(info.ppid)),
-        "pgid" => Ok(Value::from(info.pgid)),
-        "user" => Ok(Value::from(info.user.clone())),
-        "uid" => Ok(Value::from(info.uid)),
-        "stat" => Ok(Value::from(info.stat.clone())),
-        "start" => Ok(Value::from(info.start.clone())),
-        "etime" => Ok(Value::from(info.etime.clone())),
-        "time" => Ok(Value::from(info.time.clone())),
-        "pcpu" => Ok(Value::from(info.pcpu.clone())),
-        "pmem" => Ok(Value::from(info.pmem.clone())),
-        "rss" => Ok(Value::from(info.rss)),
-        "vsz" => Ok(Value::from(info.vsz)),
-        "nice" => Ok(Value::from(info.nice)),
-        "pri" => Ok(Value::from(info.pri)),
-        "tty" => Ok(Value::from(info.tty.clone())),
-        "comm" => Ok(Value::from(info.comm.clone())),
-        _ if PROCESS_FIND_FORBIDDEN_FIELDS.contains(&field) => {
-            anyhow::bail!("stateful sandbox process find cannot expose field `{field}`")
-        }
-        _ => anyhow::bail!("stateful sandbox process find unknown field `{field}`"),
-    }
-}
-
-fn process_find_row_matches(request: &SandboxProcessFindRequest, row: &SandboxProcessRow) -> bool {
-    (request.names.is_empty()
-        || request
-            .names
-            .iter()
-            .any(|name| row.info.comm == *name || process_comm_basename(&row.info.comm) == name))
-        && (request.contains.is_empty()
-            || request
-                .contains
-                .iter()
-                .any(|contains| row.command.contains(contains)))
-        && (request.pids.is_empty() || request.pids.contains(&row.info.pid))
-        && (request.parent_pids.is_empty() || request.parent_pids.contains(&row.info.ppid))
-        && (request.process_groups.is_empty() || request.process_groups.contains(&row.info.pgid))
-}
-
-fn process_comm_basename(comm: &str) -> &str {
-    Path::new(comm)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(comm)
-}
-
 fn sandbox_fs_profile_name(fs: SandboxFsProfile) -> &'static str {
     match fs {
         SandboxFsProfile::ReadOnly => "read-only",
@@ -2842,7 +2274,7 @@ fn validate_github_pr_profile_command(command: &str) -> anyhow::Result<Vec<Strin
 pub(crate) fn parse_github_pr_profile_command(command: &str) -> Result<Vec<String>, String> {
     reject_direct_profile_shell_syntax(command)
         .map_err(|reason| format!("github-pr profile requires a single gh pr command: {reason}"))?;
-    let words = split_git_profile_command_words(command)
+    let words = split_simple_command_words(command)
         .map_err(|reason| format!("github-pr profile requires a single gh pr command: {reason}"))?;
     validate_github_pr_profile_words(&words)?;
     Ok(words)
@@ -2851,7 +2283,7 @@ pub(crate) fn parse_github_pr_profile_command(command: &str) -> Result<Vec<Strin
 pub(crate) fn parse_git_profile_command(command: &str) -> Result<Vec<String>, String> {
     reject_direct_profile_shell_syntax(command)
         .map_err(|reason| format!("git profile requires a single git command: {reason}"))?;
-    let words = split_git_profile_command_words(command)
+    let words = split_simple_command_words(command)
         .map_err(|reason| format!("git profile requires a single git command: {reason}"))?;
     if words.first().is_none_or(|word| word != "git") {
         return Err("git profile requires a single git command".to_string());
@@ -3151,61 +2583,6 @@ fn reject_direct_profile_shell_syntax(command: &str) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-fn split_git_profile_command_words(command: &str) -> Result<Vec<String>, String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut state = ShellQuoteState::None;
-    let mut in_word = false;
-
-    for ch in command.chars() {
-        match state {
-            ShellQuoteState::None => match ch {
-                '\'' => {
-                    state = ShellQuoteState::Single;
-                    in_word = true;
-                }
-                '"' => {
-                    state = ShellQuoteState::Double;
-                    in_word = true;
-                }
-                ch if ch.is_whitespace() => {
-                    if in_word {
-                        words.push(std::mem::take(&mut current));
-                        in_word = false;
-                    }
-                }
-                _ => {
-                    current.push(ch);
-                    in_word = true;
-                }
-            },
-            ShellQuoteState::Single => {
-                if ch == '\'' {
-                    state = ShellQuoteState::None;
-                } else {
-                    current.push(ch);
-                }
-            }
-            ShellQuoteState::Double => {
-                if ch == '"' {
-                    state = ShellQuoteState::None;
-                } else {
-                    current.push(ch);
-                }
-            }
-        }
-    }
-
-    if state != ShellQuoteState::None {
-        return Err("unterminated quotes".to_string());
-    }
-    if in_word {
-        words.push(current);
-    }
-
-    Ok(words)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

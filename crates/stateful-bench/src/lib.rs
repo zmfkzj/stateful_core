@@ -1,5 +1,6 @@
 pub mod denovo;
 pub mod programbench;
+mod shell_template;
 
 pub use denovo::{
     DeNovoAgentDockerSandbox, DeNovoAgentKind, DeNovoCliRuntime, DeNovoCodexRunOptions,
@@ -1550,19 +1551,24 @@ fn run_pair_inner(
             let stdout = pair_dir.join("harness-result.json");
             let stderr = pair_dir.join("harness.stderr.log");
             run_shell_command(
-                &render_template(
-                    template,
-                    &TemplateValues::for_pair(
-                        pair,
-                        &workspace,
-                        &pair_json,
-                        &pair_dir,
-                        &stateful_workspace_id,
-                        "harness",
-                        "",
+                &shell_template::render(
+                    &render_template(
+                        template,
+                        &TemplateValues::for_pair(
+                            pair,
+                            &workspace,
+                            &pair_json,
+                            &pair_dir,
+                            &stateful_workspace_id,
+                            "harness",
+                            "",
+                        ),
                     ),
-                )
-                .replace("{combined_patch}", &combined_patch_path.to_string_lossy()),
+                    &[(
+                        "combined_patch",
+                        combined_patch_path.to_string_lossy().into_owned(),
+                    )],
+                ),
                 &workspace,
                 Some(&stdout),
                 Some(&stderr),
@@ -2404,24 +2410,38 @@ impl<'a> TemplateValues<'a> {
 }
 
 fn render_template(template: &str, values: &TemplateValues<'_>) -> String {
-    template
-        .replace("{workspace}", &values.workspace.to_string_lossy())
-        .replace("{task_json}", &values.task_json.to_string_lossy())
-        .replace("{pair_json}", &values.pair_json.to_string_lossy())
-        .replace("{run_dir}", &values.run_dir.to_string_lossy())
-        .replace("{session_id}", &values.session_id)
-        .replace("{stateful_workspace_id}", &values.stateful_workspace_id)
-        .replace("{agent_id}", values.agent_id)
-        .replace("{pair_id}", values.pair_id)
-        .replace("{repo}", values.repo)
-        .replace("{base_commit}", values.base_commit)
+    shell_template::render(
+        template,
+        &[
+            ("workspace", values.workspace.to_string_lossy().into_owned()),
+            ("task_json", values.task_json.to_string_lossy().into_owned()),
+            ("pair_json", values.pair_json.to_string_lossy().into_owned()),
+            ("run_dir", values.run_dir.to_string_lossy().into_owned()),
+            ("session_id", values.session_id.clone()),
+            (
+                "stateful_workspace_id",
+                values.stateful_workspace_id.clone(),
+            ),
+            ("agent_id", values.agent_id.to_string()),
+            ("pair_id", values.pair_id.to_string()),
+            ("repo", values.repo.to_string()),
+            ("base_commit", values.base_commit.to_string()),
+        ],
+    )
 }
 
 fn render_run_template(template: &str, options: &RunOptions) -> String {
-    template
-        .replace("{run_id}", &options.run_id)
-        .replace("{mode}", options.mode.as_str())
-        .replace("{output_dir}", &options.output_dir.to_string_lossy())
+    shell_template::render(
+        template,
+        &[
+            ("run_id", options.run_id.clone()),
+            ("mode", options.mode.as_str().to_string()),
+            (
+                "output_dir",
+                options.output_dir.to_string_lossy().into_owned(),
+            ),
+        ],
+    )
 }
 
 fn absolute_path(path: impl AsRef<Path>) -> Result<PathBuf> {
