@@ -38,11 +38,12 @@ use crate::{
 mod parse;
 mod process_find;
 
-#[allow(unused_imports)]
 pub(crate) use parse::{
     parse_sandbox_process_find_bash_invocation, parse_sandbox_run_bash_invocation,
-    resolve_sandbox_run_command,
 };
+// Temporary re-export for CLI sequence plumbing; keep the lint narrow.
+#[allow(unused_imports)]
+pub(crate) use parse::resolve_sandbox_run_command;
 use process_find::process_comm_basename;
 pub use process_find::run_sandbox_process_find;
 pub(crate) use process_find::validate_process_find_request;
