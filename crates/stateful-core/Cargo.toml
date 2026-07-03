@@ -10,8 +10,6 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-camino.workspace = true
-globset.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

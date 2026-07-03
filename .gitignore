@@ -16,6 +16,9 @@ __pycache__/
 .stateful/
 .stateful_core/
 .stateful_bench/
+.stateful-tmp/
+.superpowers/
+.VSCodeCounter/
 
 # New scratch implementation plans stay local. Selected historical plans may
 # remain tracked under docs/superpowers/ for traceability.
