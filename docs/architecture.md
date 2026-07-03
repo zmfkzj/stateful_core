@@ -30,10 +30,18 @@ activity signals, and IDE integrations are future observer or adapter work.
 Team-shared, cross-machine, or hosted synchronization is a later v1.5/v2
 concern.
 
-The product direction is agent-runtime portability, but the shipped prototype is
-Codex-first with OMP extension support. The state server and policy API should
-not add new Codex-only assumptions beyond adapter metadata, and broader
-non-Codex runtimes remain future integration work.
+The product center is presence, freshness, and handoff
+([ADR 0002](adr/0002-presence-first-not-lock-first.md)); the target
+coordination shape is presence plus mechanical freshness plus thin write fences.
+That target direction does not remove the shipped v1 guardrail: supported writes
+still require active reservation scope plus same-reservation claims until
+mandatory base-observation coverage and implemented continuous same-file write
+fencing have shipped and been verified. Agent-runtime portability remains a
+standing requirement because a shared presence layer matters most across
+heterogeneous runtimes. The shipped prototype is Codex-first with OMP extension
+support. The state server and policy API should not add new Codex-only
+assumptions beyond adapter metadata, and broader non-Codex runtimes remain
+future integration work.
 
 Implementation defaults for API shape, SQLite tables, hook adapter behavior,
 runtime files, CLI commands, and tests are fixed in
@@ -269,7 +277,14 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 `PreToolUse`:
 
-- deny supported write calls when the active agent has no active reservation
+- deny supported write calls when the active agent has no active reservation in
+  shipped v1; reservation-required authorization can be demoted only after
+  mandatory base observations and continuous same-file write fences are
+  implemented and verified
+- deny file-changing calls with stale base observations, or with missing base
+  observations when the adapter can identify and read the target
+- deny overlapping same-file in-flight write fences when that fence path is
+  implemented
 - deny Codex raw Bash with sandbox guidance. For OMP, built-in Bash may run
   only strict trusted `stateful sandbox run ...` and `stateful sandbox process
   find ...` commands after Stateful preflight; arbitrary raw Bash and the
@@ -455,9 +470,13 @@ The state server is responsible for:
 - rendering concise prompt context
 - retaining expired activity as historical evidence
 
-The server should block supported write actions without active reservation and
-support advisory blocking for high-risk conflicts. V1 does not treat claims as
-hard distributed locks.
+The shipped server blocks supported write actions without active reservation
+scope and same-reservation claims. The target presence-first model may demote
+that broad guardrail only after mandatory base observations and independent
+same-file write fences are implemented. Hard enforcement remains for stale
+edits, same-file write races, git index/stage/commit serialization, destructive
+operations, and unsafe raw commands; V1 does not treat claims as hard
+distributed locks beyond those write-boundary guardrails.
 
 ## Policy Engine
 
@@ -484,14 +503,21 @@ vocabulary. The shipped `/v1/authorize` path returns allow/deny/error with
 optional `wait` or `reservation` details and appends `AuthorizationDenied` events
 for deny decisions.
 
-The target policy engine owns:
+The shipped policy engine owns:
 
 - active reservation checks
 - file and directory scope checks
 - claim conflict checks
+- base-observation freshness checks where adapters can identify and read the
+  target
 - collision-domain evaluation
-- human-write reconciliation checks
+- recorded reconciliation acknowledgement checks
 - state-server availability behavior
+
+Target human-write blocks wait for watcher or IDE observer coverage. The target
+policy direction narrows broad reservation blocking toward rendered presence
+plus freshness plus thin fences, but only after mandatory base observations and
+continuous same-file write fences are implemented.
 
 Hooks and adapters classify runtime-specific tool calls, extract tool reservation and
 targets when supported, and call the policy API for store-backed coordination
@@ -560,7 +586,7 @@ clear the block.
 
 ## Conflict Policy
 
-Initial policy:
+Initial shipped policy:
 
 - no active reservation before supported write action: deny
 - reservation without matching file or directory scope before supported write action:
@@ -577,8 +603,13 @@ Initial policy:
   can write anywhere below that directory
 - delete operation without exact file scope: deny
 - rename or move without exact file scope for both source and destination: deny
+- stale base observation on a file-changing write: deny with reread/retry
+- missing base observation on a file-changing write whose target can be
+  identified and read by the adapter: deny until the adapter supplies it
 - active claim in the hard conflict domain by another actor: deny unless the
   current agent has an explicit user override for that resource
+- same-file in-flight write fence conflict: deny when that independent fence path
+  is implemented
 - same `workspace_id` and same normalized `relative_path`: shipped hard conflict
   domain for active claim and wait-queue checks
 - same normalized `absolute_path`: target physical-file hard conflict domain
@@ -597,6 +628,12 @@ Initial policy:
   acquire, denies hook-originated writes when the claimed file changes before
   authorization, and refreshes that observation after same-reservation supported file
   tools complete
+- git index, stage, and commit operations in one checkout: serialize through the
+  controlled git sandbox path
+- destructive delete, rename, reset, or equivalent operations without exact
+  target scope and explicit policy approval: deny
+- unsafe raw commands and eval-tool execution outside trusted sandbox/scope
+  policy: deny
 - unrelated reads and searches: allow
 - reads, searches, diffs, and sandboxed tests after human writes: allow
 - tests: allow only through trusted sandbox-run wrappers with authorized targets
@@ -631,6 +668,13 @@ Stale/Expired
 
 Raw event logs should not be dumped into prompts. The rendered view should help
 the agent decide what to avoid, wait for, or coordinate.
+
+Presence and `context_render` are safe to center now: they explain who is nearby,
+what changed, and when to reread. They do not prove write authority. In shipped
+v1, a later write still needs active reservation scope plus a fresh
+same-reservation claim. In the target model, reservations become advisory intent
+rendered here, but only after mandatory base observations and independent
+write-fence implementation replace the broad guardrail.
 
 `state_context_render` supports `brief` and `detailed` modes plus an optional
 singular `resource` filter. `brief` is for hook start, prompt submit context,

@@ -720,15 +720,23 @@ impl<'a> PolicyService<'a> {
         &self,
         input: &AuthorizeWriteInput,
     ) -> Result<Option<Decision>, String> {
-        if input.base_observations.is_empty() {
+        let require_observations = self.requires_file_freshness_scope(input);
+        if !require_observations && input.base_observations.is_empty() {
             return Ok(None);
         }
 
-        let Some(root) = input.root.as_deref() else {
+        let Some(root) = input.root.as_deref().filter(|root| !root.is_empty()) else {
+            if input.base_observations.is_empty() {
+                return Ok(None);
+            }
             return Ok(Some(stale_observation_decision(
                 "Base observations require workspace.root so target freshness can be checked.",
             )));
         };
+
+        if require_observations && !Path::new(root).is_dir() && input.base_observations.is_empty() {
+            return Ok(None);
+        }
 
         let affected_paths = self
             .affected_paths(input)
@@ -736,24 +744,34 @@ impl<'a> PolicyService<'a> {
             .map(normalize_relative_path)
             .collect::<Vec<_>>();
 
-        for observation in &input.base_observations {
-            let observed_path = normalize_relative_path(&observation.path);
-            if !affected_paths.iter().any(|path| path == &observed_path) {
-                continue;
-            }
+        for path in affected_paths {
+            let observation = input
+                .base_observations
+                .iter()
+                .find(|observation| normalize_relative_path(&observation.path) == path);
 
-            let current = current_target_observation(root, &observed_path)?;
+            let current = match current_target_observation(root, &path) {
+                Ok(current) => current,
+                Err(_) if observation.is_none() => continue,
+                Err(error) => return Err(error),
+            };
+
+            let Some(observation) = observation else {
+                if require_observations {
+                    return Ok(Some(missing_base_observation_decision()));
+                }
+                continue;
+            };
+
             if current.exists != observation.exists {
                 return Ok(Some(stale_observation_decision(
                     "Target existence changed since the supplied base observation.",
                 )));
             }
-            if observation.exists
-                && observation
-                    .content_hash
-                    .as_ref()
-                    .is_some_and(|expected| current.content_hash.as_ref() != Some(expected))
-            {
+            if observation.exists && observation.content_hash.is_none() {
+                return Ok(Some(missing_base_observation_decision()));
+            }
+            if observation.exists && current.content_hash != observation.content_hash {
                 return Ok(Some(stale_observation_decision(
                     "Target content changed since the supplied base observation.",
                 )));
@@ -1110,6 +1128,14 @@ impl<'a> PolicyService<'a> {
 struct CurrentTargetObservation {
     exists: bool,
     content_hash: Option<String>,
+}
+
+fn missing_base_observation_decision() -> Decision {
+    Decision::deny(
+        "missing_base_observation",
+        "File-changing writes require a fresh base observation for every affected path.",
+        "Reread target, retry same edit with fresh base observation.",
+    )
 }
 
 fn stale_observation_decision(message: &str) -> Decision {

@@ -19,7 +19,7 @@ This is the procedural manual for Stateful hooks. Rules decide when the skill ap
 2. For simple repo-internal OMP native `edit` and `write`, rely on the write boundary: if no explicit `reservation_id` is supplied and the only denial is missing reservation/scope, the OMP extension declares the exact tool-visible file scope, acquires same-reservation claims, and retries authorization. Repo-external native OMP `edit`/`write` file targets use the scoped external grant path; it auto-approves by default through `stateful.autoApprove: true` and prompts only when `stateful.autoApprove: false` is configured.
 3. When the active tool list exposes `state_reservation_declare` and `state_claim_acquire`, use them for command-shaped writes, directory writes, multi-resource intent, queued conflict recovery, deletes/moves/renames, or whenever a specific reservation boundary matters. If those tools are absent, do not invent them; use OMP native edit/write auto-declare, lazy resume, or an already-authorized `reservation_id` write boundary.
 4. Keep paths narrow. Directory claims authorize only `write_directory`; exact file writes still need exact file reservation scope and a same-reservation claim.
-5. Re-read files immediately before native edits. Native edits and write-target sandbox writes release authorized claims after the transaction; reacquire before another explicit write under the active reservation.
+5. Re-read files immediately before native edits so hooks can send fresh `base_observations`. Native edits and write-target sandbox writes release authorized claims after the transaction; reacquire before another explicit write under the active reservation. If authorization returns `missing_base_observation`, `stale_target_observation`, or `stale_claim_observation`, reread/reconcile and retry with a fresh write.
 6. For hook denials, follow the denial's next action or `denial-recovery.md`; do not call `state_context_render` unless you need to revise the plan.
 7. Use active Stateful native tool names only when they appear in the tool list: `state_context_render`, `state_current_read`, `state_session_register`, `state_reservation_declare`, `state_claim_acquire`, `state_reservation_request`, `state_notifications_poll`, `state_resume_next`, and `state_reservation_claim`. If the active tool list exposes runtime-specific names, call the exact shown equivalent; if it does not expose a tool, choose the documented OMP lazy-resume/write-boundary path instead.
 
@@ -29,7 +29,7 @@ Read only the focused support file needed for the current denial or command shap
 
 - `omp-tools.md`: OMP tool mapping, built-in Bash sandbox/process guidance, skill URI expansion, SSE/lazy edit and write resume behavior, and DeNovo OMP notes.
 - `sandbox-tools.md`: sandbox profile selection, command examples, git/GitHub/build/external profiles, tmp retention, and raw Bash/eval avoidance.
-- `denial-recovery.md`: missing reservation, missing claim, claim conflict, wait queue, hook denial, raw Bash/eval block, and no-supported-path recovery.
+- `denial-recovery.md`: missing reservation, missing claim, freshness denials, claim conflict, wait queue, hook denial, raw Bash/eval block, and no-supported-path recovery.
 - `subagent-write-recovery.md`: how native Codex/OMP subagents recover write authorization without shell session repair.
 
 ## Skill Authoring Boundary

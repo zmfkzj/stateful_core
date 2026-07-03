@@ -698,8 +698,13 @@ fn authorization_payload_for_target(
         "action": target.action,
         "path": target.path,
     });
-    if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
-        payload["base_observations"] = json!([observation]);
+    let base_observations = [Some(target.path.as_str()), target.new_path.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter_map(|path| base_observation_for_target(repo_root, path))
+        .collect::<Vec<_>>();
+    if !base_observations.is_empty() {
+        payload["base_observations"] = json!(base_observations);
     }
     if queue_on_conflict {
         payload["queue_on_conflict"] = json!(true);

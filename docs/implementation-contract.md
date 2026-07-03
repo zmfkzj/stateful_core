@@ -253,13 +253,29 @@ same-reservation file claim before hooks call `/v1/authorize` with the
 operation-specific action, including `write_file`, `delete_file`, and
 `move_file` with source `path` / `old_path` and destination `new_path`.
 PreToolUse authorization sends current `base_observations` for each affected
-target when the hook can read the workspace file state. PostToolUse observes
-completed native edits and sandbox `write-targets` transactions, records the
-result, and releases the same-reservation claims that authorized the completed
-write boundary. Released claims leave the live context render and do not
-authorize a later write; the agent must reread and reacquire a claim, or
-lazy-claim a claimable reservation, before retrying. Remaining OMP `edit`
-denials are captured as live-agent lazy edit operations when the patch has
+file target when the hook can identify the target and read the workspace file
+state. File-changing native, hook, and sandbox writes fail closed with
+`reason_code: missing_base_observation` when an adapter can identify and read the
+affected file but omits its base observation. If an observation is supplied,
+`/v1/authorize` compares it against current workspace
+file state under `workspace.root`; existence or `content_hash` changes for an
+affected target return `deny` with `reason_code: stale_target_observation` and
+require the caller to reread before retrying.
+
+This base-observation requirement is the replacement safety rail that must land
+before reservation-required authorization can be demoted. Shipped v1 still
+requires active reservation scope plus same-reservation claims for supported
+writes. `write_directory` and adapter paths where exact file target extraction
+or readable file state is unsupported keep the shipped reservation/claim and
+sandbox-scope guardrails until per-file observation or independent fence
+coverage is implemented for that surface.
+
+PostToolUse observes completed native edits and sandbox `write-targets`
+transactions, records the result, and releases the same-reservation claims that
+authorized the completed write boundary. Released claims leave the live context
+render and do not authorize a later write; the agent must reread and reacquire a
+claim, or lazy-claim a claimable reservation, before retrying. Remaining OMP
+`edit` denials are captured as live-agent lazy edit operations when the patch has
 safe repo-relative line targets. Remaining OMP `write` denials are captured as
 live-agent lazy write operations with the original full write content. Denials
 with a wait id reuse that id; other retryable lazy operations receive a generated
@@ -277,11 +293,6 @@ when the original OMP Bash call cannot display the scoped grant prompt, asks for
 the same grant during resume, re-authorizes the original Bash tool call, and
 reruns the stored command.
 For Bash, command text alone never authorizes tool use.
-`/v1/authorize` accepts optional `base_observations` for OCC-style freshness
-checks. When supplied, each observation is compared against the current
-workspace file state under `workspace.root`; existence or `content_hash` changes
-for an affected target return `deny` with `reason_code:
-stale_target_observation` and require the caller to reread before retrying.
 Hook adapters normalize namespaced runtime tool names to their leaf before
 policy classification: `functions.bash` follows Bash rules,
 `functions.python` / `functions.javascript` / `functions.js` /

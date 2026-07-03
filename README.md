@@ -1,18 +1,24 @@
 # stateful_core
 
-Current-state coordination for coding agents working in the same repository.
+Presence-first coordination for coding agents and humans sharing one live repository checkout.
 
-Git coordinates committed history. `stateful_core` coordinates active work before
-it becomes history. Before a supported write occurs, a tool can ask:
+Git coordinates committed history. `stateful_core` coordinates live presence
+before it becomes history. Before a supported write occurs, an actor should see:
 
 ```text
-Who is doing what now, what might conflict, and when does that claim expire?
+Who is nearby, what is fresh, what was handed off, and should this write proceed?
 ```
 
 The project is intentionally about current state, not long-term memory. Memory
 recalls what happened before; current state captures active, scoped, expiring
 operational truth that can be checked before writes, test execution, handoff, and
 other coordination-sensitive actions.
+
+The product center is one live-checkout presence layer: agents and humans see
+nearby work, freshness, and handoff before writing. Blocking exists only as a
+thin safety rail at data-loss edges. See
+[ADR 0002](docs/adr/0002-presence-first-not-lock-first.md) for this direction
+and its evidence.
 
 ## Status
 
@@ -26,9 +32,9 @@ and benchmark tooling.
 These docs describe the shipped local v1 coordination mechanism. There is not
 yet a checked-in empirical paired-agent stateful/no-state result.
 
-It does not ship a filesystem watcher or IDE save gate for automatic human edit
-observation. Human editing signals remain part of the target coordination model,
-not a fully shipped observer path.
+Human observation is high-value target work, but the current prototype does not
+ship a filesystem watcher or IDE save gate for automatic human edit observation.
+Human editing signals remain target coordination behavior, not a shipped path.
 
 APIs, configuration files, and command behavior may change while the project is
 pre-release. The current security and support scope is documented in
@@ -47,10 +53,13 @@ now. That creates avoidable failures:
 - a tool writes before the session has declared its intended scope
 - test execution or reconciliation happens outside the coordination loop
 
-`stateful_core` provides a small protocol for declaring reservation, tracking active
-claims, recording session activity, reading current-state summaries, queuing
-blocked writers, and blocking supported writes that have no matching active
-reservation.
+`stateful_core` provides a small protocol for recording session activity,
+reading current-state summaries, rendering scoped write-time coordination
+context (`context_render`), declaring intent as reservation, and tracking active
+claim freshness. `context_render` is a briefing, not a task scheduler: task
+allocation belongs to an orchestrator or human, and integration belongs to Git.
+As a safety rail, v1 still queues blocked writers and blocks supported writes
+that lack matching active reservation/claim authority or fresh base observations.
 
 ## When To Use It
 

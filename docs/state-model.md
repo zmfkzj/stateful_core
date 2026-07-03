@@ -599,8 +599,8 @@ implementation, including override and human save-gate events.
 Freshness is required for all active coordination records.
 
 - Active activity and claims must have `expires_at`.
-- Supported write actions require an active, unexpired reservation with matching
-  file or directory scope.
+- Supported write actions require active, unexpired reservation/claim authority
+  plus fresh base observations when the adapter can identify and read the target.
 - Default reservation TTL is 15 minutes.
 - Heartbeats may extend active reservation TTL, but never beyond 60 minutes from
   `declared_at`.

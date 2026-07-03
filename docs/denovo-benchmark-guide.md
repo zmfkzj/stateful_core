@@ -1,6 +1,6 @@
 # DeNovoSWE Benchmark Guide
 
-Last updated: 2026-06-30.
+Last updated: 2026-07-03.
 
 This guide records the protocol we use when running DeNovoSWE through
 `stateful-bench`. It follows the official AweAgent DeNovoSWE recipe/task
@@ -84,8 +84,9 @@ debug run:
 - `--benchmark-max-turns 500` for DeNovoSWE package reconstruction.
 - `--eval-iters 1` for agent comparisons, unless specifically testing
   evaluator stability.
-- `--max-concurrent 1` when comparing stateful versus no-state behavior unless
-  the experiment is explicitly about throughput.
+- `--max-concurrent 1` for official-style patch-quality comparisons. Coordination
+  mode claims need an explicitly labeled forced-overlap behavior test with
+  `--max-concurrent >= 2`; do not rely on incidental DeNovo same-file collisions.
 - `--agent omp-cli` and `--benchmark-model deepseek-v4-flash` for OMP-backed
   runs, unless the experiment explicitly compares agent CLIs or models.
 - Isolated OMP homes must have the benchmark model's API key seeded, or the
@@ -172,6 +173,47 @@ bundled task agents into the isolated runtime home and enable
 subagent spawn count for both Codex and OMP `subagent:on` runs. Treat that
 prompt addition as a declared behavior-test condition axis; do not reuse it as
 normal scored comparison policy or general patch-quality guidance.
+
+### Coordination-Mode Arms (Target Design)
+
+[ADR 0002](adr/0002-presence-first-not-lock-first.md) records a presence-first
+product direction. How much claim machinery the product keeps is an empirical
+question, so coordination-focused comparisons should use three arms once a
+warn-only mode ships:
+
+```text
+A: off          no presence, no freshness injection, no denial
+B: awareness    render + freshness warnings, no queue/denial
+C: enforcement  shipped reservation/claim/queue/blocking behavior
+```
+
+The first useful comparison is a synthetic forced-overlap scenario: create a
+small task where two or more actors are steered toward the same file or adjacent
+files, run with `--max-concurrent >= 2`, and compare A/B/C on the same shard and
+instance order. Do not wait for DeNovoSWE to produce emergent same-file
+collisions; ordinary small-N DeNovo runs may have too few overlaps to measure
+coordination behavior, and null results there can be underpowered rather than
+dispositive.
+
+Fable5's review cautions against overgeneralizing Cursor's large-N convoy
+evidence to small-N shared-checkout tests. Use Cursor as a warning against broad
+waits and task-scale locks, not as proof that every enforcement claim is bad or
+that every small-N null result validates the pivot.
+
+Arm B requires a warn-only configuration that is not shipped yet. Until it
+ships, label any approximation as a behavior test, not a scored comparison.
+
+Beyond the primary score, coordination arms should report: same-file overwrite
+count, stale edit attempts versus stale edits actually applied, duplicated
+investigation time, wall time, wait time, token overhead from injected
+context, warning-ignored rate, human/manual intervention count, final merge
+conflict count, and successful handoff count.
+
+The registered hypothesis is that arm B keeps arm C's safety metrics while
+spending less waiting and complexity. If that holds, claim machinery shrinks
+to thin safety fences only after mandatory base observations and independent
+write fences are implemented and verified; if arm C is meaningfully safer, the
+fences stay and the result documents why.
 
 ## Success Criteria
 

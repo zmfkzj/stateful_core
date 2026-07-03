@@ -14,6 +14,15 @@ If the denial says `missing_reservation`, `missing_claim`, `Target is outside ac
 
 Use file claims for file writes, deletes, renames, and moves. Directory claims only authorize directory writes.
 
+## Freshness Denials
+
+If the denial says `missing_base_observation`, `stale_target_observation`, or `stale_claim_observation`, do not retry the same write.
+
+1. Reread every affected file path, including both source and destination for moves or renames.
+2. Reconcile or regenerate the edit against the current file contents.
+3. Retry once through the same native edit/write or authorized sandbox write boundary so the hook can send fresh `base_observations`.
+4. If freshness denial repeats, stop and report the stale path and denial reason instead of forcing the write.
+
 ## Claim Conflict Or Wait Queue
 
 If `state_claim_acquire` reports `claim_conflict`, do not retry acquisition or steal the claim.

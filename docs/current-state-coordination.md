@@ -16,12 +16,13 @@ Use this table as a quick boundary; the linked canonical docs remain authoritati
 | Exact file/directory scope rules | Shipped v1 | Exact file scopes authorize exact file writes; directory scopes authorize only exact `write_directory` for the exact directory resource and do not authorize child file/delete/rename/move actions. | [State Model](state-model.md), [Implementation Contract](implementation-contract.md), [Usage Reference](usage-reference.md) |
 | FIFO single-path `write_file`/`write_directory` queueing | Shipped v1 | A wait request stores one path and schedules only `write_file` or `write_directory`. | [Implementation Contract](implementation-contract.md), this page's Wait Queue section |
 | Lazy resume notifications | Shipped v1 | Poll/SSE/`resume next` expose claimable reservations; OMP lazy edit/write resume can replay captured writes after claiming and rereading. | [Implementation Contract](implementation-contract.md), [Usage Reference](usage-reference.md) |
-| Human-write observation and reconciliation blocks | Partial | Shipped hooks compare claim-time file observations for active exact file claims; watcher/IDE human-save blocks are target behavior. | [README](../README.md), [Architecture](architecture.md), [Implementation Contract](implementation-contract.md) |
+| Human-write observation and reconciliation blocks | Partial | Shipped hooks compare claim-time file observations for active exact file claims. Human observation is high-value target work, but watcher/IDE human-save blocks are target behavior, not shipped gates. | [README](../README.md), [Architecture](architecture.md), [Implementation Contract](implementation-contract.md) |
 | Cross-workspace repo warnings | Target | Local v1 coordinates one workspace boundary; repo-relative warnings across workspaces, worktrees, or branches are future behavior. | [State Model](state-model.md), [Architecture](architecture.md) |
 | Phase-aware authorization | Partial | Shipped writes require active, unexpired reservation scope and active same-reservation claims; finalization or expiration ends authority. Direct phase-as-policy-input behavior is implementation-specific beyond canonical state-model wording. | [State Model](state-model.md), [Implementation Contract](implementation-contract.md) |
 | Continuous claim fencing | Target | Shipped v1 consumes/releases claims at write boundaries; later writes must reread and reacquire or claim a promoted reservation. Continuous claim-id fencing through a native write or long command is target behavior. | [State Model](state-model.md), [Implementation Contract](implementation-contract.md), [Usage Reference](usage-reference.md) |
 | Multi-resource queueing | Target | Shipped scheduling is single-path; atomic all-or-nothing multi-resource queueing is target-model behavior. | [State Model](state-model.md), [Implementation Contract](implementation-contract.md) |
 | Rename/move queueing | Target | `rename_file` and `move_file` are immediate authorization actions requiring exact source and destination scopes/claims; conflicting rename/move queueing waits for the multi-resource scheduler. | [Implementation Contract](implementation-contract.md), [Usage Reference](usage-reference.md) |
+| Presence-first advisory reservations | Target | Shipped v1 denies supported writes without active reservation scope plus a same-reservation claim; narrowing hard denial to thin safety edges with warn/render for other overlap is recorded direction. | [ADR 0002](adr/0002-presence-first-not-lock-first.md) |
 
 ## Problem
 
@@ -50,12 +51,19 @@ memory = past evidence and recall
 current state = active, expiring operational truth
 ```
 
-The goal is to let an agent reason like this:
+The goal is to let an agent reason like this before writing:
 
 ```text
-Another agent is editing auth validation and plans to run auth tests.
-I should avoid auth.ts, work on related tests, or wait for the claim to expire.
+Another actor is nearby in auth validation.
+My view of auth.ts is stale, and the prior session left a blocked handoff.
+I should reread, choose unrelated work, or ask the orchestrator/human.
 ```
+
+Do not use rendered coordination context (`context_render`) as a task scheduler.
+Use it as a scoped write-time briefing: what nearby work is active, what changed
+since the actor last looked, and whether to reread, wait, or proceed. Task
+allocation belongs to the orchestrator or human; merge-time integration belongs
+to Git ([ADR 0002](adr/0002-presence-first-not-lock-first.md)).
 
 ## Expected Value
 
@@ -350,10 +358,10 @@ Initial policy should prefer advisory claims:
   instruction
 - reads, searches, diffs, and sandboxed tests after human writes: allow
 
-The human-local-change and human-save bullets are target behavior for future
-watcher or IDE integrations. Shipped v1 covers external changes to files with
-active exact file claims by comparing the claim-time file observation at
-hook-originated write authorization.
+The human-local-change and human-save bullets are high-value target behavior for
+future watcher or IDE integrations, not shipped gates. Shipped v1 covers external
+changes to files with active exact file claims by comparing the claim-time file
+observation at hook-originated write authorization.
 
 This avoids making the system too rigid while still preventing the highest-risk
 collisions.
