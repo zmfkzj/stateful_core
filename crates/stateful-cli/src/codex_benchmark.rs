@@ -10,17 +10,18 @@ use std::{
 };
 
 #[cfg(any(target_os = "macos", test))]
+use crate::sandbox::STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV;
+#[cfg(any(target_os = "macos", test))]
 use crate::sandbox::apply_sandbox_temp_env;
 #[cfg(target_os = "macos")]
 use crate::sandbox::run_command_with_timeout;
 use crate::sandbox::{
-    STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV, STATEFUL_SANDBOX_RUN_ACTIVE_ENV,
-    SandboxAuthorizationDenied, SandboxAuthorizeContext, SandboxAuthorizeDecision,
-    SandboxCommandResult, SandboxNetworkPolicy, SandboxRunOutput, SandboxWritablePath,
-    SandboxWritablePathKind, agent_context_for_sandbox_profile, authorize_sandbox_write,
-    classify_sandbox_authorize_response, enrich_sandbox_write_dir_denial, ensure_repo_dir_target,
-    normalize_sandbox_target_path, push_seatbelt_device_read_allows, resolve_sandbox_cwd,
-    sandbox_temp_dir, sandbox_write_dir_display_path, seatbelt_escape,
+    STATEFUL_SANDBOX_RUN_ACTIVE_ENV, SandboxAuthorizationDenied, SandboxAuthorizeContext,
+    SandboxAuthorizeDecision, SandboxCommandResult, SandboxNetworkPolicy, SandboxRunOutput,
+    SandboxWritablePath, SandboxWritablePathKind, agent_context_for_sandbox_profile,
+    authorize_sandbox_write, classify_sandbox_authorize_response, enrich_sandbox_write_dir_denial,
+    ensure_repo_dir_target, normalize_sandbox_target_path, push_seatbelt_device_read_allows,
+    resolve_sandbox_cwd, sandbox_temp_dir, sandbox_write_dir_display_path, seatbelt_escape,
 };
 use crate::{
     GlobalPaths, RepoGate, discover_runtime_with_global, ensure_server, repo_gate,
