@@ -366,10 +366,11 @@ Run the Rust test suite:
 cargo test --workspace
 ```
 
-Run formatting and tests:
+Run formatting, linting, and tests:
 
 ```bash
 cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 

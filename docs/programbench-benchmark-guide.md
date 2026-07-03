@@ -58,8 +58,10 @@ stateful:on,subagent:on
 ```
 
 Use the same instance set, model, image tag, max turns, timeout, and network
-policy across compared conditions. Explicit `subagent:off` conditions still
-parse for diagnostic or backwards-compatible runs.
+policy across compared conditions. `--timeout-seconds` is passed to the adapter,
+and the Rust wrapper adds cleanup grace before enforcing its outer deadline.
+Explicit `subagent:off`
+conditions still parse for diagnostic or backwards-compatible runs.
 
 For `stateful:on`, the adapter installs and enables Stateful where the agent
 runs: the host airlock for host CLI mode, or the separate OMP agent container

@@ -1097,18 +1097,13 @@ fn round3(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BenchmarkEvidenceKind {
+    #[default]
     PairedAgentRun,
     SyntheticFixture,
     Mixed,
-}
-
-impl Default for BenchmarkEvidenceKind {
-    fn default() -> Self {
-        Self::PairedAgentRun
-    }
 }
 
 impl std::fmt::Display for BenchmarkEvidenceKind {

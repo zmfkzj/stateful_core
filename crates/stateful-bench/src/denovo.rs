@@ -90,6 +90,10 @@ pub enum DeNovoAgentKind {
 }
 
 #[derive(Debug, Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "clap derive keeps command fields flat"
+)]
 pub enum DeNovoCommand {
     Extract {
         #[arg(long)]
@@ -685,7 +689,7 @@ fn push_repeated(args: &mut Vec<String>, flag: &str, values: Vec<String>) {
     }
 }
 
-fn path_arg(path: &PathBuf) -> String {
+fn path_arg(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 

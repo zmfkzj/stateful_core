@@ -12,11 +12,10 @@ use std::{
 
 use stateful_cli::{
     GlobalPaths, HookOutcome, OmpHookOutcome, ServerRuntime, allow_tool_for_repo,
-    deny_tool_for_repo, enable_repo,
-    handle_omp_post_tool_use_with_runtime, handle_omp_pre_tool_use_with_runtime,
-    handle_omp_session_start_with_runtime, handle_post_tool_use_in_repo, handle_pre_tool_use,
-    handle_pre_tool_use_in_repo, tool_list_for_repo, workspace_id_for_enabled_repo,
-    write_global_runtime_file,
+    deny_tool_for_repo, enable_repo, handle_omp_post_tool_use_with_runtime,
+    handle_omp_pre_tool_use_with_runtime, handle_omp_session_start_with_runtime,
+    handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
+    tool_list_for_repo, workspace_id_for_enabled_repo, write_global_runtime_file,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -2919,12 +2918,7 @@ fn omp_parallel_tool_calls_is_allowed_for_repo_with_stale_tool_allowlist() {
         "tool_input": {"tool_uses": []}
     })
     .to_string();
-    let output = run_hook_subprocess(
-        &repo_root,
-        &paths,
-        &["hook", "omp", "pre-tool-use"],
-        &input,
-    );
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
 
     assert!(
         output.status.success(),
@@ -3344,7 +3338,7 @@ fn omp_raw_bash_authorizes_trusted_write_target_sandbox_run() {
             Some(Path::new("/repo")),
             Some(Path::new("/repo"))
         )
-        .unwrap(),
+        .expect("trusted write-target sandbox run should authorize"),
         OmpHookOutcome::Allow
     );
     let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
@@ -3380,7 +3374,7 @@ fn omp_removed_generated_command_tools_are_not_allowlisted() {
             Some(Path::new("/repo")),
             Some(Path::new("/repo")),
         )
-        .unwrap() else {
+        .expect("removed generated command tool should be classified") else {
             panic!("{tool_name} should no longer be allowlisted");
         };
         assert!(reason.contains("not classified") || reason.contains("unclassified"));
@@ -3408,7 +3402,7 @@ fn omp_raw_bash_allows_trusted_external_sandbox_run_for_extension_preflight() {
             Some(Path::new("/repo")),
             Some(Path::new("/repo"))
         )
-        .unwrap(),
+        .expect("trusted external sandbox run should authorize"),
         OmpHookOutcome::Allow
     );
 }
@@ -3431,7 +3425,7 @@ fn omp_repo_internal_raw_bash_rejects_shell_writes_and_unsafe_find_actions() {
                 Some(Path::new("/repo")),
                 Some(Path::new("/repo"))
             )
-            .unwrap(),
+            .expect("unsafe repo-internal raw bash should be classified"),
             OmpHookOutcome::Block { .. }
         ));
     }
@@ -3459,7 +3453,7 @@ fn omp_repo_internal_raw_bash_allows_only_trusted_sandbox_requests() {
             Some(Path::new("/repo")),
             Some(Path::new("/repo"))
         )
-        .unwrap(),
+        .expect("trusted read-only sandbox run should authorize"),
         OmpHookOutcome::Allow
     );
 
@@ -3479,7 +3473,7 @@ fn omp_repo_internal_raw_bash_allows_only_trusted_sandbox_requests() {
             Some(Path::new("/repo")),
             Some(Path::new("/repo")),
         )
-        .unwrap() else {
+        .expect("repo-internal raw bash should be classified") else {
             panic!("non-stateful raw OMP bash should be denied");
         };
         assert!(reason.contains("OMP raw bash is denied"));
@@ -3511,7 +3505,7 @@ fn omp_namespaced_bash_allows_only_trusted_sandbox_requests() {
             Some(Path::new("/repo")),
             Some(Path::new("/repo")),
         )
-        .unwrap();
+        .expect("namespaced bash command should be classified");
         if allowed {
             assert_eq!(outcome, OmpHookOutcome::Allow);
         } else {
@@ -3551,7 +3545,7 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
             Some(Path::new("/repo")),
             Some(Path::new("/repo")),
         )
-        .unwrap() else {
+        .expect("raw eval tool should be classified") else {
             panic!("raw OMP eval tool should block");
         };
         assert!(reason.contains(&format!("OMP eval tool {tool_name} is denied")));
@@ -3578,7 +3572,7 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
         Some(Path::new("/repo")),
         Some(Path::new("/repo")),
     )
-    .unwrap() else {
+    .expect("functions.python eval tool should be classified") else {
         panic!("raw OMP python should block");
     };
     assert!(reason.contains("OMP eval tool functions.python is denied"));
@@ -3607,7 +3601,7 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
         Some(Path::new("/repo")),
         Some(Path::new("/repo")),
     )
-    .unwrap() else {
+    .expect("sandbox-run python eval tool should be classified") else {
         panic!("sandbox-run through raw OMP python should still block");
     };
     assert!(reason.contains("OMP eval tool python is denied"));
@@ -3633,7 +3627,7 @@ fn omp_eval_tools_are_denied_even_for_sandbox_run_requests() {
         Some(Path::new("/repo")),
         Some(Path::new("/tmp/outside")),
     )
-    .unwrap() else {
+    .expect("repo-external python eval tool should be classified") else {
         panic!("repo-external OMP python should block");
     };
     assert!(reason.contains("OMP eval tool python is denied"));
@@ -3685,7 +3679,7 @@ fn omp_allows_classified_read_only_and_non_file_writing_tools() {
                 Some(Path::new("/repo")),
                 Some(Path::new("/repo"))
             )
-            .unwrap(),
+            .expect("classified read-only tool should authorize"),
             OmpHookOutcome::Allow
         );
     }
@@ -3708,7 +3702,7 @@ fn omp_repo_external_raw_bash_blocks_without_external_sandbox_profile() {
         Some(Path::new("/repo")),
         Some(Path::new("/tmp/outside")),
     )
-    .unwrap();
+    .expect("repo-external raw bash should be classified");
     let OmpHookOutcome::Block { reason } = outcome else {
         panic!("repo-external targetless bash should block");
     };
@@ -3737,7 +3731,7 @@ fn omp_allows_sandbox_external_profile_after_extension_preflight() {
             Some(Path::new("/repo")),
             Some(Path::new("/repo")),
         )
-        .unwrap(),
+        .expect("external sandbox profile should authorize"),
         OmpHookOutcome::Allow
     );
 }
@@ -3763,7 +3757,7 @@ fn omp_yolo_does_not_downgrade_server_denial() {
             Some(Path::new("/repo")),
             Some(Path::new("/repo"))
         )
-        .unwrap(),
+        .expect("yolo write denial should be classified"),
         OmpHookOutcome::Block { .. }
     ));
 }

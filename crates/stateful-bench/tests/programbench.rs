@@ -2889,6 +2889,10 @@ fn condition_report(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test fixture builder mirrors report fields"
+)]
 fn condition_report_with_instances(
     condition_id: &str,
     stateful: bool,

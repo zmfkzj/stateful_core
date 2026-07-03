@@ -2,6 +2,5 @@
   "crates/stateful-core": "0.1.0",
   "crates/stateful-store": "0.1.0",
   "crates/stateful-server": "0.1.0",
-  "crates/stateful-cli": "0.1.0",
-  "crates/stateful-mcp": "0.1.0"
+  "crates/stateful-cli": "0.1.0"
 }

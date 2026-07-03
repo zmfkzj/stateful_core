@@ -1583,6 +1583,7 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_reservations_agent_status_expires_at
                 ON reservations(agent_id, status, expires_at);
 
+
             CREATE TABLE IF NOT EXISTS claims (
                 claim_id TEXT PRIMARY KEY,
                 reservation_id TEXT,
@@ -1608,6 +1609,7 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_claims_repo_relative_status_expires_at
                 ON claims(repo_id, relative_path, status, expires_at);
 
+
             CREATE TABLE IF NOT EXISTS wait_queue (
                 wait_id TEXT PRIMARY KEY,
                 request_id TEXT,
@@ -1632,6 +1634,7 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_wait_queue_agent_status
                 ON wait_queue(agent_id, status);
 
+
             CREATE TABLE IF NOT EXISTS notifications (
                 notification_id TEXT PRIMARY KEY,
                 sequence INTEGER NOT NULL DEFAULT 0,
@@ -1646,6 +1649,7 @@ impl Store {
 
             CREATE INDEX IF NOT EXISTS idx_notifications_agent_status
                 ON notifications(target_agent_id, status);
+
 
             CREATE TABLE IF NOT EXISTS conflicts (
                 conflict_id TEXT PRIMARY KEY,
@@ -1732,6 +1736,11 @@ impl Store {
             "ALTER TABLE wait_queue ADD COLUMN branch TEXT;",
         )?;
         self.add_column_if_missing(
+            "wait_queue",
+            "reservation_expires_at",
+            "ALTER TABLE wait_queue ADD COLUMN reservation_expires_at TEXT;",
+        )?;
+        self.add_column_if_missing(
             "reservations",
             "purpose",
             "ALTER TABLE reservations ADD COLUMN purpose TEXT;",
@@ -1812,6 +1821,21 @@ impl Store {
 
             CREATE INDEX IF NOT EXISTS idx_notifications_agent_workspace_status_sequence
                 ON notifications(target_agent_id, workspace_id, status, sequence);
+            ",
+        )?;
+        self.conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_reservations_status_expires_at
+                ON reservations(status, expires_at);
+
+            CREATE INDEX IF NOT EXISTS idx_wait_queue_status_reservation_expires_at
+                ON wait_queue(status, reservation_expires_at);
+
+            CREATE INDEX IF NOT EXISTS idx_claims_status_expires_at
+                ON claims(status, expires_at);
+
+            CREATE INDEX IF NOT EXISTS idx_notifications_status_expires_at
+                ON notifications(status, expires_at);
             ",
         )?;
         self.remove_legacy_rows_without_required_purpose()?;
@@ -2053,7 +2077,13 @@ impl Store {
             || (table == "wait_queue"
                 && matches!(
                     column,
-                    "request_id" | "purpose" | "repo_id" | "worktree_id" | "root" | "branch"
+                    "request_id"
+                        | "purpose"
+                        | "repo_id"
+                        | "worktree_id"
+                        | "root"
+                        | "branch"
+                        | "reservation_expires_at"
                 ))
             || (table == "activities" && column == "phase")
             || (table == "notifications" && column == "sequence");
@@ -3392,4 +3422,69 @@ pub struct OutboxRecord {
     pub event_type: String,
     pub payload: serde_json::Value,
     pub sync_status: SyncStatus,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn creates_expiry_predicate_indexes_for_stale_cleanup() {
+        let store = Store::open_in_memory().expect("in-memory store should open");
+        let expected = [
+            ("reservations", &["status", "expires_at"][..]),
+            ("wait_queue", &["status", "reservation_expires_at"][..]),
+            ("claims", &["status", "expires_at"][..]),
+            ("notifications", &["status", "expires_at"][..]),
+        ];
+
+        let missing = expected
+            .iter()
+            .filter_map(|(table, columns)| {
+                let has_expected_index = index_column_lists(&store, table)
+                    .iter()
+                    .any(|indexed_columns| indexed_columns.as_slice() == *columns);
+                if has_expected_index {
+                    None
+                } else {
+                    Some(format!("{table}({})", columns.join(", ")))
+                }
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing.is_empty(),
+            "missing expiry indexes for stale cleanup: {}",
+            missing.join("; ")
+        );
+    }
+
+    fn index_column_lists(store: &Store, table: &str) -> Vec<Vec<String>> {
+        let quoted_table = Store::quote_sql_identifier(table);
+        let mut statement = store
+            .conn
+            .prepare(&format!("PRAGMA index_list({quoted_table})"))
+            .expect("index list should be readable");
+        let index_names = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("index list query should run")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("index names should be readable");
+
+        index_names
+            .into_iter()
+            .map(|index_name| {
+                let quoted_index = Store::quote_sql_identifier(&index_name);
+                let mut statement = store
+                    .conn
+                    .prepare(&format!("PRAGMA index_info({quoted_index})"))
+                    .expect("index info should be readable");
+                statement
+                    .query_map([], |row| row.get::<_, String>(2))
+                    .expect("index info query should run")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("index columns should be readable")
+            })
+            .collect()
+    }
 }

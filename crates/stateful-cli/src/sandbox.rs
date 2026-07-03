@@ -1027,6 +1027,10 @@ fn parse_sandbox_network_policy(value: &str) -> Result<SandboxNetworkPolicy, Str
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "sandbox launch wires policy knobs explicitly"
+)]
 fn run_sandboxed_command(
     command: &str,
     cwd: &Path,
@@ -1096,6 +1100,10 @@ fn run_sandboxed_command(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "git sandbox launch reuses parsed policy knobs"
+)]
 fn run_sandboxed_git_command(
     words: &[String],
     cwd: &Path,
@@ -3487,6 +3495,10 @@ fn is_git_internal_segment(segment: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "seatbelt profile generation keeps sandbox knobs explicit"
+)]
 fn seatbelt_command(
     command: &str,
     cwd: &Path,

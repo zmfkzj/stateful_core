@@ -666,10 +666,14 @@ fn omp_external_native_write_prompt(
 fn omp_external_target_display(path: &str, cwd: Option<&Path>) -> String {
     let path = Path::new(path.trim());
     if path.is_absolute() {
-        return normalize_path(path.to_path_buf()).to_string_lossy().to_string();
+        return normalize_path(path.to_path_buf())
+            .to_string_lossy()
+            .to_string();
     }
     let base = cwd.unwrap_or_else(|| Path::new("."));
-    normalize_path(base.join(path)).to_string_lossy().to_string()
+    normalize_path(base.join(path))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn release_omp_auto_claims(
@@ -683,6 +687,10 @@ fn release_omp_auto_claims(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "OMP authorization payload needs request context"
+)]
 fn post_omp_authorize_target(
     input: &OmpPreToolUseInput,
     runtime: &ServerRuntime,
@@ -848,7 +856,10 @@ fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {
     let mut current_path: Option<String> = None;
     let mut current_target_index: Option<usize> = None;
     for line in edit_input.lines().map(str::trim) {
-        if let Some(header) = line.strip_prefix('[').and_then(|line| line.strip_suffix(']')) {
+        if let Some(header) = line
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
             let Some((path, _)) = header.split_once('#') else {
                 continue;
             };

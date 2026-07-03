@@ -833,7 +833,7 @@ async fn lease_acquire(
                         };
                         match reservation {
                             Ok(Some(reservation)) => {
-                                Ok(LeaseAcquireOutcome::Reservation(reservation))
+                                Ok(LeaseAcquireOutcome::Reservation(Box::new(reservation)))
                             }
                             Ok(None) => Err(StoreError::ClaimConflict),
                             Err(error) => Err(error),
@@ -886,7 +886,7 @@ async fn lease_acquire(
                         match first_claimable_reservation(&store, &agent_id, &workspace_id, &paths)
                         {
                             Ok(Some(reservation)) => {
-                                Ok(LeaseAcquireOutcome::Reservation(reservation))
+                                Ok(LeaseAcquireOutcome::Reservation(Box::new(reservation)))
                             }
                             Ok(None) => Err(StoreError::ClaimConflict),
                             Err(error) => Err(error),
@@ -902,7 +902,7 @@ async fn lease_acquire(
     match result {
         Ok(LeaseAcquireOutcome::Acquired) => status_response(Ok(())),
         Ok(LeaseAcquireOutcome::Reservation(reservation)) => {
-            reservation_claim_required_response(reservation)
+            reservation_claim_required_response(*reservation)
         }
         Ok(LeaseAcquireOutcome::Batch(success)) => batch_acquire_success_response(success),
         Err(StoreError::MissingPurpose) => missing_purpose_response(),
@@ -1952,7 +1952,7 @@ struct SessionRequest {
 
 enum LeaseAcquireOutcome {
     Acquired,
-    Reservation(WaitRecord),
+    Reservation(Box<WaitRecord>),
     Batch(BatchAcquireSuccess),
 }
 

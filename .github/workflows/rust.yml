@@ -19,6 +19,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Check formatting
         run: cargo fmt --all --check
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Run workspace tests
         run: env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo test --workspace
       - name: Run codex-benchmark feature hook tests

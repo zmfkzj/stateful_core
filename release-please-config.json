@@ -17,9 +17,6 @@
     },
     "crates/stateful-cli": {
       "component": "stateful-cli"
-    },
-    "crates/stateful-mcp": {
-      "component": "stateful-mcp"
     }
   },
   "plugins": [
@@ -34,8 +31,7 @@
         "stateful-core",
         "stateful-store",
         "stateful-server",
-        "stateful-cli",
-        "stateful-mcp"
+        "stateful-cli"
       ]
     }
   ]

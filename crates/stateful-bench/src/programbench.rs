@@ -3,7 +3,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, ExitStatus},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -23,6 +23,8 @@ const DEFAULT_PROGRAMBENCH_AGENT_DOCKER_STATEFUL_BINARY: &str = "/usr/local/bin/
 const DEFAULT_PROGRAMBENCH_AGENT_DOCKER_HOME: &str = "/home/stateful";
 const DEFAULT_BENCHMARK_MAX_TURNS: usize = 500;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 7200;
+// ponytail: fixed cleanup grace; make configurable only if adapter cleanup exceeds it.
+const PROGRAMBENCH_ADAPTER_CLEANUP_GRACE_SECONDS: u64 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -33,6 +35,10 @@ pub enum ProgramBenchAgentKind {
 }
 
 #[derive(Debug, Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "clap derive keeps command fields flat"
+)]
 pub enum ProgramBenchCommand {
     Run {
         #[arg(long, default_value = DEFAULT_PROGRAMBENCH_RUNS)]
@@ -1340,7 +1346,10 @@ fn run_programbench_instance(
         agent_docker_stateful_binary: options.agent_docker_stateful_binary.clone(),
         agent_docker_home: options.agent_docker_home.clone(),
     })?;
-    let adapter_result = execute_recipe_command_status(&command);
+    let adapter_result = execute_recipe_command_status(
+        &command,
+        programbench_adapter_execution_timeout(Duration::from_secs(options.timeout_seconds)),
+    );
     remove_programbench_container(&options.docker_bin, &container_id);
     adapter_result.with_context(|| format!("failed to execute {}", command_line(&command)))?;
 
@@ -1667,12 +1676,58 @@ fn execute_recipe_command(command: &ProgramBenchRecipeCommand) -> Result<()> {
     Ok(())
 }
 
-fn execute_recipe_command_status(command: &ProgramBenchRecipeCommand) -> Result<ExitStatus> {
-    ProcessCommand::new(&command.program)
+fn programbench_adapter_execution_timeout(adapter_timeout: Duration) -> Duration {
+    adapter_timeout.saturating_add(Duration::from_secs(
+        PROGRAMBENCH_ADAPTER_CLEANUP_GRACE_SECONDS,
+    ))
+}
+
+fn execute_recipe_command_status(
+    command: &ProgramBenchRecipeCommand,
+    timeout: Duration,
+) -> Result<ExitStatus> {
+    let mut child = ProcessCommand::new(&command.program)
         .args(&command.args)
         .envs(&command.env)
-        .status()
-        .with_context(|| format!("failed to execute {}", command_line(command)))
+        .spawn()
+        .with_context(|| format!("failed to execute {}", command_line(command)))?;
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("failed to wait for {}", command_line(command)))?
+        {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            let kill_error = child.kill().err();
+            let wait_deadline = Instant::now() + Duration::from_millis(100);
+            while Instant::now() < wait_deadline {
+                if child
+                    .try_wait()
+                    .with_context(|| format!("failed to wait for {}", command_line(command)))?
+                    .is_some()
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if let Some(error) = kill_error {
+                bail!(
+                    "ProgramBench command timed out after {timeout:?} and failed to kill child: {error}: {}",
+                    command_line(command)
+                );
+            }
+            bail!(
+                "ProgramBench command timed out after {timeout:?}: {}",
+                command_line(command)
+            );
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
 }
 
 fn command_line(command: &ProgramBenchRecipeCommand) -> String {
@@ -1747,12 +1802,45 @@ fn path_arg(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     fn env_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
             .iter()
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn execute_recipe_command_status_times_out_slow_command() {
+        let command = ProgramBenchRecipeCommand {
+            program: "sleep".to_string(),
+            args: vec!["2".to_string()],
+            env: BTreeMap::new(),
+        };
+
+        let started = Instant::now();
+        let result = execute_recipe_command_status(&command, Duration::from_millis(50));
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "expected timeout error for slow command, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "timeout returned after {elapsed:?}, expected it before the child sleep completed"
+        );
+    }
+
+    #[test]
+    fn programbench_adapter_execution_timeout_includes_cleanup_grace() {
+        let adapter_timeout = Duration::from_secs(10);
+
+        assert!(
+            programbench_adapter_execution_timeout(adapter_timeout) > adapter_timeout,
+            "Rust wrapper timeout must exceed the adapter timeout so Python cleanup can run"
+        );
     }
 
     #[test]

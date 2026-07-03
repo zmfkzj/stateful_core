@@ -348,6 +348,10 @@ fn denovo_run_command_rejects_zero_subagent_min_count() {
 }
 
 #[test]
+#[expect(
+    clippy::useless_format,
+    reason = "Python fixture keeps literal braces escaped"
+)]
 fn denovo_matrix_runs_all_conditions_for_one_instance_before_next_instance() {
     let temp_dir = target_temp_dir("stateful-bench-denovo-matrix-instance-major");
     let aweagent_root = temp_dir.join("AweAgent");
@@ -473,6 +477,10 @@ with results.open("w", encoding="utf-8") as handle:
 }
 
 #[test]
+#[expect(
+    clippy::useless_format,
+    reason = "Python fixture keeps literal braces escaped"
+)]
 fn denovo_matrix_batches_cli_instances_when_max_concurrent_is_set() {
     let temp_dir = target_temp_dir("stateful-bench-denovo-matrix-cli-batch");
     let aweagent_root = temp_dir.join("AweAgent");
@@ -595,6 +603,10 @@ with results.open("w", encoding="utf-8") as handle:
 }
 
 #[test]
+#[expect(
+    clippy::useless_format,
+    reason = "Python fixture keeps literal braces escaped"
+)]
 fn denovo_matrix_checkpoint_skips_conditions_not_started_yet() {
     let temp_dir = target_temp_dir("stateful-bench-denovo-matrix-skip-pending");
     let aweagent_root = temp_dir.join("AweAgent");
@@ -1677,7 +1689,8 @@ with sqlite3.connect(target_agent / "agent.db") as db:
 print(json.dumps({{"rows": rows}}))
 "#,
         agent_path = denovo_codex_agent_path_json(),
-        root = serde_json::to_string(&dir.display().to_string()).unwrap(),
+        root =
+            serde_json::to_string(&dir.display().to_string()).expect("root path should serialize"),
     );
     let output = run_python_json(&script);
     assert_eq!(
@@ -4137,8 +4150,10 @@ print(json.dumps({{"off": off, "on": on}}, sort_keys=True))
     assert!(on.contains("This does not prohibit non-target third-party dependency research."));
     assert!(on.contains("Do not create or use an `upstream` checkout"));
     assert!(
-        on.find("Native Codex/OMP subagent requirements").unwrap()
-            < on.find("Repository specification:").unwrap()
+        on.find("Native Codex/OMP subagent requirements")
+            .expect("subagent requirements section should exist")
+            < on.find("Repository specification:")
+                .expect("repository specification section should exist")
     );
     assert!(on.contains("Do not leave any native subagent as analysis-only"));
     assert!(on.contains("Wait for each spawned subagent"));
