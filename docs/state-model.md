@@ -188,16 +188,16 @@ relative_path
 absolute_path
 ```
 
-The shipped hard conflict domain is the same `workspace_id` and same normalized
-`relative_path`. This approximates two actors touching the same file inside the
-same enabled workspace. The target physical-file domain also records and compares
-same normalized `absolute_path`.
+The shipped hard conflict domain is only the same `workspace_id` and same
+normalized `relative_path`. In operator terms, two sessions in the same enabled
+workspace writing the same normalized path conflict; the same repo-relative path
+in another workspace, worktree, or branch does not hard-block in shipped v1.
 
-The target soft conflict domain is the same `repo_id` and same `relative_path`
-across different workspaces, worktrees, or branches. This should not block by
-default, but should produce warning context because later merge or integration
-work may conflict. The shipped authorization path does not yet emit this warn
-tier.
+Cross-workspace/repo identity handling is target warning behavior unless another
+shipped contract says otherwise. The target soft conflict domain is the same
+`repo_id` and same `relative_path` across different workspaces, worktrees, or
+branches; it should warn because later merge or integration work may conflict,
+but the shipped authorization path does not yet emit this warn tier.
 
 If repository identity is unknown, the target model should only hard-block on
 same normalized `absolute_path`; repo-relative matches with incomplete identity
@@ -604,6 +604,13 @@ Freshness is required for all active coordination records.
 - Default reservation TTL is 15 minutes.
 - Heartbeats may extend active reservation TTL, but never beyond 60 minutes from
   `declared_at`.
+- Operator math: a long-running build/test can keep a reservation alive with
+  heartbeats, but any write after the 60-minute cap needs a fresh reservation and
+  same-reservation claim.
+- Active claims expire after 300 seconds without heartbeat; if a waiter is
+  queued, expiry can promote it.
+- A promoted claimable reservation (`reserved`) expires after 120 seconds, so
+  resume or lazy resume promptly or expect the next eligible FIFO waiter to move.
 - Shipped reservation authorization is based on active, unexpired scope rows. Expired
   rows are removed from the active policy state and deny as `missing_reservation`.
 - Phase-aware authorization requires the latest activity phase to be

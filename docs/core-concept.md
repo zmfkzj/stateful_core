@@ -94,9 +94,12 @@ Expired state can remain useful as historical evidence, but it should not block
 new work as if it were still active.
 
 V1 reservation freshness uses a 15-minute default TTL. Heartbeats can extend active
-reservation while the phase is `exploring`, `editing`, or `testing`, but never beyond
-60 minutes from declaration. Blocked or finalized work is visible but does not
-authorize writes.
+reservations while the phase is `exploring`, `editing`, or `testing`, but never
+beyond 60 minutes from declaration. Blocked or finalized work is visible but does
+not authorize writes. Active claims expire after 300 seconds without heartbeat,
+and claimable reservations expire after 120 seconds, so long-running test/build
+work must keep heartbeating and reacquire authority before any post-60-minute
+write.
 
 ## Coordination Protocol
 

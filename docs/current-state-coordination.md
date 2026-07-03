@@ -1,8 +1,11 @@
 # Current-State Coordination
 
-This document summarizes the initial product direction for observing and
-coordinating the present activity of agents, sessions, and humans working in the
-same codebase.
+This page is a rationale and index for current-state coordination. The shipped
+contract details are authoritative in [README](../README.md),
+[Implementation Contract](implementation-contract.md), [State Model](state-model.md),
+and [Architecture](architecture.md). When this page says `target`, `future`, or
+`should`, treat it as direction rather than shipped behavior unless the canonical
+docs above say otherwise.
 
 ## Problem
 
@@ -261,321 +264,27 @@ Codex lifecycle hooks and OMP extension hooks
 This gives useful control without forking Codex or changing the default OMP
 profile.
 
-The prototype supports user-level installation with repo allowlist gating.
-`stateful install --agent codex --yes` configures global Codex hooks and writes
-`skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
-`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`) and
-`skills/dispatching-parallel-agents/SKILL.md`.
-For OMP, `stateful install --agent omp --yes` writes OMP config containing the
-stateful extension under the OMP `stateful` profile agent directory
-(`~/.omp/profiles/stateful/agent`) and ensures the target keys
-`tools.approvalMode: yolo`, `stateful.autoApprove: false`,
-`bash.enabled: true`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
-and `eval.jl: false`. The installer removes `tools.approval` from the stateful
-profile because yolo mode delegates safety to
-Stateful hooks. Without `--update`, existing scalar values are preserved and
-only missing keys are inserted; with `--update`, existing target scalar values
-are overwritten. Raw Bash plus the Python/JavaScript/JS/Ruby/Julia eval
-tools are denied at the host approval and hook levels. The installer also writes
-`rules/stateful-required.md` and `skills/stateful-command-policy/` (`SKILL.md`,
-`omp-tools.md`, `sandbox-tools.md`, `denial-recovery.md`,
-`subagent-write-recovery.md`) under that isolated agent directory: the
-always-apply rule tells the model when
-Stateful policy applies, the `stateful-command-policy` manual keeps the detailed
-procedure, and hooks remain the enforcement boundary. The
-generated extension keeps built-in Bash preflight, edit/write auto-declare/claim,
-and lazy resume tools. Built-in Bash may run only strict trusted
-`stateful sandbox run ...` and `stateful sandbox process find ...` commands
-after Stateful preflight; command execution and process inspection are not
-generated tool calls. External write/create/write-dir/socket/signal scope and
-repo-external OMP native `edit`/`write` file targets ask for a scoped OMP UI
-grant by default; `stateful.autoApprove: true` skips only that Stateful-owned
-prompt while sandbox scope validation, hooks, reservation/claim checks, and
-grant limits still apply. That grant omits raw command text, shows purpose and
-declared scope, and can cover matching calls until expiry or max uses. When
-auto-approval is enabled, no prompt is shown. Raw Bash and
-Python/JavaScript/JS/Ruby/Julia
-eval-tool calls
-are blocked even if their command text
-invokes `stateful sandbox run`. The OMP
-global/default profile is not modified.
-`stateful enable` opts the current repo into enforcement through the user-level
-install and repo allowlist.
+The runtime details are intentionally not repeated here. Use this page for the
+current-state rationale and queue/resume shape; use the canonical docs for
+shipped hook, tool, sandbox, API, and storage behavior:
 
-```text
-global Codex hooks and generated skills
-isolated OMP `stateful` profile config
-repo allowlist entry
-optional <repo>/.codex/hooks.json compatibility fallback
-<repo>/.stateful/config.yml
-stateful binary available by absolute path or PATH lookup
-```
+- [README](../README.md) summarizes shipped status and operator-facing use.
+- [Implementation Contract](implementation-contract.md) is the concrete v1
+  source for installation, hooks, native Stateful tools, lazy resume,
+  `write-targets`, OMP scoped UI grant behavior, API, storage, and tests.
+- [State Model](state-model.md) defines active reservation,
+  same-reservation claim, claimable reservation, `wait_id`, `reservation_id`,
+  freshness, queues, and current-state views.
+- [Architecture](architecture.md) defines the hook/native-tool/server split:
+  adapters stay thin, the local HTTP state server owns policy, and native tools
+  are API adapters rather than independent policy engines.
 
-Codex global hooks, repo-local compatibility hooks, and managed Codex hooks
-share the Codex lifecycle model: `SessionStart`, `UserPromptSubmit`,
-`PreToolUse`, `PostToolUse`, and `Stop`. The isolated OMP `stateful` profile
-uses OMP extension entry points for `SessionStart`, `PreToolUse`,
-`PostToolUse`, and `Stop`; OMP does not expose `UserPromptSubmit`. OMP
-`session-start` derives the active Stateful `agent_id` from
-`ctx.sessionManager.getSessionId()` plus `ctx.sessionManager.getLeafId()` when
-present. The generated id is `omp-${sessionId}-${leafId}` with a leaf id and
-`omp-${sessionId}` without one; if `getSessionId()` is unavailable or invalid,
-Stateful actions fail closed. OMP native tools use that derived identity; agents
-do not repair or select current-session files, environment variables, runtime
-session aliases, or event/ctx agent and session fields. With that state in place,
-`state_session_register` -> `state_reservation_declare` ->
-`state_claim_acquire` resolves the active OMP agent identity without a
-caller-supplied environment override. OMP native `edit`
-and `write` pre-tool authorization can
-also auto-declare the exact file scope, acquire same-reservation claims, and
-retry when the only denial is missing reservation/scope and no explicit
-reservation id was supplied; queued conflicts, unavailable runtime,
-changed-target replay, unsupported targets, explicit bad reservation ids, and
-other denials still use lazy resume or normal denial recovery. Plugin packaging
-is deferred to team beta for distribution and update UX, while managed hooks
-remain the long-term organization-enforcement path.
-
-Hook scripts are thin integration adapters. They parse runtime hook input,
-classify runtime-specific tool calls, extract action and targets when supported,
-call the local HTTP state server for store-backed coordination policy, and
-translate the decision back into runtime hook output. Adapter-local policy is
-limited to fail-closed classification and trusted wrapper validation for
-command-shaped execution. V1 implementation is Rust-only, so hooks invoke the
-compiled `stateful` binary.
-
-Envelope-enforced write authorization and reservation requests include
-`protocol_version`; a major protocol mismatch fails closed on those paths.
-Reconciliation acknowledgements and OMP `SessionStart`, `PostToolUse`, and
-`Stop` lifecycle posts use flat route-specific bodies with `metadata` and
-`source`, while OMP `PreToolUse` authorization still uses the v1 envelope.
-
-OMP adapters preserve stateful hard blocks: built-in Bash may run only strict
-trusted `stateful sandbox run ...` and `stateful sandbox process find ...`
-commands after Stateful preflight. External write/create/write-dir/socket/signal
-scope and repo-external OMP native `edit`/`write` file targets ask for a scoped
-OMP UI grant by default; `stateful.autoApprove: true` skips only that
-Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim
-checks, and grant limits still apply; stateful allow maps to allow; and stateful
-denial or unavailable state maps to block even when OMP yolo metadata is present.
-
-### Hook Responsibilities
-
-These responsibilities apply to Codex hooks unless noted. OMP supports
-`SessionStart`, `PreToolUse`, `PostToolUse`, and `Stop`; it does not expose a
-`UserPromptSubmit` hook.
-
-`SessionStart`:
-
-- register the active agent
-- record agent id, workspace, and branch
-- inject relevant active state into the model context
-
-`UserPromptSubmit`:
-
-- extract or request an initial reservation when possible
-- attach nearby active states as context
-
-`PreToolUse`:
-
-- intercept supported tool calls before execution
-- deny supported write calls when the active agent has no active reservation
-- deny Codex raw Bash with sandbox guidance. For OMP, built-in Bash may run
-  only strict trusted `stateful sandbox run ...` and `stateful sandbox process
-  find ...` commands after Stateful preflight; arbitrary raw Bash and the
-  Python/JavaScript/JS/Ruby/Julia eval tools remain denied at host approval and
-  hook levels. Scoped external writes and repo-external OMP native `edit`/`write`
-  file targets still ask for a Stateful OMP UI grant by default;
-  `stateful.autoApprove: true` skips only that Stateful-owned prompt while
-  sandbox scope validation, hooks, reservation/claim checks, and grant limits
-  still apply.
-- check whether requested files or resources conflict with active claims
-- deny, warn, or add context based on policy
-
-`PostToolUse`:
-
-- observe supported tool results
-- update files touched, phase, test results, and last result
-- release same-reservation repo-write claims after completed native edit and
-  `write-targets` transactions
-- refresh heartbeat timestamps and claim timestamps only for remaining active
-  claims still covered by active reservation
-
-`Stop`:
-
-- post activity finalization for the session
-- release the session's claims through finalization
-- leave explicit `state_activity_finalize` available for manual final status
-  updates before shutdown
-
-Subagents:
-
-- coordinate in the same workspace state; in OMP, branch-specific subagent work
-  uses the `agent_id` derived from the current `getLeafId()` when present
-- record activity and claims with their own `actor_id`
-- do not receive automatic override authority from a shared owner
-
-### Native Stateful Tool Responsibilities
-
-The native Stateful tool surface should expose structured tools for agents and
-hooks. Agent identity tools use native names directly; other canonical callable
-tool names map to dotted protocol names:
-
-```text
-state_session_register
-state_session_heartbeat
-state_reservation_declare (state.reservation.declare)
-state_reservation_request (state.reservation.request)
-state_reservation_claim (state.reservation.claim)
-state_reservation_cancel (state.reservation.cancel)
-state_claim_acquire (state.claim.acquire)
-state_claim_release (state.claim.release)
-state_activity_observe (state.activity.observe)
-state_activity_finalize (state.activity.finalize)
-state_conflicts_check (state.conflicts.check)
-state_current_read (state.current.read)
-state_events_read (state.events.read)
-state_context_render (state.context.render)
-state_reconcile_ack (state.reconcile.ack)
-state_notifications_poll (state.notifications.poll)
-state_resume_next (state.resume.next)
-```
-
-`state_reservation_declare` and `state_reservation_request` require a non-empty `purpose`.
-The caller must infer that purpose from the user or agent instruction when it is
-not explicit; the server must not synthesize a fallback purpose.
-`state_reservation_declare` also requires non-empty `files_planned`; empty arrays and
-empty or normalized-empty entries are rejected with `missing_scope`.
-`state_reservation_request` also requires a non-empty `path`; empty or
-normalized-empty request paths are rejected with `missing_scope`.
-`state_reservation_request` and `state_reservation_cancel` expose the explicit scheduling
-queue. `state_reservation_claim` takes `reservation_id` and `wait_id`, then uses
-the stored reservation purpose; callers must not send a claim purpose.
-
-`state_claim_acquire` accepts `paths: string[]` for batch acquisition from
-active reservation scope. Each entry still becomes a claim on one exact file or
-directory resource; directory claims authorize only exact `write_directory`
-resources, not child file writes. Legacy server requests with `path` remain
-accepted for compatibility, while `state_claim_release` still accepts one
-`path`.
-
-Hooks should call the same state server API as native Stateful tools so policy
-remains centralized. OMP native `edit`/`write` can auto-declare and claim exact
-tool-visible file scope for the default simple-write path; explicit reservation
-and claim remain the repo edit path for other native writes and command-shaped
-shell writes.
-
-### State Server Responsibilities
-
-The state server is the source of truth for active coordination state.
-
-It should:
-
-- store append-only state events
-- materialize active current state
-- evaluate conflict rules
-- manage claim TTLs
-- expose current-state views for prompt rendering
-- retain historical activity as evidence after expiration
-
-Runtime hook integrations should stay thin. Store-backed coordination policy
-belongs to the server, not to hook scripts. Hook logic should only handle
-runtime parsing, fail-closed unknown-tool handling, and trusted wrapper validation.
-
-V1 persistence is SQLite with append-only event tables and materialized
-current-state views. JSONL may be used for debugging exports, but not as the
-primary store.
-
-V1 transport is local HTTP. Codex hooks, OMP hooks, native Stateful tools,
-filesystem watchers, and the future IDE extension should call the same local
-HTTP API. Native tools remain adapters, not separate policy implementations.
-
-Policy evaluation should use one entry point:
-
-```text
-authorize_action(input) -> decision
-```
-
-The shipped `/v1/authorize` decision includes `allow`, `deny`, or `error` plus a
-reason and required next action when needed. A `warn` decision, response-level
-conflicts, rendered context items, and response-level audit-event fields are
-target response vocabulary. Deny decisions are audited as
-`AuthorizationDenied`; shipped lifecycle mutations also append
-`ClaimReleased`, `ReservationClaimed`, `ReservationCanceled`, and `ActivityFinalized`
-events.
-
-### Tool Classification
-
-V1 write enforcement is limited to tool paths where targets can be determined
-reliably:
-
-```text
-namespaced runtime tool names -> classify by leaf
-  (functions.bash as Bash; functions.python/javascript/js/ruby/julia as eval
-  tools; functions.read / functions.search as native read/search)
-native read/search/diff tools -> preferred path for ordinary read work
-OMP native edit/write without explicit reservation_id -> auto-declare/claim
-  exact tool-visible file scope when only missing reservation/scope blocks it
-other native edit tools with hook-visible targets -> require task-level reservation
-  covering the target and a same-reservation claim; release the claim after the
-  completed write transaction
-Codex Bash read-only inspection that genuinely needs a shell -> require a strict
-  trusted wrapper:
-  <absolute-stateful-binary> sandbox run --fs read-only --network disabled
-  --command <cmd>
-OMP built-in Bash sandbox/process commands -> allow only strict trusted
-  `stateful sandbox run ...` and `stateful sandbox process find ...` commands
-  after Stateful preflight
-Codex process inspection -> use <absolute-stateful-binary> sandbox process find <selector>, not raw ps/pgrep
-Codex Bash command-shaped repo writes -> require the trusted wrapper with
-  --fs write-targets plus explicit --write-target <file>/--create-target <file> values
-test execution -> run through sandbox run --fs build --network enabled with
-  --write-dir <scratch-purpose>; scratch lives under /tmp/stateful/<session>/
-Codex raw Bash, arbitrary OMP raw Bash, or OMP Python/JavaScript/JS/Ruby/Julia eval tools
-  -> deny
-repo-external OMP command-shaped work -> use built-in Bash with a strict trusted `stateful sandbox run --fs external ...` command; write/create/write-dir/socket/signal scope and repo-external OMP native `edit`/`write` file targets ask for a scoped OMP UI grant by default, and `stateful.autoApprove: true` skips only that Stateful-owned prompt while sandbox scope validation, hooks, reservation/claim checks, and grant limits still apply
-```
-
-Bash denial should tell the agent to use native read/search/diff tools for
-ordinary read work,
-`<absolute-stateful-binary> sandbox run --fs read-only --network disabled
---command <cmd>` for Codex shell-based read-only inspection,
-`<absolute-stateful-binary> sandbox run --fs write-targets --write-target <file> ... --command <cmd>`
-for Codex command-shaped repo writes after reservation and same-reservation claim,
-OMP built-in Bash with strict trusted `stateful sandbox run ...` commands for
-sandbox runs and repo-external command-shaped work. External write/create/write-dir,
-socket, or signal scope and repo-external OMP native `edit`/`write` file targets
-ask for a scoped OMP UI grant by default; `stateful.autoApprove: true` skips only
-that Stateful-owned prompt while sandbox scope validation, hooks,
-reservation/claim checks, and grant limits still apply. Use OMP native
-`edit`/`write` auto-declare/claim for repo-internal simple writes and native edit
-tools for other repo file edits.
-
-The read-only sandbox profile is a write-confinement profile. It does not
-provide full process containment, and it cannot be combined with
-`--network enabled`.
-
-There is no command-text authorization path. Command text alone does not
-authorize `rg`, `git diff`, test runners, stateful operational commands, or any
-other Bash command. Test commands should run through the trusted
-`stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose>
---command <cmd>` wrapper. OMP native `edit`/`write` can auto-declare/claim the
-default simple-write path; other repo writes require task-level reservation
-covering the target plus a matching same-reservation claim and must use native
-edit tools or `--fs write-targets` with explicit targets.
-
-Minimum sandboxed test shape:
-
-```text
-stateful sandbox run --fs build --network enabled --write-dir test-run --command <cmd>
-```
-
-The build profile writes disposable artifacts under
-`/tmp/stateful/<session>/<scratch-purpose>/`. OMP native `edit`/`write` can
-auto-declare/claim exact tool-visible file scope for the default simple-write
-path; other source-tree edits use native edit tools with hook-visible targets
-after exact reservation declaration and a successful same-reservation file claim.
-The completed write transaction releases the authorizing claim. Command-shaped
-source writes must use exact `--write-target <file>` or `--create-target <file>` entries.
+The important design point for this rationale: supported writes pass through an
+authorization boundary before mutation, effects are observed afterward, and
+runtime adapters should classify tools only enough to call the state server.
+Lazy resume belongs at the retry boundary: a queued `wait_id` may become a
+claimable reservation, but write authority exists only after the target is
+reread and an active same-reservation claim is created.
 
 ## Conflict Policy
 

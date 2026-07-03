@@ -396,20 +396,25 @@ workspace later on old state.
 
 ## Relationship to Existing Docs
 
-This document defines the concurrency model at a product and policy level.
-Detailed implementation rules live in the existing docs:
+This document defines the concurrency model at a product and policy level. The
+canonical doc hierarchy is:
 
-- [Core Concept](core-concept.md) defines current state and product boundary.
-- [State Model](state-model.md) defines records, freshness, overrides, queues,
-  and views.
-- [Architecture](architecture.md) defines hooks, server, native tools, policy engine, and
-  failure modes.
-- [Implementation Contract](implementation-contract.md) defines concrete v1 API,
-  CLI, storage, and test expectations.
+1. [README](../README.md): shipped status, operator overview, and entry points.
+2. [Implementation Contract](implementation-contract.md): concrete v1 API, CLI,
+   hook, runtime, storage, and test expectations.
+3. [State Model](state-model.md): records, freshness, overrides, queues, and
+   views.
+4. [Architecture](architecture.md): hooks, server, native tools, policy engine,
+   and failure modes.
+5. [Current-State Coordination](current-state-coordination.md): rationale and
+   index for current-state coordination, including queue/resume/lazy-resume
+   design notes. It is not an independent source of truth for shipped behavior.
 
 When this document and a lower-level implementation document differ, treat this
-document as the model reservation and the implementation contract as the current
-shipping behavior. Changes that alter the model should update both layers.
+document as the model reference and the implementation contract as the current
+shipping behavior. Changes that alter shipped behavior should update the
+implementation contract, state model, or architecture document as applicable;
+changes that alter rationale may update current-state coordination.
 
 ## Invariants
 

@@ -221,6 +221,11 @@ Notes:
   purpose.
 - Native edit hooks and sandbox `write-targets` authorization may lazy-claim a
   claimable request at the retry write boundary.
+- Operator TTLs: active reservations start at 15 minutes and heartbeat only up
+  to 60 minutes from declaration. Active claims expire after 300 seconds without
+  heartbeat. Claimable reservations expire after 120 seconds, so poll/resume or
+  lazy resume promptly after being unblocked; blocked or finalized work must
+  reread and get fresh authority before writing.
 
 Resume commands:
 
@@ -333,6 +338,18 @@ successful same-reservation file claim. Hooks extract the native tool target,
 call `/v1/authorize` with the operation-specific action and `reservation_id`,
 allow the edit only after an allow decision, and release the authorizing claim
 after the completed write transaction.
+
+Choose the path by operation shape:
+
+| Operation | Use |
+| --- | --- |
+| Simple OMP repo file edit/write | Native `edit`/`write`; auto-declare/claim handles missing reservation/scope when no explicit `reservation_id` is supplied. |
+| Planned repo edit/delete/move or multi-file work | Declare a reservation, acquire exact same-reservation claims, then use native edit/write with that `reservation_id`. |
+| Script or generator mutates repo files | `stateful sandbox run --fs write-targets --reservation-id <reservation_id>` with exact `--write-target` / `--create-target` flags. |
+| Build, test, or package command | `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`. |
+| `git ...` | `--fs git`; keep network disabled for local git, enable it only for remote git. |
+| `gh pr list|view|status|create` | `--fs github-pr --network enabled`. |
+| Repo-external command | `--fs external --purpose <purpose>`; add exact absolute external write/create/dir scope only for writes. |
 
 ## Sandbox Profiles
 

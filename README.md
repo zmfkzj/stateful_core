@@ -229,7 +229,7 @@ resolving the missing scope or claim externally before resume.
 
 Detailed queue states, claim expiry behavior, and promotion rules are documented
 in [State model](docs/state-model.md),
-[Current-state coordination](docs/current-state-coordination.md), and
+[Current-state coordination rationale/index](docs/current-state-coordination.md), and
 [Concurrency control spec](docs/concurrency-control-spec.md).
 
 ## Command Execution
@@ -385,7 +385,7 @@ release workflow notes.
 - [State model](docs/state-model.md)
 - [Architecture](docs/architecture.md)
 - [Implementation contract](docs/implementation-contract.md)
-- [Current-state coordination](docs/current-state-coordination.md)
+- [Current-state coordination rationale/index](docs/current-state-coordination.md)
 - [Concurrency control spec](docs/concurrency-control-spec.md)
 - [V1 hardening scope decisions](docs/v1-hardening-scope-decisions.md)
 - [DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md)
