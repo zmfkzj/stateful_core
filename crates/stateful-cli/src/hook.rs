@@ -38,6 +38,7 @@ pub enum HookOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OmpHookOutcome {
     Allow,
+    Warn { message: String },
     Block { reason: String },
     Prompt { title: String, message: String },
 }
@@ -46,6 +47,10 @@ impl OmpHookOutcome {
     fn to_stdout_json(&self) -> serde_json::Value {
         match self {
             Self::Allow => json!({ "decision": "allow" }),
+            Self::Warn { message } => json!({
+                "decision": "warn",
+                "message": message,
+            }),
             Self::Block { reason } => json!({
                 "decision": "block",
                 "reason": reason,
@@ -531,6 +536,7 @@ fn authorize_omp_targets(
     let mut reservation_id = input.reservation_id().map(str::to_string);
     let mut auto_declared = false;
     let mut auto_claimed_paths = BTreeSet::new();
+    let mut warnings = Vec::new();
 
     'authorize: loop {
         for target in &targets {
@@ -552,6 +558,10 @@ fn authorize_omp_targets(
                     return Ok(outcome);
                 }
             };
+            if decision.decision == "warn" {
+                warnings.push(authorization_warning_message(&decision));
+                continue;
+            }
             if decision.decision != "allow" {
                 if !auto_declared
                     && reservation_id.is_none()
@@ -594,7 +604,12 @@ fn authorize_omp_targets(
             }
         }
 
-        return Ok(OmpHookOutcome::Allow);
+        if warnings.is_empty() {
+            return Ok(OmpHookOutcome::Allow);
+        }
+        return Ok(OmpHookOutcome::Warn {
+            message: warnings.join("\n"),
+        });
     }
 }
 
@@ -698,8 +713,13 @@ fn authorization_payload_for_target(
         "action": target.action,
         "path": target.path,
     });
-    if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
-        payload["base_observations"] = json!([observation]);
+    let base_observations = [Some(target.path.as_str()), target.new_path.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter_map(|path| base_observation_for_target(repo_root, path))
+        .collect::<Vec<_>>();
+    if !base_observations.is_empty() {
+        payload["base_observations"] = json!(base_observations);
     }
     if queue_on_conflict {
         payload["queue_on_conflict"] = json!(true);
@@ -1628,6 +1648,7 @@ fn handle_pre_tool_use_with_runtime(
             ),
         }),
         tool_name if is_safe_without_repo_write_authorization(tool_name) => Ok(HookOutcome::Allow),
+        _ if is_stateful_control_plane_tool(&input.tool_name) => Ok(HookOutcome::Allow),
         _ if is_user_allowed_tool(global_paths.as_ref(), repo_root, &input.tool_name) => {
             Ok(HookOutcome::Allow)
         }
@@ -1752,6 +1773,8 @@ fn is_canonical_stateful_mcp_tool(tool_name: &str) -> bool {
             | "state.events.read"
             | "state_context_render"
             | "state.context.render"
+            | "state_reconcile_ack"
+            | "state.reconcile.ack"
             | "state_notifications_poll"
             | "state.notifications.poll"
             | "state_resume_next"
@@ -2568,6 +2591,7 @@ fn authorize_targets(
     let workspace_id = effective_workspace_id(runtime, identity);
     let agent_id = input.stateful_agent_id().to_string();
     let mut allowed_paths = BTreeSet::new();
+    let mut warnings = Vec::new();
     for target in targets {
         let purpose = hook_authorize_purpose(input, runtime, &target, &workspace_id);
         let payload = authorization_payload_for_target(
@@ -2599,6 +2623,14 @@ fn authorize_targets(
                 return Ok(HookOutcome::Deny { reason });
             }
         };
+        if decision.decision == "warn" {
+            warnings.push(authorization_warning_message(&decision));
+            allowed_paths.insert(target.path.clone());
+            if let Some(new_path) = &target.new_path {
+                allowed_paths.insert(new_path.clone());
+            }
+            continue;
+        }
         if decision.decision != "allow" {
             release_pre_tool_authorized_claims(runtime, &agent_id, &workspace_id, &allowed_paths);
             let reason = if let Some(repo_root) = repo_root {
@@ -2618,7 +2650,13 @@ fn authorize_targets(
         }
     }
 
-    Ok(HookOutcome::Allow)
+    if warnings.is_empty() {
+        Ok(HookOutcome::Allow)
+    } else {
+        Ok(HookOutcome::AllowWithContext {
+            message: warnings.join("\n"),
+        })
+    }
 }
 
 fn release_pre_tool_authorized_claims(
@@ -2699,6 +2737,10 @@ fn authorization_unavailable_reason(error: &dyn std::fmt::Display) -> String {
     )
 }
 
+fn authorization_warning_message(decision: &AuthorizeDecision) -> String {
+    format!("stateful warning: {}", decision.message)
+}
+
 fn authorization_denial_reason(decision: AuthorizeDecision) -> String {
     let reservation_id = decision.reservation_id();
     let mut reason = decision.required_next_action.unwrap_or(decision.message);
@@ -2739,7 +2781,7 @@ fn authorization_denial_reason(decision: AuthorizeDecision) -> String {
     reason
 }
 
-fn base_observation_for_target(
+pub(crate) fn base_observation_for_target(
     repo_root: Option<&Path>,
     relative_path: &str,
 ) -> Option<serde_json::Value> {
@@ -2760,7 +2802,7 @@ fn base_observation_for_target(
     }
 }
 
-fn hook_content_hash(bytes: &[u8]) -> String {
+pub(crate) fn hook_content_hash(bytes: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
         hash ^= u64::from(*byte);

@@ -1,6 +1,6 @@
 # State Model
 
-This document defines the v1 current-state coordination model.
+This document defines the v1 current-state coordination model, including the default `enforcement` mode and the presence-first `awareness` mode.
 
 ## State Kinds
 
@@ -10,6 +10,9 @@ The model is intentionally narrow:
 - `activity`
 - `reservation`
 - `claim`
+- `write_fence`
+- `human_observation`
+- `reconciliation`
 - `conflict`
 - `finalization`
 - `override`
@@ -27,18 +30,25 @@ authorize writes.
 
 `turn_id` identifies one agent execution slice inside a session: one prompt,
 the tool calls that follow, and the final response, pause, or stop. V1 records
-turn identity where available, but write authorization is reservation-scoped:
-active `reservation_id` scope plus an active same-reservation claim.
+turn identity where available. Write behavior is coordination-mode dependent:
+`enforcement` is the default and requires active `reservation_id` scope plus an
+active same-reservation claim. `awareness` keeps the same reservation, claim,
+phase, and overlap signals visible but converts broad coordination denials into
+warnings without queue side effects. Unsupported actions, stale base or
+claim-time observations, unreconciled human writes, and active write-fence
+conflicts remain safety stops when those checks are reached.
 
-`reservation` is the task-level write scope. A reservation belongs to one
+`reservation` is the task-level write intent. A reservation belongs to one
 session, expires, and groups the known file or directory scopes for one task
 purpose under a stable `reservation_id`. Agents should declare the complete known
 file set for a task, then add scopes to that same reservation as the target set
 grows.
 
-`claim` is the live resource-level ownership signal. Each supported write still
-requires a fresh same-reservation claim for the exact file or directory resource
-being mutated.
+`claim` is the live resource-level ownership signal. In `enforcement`, each
+supported write requires a fresh same-reservation claim for the exact file or
+directory resource being mutated. In `awareness`, claim overlap is warning and
+context input rather than a broad lock; short write fences protect the actual
+mutation boundary.
 
 The practical hierarchy is:
 
@@ -134,8 +144,9 @@ source_ref
 ```
 
 V1 claims are coordination signals. They are not hard distributed locks and do
-not replace source-control review. Only `file` and `directory` claims can
-authorize supported write actions in v1.
+not replace source-control review. In `enforcement`, only `file` and `directory`
+claims can authorize supported write actions. In `awareness`, they drive
+warnings and rendered context rather than broad denial.
 
 Claim freshness defaults to `claim_ttl_seconds = 300`. Heartbeats refresh active
 claim expiry while the owning agent remains active. Missing heartbeats do not
@@ -342,8 +353,8 @@ source_refs
 
 Conflict records are target audit artifacts. They also help render useful
 context into later prompts. The shipped authorization path currently appends
-`AuthorizationDenied` events for deny decisions instead of writing rows to the
-`conflicts` table, and it does not emit warn-tier conflict records.
+`AuthorizationDenied` or `AuthorizationWarned` events for policy decisions
+instead of writing rows to the `conflicts` table.
 
 Write attempts without active reservation should be audited as missing-reservation denials.
 In the shipped server this is an `AuthorizationDenied` event; the target conflict
@@ -389,6 +400,10 @@ finds an already-unblocked queued waiter, but the current row does not persist
 the trigger reason. Soft repo-relative conflicts do not create wait queue
 records in v1.
 
+Awareness mode does not create wait queue side effects when broad coordination
+checks soften from deny to warn. Queueing remains an enforcement-mode recovery
+path for hard active-claim conflicts.
+
 Promotion creates claimable reservations, not active write authority. Each
 waiting agent must reread the target. Manual native-tool/CLI flows then
 explicitly claim the reservation with `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)`
@@ -426,6 +441,34 @@ Queued or claimable (`reserved`) requests can be canceled explicitly. Stop or
 activity finalization releases active claims, cancels that agent's queued and
 claimable (`reserved`) requests, and promotes the next eligible waiter for any
 released or canceled resource.
+
+## Write Fence Record
+
+A write fence is the shipped short-lived mutation-boundary guardrail. It is not
+a task-scale reservation and not a long-lived claim replacement.
+
+```text
+fence_id
+agent_id
+workspace_id
+relative_path
+action
+acquired_at
+expires_at
+released_at
+```
+
+The server acquires write fences after reservation/claim policy, human-write
+reconciliation checks, and base-observation checks allow a supported write.
+Fences are acquired all-or-nothing across the normalized affected paths. The
+same agent may refresh its own active fence; another agent targeting the same
+path receives `write_fence_conflict`, which denies in both `enforcement` and
+`awareness`.
+
+Write-fence freshness defaults to 300 seconds. Native edit hooks and
+`sandbox run --fs write-targets` release the fence when the write transaction
+completes; session finalization also releases that session's active fences.
+Expiry is a fallback for interrupted writers, not the normal completion path.
 
 ## Override Record
 
@@ -531,27 +574,36 @@ work and releases the agent's claims.
 A reconciliation record acknowledges that an agent has reread and accounted for a
 human write before resuming work on the affected file.
 
-The shipped `reconcile_ack` API records the flat acknowledgement payload:
+The shipped `/v1/reconcile/ack` API and `stateful reconcile ack` command record:
 
 ```text
 agent_id
 workspace_id
+reservation_id
+resources
 files_reread
 human_change_summary
 decision: adopt | reapply | ask_user | abandon
+conflict_with_plan
 ```
 
-Future richer reconciliation records may add actor/turn metadata, target
-resources, trigger event ids, and next-action fields.
+The native command-policy tool names are `state.reconcile.ack` and
+`state_reconcile_ack`; use the exact name exposed by the active runtime. The CLI
+shape is:
 
-Only `adopt` and `reapply` can clear an unreconciled-human-write block. `ask_user`
-keeps writes blocked until the user provides direction. `abandon` keeps writes
-blocked for the affected file and should release or shorten the affected claim.
-Clearing the block does not authorize writes by itself; active, unexpired,
-matching reservation is still required.
+```text
+stateful reconcile ack --resource <path> --files-reread <path> \
+  --summary <text> --decision adopt|reapply|ask_user|abandon \
+  --reservation-id <reservation_id>
+```
 
-The current implementation records reconciliation acknowledgements but does not
-yet emit `HumanWriteObserved` events or enforce unreconciled-human-write blocks.
+The server requires `files_reread` and a reservation id whose active exact file
+intent covers every reread file. Only `adopt` and `reapply` clear
+unreconciled-human-write blocks. `ask_user` records that the agent needs user
+direction and keeps writes blocked. `abandon` records that the agent will not
+resume the affected work and also leaves the block uncleared. Clearing the block
+does not authorize writes by itself; active, unexpired matching reservation and,
+in enforcement mode, same-reservation claim authority are still required.
 
 ## Events
 
@@ -561,10 +613,10 @@ source for conflict checks. Event-backed materialization is used for accepted
 agent registration and reservation declaration events; other shipped lifecycle APIs update
 materialized tables directly and append audit events in the same transaction.
 
-The shipped server emits:
+The shipped store event log emits:
 
-- `SessionRegistered`
-- `SessionHeartbeat`
+- `AgentRegistered`
+- `AgentHeartbeat`
 - `ReservationDeclared`
 - `ClaimAcquired`
 - `ClaimReleased`
@@ -573,6 +625,9 @@ The shipped server emits:
 - `ReservationCanceled`
 - `ActivityFinalized`
 - `AuthorizationDenied`
+- `AuthorizationWarned`
+- `HumanWriteObserved`
+- `ReconciliationAcknowledged`
 
 The target model also includes these explicit coordination events:
 
@@ -583,8 +638,6 @@ The target model also includes these explicit coordination events:
 - `HumanActivityObserved`
 - `HumanSaveGateShown`
 - `HumanSaveContinued`
-- `HumanWriteObserved`
-- `ReconciliationAcknowledged`
 - `ActivityUpdated`
 - `OutboxEventQueued`
 - `OutboxEventSynced`
@@ -592,15 +645,19 @@ The target model also includes these explicit coordination events:
 
 Expiration may be driven by background TTL processing or by reads that discover
 stale state. Target events above are not yet emitted by the current
-implementation, including override and human save-gate events.
+implementation, including override and human save-gate events. `stateful human
+observe` records human observations; a high-confidence `save`, `change`, or
+`delete` not attributed to an active agent write fence emits `HumanWriteObserved`.
+`stateful human save-check` returns `clear` or `warn` and does not emit
+`HumanSaveGateShown` or `HumanSaveContinued`.
 
 ## Freshness Rules
 
 Freshness is required for all active coordination records.
 
 - Active activity and claims must have `expires_at`.
-- Supported write actions require an active, unexpired reservation with matching
-  file or directory scope.
+- Supported write actions require active, unexpired reservation/claim authority
+  plus fresh base observations when the adapter can identify and read the target.
 - Default reservation TTL is 15 minutes.
 - Heartbeats may extend active reservation TTL, but never beyond 60 minutes from
   `declared_at`.
@@ -623,7 +680,7 @@ Freshness is required for all active coordination records.
 - Rename and move operations require exact file scope for both source and
   destination.
 - Heartbeats extend active claims and activity records. The current
-  implementation also refreshes active reservation expiry during `SessionHeartbeat`
+  implementation also refreshes active reservation expiry during `AgentHeartbeat`
   materialization, capped at 60 minutes from `declared_at`.
 - Missing heartbeats do not imply success.
 - Shipped finalization completes active reservations and appends a terminal activity
@@ -654,7 +711,8 @@ writes, and pending outbox sync.
 When the state server is unavailable, coordination must fail closed for agent
 write authorization and fail open for human saves.
 
-- Supported writes are denied.
+- Supported writes are denied because neither `enforcement` nor `awareness` can
+  prove reservation state, freshness, human reconciliation, or write-fence safety.
 - Codex raw Bash and Bash calls that are not a strict
   `<absolute-stateful-binary> sandbox run ... --command <cmd>` wrapper are
   denied, including repo-external shell work. Repo-external command-shaped writes
@@ -663,10 +721,12 @@ write authorization and fail open for human saves.
   cannot be proven.
 - write-target sandbox authorization fails closed and does not execute the
   command.
-- `state.reconcile.ack` fails and cannot clear an unreconciled-human-write block.
+- `state.reconcile.ack` / `state_reconcile_ack` fails and cannot clear an
+  unreconciled-human-write block.
 - Reservation declaration, claim acquisition, and claim refresh fail.
 - Read, search, and diff actions are allowed.
-- Future IDE human save gates warn the user and allow the save.
+- Human save checks should warn the user and allow the save rather than block
+  human work on server availability.
 - Heartbeat, finalization, and observer events may be queued in a local outbox.
 - Local outbox events cannot authorize writes, clear reconciliation blocks, or
   extend claims until synced through the state server.
@@ -697,26 +757,38 @@ sync attempts for the same `outbox_id` as the same event. Pending entries should
 sync in `sequence` order per agent. Failed entries remain available for retry
 and inspection.
 
-## Human Save Gate Rules
+## Human Observation and Save-Check Rules
 
-Human save-gate events are advisory coordination evidence for future IDE
-integration. They are not emitted by the current CLI, native tools, or HTTP
-implementation.
+Human observation is shipped as advisory input plus a hard safety stop for later
+agent writes that would overwrite unreconciled human changes. The CLI/HTTP
+surfaces are:
 
-- IDE open, selection, dirty-buffer, and save-completion events may update
-  human `activity` records.
-- A save attempt that conflicts with an active agent claim should produce
-  `HumanSaveGateShown`.
-- If the user explicitly continues the save, record `HumanSaveContinued`.
-- A completed save should produce `HumanWriteObserved`.
-- Human save decisions do not grant agent override authority.
+```text
+stateful human observe <path> --kind save|change|delete|presence|dirty \
+  --confidence high|low --source <source> --summary <text>
+stateful human save-check <path>...
+stateful reconcile ack --resource <path> --files-reread <path> \
+  --summary <text> --decision adopt|reapply|ask_user|abandon \
+  --reservation-id <reservation_id>
+```
+
+- IDE open, selection, dirty-buffer, and save-completion sensors may update
+  human `activity` or `human_observation` rows; low-confidence presence signals
+  warn rather than deny.
+- `human save-check` compares requested save paths with active agent claims and
+  active write fences. It returns `decision: clear` or `decision: warn` with
+  `conflict_kind: claim | write_fence`; it is advisory UX and should not prevent
+  the human save.
+- A high-confidence `human observe` with kind `save`, `change`, or `delete`
+  records an unreconciled human write unless the write is attributed to an active
+  agent write fence.
 - After `HumanWriteObserved` on a file with active agent work, later agent writes
-  should be denied or warned until the agent refreshes state and reconciles the
-  file.
-- Read, search, diff, and sandboxed test actions remain allowed while a
-  human write is unreconciled.
-- `state.reconcile.ack` records reconciliation after the agent rereads the file
-  and chooses `adopt`, `reapply`, `ask_user`, or `abandon`.
+  are denied until the agent rereads and reconciles the file.
+- Read, search, diff, and sandboxed test actions remain allowed while a human
+  write is unreconciled.
+- `state.reconcile.ack` / `state_reconcile_ack` records reconciliation after the
+  agent rereads the file and chooses `adopt`, `reapply`, `ask_user`, or
+  `abandon`.
 
 ## Views
 

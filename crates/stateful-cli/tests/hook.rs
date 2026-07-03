@@ -2234,6 +2234,8 @@ fn pre_tool_use_allows_known_non_repo_write_tools_without_runtime() {
         "state_claim_acquire",
         "state_current_read",
         "state_context_render",
+        "state_reconcile_ack",
+        "state.reconcile.ack",
         "mcp__stateful__state_reservation_declare",
         "mcp__stateful__state_claim_acquire",
         "mcp__stateful_state_reservation_declare",
@@ -2242,6 +2244,8 @@ fn pre_tool_use_allows_known_non_repo_write_tools_without_runtime() {
         "mcp__stateful_state_context_render",
         "mcp__stateful__state_current_read",
         "mcp__stateful__state_context_render",
+        "mcp__stateful_state_reconcile_ack",
+        "mcp__stateful__state_reconcile_ack",
         "mcp__codex_apps__github__update_pull_request",
         "mcp__codex_apps__github__create_pull_request",
         "mcp__codex_apps__github__add_comment_to_issue",
@@ -2569,6 +2573,48 @@ fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
     assert!(body["payload"].get("commit_id").is_none());
     assert_eq!(body["metadata"]["runtime"], "omp");
     assert_eq!(body["metadata"]["commit_id"], "abc123");
+}
+
+#[test]
+fn omp_write_warns_without_auto_declare() {
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"warn","reason_code":"missing_reservation","message":"Review context first.","required_next_action":"Reread before writing."}"#,
+    );
+    let input = serde_json::json!({
+        "runtime": "omp",
+        "agent_id": "omp-parent",
+        "parent_agent_id": serde_json::Value::Null,
+        "omp_agent_id": "main",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "write",
+        "tool_input": { "path": "docs/a.md", "content": "hello" }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        Some(&runtime),
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp pre-tool should parse");
+
+    assert_eq!(
+        outcome,
+        OmpHookOutcome::Warn {
+            message: "stateful warning: Review context first.".to_string()
+        }
+    );
+    let request = rx.recv().expect("authorize request should arrive");
+    let body = request_json_body(&request);
+    assert_eq!(body["payload"]["action"], "write_file");
+    assert_eq!(body["payload"]["path"], "docs/a.md");
+    assert!(
+        rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "warn should not trigger auto-declare follow-up requests"
+    );
 }
 
 #[test]
@@ -3824,6 +3870,60 @@ fn pre_tool_use_edit_posts_authorize_and_denies_when_server_denies() {
 }
 
 #[test]
+fn pre_tool_use_edit_allows_with_context_when_server_warns() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let temp_root = temp.path();
+    let paths = GlobalPaths::new(temp_root.join("home"));
+    let repo_root = temp_root.join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    fs::write(repo_root.join("src/auth.ts"), b"old contents\n")
+        .expect("observed file should be writable");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_fake_stateful_server(
+        r#"{"decision":"warn","reason_code":"missing_reservation","message":"Review context first.","required_next_action":"Reread before writing."}"#,
+    );
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+
+    let input = serde_json::json!({
+        "agent_id": "s1",
+        "cwd": repo_root,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": "src/auth.ts",
+            "old_string": "old",
+            "new_string": "new"
+        }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
+
+    assert!(
+        output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _request = rx.recv().expect("captured request should arrive");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("warn outcome should serialize");
+    assert_eq!(
+        json["hookSpecificOutput"]["additionalContext"],
+        "stateful warning: Review context first."
+    );
+    assert!(
+        json["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none()
+    );
+}
+
+#[test]
 fn pre_tool_use_edit_denies_when_authorize_connection_drops() {
     let temp = tempfile::tempdir().expect("temp dir should create");
     let temp_root = temp.path();
@@ -4653,6 +4753,22 @@ fn pre_tool_use_apply_patch_move_authorizes_source_and_destination() {
     assert!(request.contains("\"new_path\":\"new.txt\""));
     let body = request_json_body(&request);
     assert_eq!(body["payload"]["purpose"], "Fix auth validation behavior.");
+    let observations = body["payload"]["base_observations"]
+        .as_array()
+        .expect("base_observations should be present");
+    assert_eq!(observations.len(), 2);
+    let old_observation = observations
+        .iter()
+        .find(|observation| observation["path"] == "old.txt")
+        .expect("old.txt base observation should be present");
+    assert_eq!(old_observation["exists"], false);
+    assert!(old_observation["content_hash"].is_null());
+    let new_observation = observations
+        .iter()
+        .find(|observation| observation["path"] == "new.txt")
+        .expect("new.txt base observation should be present");
+    assert_eq!(new_observation["exists"], false);
+    assert!(new_observation["content_hash"].is_null());
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("deny outcome should serialize");
     assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");

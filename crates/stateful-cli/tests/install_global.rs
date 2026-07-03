@@ -575,6 +575,7 @@ fn install_omp_yes_preserves_existing_config_and_uses_yolo_approval() {
     .expect("omp extension should read");
     assert!(extension.contains("function isYolo"));
     assert!(extension.contains("yolo: isYolo(event, ctx)"));
+    assert!(extension.contains("stateful_coordination_warning"));
 }
 
 #[test]
@@ -706,7 +707,7 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     assert!(command_policy_skill.contains("Support Files"));
     assert!(command_policy_skill.contains("state_reservation_declare"));
     assert!(command_policy_skill.contains("state_claim_acquire"));
-    assert!(command_policy_skill.contains("call the exact shown equivalent"));
+    assert!(command_policy_skill.contains("copy the exact active name"));
     for (name, marker) in [
         ("omp-tools.md", "Use OMP-Native Stateful Tools"),
         (

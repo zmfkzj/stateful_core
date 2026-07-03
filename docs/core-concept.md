@@ -15,10 +15,14 @@ This creates avoidable coordination failures:
 - stale memory is mistaken for current activity
 - an interrupted session leaves no structured handoff state
 
-`stateful_core` exists to answer the operational question:
+These are information and freshness failures first: unknown neighbor activity,
+stale local belief, and missing handoff state. Access control enters only as a
+thin safety rail where information alone cannot prevent data loss.
+
+`stateful_core` exists to answer the write-time operational question:
 
 ```text
-Who is doing what now, what might conflict, and when does that claim expire?
+Who is present nearby, what is fresh, what was handed off, and should this write proceed?
 ```
 
 ## Core Thesis
@@ -32,6 +36,12 @@ background context. It cannot by itself say what is actively true now.
 memory = past evidence and recall
 current state = active, expiring operational truth
 ```
+
+The primary nouns are presence, freshness, and handoff for one live checkout:
+who is touching what, whether that belief is still fresh, and what state a
+stopped session left behind. Reservations and claims exist to feed that picture
+and to protect thin safety edges. Blocking is a safety rail, not the product
+([ADR 0002](adr/0002-presence-first-not-lock-first.md)).
 
 ## When Shared State Is The Right Tool
 
@@ -72,13 +82,14 @@ Examples:
   observer/IDE integration reports nearby human editing activity.
 - A session finalized as `done`, `failed`, or `blocked`.
 
-Current state must be compact enough to render into an agent prompt and precise
-enough to drive conflict checks before important tool calls.
+Current state must be compact enough to render into an agent prompt or
+`context_render` briefing and precise enough to drive conflict checks before
+important tool calls.
 
 The shipped v1 prototype observes Codex and OMP sessions, supported tool
 effects, native Stateful tool calls, exact file claim freshness, and explicit
-reconciliation acknowledgements.
-It does not automatically watch human editor buffers or filesystem saves.
+reconciliation acknowledgements. Human observation is high-value target work,
+but v1 does not automatically watch human editor buffers or filesystem saves.
 
 ## Freshness
 
@@ -129,6 +140,12 @@ before important action -> check reservation and conflicts
 after important action  -> observe effects and refresh state
 before turn stops       -> require final status
 ```
+
+V1 ships a broad guardrail: the recorded direction narrows hard denial toward
+thin safety edges - stale-base edits, simultaneous same-file writes,
+multi-file operation leases, git index serialization, destructive operations,
+unsafe raw commands - while presence, freshness, and handoff carry the
+coordination value ([ADR 0002](adr/0002-presence-first-not-lock-first.md)).
 
 For v1, supported write actions are blocked unless the active agent has an active
 task reservation whose file or directory set covers the target, plus a fresh
@@ -198,3 +215,9 @@ The product is useful when an agent can answer:
 - Is my planned edit likely to conflict?
 - Is the conflicting state fresh, stale, or expired?
 - What final status did the previous session leave behind?
+
+Rendered coordination context (`context_render`) is a scoped write-time
+briefing, not a task scheduler: it shows what nearby work is active, what
+changed since the actor last looked, and whether to reread, wait, or proceed.
+Task allocation belongs to the orchestrator or human; merge-time integration
+belongs to Git.

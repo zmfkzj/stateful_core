@@ -215,6 +215,9 @@ fn composite_score_combines_functional_collision_safety_and_cost() {
             stale_intents: 0,
             timeouts: 0,
             long_idle_periods: 0,
+            authorization_warnings: 0,
+            warned_writes_applied: 0,
+            wait_events: 0,
         },
     )
     .expect("non-setup outcome should be scored");

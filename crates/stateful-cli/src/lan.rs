@@ -35,6 +35,7 @@ pub struct ServerStartRuntimeOptions {
     pub port: u16,
     pub token: Option<String>,
     pub workspace_id: String,
+    pub coordination_mode: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +199,7 @@ pub fn start_server_runtime(
             port: options.port,
             token: options.token,
             workspace_id: options.workspace_id,
+            coordination_mode: options.coordination_mode,
         },
     )?;
     Ok(server_start_runtime_result(

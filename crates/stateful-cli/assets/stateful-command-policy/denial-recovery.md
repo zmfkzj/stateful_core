@@ -14,6 +14,26 @@ If the denial says `missing_reservation`, `missing_claim`, `Target is outside ac
 
 Use file claims for file writes, deletes, renames, and moves. Directory claims only authorize directory writes.
 
+## Freshness Denials
+
+If the denial says `missing_base_observation`, `stale_target_observation`, or `stale_claim_observation`, do not retry the same write.
+
+1. Reread every affected file path, including both source and destination for moves or renames.
+2. Reconcile or regenerate the edit against the current file contents.
+3. Retry once through the same native edit/write or authorized sandbox write boundary so the hook can send fresh `base_observations`.
+4. If freshness denial repeats, stop and report the stale path and denial reason instead of forcing the write.
+
+## Unreconciled Human Write
+
+Human save tooling is explicit: `stateful human observe <path> ...` records a human save, and `stateful human save-check <path>...` checks whether pending human saves block agent writes.
+
+If a hook or save-check says `unreconciled_human_write`, do not overwrite the file.
+
+1. Reread every denied file path.
+2. Summarize the human change and decide whether to `adopt`, `reapply`, `ask_user`, or `abandon`.
+3. If the active tool list exposes `state_reconcile_ack`, `state.reconcile.ack`, `state.reconcile_ack`, `stateful_reconcile_ack`, or an MCP-prefixed equivalent, call the exact shown tool with `resource`/`resources`, `reservation_id`, `files_reread`, `summary` or `human_change_summary`, and `decision`.
+4. Otherwise use `stateful reconcile ack --reservation-id <reservation_id> --resource <path> --files-reread <path> --summary <text> --decision <adopt|reapply|ask_user|abandon>`.
+5. Retry the original write only after an `adopt` or `reapply` acknowledgement succeeds.
 ## Claim Conflict Or Wait Queue
 
 If `state_claim_acquire` reports `claim_conflict`, do not retry acquisition or steal the claim.

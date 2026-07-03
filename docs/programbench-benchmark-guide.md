@@ -41,13 +41,19 @@ files such as the provided top-level `executable`, `.omp`, `.codex`,
 `.stateful*`, `.config`, `.cache`, `.git`, `Library/Caches`, `__pycache__`,
 `.pytest_cache`, and Python bytecode files.
 
-Install the official `programbench` CLI with one of:
+Install the official `programbench` CLI with Python 3.10 or newer. Prefer the
+upstream repository package so a placeholder PyPI release cannot shadow the real
+CLI:
 
 ```bash
-pip install programbench
-uv pip install programbench
-uvx programbench
+python3.11 -m pip install git+https://github.com/facebookresearch/ProgramBench.git
 ```
+
+If host Python 3.9 or PyPI resolution gives a placeholder package whose CLI does
+not expose `eval`, `info`, and `submit package`, install the official
+`facebookresearch/ProgramBench` package in a Python >=3.10 environment instead
+and point `--programbench-bin` at that executable. The current evidence run used
+the official repository package with Python 3.11.
 
 ## Stateful Comparison Matrix
 

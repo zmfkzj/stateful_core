@@ -1,18 +1,24 @@
 # stateful_core
 
-Current-state coordination for coding agents working in the same repository.
+Presence-first coordination for coding agents and humans sharing one live repository checkout.
 
-Git coordinates committed history. `stateful_core` coordinates active work before
-it becomes history. Before a supported write occurs, a tool can ask:
+Git coordinates committed history. `stateful_core` coordinates live presence
+before it becomes history. Before a supported write occurs, an actor should see:
 
 ```text
-Who is doing what now, what might conflict, and when does that claim expire?
+Who is nearby, what is fresh, what was handed off, and should this write proceed?
 ```
 
 The project is intentionally about current state, not long-term memory. Memory
 recalls what happened before; current state captures active, scoped, expiring
 operational truth that can be checked before writes, test execution, handoff, and
 other coordination-sensitive actions.
+
+The product center is one live-checkout presence layer: agents and humans see
+nearby work, freshness, and handoff before writing. Blocking exists only as a
+thin safety rail at data-loss edges. See
+[ADR 0002](docs/adr/0002-presence-first-not-lock-first.md) for this direction
+and its evidence.
 
 ## Status
 
@@ -21,14 +27,16 @@ prototype. The current implementation is Codex-first with OMP support. It
 includes a CLI, global user-level installation, repo allowlist gating, a local
 HTTP state server, native Stateful coordination tools, Codex and OMP hook
 adapters, SQLite-backed state store, sandboxed command profiles, outbox sync,
-and benchmark tooling.
+human observation/reconciliation commands, a VS Code advisory save gate, and
+benchmark tooling.
 
-These docs describe the shipped local v1 coordination mechanism. There is not
-yet a checked-in empirical paired-agent stateful/no-state result.
+These docs describe the shipped local v1 coordination mechanism. Checked-in
+benchmark evidence now includes three-arm forced-overlap plumbing/smoke results;
+ProgramBench quality scoring remains blocked on this macOS arm64 host and needs
+a Linux amd64-compatible eval rerun before quality comparisons.
 
-It does not ship a filesystem watcher or IDE save gate for automatic human edit
-observation. Human editing signals remain part of the target coordination model,
-not a fully shipped observer path.
+Human coordination is explicit and advisory: `stateful watch`, `human observe`,
+`human save-check`, `reconcile ack`, and the VS Code save gate surface conflicts.
 
 APIs, configuration files, and command behavior may change while the project is
 pre-release. The current security and support scope is documented in
@@ -47,10 +55,13 @@ now. That creates avoidable failures:
 - a tool writes before the session has declared its intended scope
 - test execution or reconciliation happens outside the coordination loop
 
-`stateful_core` provides a small protocol for declaring reservation, tracking active
-claims, recording session activity, reading current-state summaries, queuing
-blocked writers, and blocking supported writes that have no matching active
-reservation.
+`stateful_core` provides a small protocol for recording session activity,
+reading current-state summaries, rendering scoped write-time coordination
+context (`context_render`), declaring intent as reservation, and tracking active
+claim freshness. `context_render` is a briefing, not a task scheduler: task
+allocation belongs to an orchestrator or human, and integration belongs to Git.
+As a safety rail, v1 still queues blocked writers and blocks supported writes
+that lack matching active reservation/claim authority or fresh base observations.
 
 ## When To Use It
 
@@ -89,10 +100,13 @@ here right now?"
 - Codex and OMP lifecycle hook integration for observing and gating important
   actions.
 - Native Stateful coordination tools exposed by the active agent harness.
+- Human coordination commands for `human observe`, `human save-check`, and
+  `reconcile ack`, plus an advisory VS Code save gate.
 - Sandboxed profiles for build/test output, command-shaped repo writes, git
   operations, GitHub PR commands, and repo-external shell work.
-- Benchmark tooling for SWE-bench pair runs, reports, comparisons, synthetic
-  coordination experiments, and DeNovoSWE/ProgramBench adapters.
+- Benchmark tooling for SWE-bench pair runs, reports, comparisons, awareness
+  mode, synthetic coordination experiments, forced-overlap harness scripts, and
+  DeNovoSWE/ProgramBench adapters.
 
 `stateful_core` is not a sandbox, access-control system, file lock manager,
 distributed lock service, durable secret store, or long-term memory product. It
@@ -200,6 +214,21 @@ returned reservation id, and inspect the current state:
 reservation_id=$(stateful reservation declare --purpose "Update README content requested by the user." README.md | jq -r '.reservation_id')
 stateful current
 ```
+
+Server coordination defaults to enforcement; use
+`stateful server start --coordination-mode awareness` for warn-only awareness
+mode.
+
+Human-side coordination is explicit:
+
+```bash
+stateful human observe <path> [--summary <text>]
+stateful human save-check <paths...>
+stateful reconcile ack --reservation-id <reservation_id> --resource <path> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon
+```
+
+The VS Code extension is an advisory save gate: it warns on server-reported
+human save conflicts and lets the human decide.
 
 Inside an active Codex or OMP session, use the active Stateful coordination tools
 directly instead of shelling out to `stateful reservation declare`. Simple OMP
@@ -362,20 +391,30 @@ local generated state.
 
 ## Benchmark Tooling
 
-`stateful-bench` supports SWE-bench pair preparation/runs, reports, comparisons,
-synthetic coordination experiments, and DeNovoSWE adapters for official AweAgent,
-host Codex CLI, and OMP CLI workflows, and ProgramBench stateful/no-state
-condition runs with official ProgramBench evaluation and efficiency reporting.
+`stateful-bench run --mode no-state|awareness|stateful` covers the three
+benchmark arms: no coordination, awareness as the warn-only middle arm, and
+stateful enforcement. `stateful-bench compare` accepts `--awareness-run-dir`
+alongside stateful/no-state runs. The benchmark crate also includes synthetic
+coordination experiments, forced-overlap scripts
+(`overlap_manifest_generator.py`, `overlap_omp_agent.py`,
+`overlap_harness.py`), DeNovoSWE adapters for official AweAgent, host Codex CLI,
+and OMP CLI workflows, and ProgramBench condition runs with official
+ProgramBench evaluation and efficiency reporting.
 
 Benchmark artifacts live under `.stateful_bench/` and are intentionally ignored.
-The checked-in synthetic fixture is a smoke test for report plumbing, not
-empirical evidence that real paired agents avoid conflicts. This repository does
-not currently ship a checked-in empirical paired-agent stateful/no-state result.
+Checked-in benchmark summaries live under [docs/benchmarks](docs/benchmarks/):
+the forced-overlap result verifies three-arm runner/compare plumbing without a
+differentiated safety outcome, and the ProgramBench note records completed
+inference trials plus the official-eval blocker. Do not infer quality wins from
+either artifact.
 
 For DeNovoSWE and ProgramBench setup, interpretation rules, and reusable command
 lines, read [DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md),
 [DeNovoSWE Benchmark Commands](docs/denovo-benchmark-commands.md), and
-[ProgramBench Benchmark Guide](docs/programbench-benchmark-guide.md).
+[ProgramBench Benchmark Guide](docs/programbench-benchmark-guide.md). Official
+ProgramBench setup currently needs Python >=3.10; install from the upstream
+`facebookresearch/ProgramBench` source when PyPI does not provide a usable
+package for your interpreter.
 
 ## Development
 

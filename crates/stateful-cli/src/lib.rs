@@ -3,6 +3,7 @@ use std::{
     io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 mod codex_benchmark;
@@ -20,6 +21,7 @@ mod sandbox;
 mod server_lifecycle;
 mod shadow_guard;
 mod shell_command;
+mod watch;
 
 pub use codex_wrapper::{
     CodexInvocation, CodexSandboxMode, CodexWrapperOptions, build_codex_invocation, run_codex,
@@ -102,6 +104,8 @@ pub enum Command {
         token: Option<String>,
         #[arg(long, default_value = "local")]
         workspace_id: String,
+        #[arg(long, default_value = "enforcement", value_parser = ["enforcement", "awareness"])]
+        coordination_mode: String,
     },
     Status,
     Current,
@@ -137,9 +141,23 @@ pub enum Command {
     Resume(ResumeCommand),
     #[command(subcommand)]
     Reservation(ReservationCommand),
+    #[command(subcommand)]
+    Human(HumanCommand),
+    #[command(subcommand)]
+    Reconcile(ReconcileCommand),
+    #[command(subcommand)]
+    Watch(WatchCommand),
     SyncOutbox,
     #[command(subcommand)]
     Hook(HookRuntime),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WatchCommand {
+    Run {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -173,6 +191,8 @@ pub enum ServerCommand {
         token: Option<String>,
         #[arg(long, default_value = "local")]
         workspace_id: String,
+        #[arg(long, default_value = "enforcement", value_parser = ["enforcement", "awareness"])]
+        coordination_mode: String,
     },
     Restart,
     Join {
@@ -192,6 +212,52 @@ pub enum ServerCommand {
     },
     Stop,
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HumanCommand {
+    Observe {
+        path: String,
+        #[arg(long, default_value = "save")]
+        kind: String,
+        #[arg(long, default_value = "high")]
+        confidence: String,
+        #[arg(long, default_value = "watcher:save")]
+        source: String,
+        #[arg(long, default_value = "Human changed the file.")]
+        summary: String,
+        #[arg(long, default_value = "human-watcher")]
+        agent_id: String,
+        #[arg(long)]
+        workspace_id: Option<String>,
+    },
+    SaveCheck {
+        paths: Vec<String>,
+        #[arg(long)]
+        workspace_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ReconcileCommand {
+    Ack {
+        #[arg(long = "resource", required = true)]
+        resources: Vec<String>,
+        #[arg(long = "files-reread", required = true)]
+        files_reread: Vec<String>,
+        #[arg(long)]
+        summary: String,
+        #[arg(long, value_parser = ["adopt", "reapply", "ask_user", "abandon"])]
+        decision: String,
+        #[arg(long = "reservation-id")]
+        reservation_id: Option<String>,
+        #[arg(long = "agent-id", default_value = "cli-reconcile")]
+        agent_id: String,
+        #[arg(long)]
+        workspace_id: Option<String>,
+        #[arg(long)]
+        conflict_with_plan: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -446,12 +512,14 @@ pub fn run() -> anyhow::Result<()> {
             port: legacy_port,
             token: legacy_token,
             workspace_id: legacy_workspace_id,
+            coordination_mode: legacy_coordination_mode,
         } => match command.unwrap_or(ServerCommand::Start {
             foreground: true,
             host: legacy_host,
             port: legacy_port,
             token: legacy_token,
             workspace_id: legacy_workspace_id,
+            coordination_mode: legacy_coordination_mode,
         }) {
             ServerCommand::Start {
                 foreground,
@@ -459,9 +527,10 @@ pub fn run() -> anyhow::Result<()> {
                 port,
                 token,
                 workspace_id,
+                coordination_mode,
             } => {
                 if foreground {
-                    run_server(host, port, token, workspace_id)?;
+                    run_server(host, port, token, workspace_id, coordination_mode)?;
                 } else {
                     let paths = GlobalPaths::from_env()?;
                     let result = start_server_runtime(ServerStartRuntimeOptions {
@@ -470,6 +539,7 @@ pub fn run() -> anyhow::Result<()> {
                         port,
                         token,
                         workspace_id,
+                        coordination_mode,
                     })?;
                     print_server_start_result(&result)?;
                 }
@@ -483,6 +553,7 @@ pub fn run() -> anyhow::Result<()> {
                     host: options.host,
                     port: options.port,
                     token: Some(runtime.token),
+                    coordination_mode: options.coordination_mode,
                     workspace_id: options.workspace_id,
                 })?;
                 print_server_start_result(&result)?;
@@ -898,6 +969,105 @@ pub fn run() -> anyhow::Result<()> {
             )?;
             println!("canceled stateful reservation");
         }
+        Command::Human(HumanCommand::Observe {
+            path,
+            kind,
+            confidence,
+            source,
+            summary,
+            agent_id,
+            workspace_id,
+        }) => {
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let (_, workspace_id) = resolve_agent_workspace(
+                repo_root.as_path(),
+                &runtime,
+                Some(agent_id.clone()),
+                workspace_id,
+            )?;
+            let body = protocol_envelope(ProtocolEnvelopeArgs {
+                runtime: &runtime,
+                request_id: uuid::Uuid::new_v4().to_string(),
+                agent_id,
+                workspace_id,
+                identity: GlobalPaths::from_env()
+                    .ok()
+                    .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
+                source_kind: "watcher",
+                event: "file_saved",
+                source_ref: "stateful-human-observe",
+                source_tool_name: None,
+                payload: serde_json::json!({
+                    "path": path,
+                    "kind": kind,
+                    "confidence": confidence,
+                    "source": source,
+                    "summary": summary
+                }),
+            });
+            let response = post_json(&runtime, "/v1/human/observe", &body)?;
+            print_http_response(response)?;
+        }
+        Command::Human(HumanCommand::SaveCheck {
+            paths,
+            workspace_id,
+        }) => {
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let workspace_id = workspace_id.unwrap_or_else(|| {
+                GlobalPaths::from_env()
+                    .ok()
+                    .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok())
+                    .map(|identity| {
+                        effective_workspace_id_for_repo(&runtime.workspace_id, Some(&identity))
+                    })
+                    .unwrap_or_else(|| runtime.workspace_id.clone())
+            });
+            let response = post_json(
+                &runtime,
+                "/v1/human/save-check",
+                &serde_json::json!({
+                    "workspace_id": workspace_id,
+                    "paths": paths
+                }),
+            )?;
+            print_http_response(response)?;
+        }
+        Command::Reconcile(ReconcileCommand::Ack {
+            resources,
+            files_reread,
+            summary,
+            decision,
+            reservation_id,
+            agent_id,
+            workspace_id,
+            conflict_with_plan,
+        }) => {
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let (_, workspace_id) = resolve_agent_workspace(
+                repo_root.as_path(),
+                &runtime,
+                Some(agent_id.clone()),
+                workspace_id,
+            )?;
+            let response = post_json(
+                &runtime,
+                "/v1/reconcile/ack",
+                &serde_json::json!({
+                    "agent_id": agent_id,
+                    "workspace_id": workspace_id,
+                    "reservation_id": reservation_id,
+                    "decision": decision,
+                    "files_reread": files_reread,
+                    "human_change_summary": summary,
+                    "resources": resources,
+                    "conflict_with_plan": conflict_with_plan
+                }),
+            )?;
+            print_http_response(response)?;
+        }
+        Command::Watch(WatchCommand::Run { repo }) => {
+            watch::run_watch(repo)?;
+        }
         Command::Hook(hook) => hook::run_hook(hook)?,
     }
     Ok(())
@@ -949,6 +1119,7 @@ fn run_server(
     port: u16,
     token: Option<String>,
     workspace_id: String,
+    coordination_mode: String,
 ) -> anyhow::Result<()> {
     let token = token.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let base_url = format!("http://{host}:{port}");
@@ -958,6 +1129,7 @@ fn run_server(
         port,
         token: Some(token.clone()),
         workspace_id: workspace_id.clone(),
+        coordination_mode: coordination_mode.clone(),
     };
     let runtime = ServerRuntime::new(&base_url, &token, workspace_id, std::process::id());
     let store = stateful_store::Store::open(global_state_db_path(&paths))?;
@@ -969,9 +1141,12 @@ fn run_server(
         server_lifecycle::register_foreground_runtime(&paths, &runtime, &options)?;
         let result = server_start_runtime_result(runtime.clone(), &host, port);
         print_server_start_result(&result)?;
+        let coordination_mode = stateful_server::CoordinationMode::from_str(&coordination_mode)
+            .map_err(|message| anyhow::anyhow!(message))?;
         stateful_server::serve_listener(
             listener,
-            stateful_server::ServerConfig::with_store(token, store),
+            stateful_server::ServerConfig::with_store(token, store)
+                .with_coordination_mode(coordination_mode),
         )
         .await
     })
@@ -1117,6 +1292,7 @@ mod tests {
             stderr: "child-err".to_string(),
             allowed_write_targets: Vec::new(),
             denied_write_targets: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 

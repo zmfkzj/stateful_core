@@ -1,10 +1,10 @@
 use clap::Parser;
 use stateful_cli::{
     Cli, CodexSandboxMode, Command, GlobalPaths, HookCommand, HookRuntime, InstallAgent,
-    NotificationsCommand, OmpInstallOptions, ReposCommand, ResumeCommand, SandboxCommand,
-    SandboxFsProfile, SandboxNetworkPolicy, SandboxProcessCommand, ServerCommand, ToolsCommand,
-    allow_tool_for_repo, apply_omp_install, doctor_report_with_global, enable_repo,
-    record_unclassified_tool_for_repo,
+    NotificationsCommand, OmpInstallOptions, ReconcileCommand, ReposCommand, ResumeCommand,
+    SandboxCommand, SandboxFsProfile, SandboxNetworkPolicy, SandboxProcessCommand, ServerCommand,
+    ToolsCommand, WatchCommand, allow_tool_for_repo, apply_omp_install, doctor_report_with_global,
+    enable_repo, record_unclassified_tool_for_repo,
 };
 use std::{fs, path::PathBuf, process::Command as ProcessCommand};
 
@@ -686,6 +686,64 @@ fn parses_disable_command() {
 }
 
 #[test]
+fn parses_watch_run_repo() {
+    let cli = Cli::try_parse_from(["stateful", "watch", "run", "--repo", "/work/repo"])
+        .expect("watch run should parse");
+
+    match cli.command {
+        Command::Watch(WatchCommand::Run { repo }) => {
+            assert_eq!(repo, Some(PathBuf::from("/work/repo")));
+        }
+        other => panic!("expected watch run command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_reconcile_ack() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "reconcile",
+        "ack",
+        "--resource",
+        "src/auth.ts",
+        "--files-reread",
+        "src/auth.ts",
+        "--summary",
+        "Adopted human auth edit.",
+        "--decision",
+        "adopt",
+        "--reservation-id",
+        "reservation-1",
+        "--agent-id",
+        "agent-1",
+    ])
+    .expect("reconcile ack should parse");
+
+    match cli.command {
+        Command::Reconcile(ReconcileCommand::Ack {
+            resources,
+            files_reread,
+            summary,
+            decision,
+            reservation_id,
+            agent_id,
+            workspace_id,
+            conflict_with_plan,
+        }) => {
+            assert_eq!(resources, vec!["src/auth.ts"]);
+            assert_eq!(files_reread, vec!["src/auth.ts"]);
+            assert_eq!(summary, "Adopted human auth edit.");
+            assert_eq!(decision, "adopt");
+            assert_eq!(reservation_id.as_deref(), Some("reservation-1"));
+            assert_eq!(agent_id, "agent-1");
+            assert_eq!(workspace_id, None);
+            assert!(!conflict_with_plan);
+        }
+        other => panic!("expected reconcile ack command, got {other:?}"),
+    }
+}
+
+#[test]
 fn rejects_codex_wrapper_command_with_read_only_tmp_sandbox() {
     let error = Cli::try_parse_from([
         "stateful",
@@ -1291,6 +1349,43 @@ fn parses_server_start_subcommand() {
 }
 
 #[test]
+fn parses_server_start_coordination_mode() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "server",
+        "start",
+        "--coordination-mode",
+        "awareness",
+    ])
+    .expect("server start should parse coordination mode");
+
+    match cli.command {
+        Command::Server {
+            command:
+                Some(ServerCommand::Start {
+                    coordination_mode, ..
+                }),
+            ..
+        } => assert_eq!(coordination_mode, "awareness"),
+        other => panic!("expected server start command, got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_invalid_server_start_coordination_mode() {
+    let error = Cli::try_parse_from([
+        "stateful",
+        "server",
+        "start",
+        "--coordination-mode",
+        "sometimes",
+    ])
+    .expect_err("invalid coordination mode should fail");
+
+    assert!(error.to_string().contains("possible values"));
+}
+
+#[test]
 fn parses_server_start_subcommand_as_detached_by_default() {
     let cli =
         Cli::try_parse_from(["stateful", "server", "start"]).expect("server start should parse");
@@ -1328,6 +1423,7 @@ fn parses_legacy_server_runtime_options() {
             port,
             ref token,
             ref workspace_id,
+            ..
         } if host == "127.0.0.1"
             && port == 43874
             && token.as_deref() == Some("secret-token")

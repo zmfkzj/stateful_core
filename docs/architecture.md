@@ -20,20 +20,41 @@ state server owns policy, persistence, TTLs, and conflict checks.
 The v1 MVP includes sandboxed test execution through
 `sandbox run --fs build --network enabled --write-dir <scratch-purpose>`, which
 writes disposable artifacts under `/tmp/stateful/<session>/<scratch-purpose>/`,
-plus explicit reconciliation acknowledgements through
-`state.reconcile.ack`. Automatic human-write observation and reconciliation
-blocks remain target behavior.
+plus two server coordination modes:
+
+```text
+stateful server --coordination-mode enforcement|awareness
+```
+
+`enforcement` is the default shipped guardrail. `awareness` keeps presence and
+context rendering, but softens reservation/scope/claim coordination denials into
+warnings so the presence-first path can be measured without queue/claim blocking.
+Freshness, human-write, unsafe-command, and write-fence denials remain hard when
+those checks apply.
+
+Human coordination is implemented through `human observe`, `human save-check`,
+and `reconcile ack`, with an advisory VS Code save gate under
+`integrations/vscode`. High-confidence human save/change/delete observations
+block later agent writes to those paths until the agent rereads and acknowledges
+reconciliation.
 
 V1 is local-only. It coordinates Codex and OMP sessions and agents inside one
-machine/workspace boundary. Subagent-specific lifecycle attribution, local human
-activity signals, and IDE integrations are future observer or adapter work.
-Team-shared, cross-machine, or hosted synchronization is a later v1.5/v2
-concern.
+machine/workspace boundary. Native subagent lifecycle attribution, richer human
+observer coverage, and hosted/team-shared synchronization remain later work.
 
-The product direction is agent-runtime portability, but the shipped prototype is
-Codex-first with OMP extension support. The state server and policy API should
-not add new Codex-only assumptions beyond adapter metadata, and broader
-non-Codex runtimes remain future integration work.
+The product center is presence, freshness, and handoff
+([ADR 0002](adr/0002-presence-first-not-lock-first.md)). The shipped target
+shape is presence plus mechanical freshness plus thin write fences. Supported
+file-changing writes send base observations, stale observations deny, and
+same-file in-flight writes acquire short write fences. Enforcement mode still
+requires active reservation scope plus same-reservation claims; awareness mode is
+the shipped comparison mode for demoting that broad guardrail to warnings while
+retaining hard safety denials when the corresponding checks apply.
+Agent-runtime portability remains a standing requirement because a shared
+presence layer matters most across heterogeneous runtimes. The shipped prototype
+is Codex-first with OMP extension support. The
+state server and policy API should not add new Codex-only assumptions beyond
+adapter metadata, and broader non-Codex runtimes remain future integration work.
 
 Implementation defaults for API shape, SQLite tables, hook adapter behavior,
 runtime files, CLI commands, and tests are fixed in
@@ -89,8 +110,8 @@ compatibility/runtime fallback. Committed repo configuration stays under
 
 ## API Transport
 
-The state server should expose a local HTTP API. Hooks, native Stateful tools,
-filesystem watchers, and the future IDE extension all call the same HTTP API.
+The state server exposes a local HTTP API. Hooks, native Stateful tools,
+filesystem watchers, and the advisory IDE extension all call the same HTTP API.
 
 Agent-facing tools are adapters over that API, not policy owners:
 
@@ -233,14 +254,15 @@ Currently implemented trigger sources:
 - OMP `Stop`
 - Native Stateful tool calls from the agent
 - CLI and state server calls
+- CLI/watch human observation through `/v1/human/observe`
+- CLI and VS Code human save checks through `/v1/human/save-check`
+- Reconciliation acknowledgements through `/v1/reconcile/ack`
 
 Target and future trigger sources:
 
 - Native Codex/OMP subagent start/stop and tool activity with separate attribution
-- git working tree or filesystem observation for conservative human activity
-  detection
-- IDE extension events for human file open, dirty, save-attempt, and save
-  completion signals
+- richer filesystem/IDE observation for open, dirty, selected, and save-complete
+  human activity signals
 
 Each trigger should carry the active agent id, actor identity when known,
 workspace, branch, timestamp, and source reference.
@@ -269,7 +291,14 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
 
 `PreToolUse`:
 
-- deny supported write calls when the active agent has no active reservation
+- in enforcement mode, deny supported write calls when the active agent has no
+  active reservation scope and same-reservation claim
+- in awareness mode, convert reservation/scope/claim coordination denials into
+  warnings while keeping later safety denials hard when those checks apply
+- deny file-changing calls with stale base observations, or with missing base
+  observations when the adapter can identify and read the target
+- deny overlapping same-file in-flight write fences
+- deny writes to unreconciled high-confidence human save/change/delete observations
 - deny Codex raw Bash with sandbox guidance. For OMP, built-in Bash may run
   only strict trusted `stateful sandbox run ...` and `stateful sandbox process
   find ...` commands after Stateful preflight; arbitrary raw Bash and the
@@ -332,7 +361,8 @@ state_conflicts_check (state.conflicts.check)
 state_current_read (state.current.read)
 state_events_read (state.events.read)
 state_context_render (state.context.render)
-state_reconcile_ack (state.reconcile.ack)
+state_reconcile_ack (state.reconcile.ack; some runtimes expose underscore or
+stateful-prefixed aliases)
 state_notifications_poll (state.notifications.poll)
 state_resume_next (state.resume.next)
 ```
@@ -441,8 +471,8 @@ The state server is responsible for:
 
 - appending coordination events
 - materializing active current state
-- running background and lazy expiration for stale activity, reservation, claims, and
-  reservations
+- running background and lazy expiration for stale activity, reservation, claims,
+  claimable reservations, write fences, and human observations
 - extending active reservation TTL from explicit heartbeats and authorize-time
   implicit heartbeat events within a 60-minute rolling maximum
 - evaluating conflict policy
@@ -451,13 +481,22 @@ The state server is responsible for:
   notification payloads that carry the stored reservation purpose with monotonic
   per-target-agent/workspace sequence ids for poll and SSE replay
 - requiring reservation claim before creating active reservation scope and active
-  claims from that stored purpose
+  claims from that stored purpose in enforcement mode
+- acquiring and releasing short same-file write fences around authorized write
+  boundaries
+- recording human observations, save-check warnings, and reconciliation
+  acknowledgements
 - rendering concise prompt context
 - retaining expired activity as historical evidence
 
-The server should block supported write actions without active reservation and
-support advisory blocking for high-risk conflicts. V1 does not treat claims as
-hard distributed locks.
+The shipped server supports `enforcement` and `awareness` coordination modes.
+Enforcement blocks supported writes without active reservation scope and
+same-reservation claims. Awareness softens only reservation/scope/claim
+coordination denials to warnings. Stale edits, unreconciled human writes,
+same-file write fence conflicts, git index/stage/commit serialization,
+destructive operations, and unsafe raw commands remain hard enforcement in both
+modes. V1 does not treat claims as hard distributed locks beyond those
+write-boundary guardrails.
 
 ## Policy Engine
 
@@ -471,7 +510,7 @@ authorize_action(input) -> decision
 The decision result should include:
 
 ```text
-decision: allow | deny | error
+decision: allow | warn | deny | error
 reason
 conflicts[]
 required_next_action
@@ -479,19 +518,29 @@ context_items[]
 audit_event
 ```
 
-`warn`, `conflicts[]`, `context_items[]`, and `audit_event` are target response
-vocabulary. The shipped `/v1/authorize` path returns allow/deny/error with
-optional `wait` or `reservation` details and appends `AuthorizationDenied` events
-for deny decisions.
+`warn` is shipped for awareness-mode coordination denials. The shipped
+`/v1/authorize` path returns allow/warn/deny/error with optional `wait` or
+`reservation` details, appends `AuthorizationDenied` events for deny decisions,
+and appends warning audit events for awareness-mode warnings.
 
-The target policy engine owns:
+The shipped policy engine owns:
 
 - active reservation checks
 - file and directory scope checks
 - claim conflict checks
+- base-observation freshness checks where adapters can identify and read the
+  target
+- same-file write-fence acquisition and conflict checks
+- unreconciled human-write checks
 - collision-domain evaluation
-- human-write reconciliation checks
+- recorded reconciliation acknowledgement checks
 - state-server availability behavior
+
+The policy direction narrows broad reservation blocking toward rendered presence
+plus freshness plus thin fences. Shipped awareness mode is the comparison rail:
+reservation/scope/claim denials become warnings, while freshness, human-write,
+write-fence, destructive-operation, and unsafe-command denials remain hard when
+those checks apply.
 
 Hooks and adapters classify runtime-specific tool calls, extract tool reservation and
 targets when supported, and call the policy API for store-backed coordination
@@ -502,35 +551,28 @@ prototype, `stateful-core` owns pure scope-policy primitives and
 
 ## IDE Soft Save Gate
 
-V2 should include a dedicated IDE extension for human activity. Its purpose is
-to create a soft save gate, not a guaranteed lock. The extension should:
-
-- report opened, dirty, selected, and saved files as human activity signals
-- check the state server before a human save when the IDE exposes a pre-save
-  event
-- warn the user when the save target conflicts with an active agent claim
-- let the user explicitly continue the save, recording that decision as an
-  audited human event
-- fail open with a visible warning if the state server is unavailable, because
-  losing human work is worse than missing a coordination warning
+V1 includes an advisory VS Code extension under `integrations/vscode`. It calls
+`/v1/human/save-check` for the active editor and save attempts, warns when the
+target conflicts with an active agent claim or write fence, and fails open with a
+visible warning if the state server is unavailable because losing human work is
+worse than missing a coordination warning.
 
 The save gate does not grant agent override authority. If a human continues a
-conflicting save, later agent writes to that file should be denied or warned
-until the agent refreshes state and reconciles the change.
+conflicting save and that save is later observed as high-confidence human work,
+agent writes to that file are denied until the agent refreshes state and
+acknowledges reconciliation.
 
-V1 does not require the IDE extension. Target human-write reconciliation is
-driven by conservative git working-tree or filesystem observation. The observer
-should prefer warnings and reconciliation blocks over pretending to know the
-human's reservation.
+Richer IDE observation remains future work: opened, dirty, selected, and
+save-complete telemetry should feed the same HTTP API when the IDE exposes those
+events.
 
 ## Human Write Reconciliation
 
-The current implementation records `state.reconcile.ack` acknowledgements but
-does not yet observe `HumanWriteObserved` events or block writes because of
-human-written files. The target policy is:
-
-When `HumanWriteObserved` affects a file with active agent work, the next agent
-write to that file is blocked until reconciliation is acknowledged.
+The current implementation records human presence/save observations and blocks
+agent writes for unreconciled high-confidence human `save`, `change`, and
+`delete` observations on affected file paths. Human observations recorded while
+an active same-file write fence is held are attributed to the agent write and do
+not create a human-write block.
 
 During this blocked state, the agent may still:
 
@@ -540,45 +582,58 @@ During this blocked state, the agent may still:
 - run sandboxed tests with an external `/tmp/stateful/<session>/<scratch-purpose>/`
   artifact tree
 
-To resume writing, the agent must call:
+To resume writing, the agent must reread the affected file and acknowledge:
 
 ```text
-state.reconcile.ack(resources, files_reread, human_change_summary, conflict_with_plan, decision)
+state.reconcile.ack(files_reread, human_change_summary, decision, optional conflict_with_plan)
 ```
 
-The acknowledgement must show that the agent reread the affected file, summarize
-the human change, state whether it conflicts with the agent's previous plan, and
-choose `adopt`, `reapply`, `ask_user`, or `abandon`.
+The CLI form is:
 
-Only `adopt` and `reapply` can clear the human-write block, and only when the
-active agent still has active, unexpired, matching reservation. `ask_user` keeps writes
-blocked until the user responds. `abandon` should release or shorten the
-affected claim.
+```text
+stateful reconcile ack --resource <path> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon --reservation-id <id> [--conflict-with-plan]
+```
 
-If the state server is unavailable, `state.reconcile.ack` fails closed and cannot
-clear the block.
+The HTTP route requires non-empty `files_reread`, an active reservation id whose
+exact file intent covers every reread file, a summary, and a decision. Only
+`adopt` and `reapply` clear the human-write block. `ask_user` records the
+acknowledgement but keeps writes blocked until the user responds. `abandon`
+records the decision without clearing the block; the agent should release or
+shorten affected work separately.
+
+If the state server is unavailable, reconciliation acknowledgement fails closed
+and cannot clear the block.
 
 ## Conflict Policy
 
-Initial policy:
+Initial shipped policy:
 
-- no active reservation before supported write action: deny
-- reservation without matching file or directory scope before supported write action:
-  deny
-- expired reservation or reservation beyond its 60-minute rolling window: deny as missing
-  active reservation
+- no active reservation before supported write action in enforcement mode: deny
+- no active reservation before supported write action in awareness mode: warn,
+  unless another hard safety denial applies
+- reservation without matching file or directory scope before supported write
+  action in enforcement mode: deny
+- reservation without matching file or directory scope before supported write
+  action in awareness mode: warn, unless another hard safety denial applies
+- expired reservation or reservation beyond its 60-minute rolling window:
+  enforcement mode denies as missing active reservation; awareness mode warns
 - blocked phase or finalized agent flow before supported write action: target
   phase-aware deny behavior
-- directory reservation and directory claim authorize only `write_directory` for the
-  exact directory resource; they do not authorize `write_file`, delete, rename,
-  or move actions on child paths
-- `write_directory` requires exact directory reservation, and a matching directory
-  claim fences the whole subtree because command-shaped `--write-dir` execution
-  can write anywhere below that directory
+- directory reservation and directory claim authorize only `write_directory` for
+  the exact directory resource; they do not authorize `write_file`, delete,
+  rename, or move actions on child paths
+- `write_directory` requires exact directory reservation, and a matching
+  directory claim fences the whole subtree because command-shaped `--write-dir`
+  execution can write anywhere below that directory
 - delete operation without exact file scope: deny
 - rename or move without exact file scope for both source and destination: deny
-- active claim in the hard conflict domain by another actor: deny unless the
-  current agent has an explicit user override for that resource
+- stale base observation on a file-changing write: deny with reread/retry
+- missing base observation on a file-changing write whose target can be
+  identified and read by the adapter: deny until the adapter supplies it
+- active claim in the hard conflict domain by another actor: enforcement mode
+  denies unless the current agent has an explicit user override for that
+  resource; awareness mode warns unless another hard safety denial applies
+- same-file in-flight write fence conflict: deny
 - same `workspace_id` and same normalized `relative_path`: shipped hard conflict
   domain for active claim and wait-queue checks
 - same normalized `absolute_path`: target physical-file hard conflict domain
@@ -597,6 +652,12 @@ Initial policy:
   acquire, denies hook-originated writes when the claimed file changes before
   authorization, and refreshes that observation after same-reservation supported file
   tools complete
+- git index, stage, and commit operations in one checkout: serialize through the
+  controlled git sandbox path
+- destructive delete, rename, reset, or equivalent operations without exact
+  target scope and explicit policy approval: deny
+- unsafe raw commands and eval-tool execution outside trusted sandbox/scope
+  policy: deny
 - unrelated reads and searches: allow
 - reads, searches, diffs, and sandboxed tests after human writes: allow
 - tests: allow only through trusted sandbox-run wrappers with authorized targets
@@ -631,6 +692,13 @@ Stale/Expired
 
 Raw event logs should not be dumped into prompts. The rendered view should help
 the agent decide what to avoid, wait for, or coordinate.
+
+Presence and `context_render` are safe to center now: they explain who is nearby,
+what changed, and when to reread. They do not prove write authority. In
+enforcement mode, a later write still needs active reservation scope plus a fresh
+same-reservation claim. In awareness mode, reservation/scope/claim problems are
+rendered and warned, but stale observations, unreconciled human writes, and
+same-file write fences remain hard write-boundary safety rails.
 
 `state_context_render` supports `brief` and `detailed` modes plus an optional
 singular `resource` filter. `brief` is for hook start, prompt submit context,

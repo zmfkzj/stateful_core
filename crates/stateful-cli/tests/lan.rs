@@ -260,6 +260,7 @@ fn server_start_without_token_reuses_existing_runtime_token() {
         port: host.port(),
         token: None,
         workspace_id: "shared".to_string(),
+        coordination_mode: "enforcement".to_string(),
     })
     .expect("server start should reuse existing runtime");
 
@@ -286,6 +287,7 @@ fn server_start_explicit_host_and_workspace_are_reflected_in_join_command() {
         port: host.port(),
         token: Some("secret-token".to_string()),
         workspace_id: "w1".to_string(),
+        coordination_mode: "enforcement".to_string(),
     })
     .expect("server start should reuse existing runtime");
 

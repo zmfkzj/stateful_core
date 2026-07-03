@@ -151,6 +151,20 @@ async fn runtime_identity_requires_token_and_returns_process_identity() {
 }
 
 #[tokio::test]
+async fn runtime_identity_reports_coordination_mode() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .oneshot(authorized_get("/v1/runtime/identity"))
+        .await
+        .expect("identity response should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 1024).await;
+    assert_eq!(json["coordination_mode"], "enforcement");
+}
+
+#[tokio::test]
 async fn authorize_accepts_matching_bearer_token() {
     let app = build_router(ServerConfig::new("secret-token"));
 
@@ -1074,7 +1088,12 @@ async fn same_reservation_claim_authorizes_write() {
         serde_json::json!({
             "action": "write_file",
             "path": "src/auth.ts",
-            "reservation_id": reservation_id
+            "reservation_id": reservation_id,
+            "base_observations": [{
+                "path": "src/auth.ts",
+                "exists": false,
+                "content_hash": null
+            }]
         }),
     );
     body["source"]["kind"] = serde_json::json!("hook");
@@ -1409,24 +1428,59 @@ async fn hook_native_write_requires_exact_file_lease_even_when_directory_lease_c
 }
 
 #[tokio::test]
-async fn hook_native_write_allows_exact_file_intent_and_exact_file_lease() {
+async fn hook_native_write_without_root_denies_stale_claim_observation() {
     let app = build_router(ServerConfig::new("secret-token"));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let repo_root = temp.path().join("repo");
+    std::fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    std::fs::write(repo_root.join("src/auth.ts"), "version one\n")
+        .expect("initial target should be writable");
 
-    let declare = app
+    ensure_test_reservation_via_http(&app, "s1", "w1", "src/auth.ts").await;
+    let claim = app
         .clone()
-        .oneshot(protocol_request(
-            "/v1/reservation/declare",
-            "s1",
-            "w1",
+        .oneshot(json_request(
+            "/v1/claim/acquire",
             serde_json::json!({
-                "purpose": "Test requested work.",
-                "files_planned": ["src/auth.ts"]
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts",
+                "root": repo_root.to_string_lossy().to_string()
             }),
         ))
         .await
-        .expect("reservation declaration should complete");
-    assert_eq!(declare.status(), StatusCode::OK);
+        .expect("file claim acquire should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
 
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts"
+        }),
+    );
+    body["workspace"]["root"] = serde_json::json!("");
+    body["source"]["kind"] = serde_json::json!("hook");
+    body["source"]["event"] = serde_json::json!("pre_tool_use");
+    body["source"]["source_ref"] = serde_json::json!("hook:req-1");
+    body["source"]["tool_name"] = serde_json::json!("file_change");
+
+    let response = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "stale_claim_observation");
+}
+
+#[tokio::test]
+async fn hook_native_write_with_observation_and_unreadable_root_skips_comparison() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    ensure_test_reservation_via_http(&app, "s1", "w1", "src/auth.ts").await;
     let claim = app
         .clone()
         .oneshot(json_request(
@@ -1446,9 +1500,79 @@ async fn hook_native_write_allows_exact_file_intent_and_exact_file_lease() {
         "w1",
         serde_json::json!({
             "action": "write_file",
+            "path": "src/auth.ts",
+            "base_observations": [{
+                "path": "src/auth.ts",
+                "exists": true,
+                "content_hash": "unreadable-root-presence-only"
+            }]
+        }),
+    );
+    body["workspace"]["root"] = serde_json::json!("/definitely/not/a/stateful/test/root");
+    body["source"]["kind"] = serde_json::json!("hook");
+    body["source"]["event"] = serde_json::json!("pre_tool_use");
+    body["source"]["source_ref"] = serde_json::json!("hook:req-1");
+    body["source"]["tool_name"] = serde_json::json!("file_change");
+
+    let response = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["decision"], "allow");
+    assert_eq!(json["reason_code"], "authorized");
+}
+
+#[tokio::test]
+async fn hook_native_write_denies_exact_file_intent_and_lease_without_base_observation() {
+    let app = build_router(ServerConfig::new("secret-token"));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let repo_root = temp.path().join("repo");
+    std::fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    std::fs::write(repo_root.join("src/auth.ts"), "version one\n")
+        .expect("initial target should be writable");
+
+    let mut declare_body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "purpose": "Test requested work.",
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    declare_body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
+    let declare = app
+        .clone()
+        .oneshot(json_request("/v1/reservation/declare", declare_body))
+        .await
+        .expect("reservation declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts",
+                "root": repo_root.to_string_lossy().to_string()
+            }),
+        ))
+        .await
+        .expect("file claim acquire should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
             "path": "src/auth.ts"
         }),
     );
+    body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
     body["source"]["kind"] = serde_json::json!("hook");
     body["source"]["event"] = serde_json::json!("pre_tool_use");
     body["source"]["source_ref"] = serde_json::json!("hook:req-1");
@@ -1460,10 +1584,150 @@ async fn hook_native_write_allows_exact_file_intent_and_exact_file_lease() {
         .expect("authorize should complete");
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), 2048)
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_base_observation");
+    let required_next_action = json["required_next_action"].as_str().unwrap_or_default();
+    assert!(required_next_action.contains("Reread"));
+    assert!(required_next_action.contains("fresh base observation"));
+}
+
+#[tokio::test]
+async fn hook_native_write_denies_existing_base_observation_without_content_hash() {
+    let app = build_router(ServerConfig::new("secret-token"));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let repo_root = temp.path().join("repo");
+    std::fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    std::fs::write(repo_root.join("src/auth.ts"), "version one\n")
+        .expect("initial target should be writable");
+
+    let mut declare_body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "purpose": "Test requested work.",
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    declare_body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
+    let declare = app
+        .clone()
+        .oneshot(json_request("/v1/reservation/declare", declare_body))
         .await
-        .expect("body should read");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+        .expect("reservation declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts",
+                "root": repo_root.to_string_lossy().to_string()
+            }),
+        ))
+        .await
+        .expect("file claim acquire should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts",
+            "base_observations": [{
+                "path": "src/auth.ts",
+                "exists": true,
+                "content_hash": null
+            }]
+        }),
+    );
+    body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
+    body["source"]["kind"] = serde_json::json!("hook");
+    body["source"]["event"] = serde_json::json!("pre_tool_use");
+    body["source"]["source_ref"] = serde_json::json!("hook:req-1");
+    body["source"]["tool_name"] = serde_json::json!("file_change");
+
+    let response = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_base_observation");
+}
+
+#[tokio::test]
+async fn hook_native_write_allows_exact_file_intent_lease_and_matching_base_observation() {
+    let app = build_router(ServerConfig::new("secret-token"));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let repo_root = temp.path().join("repo");
+    std::fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    std::fs::write(repo_root.join("src/auth.ts"), "version one\n")
+        .expect("initial target should be writable");
+
+    let mut declare_body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "purpose": "Test requested work.",
+            "files_planned": ["src/auth.ts"]
+        }),
+    );
+    declare_body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
+    let declare = app
+        .clone()
+        .oneshot(json_request("/v1/reservation/declare", declare_body))
+        .await
+        .expect("reservation declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts",
+                "root": repo_root.to_string_lossy().to_string()
+            }),
+        ))
+        .await
+        .expect("file claim acquire should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "write_file",
+            "path": "src/auth.ts",
+            "base_observations": [{
+                "path": "src/auth.ts",
+                "exists": true,
+                "content_hash": test_content_hash(b"version one\n")
+            }]
+        }),
+    );
+    body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
+    body["source"]["kind"] = serde_json::json!("hook");
+    body["source"]["event"] = serde_json::json!("pre_tool_use");
+    body["source"]["source_ref"] = serde_json::json!("hook:req-1");
+    body["source"]["tool_name"] = serde_json::json!("file_change");
+
+    let response = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 2048).await;
     assert_eq!(json["decision"], "allow");
     assert_eq!(json["reason_code"], "authorized");
 }
@@ -1610,7 +1874,12 @@ async fn post_write_refresh_updates_claim_observation_for_next_write() {
         "w1",
         serde_json::json!({
             "action": "write_file",
-            "path": "src/auth.ts"
+            "path": "src/auth.ts",
+            "base_observations": [{
+                "path": "src/auth.ts",
+                "exists": true,
+                "content_hash": test_content_hash(b"version two\n")
+            }]
         }),
     );
     authorize_body["workspace"]["root"] =
@@ -2346,7 +2615,12 @@ async fn authorize_lazily_claims_supplied_reserved_reservation_id() {
         serde_json::json!({
             "action": "write_file",
             "path": "src/auth.ts",
-            "reservation_id": wait_id.clone()
+            "reservation_id": wait_id.clone(),
+            "base_observations": [{
+                "path": "src/auth.ts",
+                "exists": false,
+                "content_hash": null
+            }]
         }),
     );
     body["source"]["kind"] = serde_json::json!("hook");
@@ -4387,21 +4661,6 @@ async fn active_claim_allows_matching_authorize_without_explicit_reservation_id(
         .expect("claim acquire should complete");
     assert_eq!(claim.status(), StatusCode::OK);
 
-    let declare = app
-        .clone()
-        .oneshot(protocol_request(
-            "/v1/reservation/declare",
-            "s1",
-            "w1",
-            serde_json::json!({
-                "purpose": "Test requested work.",
-                "files_planned": ["src/auth.ts"]
-            }),
-        ))
-        .await
-        .expect("reservation declaration should complete");
-    assert_eq!(declare.status(), StatusCode::OK);
-
     let response = app
         .oneshot(protocol_request(
             "/v1/authorize",
@@ -4409,7 +4668,12 @@ async fn active_claim_allows_matching_authorize_without_explicit_reservation_id(
             "w1",
             serde_json::json!({
                 "action": "write_file",
-                "path": "src/auth.ts"
+                "path": "src/auth.ts",
+                "base_observations": [{
+                    "path": "src/auth.ts",
+                    "exists": false,
+                    "content_hash": null
+                }]
             }),
         ))
         .await
@@ -4420,7 +4684,7 @@ async fn active_claim_allows_matching_authorize_without_explicit_reservation_id(
         .await
         .expect("body should read");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-    assert_eq!(json["decision"], "allow");
+    assert_eq!(json["decision"], "allow", "{json}");
     assert_eq!(json["reason_code"], "authorized");
 }
 
@@ -4754,6 +5018,155 @@ async fn rename_file_denies_when_other_session_reserves_source() {
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "reservation_conflict");
     assert_eq!(json["reservation"]["relative_path"], "src/old.ts");
+}
+
+#[tokio::test]
+async fn move_file_denies_when_destination_base_observation_is_missing() {
+    let app = build_router(ServerConfig::new("secret-token"));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let repo_root = temp.path().join("repo");
+    std::fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    std::fs::write(repo_root.join("src/old.ts"), "version one\n")
+        .expect("initial source should be writable");
+
+    let mut declare_body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "purpose": "Move auth file.",
+            "files_planned": ["src/old.ts", "src/new.ts"]
+        }),
+    );
+    declare_body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
+    let declare = app
+        .clone()
+        .oneshot(json_request("/v1/reservation/declare", declare_body))
+        .await
+        .expect("reservation declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    for path in ["src/old.ts", "src/new.ts"] {
+        let claim = app
+            .clone()
+            .oneshot(json_request(
+                "/v1/claim/acquire",
+                serde_json::json!({
+                    "agent_id": "s1",
+                    "workspace_id": "w1",
+                    "path": path,
+                    "root": repo_root.to_string_lossy().to_string()
+                }),
+            ))
+            .await
+            .expect("file claim acquire should complete");
+        assert_eq!(claim.status(), StatusCode::OK);
+    }
+
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "move_file",
+            "path": "src/old.ts",
+            "old_path": "src/old.ts",
+            "new_path": "src/new.ts",
+            "base_observations": [{
+                "path": "src/old.ts",
+                "exists": true,
+                "content_hash": test_content_hash(b"version one\n")
+            }]
+        }),
+    );
+    body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
+    body["source"]["event"] = serde_json::json!("sandbox_run");
+
+    let response = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "missing_base_observation");
+}
+
+#[tokio::test]
+async fn move_file_allows_when_source_and_destination_base_observations_match() {
+    let app = build_router(ServerConfig::new("secret-token"));
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let repo_root = temp.path().join("repo");
+    std::fs::create_dir_all(repo_root.join("src")).expect("repo src should be creatable");
+    std::fs::write(repo_root.join("src/old.ts"), "version one\n")
+        .expect("initial source should be writable");
+
+    let mut declare_body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "purpose": "Move auth file.",
+            "files_planned": ["src/old.ts", "src/new.ts"]
+        }),
+    );
+    declare_body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
+    let declare = app
+        .clone()
+        .oneshot(json_request("/v1/reservation/declare", declare_body))
+        .await
+        .expect("reservation declaration should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    for path in ["src/old.ts", "src/new.ts"] {
+        let claim = app
+            .clone()
+            .oneshot(json_request(
+                "/v1/claim/acquire",
+                serde_json::json!({
+                    "agent_id": "s1",
+                    "workspace_id": "w1",
+                    "path": path,
+                    "root": repo_root.to_string_lossy().to_string()
+                }),
+            ))
+            .await
+            .expect("file claim acquire should complete");
+        assert_eq!(claim.status(), StatusCode::OK);
+    }
+
+    let mut body = protocol_body(
+        "s1",
+        "w1",
+        serde_json::json!({
+            "action": "move_file",
+            "path": "src/old.ts",
+            "old_path": "src/old.ts",
+            "new_path": "src/new.ts",
+            "base_observations": [
+                {
+                    "path": "src/old.ts",
+                    "exists": true,
+                    "content_hash": test_content_hash(b"version one\n")
+                },
+                {
+                    "path": "src/new.ts",
+                    "exists": false,
+                    "content_hash": null
+                }
+            ]
+        }),
+    );
+    body["workspace"]["root"] = serde_json::json!(repo_root.to_string_lossy().to_string());
+    body["source"]["event"] = serde_json::json!("sandbox_run");
+
+    let response = app
+        .oneshot(json_request("/v1/authorize", body))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["decision"], "allow");
+    assert_eq!(json["reason_code"], "authorized");
 }
 
 #[tokio::test]
@@ -5721,6 +6134,692 @@ async fn authorize_denial_records_audit_event() {
 }
 
 #[tokio::test]
+async fn awareness_mode_warns_and_records_audit_event_for_soft_denial() {
+    let app = build_router(
+        ServerConfig::new("secret-token")
+            .with_coordination_mode(stateful_server::CoordinationMode::Awareness),
+    );
+
+    let response = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["decision"], "warn");
+    assert_eq!(json["reason_code"], "missing_reservation");
+    assert!(
+        json["required_next_action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("awareness mode")
+    );
+
+    let response = app
+        .oneshot(authorized_get("/v1/events"))
+        .await
+        .expect("events request should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 4096).await;
+    let events = json["events"]
+        .as_array()
+        .expect("events should be an array");
+    assert!(
+        events.iter().any(|event| {
+            event["event_type"] == "AuthorizationWarned"
+                && event["agent_id"] == "s1"
+                && event["workspace_id"] == "w1"
+                && event["payload"]["reason_code"] == "missing_reservation"
+        }),
+        "authorization warning should be present in audit events: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn authorize_denies_other_agent_active_write_fence() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .acquire_write_fences("s1", "w1", &["src/auth.ts".to_string()], "write_file")
+        .expect("preexisting fence should acquire");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    ensure_test_reservation_via_http(&app, "s2", "w1", "src/auth.ts").await;
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "agent_id": "s2",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("claim acquire should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let blocked = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(blocked.status(), StatusCode::OK);
+
+    let json = response_json(blocked, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "write_fence_conflict");
+}
+
+#[tokio::test]
+async fn awareness_mode_still_denies_active_write_fence() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .acquire_write_fences("s1", "w1", &["src/auth.ts".to_string()], "write_file")
+        .expect("preexisting fence should acquire");
+    let app = build_router(
+        ServerConfig::with_store("secret-token", store)
+            .with_coordination_mode(stateful_server::CoordinationMode::Awareness),
+    );
+
+    ensure_test_reservation_via_http(&app, "s2", "w1", "src/auth.ts").await;
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "agent_id": "s2",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("claim acquire should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let blocked = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    let json = response_json(blocked, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "write_fence_conflict");
+}
+
+#[tokio::test]
+async fn awareness_mode_still_denies_write_fence_without_reservation() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .acquire_write_fences("s1", "w1", &["src/auth.ts".to_string()], "write_file")
+        .expect("preexisting fence should acquire");
+    let app = build_router(
+        ServerConfig::with_store("secret-token", store)
+            .with_coordination_mode(stateful_server::CoordinationMode::Awareness),
+    );
+
+    let blocked = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    let json = response_json(blocked, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "write_fence_conflict");
+}
+
+#[tokio::test]
+async fn awareness_mode_still_denies_unreconciled_human_write_without_reservation() {
+    let app = build_router(
+        ServerConfig::new("secret-token")
+            .with_coordination_mode(stateful_server::CoordinationMode::Awareness),
+    );
+    let mut observe = protocol_body(
+        "human-watcher",
+        "w1",
+        serde_json::json!({
+            "path": "src/auth.ts",
+            "kind": "save",
+            "confidence": "high",
+            "source": "watcher:save",
+            "summary": "Human saved auth outside Stateful."
+        }),
+    );
+    observe["agent"]["actor_type"] = serde_json::json!("human");
+    observe["source"]["kind"] = serde_json::json!("watcher");
+    let observed = app
+        .clone()
+        .oneshot(json_request("/v1/human/observe", observe))
+        .await
+        .expect("human observe should complete");
+    assert_eq!(observed.status(), StatusCode::OK);
+
+    let denied = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    let json = response_json(denied, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "unreconciled_human_write");
+}
+
+#[tokio::test]
+async fn awareness_warn_write_fence_release_does_not_require_claim() {
+    let app = build_router(
+        ServerConfig::new("secret-token")
+            .with_coordination_mode(stateful_server::CoordinationMode::Awareness),
+    );
+
+    let warned = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts",
+                "base_observations": [{
+                    "path": "src/auth.ts",
+                    "exists": false,
+                    "content_hash": null
+                }]
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    let json = response_json(warned, 2048).await;
+    assert_eq!(json["decision"], "warn", "{json}");
+
+    let release = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/release",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("claim release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    let save_check = app
+        .oneshot(json_request(
+            "/v1/human/save-check",
+            serde_json::json!({
+                "workspace_id": "w1",
+                "paths": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("save check should complete");
+    let json = response_json(save_check, 2048).await;
+    assert_eq!(json["decision"], "clear", "{json}");
+}
+
+#[tokio::test]
+async fn move_authorize_checks_new_path_write_fence() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .acquire_write_fences("s1", "w1", &["src/new.ts".to_string()], "write_file")
+        .expect("preexisting fence should acquire");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let declare = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/reservation/declare",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "purpose": "Move auth file.",
+                "files_planned": ["src/old.ts", "src/new.ts"]
+            }),
+        ))
+        .await
+        .expect("declare should complete");
+    assert_eq!(declare.status(), StatusCode::OK);
+
+    for path in ["src/old.ts", "src/new.ts"] {
+        let claim = app
+            .clone()
+            .oneshot(json_request(
+                "/v1/claim/acquire",
+                serde_json::json!({
+                    "agent_id": "s2",
+                    "workspace_id": "w1",
+                    "path": path
+                }),
+            ))
+            .await
+            .expect("claim acquire should complete");
+        assert_eq!(claim.status(), StatusCode::OK);
+    }
+
+    let blocked = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "move_file",
+                "path": "src/old.ts",
+                "old_path": "src/old.ts",
+                "new_path": "src/new.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    let json = response_json(blocked, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "write_fence_conflict");
+}
+
+#[tokio::test]
+async fn context_render_lists_active_write_fence() {
+    let store = Store::open_in_memory().expect("store should open");
+    store
+        .acquire_write_fences("s1", "w1", &["src/auth.ts".to_string()], "write_file")
+        .expect("preexisting fence should acquire");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let rendered = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "w1",
+                "resource": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(rendered.status(), StatusCode::OK);
+    let json = response_json(rendered, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(
+        items.iter().any(|item| {
+            item["kind"] == "claim"
+                && item["severity"] == "warn"
+                && item["agent_id"] == "s1"
+                && item["resource"] == "src/auth.ts"
+                && item["summary"]
+                    .as_str()
+                    .is_some_and(|summary| summary.contains("write in flight"))
+        }),
+        "render should show active write fence: {items:?}"
+    );
+}
+
+#[tokio::test]
+async fn human_observe_records_high_confidence_save_outside_fence_windows() {
+    let app = build_router(ServerConfig::new("secret-token"));
+    let mut body = protocol_body(
+        "human-watcher",
+        "w1",
+        serde_json::json!({
+            "path": "src/auth.ts",
+            "kind": "save",
+            "confidence": "high",
+            "source": "watcher:save",
+            "summary": "Human saved auth outside Stateful.",
+            "exists": true,
+            "content_hash": "fnv1a64:1111111111111111"
+        }),
+    );
+    body["agent"]["actor_type"] = serde_json::json!("human");
+    body["source"]["kind"] = serde_json::json!("watcher");
+    body["source"]["event"] = serde_json::json!("file_saved");
+    body["source"]["source_ref"] = serde_json::json!("watcher:src/auth.ts");
+
+    let observed = app
+        .clone()
+        .oneshot(json_request("/v1/human/observe", body))
+        .await
+        .expect("human observe should complete");
+    assert_eq!(observed.status(), StatusCode::OK);
+
+    let current = app
+        .oneshot(authorized_get("/v1/current?resource=src/auth.ts"))
+        .await
+        .expect("current should complete");
+    assert_eq!(current.status(), StatusCode::OK);
+    let json = response_json(current, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(
+        items.iter().any(|item| {
+            item["resource"] == "src/auth.ts"
+                && item["severity"] == "block"
+                && item["summary"]
+                    .as_str()
+                    .is_some_and(|summary| summary.contains("unreconciled human"))
+        }),
+        "high-confidence human save should become unreconciled current state: {items:?}"
+    );
+}
+
+#[tokio::test]
+async fn authorize_denies_write_to_unreconciled_human_path() {
+    let app = build_router(ServerConfig::new("secret-token"));
+    let mut observe = protocol_body(
+        "human-watcher",
+        "w1",
+        serde_json::json!({
+            "path": "src/auth.ts",
+            "kind": "save",
+            "confidence": "high",
+            "source": "watcher:save",
+            "summary": "Human saved auth outside Stateful."
+        }),
+    );
+    observe["agent"]["actor_type"] = serde_json::json!("human");
+    observe["source"]["kind"] = serde_json::json!("watcher");
+    observe["source"]["event"] = serde_json::json!("file_saved");
+    observe["source"]["source_ref"] = serde_json::json!("watcher:src/auth.ts");
+    let observed = app
+        .clone()
+        .oneshot(json_request("/v1/human/observe", observe))
+        .await
+        .expect("human observe should complete");
+    assert_eq!(observed.status(), StatusCode::OK);
+    ensure_test_reservation_via_http(&app, "s1", "w1", "src/auth.ts").await;
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("claim acquire should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let denied = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(denied.status(), StatusCode::OK);
+    let json = response_json(denied, 2048).await;
+    assert_eq!(json["decision"], "deny");
+    assert_eq!(json["reason_code"], "unreconciled_human_write");
+}
+
+#[tokio::test]
+async fn reconcile_ack_validates_files_reread_and_missing_reservation() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let missing_files = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/reconcile/ack",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "reservation_id": "reservation-1",
+                "decision": "adopt",
+                "files_reread": [],
+                "human_change_summary": "Reviewed human edit."
+            }),
+        ))
+        .await
+        .expect("ack should complete");
+    assert_eq!(missing_files.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(missing_files, 2048).await;
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["reason_code"], "missing_files_reread");
+
+    let missing_reservation = app
+        .oneshot(json_request(
+            "/v1/reconcile/ack",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "decision": "adopt",
+                "files_reread": ["src/auth.ts"],
+                "human_change_summary": "Reviewed human edit."
+            }),
+        ))
+        .await
+        .expect("ack should complete");
+    assert_eq!(missing_reservation.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(missing_reservation, 2048).await;
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["reason_code"], "missing_reservation");
+}
+
+#[tokio::test]
+async fn context_render_includes_unreconciled_human_observation() {
+    let app = build_router(ServerConfig::new("secret-token"));
+    let mut observe = protocol_body(
+        "human-watcher",
+        "w1",
+        serde_json::json!({
+            "path": "src/auth.ts",
+            "kind": "save",
+            "confidence": "high",
+            "source": "ide:save",
+            "summary": "Human saved auth outside Stateful."
+        }),
+    );
+    observe["agent"]["actor_type"] = serde_json::json!("human");
+    observe["source"]["kind"] = serde_json::json!("ide");
+    observe["source"]["event"] = serde_json::json!("document_saved");
+    observe["source"]["source_ref"] = serde_json::json!("ide:src/auth.ts");
+    let observed = app
+        .clone()
+        .oneshot(json_request("/v1/human/observe", observe))
+        .await
+        .expect("human observe should complete");
+    assert_eq!(observed.status(), StatusCode::OK);
+
+    let rendered = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "workspace_id": "w1",
+                "resource": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(rendered.status(), StatusCode::OK);
+    let json = response_json(rendered, 4096).await;
+    let items = json["items"].as_array().expect("items should be an array");
+    assert!(
+        items.iter().any(|item| {
+            item["resource"] == "src/auth.ts"
+                && item["severity"] == "block"
+                && item["summary"]
+                    .as_str()
+                    .is_some_and(|summary| summary.contains("unreconciled human"))
+        }),
+        "render should include unreconciled human observation: {items:?}"
+    );
+    assert!(
+        json["prompt_text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("state.reconcile.ack"),
+        "prompt should instruct reconciliation: {}",
+        json["prompt_text"]
+    );
+}
+
+#[tokio::test]
+async fn human_save_check_warns_when_another_actor_has_claim_or_fence() {
+    let store = Store::open_in_memory().expect("store should open");
+    acquire_test_lease(&store, "s1", "w1", "src/claimed.ts");
+    store
+        .acquire_write_fences("s2", "w1", &["src/fenced.ts".to_string()], "write_file")
+        .expect("write fence should acquire");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let checked = app
+        .oneshot(json_request(
+            "/v1/human/save-check",
+            serde_json::json!({
+                "workspace_id": "w1",
+                "paths": ["src/claimed.ts", "src/fenced.ts"]
+            }),
+        ))
+        .await
+        .expect("save check should complete");
+    assert_eq!(checked.status(), StatusCode::OK);
+    let json = response_json(checked, 4096).await;
+    assert_eq!(json["decision"], "warn");
+    assert_eq!(json["reason_code"], "human_save_conflict");
+    let conflicts = json["conflicts"]
+        .as_array()
+        .expect("conflicts should be an array");
+    assert!(
+        conflicts.iter().any(|conflict| {
+            conflict["path"] == "src/claimed.ts"
+                && conflict["conflict_kind"] == "claim"
+                && conflict["owner_agent_id"] == "s1"
+        }),
+        "save-check should surface active claim conflict: {conflicts:?}"
+    );
+    assert!(
+        conflicts.iter().any(|conflict| {
+            conflict["path"] == "src/fenced.ts"
+                && conflict["conflict_kind"] == "write_fence"
+                && conflict["owner_agent_id"] == "s2"
+        }),
+        "save-check should surface active fence conflict: {conflicts:?}"
+    );
+}
+
+#[tokio::test]
+async fn claim_release_clears_authorize_write_fence() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    ensure_test_reservation_via_http(&app, "s1", "w1", "src/auth.ts").await;
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("claim acquire should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+    let allowed = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    assert_eq!(response_json(allowed, 2048).await["decision"], "allow");
+
+    let release = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/release",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("claim release should complete");
+    assert_eq!(release.status(), StatusCode::OK);
+
+    ensure_test_reservation_via_http(&app, "s2", "w1", "src/auth.ts").await;
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "agent_id": "s2",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("claim acquire should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+    let allowed = app
+        .oneshot(protocol_request(
+            "/v1/authorize",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("authorize should complete");
+    let json = response_json(allowed, 2048).await;
+    assert_eq!(json["decision"], "allow");
+}
+
+#[tokio::test]
 async fn authorize_denial_audit_event_includes_queued_wait_details() {
     let app = build_router(ServerConfig::new("secret-token"));
 
@@ -6296,6 +7395,30 @@ async fn context_render_returns_empty_prompt_when_no_blocking_state_exists() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
     assert_eq!(json["status"], "ok");
     assert_eq!(json["prompt_text"], "");
+}
+
+#[tokio::test]
+async fn context_render_reports_coordination_mode() {
+    let app = build_router(
+        ServerConfig::new("secret-token")
+            .with_coordination_mode(stateful_server::CoordinationMode::Awareness),
+    );
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/context/render",
+            serde_json::json!({
+                "mode": "detailed",
+                "resource": "src/auth.ts",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("context render should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 2048).await;
+    assert_eq!(json["coordination_mode"], "awareness");
 }
 
 #[tokio::test]
@@ -7084,16 +8207,6 @@ async fn removed_compat_endpoints_return_not_found() {
                 "path": "src/auth.ts"
             }),
         ),
-        (
-            "/v1/reconcile/ack",
-            serde_json::json!({
-                "agent_id": "s1",
-                "workspace_id": "w1",
-                "decision": "adopt",
-                "files_reread": ["src/auth.ts"],
-                "human_change_summary": "User adjusted auth guard."
-            }),
-        ),
     ] {
         let response = app
             .clone()
@@ -7195,7 +8308,12 @@ fn native_hook_authorize_request(
         workspace_id,
         serde_json::json!({
             "action": "write_file",
-            "path": path
+            "path": path,
+            "base_observations": [{
+                "path": path,
+                "exists": false,
+                "content_hash": null
+            }]
         }),
     );
     body["source"]["kind"] = serde_json::json!("hook");

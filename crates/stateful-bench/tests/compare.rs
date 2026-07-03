@@ -100,6 +100,7 @@ fn compare_runs_uses_paired_valid_denominator_and_reports_missing_invalid_pairs(
     let report = compare_runs(CompareOptions {
         stateful_run_dir: vec![stateful_dir],
         no_state_run_dir: vec![no_state_dir],
+        awareness_run_dir: Vec::new(),
         manifest: manifest_path,
         max_pairs: None,
     })
@@ -224,6 +225,7 @@ fn compare_runs_can_limit_manifest_to_first_n_pairs() {
     let report = compare_runs(CompareOptions {
         stateful_run_dir: vec![stateful_dir],
         no_state_run_dir: vec![no_state_dir],
+        awareness_run_dir: Vec::new(),
         manifest: manifest_path,
         max_pairs: Some(2),
     })
@@ -293,6 +295,7 @@ fn compare_runs_aggregates_discriminating_harness_metrics() {
     let report = compare_runs(CompareOptions {
         stateful_run_dir: vec![stateful_dir],
         no_state_run_dir: vec![no_state_dir],
+        awareness_run_dir: Vec::new(),
         manifest: manifest_path,
         max_pairs: None,
     })
@@ -373,6 +376,7 @@ fn compare_runs_reports_coordination_effect_and_friction_deltas() {
     let report = compare_runs(CompareOptions {
         stateful_run_dir: vec![stateful_dir],
         no_state_run_dir: vec![no_state_dir],
+        awareness_run_dir: Vec::new(),
         manifest: manifest_path,
         max_pairs: None,
     })
@@ -402,6 +406,126 @@ fn compare_runs_reports_coordination_effect_and_friction_deltas() {
     assert!(markdown.contains("| Prevented uncoordinated same-file collisions | 2 |"));
     assert!(markdown.contains("| Prevented lost edit events | 1 |"));
     assert!(markdown.contains("| Additional coordination friction events | 4 |"));
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn compare_runs_accepts_awareness_arm_and_keeps_two_arm_json_unchanged() {
+    let root = temp_root("stateful-bench-compare-awareness");
+    let manifest_path = root.join("pairs.jsonl");
+    let stateful_dir = root.join("runs/stateful");
+    let no_state_dir = root.join("runs/no-state");
+    let awareness_dir = root.join("runs/awareness");
+    fs::create_dir_all(&stateful_dir).expect("stateful run dir should exist");
+    fs::create_dir_all(&no_state_dir).expect("no-state run dir should exist");
+    fs::create_dir_all(&awareness_dir).expect("awareness run dir should exist");
+    fs::write(
+        stateful_dir.join("run.json"),
+        r#"{"run_id":"stateful","mode":"stateful"}"#,
+    )
+    .expect("stateful metadata should write");
+    fs::write(
+        no_state_dir.join("run.json"),
+        r#"{"run_id":"no-state","mode":"no-state"}"#,
+    )
+    .expect("no-state metadata should write");
+    fs::write(
+        awareness_dir.join("run.json"),
+        r#"{"run_id":"awareness","mode":"awareness"}"#,
+    )
+    .expect("awareness metadata should write");
+
+    write_jsonl(&manifest_path, &[exact_overlap_pair("pair-1")]).expect("manifest should write");
+    write_pair(
+        &stateful_dir,
+        RunMode::Stateful,
+        "pair-1",
+        "passed",
+        "passed",
+    );
+    write_pair(
+        &no_state_dir,
+        RunMode::NoState,
+        "pair-1",
+        "failed",
+        "passed",
+    );
+    write_pair(
+        &awareness_dir,
+        RunMode::Awareness,
+        "pair-1",
+        "passed",
+        "failed",
+    );
+    write_observer_events(
+        &stateful_dir,
+        "pair-1",
+        &[serde_json::json!({"event_type":"coordinated_block"})],
+    );
+    write_observer_events(
+        &no_state_dir,
+        "pair-1",
+        &[serde_json::json!({"event_type":"lost_edit_event"})],
+    );
+    write_observer_events(
+        &awareness_dir,
+        "pair-1",
+        &[
+            serde_json::json!({"event_type":"authorization_warning"}),
+            serde_json::json!({"event_type":"wait_event"}),
+        ],
+    );
+
+    let two_arm = compare_runs(CompareOptions {
+        stateful_run_dir: vec![stateful_dir.clone()],
+        no_state_run_dir: vec![no_state_dir.clone()],
+        awareness_run_dir: Vec::new(),
+        manifest: manifest_path.clone(),
+        max_pairs: None,
+    })
+    .expect("two-arm comparison should build");
+    let two_arm_json = serde_json::to_string_pretty(&two_arm).expect("two-arm should serialize");
+    assert!(!two_arm_json.contains("\"awareness\":"));
+    assert!(!two_arm_json.contains("\"off_vs_awareness\""));
+
+    let report = compare_runs(CompareOptions {
+        stateful_run_dir: vec![stateful_dir],
+        no_state_run_dir: vec![no_state_dir],
+        awareness_run_dir: vec![awareness_dir],
+        manifest: manifest_path,
+        max_pairs: None,
+    })
+    .expect("three-arm comparison should build");
+
+    assert_eq!(
+        report
+            .awareness
+            .as_ref()
+            .expect("awareness summary")
+            .raw_manifest_score,
+        0.5
+    );
+    assert_eq!(
+        report
+            .off_vs_awareness
+            .as_ref()
+            .expect("off vs awareness")
+            .prevented_lost_edit_events,
+        1
+    );
+    assert_eq!(
+        report
+            .awareness_vs_enforcement
+            .as_ref()
+            .expect("awareness vs enforcement")
+            .additional_coordinated_blocks,
+        1
+    );
+    let markdown = report.render_markdown();
+    assert!(markdown.contains("| Metric | Stateful | Awareness | No-state |"));
+    assert!(markdown.contains("| Authorization warnings | 0 | 1 | 0 |"));
+    assert!(markdown.contains("| Wait events | 0 | 1 | 0 |"));
 
     fs::remove_dir_all(root).expect("temp root should clean up");
 }

@@ -1,5 +1,6 @@
 mod policy_service;
 mod protocol;
+pub use policy_service::CoordinationMode;
 
 use axum::{
     Json, Router,
@@ -20,17 +21,19 @@ use policy_service::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stateful_core::{
-    ActivityPhase, ContextPackage, RenderMode, normalized_relative_path_is_empty,
-    render_prompt_text,
+    ActivityPhase, ContextPackage, ReconciliationDecision, RenderMode,
+    normalized_relative_path_is_empty, render_prompt_text,
 };
 use stateful_store::{
-    ClaimBatchAcquireResult, CurrentStateIdentityFilter, Event, NotificationRecord, OutboxEntry,
-    Store, StoreError, WaitRecord,
+    ClaimBatchAcquireResult, CurrentStateIdentityFilter, Event, HumanObservationConfidence,
+    HumanObservationInput, HumanObservationKind, NotificationRecord, OutboxEntry,
+    ReconciliationAckInput, Store, StoreError, WaitRecord,
 };
 use std::{
     collections::VecDeque,
     convert::Infallible,
     net::SocketAddr,
+    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -45,6 +48,7 @@ pub struct ServerConfig {
     bearer_token: String,
     store: SharedStore,
     maintenance_interval: Duration,
+    coordination_mode: CoordinationMode,
 }
 
 impl ServerConfig {
@@ -60,11 +64,17 @@ impl ServerConfig {
             bearer_token: bearer_token.into(),
             store: Arc::new(Mutex::new(store)),
             maintenance_interval: DEFAULT_MAINTENANCE_INTERVAL,
+            coordination_mode: CoordinationMode::Enforcement,
         }
     }
 
     pub fn with_maintenance_interval(mut self, interval: Duration) -> Self {
         self.maintenance_interval = interval;
+        self
+    }
+
+    pub fn with_coordination_mode(mut self, mode: CoordinationMode) -> Self {
+        self.coordination_mode = mode;
         self
     }
 }
@@ -90,6 +100,9 @@ pub fn build_router(config: ServerConfig) -> Router {
         .route("/v1/claim/release", post(lease_release))
         .route("/v1/activity/finalize", post(activity_finalize))
         .route("/v1/authorize", post(authorize))
+        .route("/v1/human/observe", post(human_observe))
+        .route("/v1/human/save-check", post(human_save_check))
+        .route("/v1/reconcile/ack", post(reconcile_ack))
         .route("/v1/context/render", post(context_render))
         .route("/v1/notifications/poll", post(notifications_poll))
         .route("/v1/notifications/stream", get(notifications_stream))
@@ -212,14 +225,15 @@ async fn events(State(config): State<ServerConfig>) -> (StatusCode, Json<Value>)
     }
 }
 
-async fn runtime_identity(State(_config): State<ServerConfig>) -> (StatusCode, Json<Value>) {
+async fn runtime_identity(State(config): State<ServerConfig>) -> (StatusCode, Json<Value>) {
     (
         StatusCode::OK,
         Json(json!({
             "status": "ok",
             "pid": std::process::id(),
             "protocol_version": "stateful.v1",
-            "capabilities": RUNTIME_CAPABILITIES
+            "capabilities": RUNTIME_CAPABILITIES,
+            "coordination_mode": config.coordination_mode.as_str()
         })),
     )
 }
@@ -315,21 +329,220 @@ async fn authorize(
             .collect(),
     };
 
-    let outcome = match authorize_with_policy_and_audit(&config.store, input) {
-        Ok(outcome) => outcome,
-        Err(message) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "decision": "error",
-                    "reason_code": "state_error",
-                    "message": message
-                })),
-            );
-        }
-    };
+    let outcome =
+        match authorize_with_policy_and_audit(&config.store, config.coordination_mode, input) {
+            Ok(outcome) => outcome,
+            Err(message) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "decision": "error",
+                        "reason_code": "state_error",
+                        "message": message
+                    })),
+                );
+            }
+        };
 
     (StatusCode::OK, Json(authorization_json(outcome)))
+}
+
+async fn human_observe(
+    State(config): State<ServerConfig>,
+    Json(input): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let envelope = match protocol::require_v1_envelope(input) {
+        Ok(envelope) => envelope,
+        Err(error) => return error.response(),
+    };
+    let payload: HumanObservePayload = match serde_json::from_value(envelope.payload) {
+        Ok(payload) => payload,
+        Err(_) => return protocol::protocol_mismatch_response(),
+    };
+    let kind = match HumanObservationKind::from_str(&payload.kind) {
+        Ok(kind) => kind,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
+    };
+    let confidence = match HumanObservationConfidence::from_str(&payload.confidence) {
+        Ok(confidence) => confidence,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
+    };
+    let path = stateful_core::normalize_relative_path(&payload.path);
+    if normalized_relative_path_is_empty(&path) {
+        return error_response(StatusCode::BAD_REQUEST, "path is required");
+    }
+
+    let workspace_id = envelope.request.workspace.workspace_id;
+    let attributed_to_agent = match config.store.lock() {
+        Ok(store) => store
+            .write_fence_owner_for_observation(&workspace_id, &path, &envelope.request.observed_at)
+            .map(|owner| owner.is_some()),
+        Err(_) => return status_response(Err("store lock poisoned".to_string())),
+    };
+    let attributed_to_agent = match attributed_to_agent {
+        Ok(attributed) => attributed,
+        Err(error) => return status_response(Err(error.to_string())),
+    };
+
+    let observation = HumanObservationInput {
+        workspace_id,
+        relative_path: path,
+        kind,
+        confidence,
+        source: payload.source,
+        observed_at: envelope.request.observed_at,
+        summary: payload.summary,
+    };
+    let result = match config.store.lock() {
+        Ok(store) => store.record_human_observation(observation),
+        Err(_) => return status_response(Err("store lock poisoned".to_string())),
+    };
+
+    match result {
+        Ok(observation_id) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "attributed": if attributed_to_agent { "agent" } else { "human" },
+                "observation_id": observation_id
+            })),
+        ),
+        Err(error) => status_response(Err(error.to_string())),
+    }
+}
+
+async fn human_save_check(
+    State(config): State<ServerConfig>,
+    Json(input): Json<HumanSaveCheckRequest>,
+) -> (StatusCode, Json<Value>) {
+    let paths = match require_files_planned(input.paths) {
+        Ok(paths) => paths,
+        Err(response) => return response,
+    };
+    let result = match config.store.lock() {
+        Ok(store) => {
+            let mut conflicts = Vec::new();
+            for path in &paths {
+                match store.active_claim_owner(&input.workspace_id, path) {
+                    Ok(Some(owner)) => conflicts.push(json!({
+                        "path": path,
+                        "conflict_kind": "claim",
+                        "owner_agent_id": owner
+                    })),
+                    Ok(None) => {}
+                    Err(error) => return status_response(Err(error.to_string())),
+                }
+                match store.active_write_fence_owner(&input.workspace_id, path) {
+                    Ok(Some(owner)) => conflicts.push(json!({
+                        "path": path,
+                        "conflict_kind": "write_fence",
+                        "owner_agent_id": owner
+                    })),
+                    Ok(None) => {}
+                    Err(error) => return status_response(Err(error.to_string())),
+                }
+            }
+            Ok(conflicts)
+        }
+        Err(_) => return status_response(Err("store lock poisoned".to_string())),
+    };
+
+    match result {
+        Ok(conflicts) if conflicts.is_empty() => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "decision": "clear",
+                "conflicts": []
+            })),
+        ),
+        Ok(conflicts) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "decision": "warn",
+                "reason_code": "human_save_conflict",
+                "conflicts": conflicts
+            })),
+        ),
+        Err(error) => status_response(Err(error)),
+    }
+}
+
+async fn reconcile_ack(
+    State(config): State<ServerConfig>,
+    Json(input): Json<ReconcileAckRequest>,
+) -> (StatusCode, Json<Value>) {
+    if input.files_reread.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error",
+                "reason_code": "missing_files_reread"
+            })),
+        );
+    }
+    let Some(reservation_id) = input.reservation_id.clone() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error",
+                "reason_code": "missing_reservation"
+            })),
+        );
+    };
+    let decision = match ReconciliationDecision::from_str(&input.decision) {
+        Ok(decision) => decision,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
+    };
+    let files_reread = match require_files_planned(input.files_reread) {
+        Ok(files) => files,
+        Err(response) => return response,
+    };
+
+    let result = match config.store.lock() {
+        Ok(store) => {
+            for path in &files_reread {
+                match store.active_exact_file_intent_by_reservation(
+                    &input.workspace_id,
+                    path,
+                    &reservation_id,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "status": "error",
+                                "reason_code": "missing_reservation"
+                            })),
+                        );
+                    }
+                    Err(error) => return status_response(Err(error.to_string())),
+                }
+            }
+            store.acknowledge_human_reconciliation(ReconciliationAckInput {
+                agent_id: input.agent_id,
+                workspace_id: input.workspace_id,
+                reservation_id: Some(reservation_id),
+                decision,
+                files_reread,
+                human_change_summary: input.human_change_summary,
+            })
+        }
+        Err(_) => return status_response(Err("store lock poisoned".to_string())),
+    };
+
+    match result {
+        Ok(cleared) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "cleared": cleared
+            })),
+        ),
+        Err(error) => status_response(Err(error.to_string())),
+    }
 }
 
 async fn reservation_declare(
@@ -913,7 +1126,20 @@ async fn lease_release(
     }
 
     let result = match config.store.lock() {
-        Ok(store) => store.release_claim(input.agent_id, input.workspace_id, input.path),
+        Ok(store) => {
+            let claim_result =
+                store.release_claim(&input.agent_id, &input.workspace_id, &input.path);
+            let fence_result =
+                store.release_write_fences(&input.agent_id, &input.workspace_id, &input.path);
+            match (claim_result, fence_result) {
+                (Ok(()), Ok(_)) => Ok(()),
+                (Err(StoreError::ClaimNotFound), Ok(released_fences)) if released_fences > 0 => {
+                    Ok(())
+                }
+                (Err(error), _) => Err(error),
+                (_, Err(error)) => Err(error),
+            }
+        }
         Err(_) => return status_response(Err("store lock poisoned".to_string())),
     };
 
@@ -1026,6 +1252,7 @@ async fn context_render(
                 RenderMode::Brief => "brief",
                 RenderMode::Detailed => "detailed",
             },
+            "coordination_mode": config.coordination_mode.as_str(),
             "current": live.summary,
             "items": live.items,
             "prompt_text": prompt_text
@@ -1270,6 +1497,7 @@ async fn resume_next(
 
 fn authorize_with_policy_and_audit(
     store: &SharedStore,
+    coordination_mode: CoordinationMode,
     input: AuthorizeWriteInput,
 ) -> Result<AuthorizationOutcome, String> {
     let audit_input = input.clone();
@@ -1281,10 +1509,18 @@ fn authorize_with_policy_and_audit(
             if let Some(heartbeat) = authorize_heartbeat_event(&audit_input) {
                 store.append(heartbeat).map_err(|error| error.to_string())?;
             }
-            let outcome = PolicyService::new(store).authorize_write(input, true)?;
-            if matches!(outcome.decision.decision, stateful_core::DecisionKind::Deny) {
-                let audit = authorization_denied_audit_event(&audit_input, &outcome);
-                store.append(audit).map_err(|error| error.to_string())?;
+            let outcome =
+                PolicyService::new(store, coordination_mode).authorize_write(input, true)?;
+            match outcome.decision.decision {
+                stateful_core::DecisionKind::Deny => {
+                    let audit = authorization_denied_audit_event(&audit_input, &outcome);
+                    store.append(audit).map_err(|error| error.to_string())?;
+                }
+                stateful_core::DecisionKind::Warn => {
+                    let audit = authorization_warned_audit_event(&audit_input, &outcome);
+                    store.append(audit).map_err(|error| error.to_string())?;
+                }
+                _ => {}
             }
             Ok(outcome)
         },
@@ -1314,7 +1550,8 @@ fn claim_intent_with_policy_and_audit(
         .map_err(|_| "store lock poisoned".to_string())?;
     store.transaction(
         |store| {
-            let outcome = PolicyService::new(store).claim_intent(input)?;
+            let outcome =
+                PolicyService::new(store, CoordinationMode::Enforcement).claim_intent(input)?;
             let audit = reservation_claimed_audit_event(&outcome);
             store.append(audit).map_err(|error| error.to_string())?;
             Ok(outcome)
@@ -1333,7 +1570,7 @@ fn request_intent_with_policy(
         .map_err(|_| RequestReservationError::State("store lock poisoned".to_string()))?;
     store.transaction(
         |store| {
-            let outcome = PolicyService::new(store)
+            let outcome = PolicyService::new(store, CoordinationMode::Enforcement)
                 .request_intent(input)
                 .map_err(RequestReservationError::RequestFailed)?;
             let audit = reservation_requested_audit_event(&audit_input, &outcome);
@@ -1361,7 +1598,8 @@ fn cancel_intent_with_policy_and_audit(
         .map_err(|_| "store lock poisoned".to_string())?;
     store.transaction(
         |store| {
-            let outcome = PolicyService::new(store).cancel_intent(input)?;
+            let outcome =
+                PolicyService::new(store, CoordinationMode::Enforcement).cancel_intent(input)?;
             let audit = reservation_canceled_audit_event(&request_id, &outcome);
             store.append(audit).map_err(|error| error.to_string())?;
             Ok(outcome)
@@ -1517,6 +1755,30 @@ fn authorization_denied_audit_event(
     event
 }
 
+fn authorization_warned_audit_event(
+    input: &AuthorizeWriteInput,
+    outcome: &AuthorizationOutcome,
+) -> Event {
+    with_request_identity(
+        Event::authorization_warned(
+            input.agent_id.clone(),
+            input.workspace_id.clone().unwrap_or_default(),
+            input.action.clone(),
+            input.path.clone(),
+            input.old_path.clone(),
+            input.new_path.clone(),
+            outcome.decision.reason_code.clone(),
+            outcome.decision.message.clone(),
+        ),
+        WorkspaceIdentityRequest {
+            repo_id: input.repo_id.clone(),
+            worktree_id: input.worktree_id.clone(),
+            root: input.root.clone(),
+            branch: input.branch.clone(),
+        },
+    )
+}
+
 fn error_response(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Value>) {
     let message = message.into();
     (
@@ -1592,6 +1854,7 @@ fn request_intent_json(outcome: RequestReservationOutcome) -> Value {
 
 fn cancel_intent_json(outcome: CancelReservationOutcome) -> Value {
     let request_state = outcome.wait.status.clone();
+
     json!({
         "status": "ok",
         "request_id": outcome.request_id,
@@ -1799,6 +2062,32 @@ impl From<BaseObservationPayload> for BaseObservation {
             content_hash: payload.content_hash,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct HumanObservePayload {
+    path: String,
+    kind: String,
+    confidence: String,
+    source: String,
+    summary: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HumanSaveCheckRequest {
+    workspace_id: String,
+    paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReconcileAckRequest {
+    agent_id: String,
+    workspace_id: String,
+    #[serde(default)]
+    reservation_id: Option<String>,
+    decision: String,
+    files_reread: Vec<String>,
+    human_change_summary: String,
 }
 
 #[derive(Debug, Deserialize)]

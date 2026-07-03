@@ -405,6 +405,7 @@ fn ensure_server_with_options_rejects_healthy_runtime_on_different_port() {
             port: 1,
             token: None,
             workspace_id: "w1".to_string(),
+            coordination_mode: "enforcement".to_string(),
         },
     )
     .expect_err("healthy runtime with different port should be rejected");
@@ -435,6 +436,7 @@ fn server_start_options_from_runtime_preserves_previous_start_options() {
             port: 43874,
             token: Some("secret-token".to_string()),
             workspace_id: "shared".to_string(),
+            coordination_mode: "enforcement".to_string(),
         }
     );
 }
@@ -459,6 +461,7 @@ fn detached_server_args_include_start_options() {
         port: 43874,
         token: Some("secret-token".to_string()),
         workspace_id: "w2".to_string(),
+        coordination_mode: "awareness".to_string(),
     });
 
     assert_eq!(
@@ -474,7 +477,9 @@ fn detached_server_args_include_start_options() {
             "--token",
             "secret-token",
             "--workspace-id",
-            "w2"
+            "w2",
+            "--coordination-mode",
+            "awareness"
         ]
     );
 }

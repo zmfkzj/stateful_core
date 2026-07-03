@@ -14,9 +14,10 @@ V1 is Rust-only.
 
 The state server, pure policy primitives, store-backed authorization service,
 SQLite persistence, CLI, hook adapter commands, native Stateful tool handlers,
-sandbox wrapper, and implemented prompt/context endpoints live in the same Rust
-codebase. Watcher-driven human observation and richer store-backed prompt
-rendering remain design targets unless a section below says they are implemented.
+sandbox wrapper, human observation/reconciliation endpoints, advisory VS Code
+save gate, and store-backed prompt/context endpoints live in the same Rust
+codebase. Richer human observer coverage remains future adapter work unless a
+section below says it is implemented.
 
 The prototype supports user-level installation with repo allowlist gating.
 `stateful install --yes` installs stateful global files only. `stateful install
@@ -141,6 +142,9 @@ POST /v1/claim/refresh-observation
 POST /v1/claim/release
 POST /v1/activity/finalize
 POST /v1/authorize
+POST /v1/human/observe
+POST /v1/human/save-check
+POST /v1/reconcile/ack
 POST /v1/context/render
 POST /v1/notifications/poll
 GET  /v1/notifications/stream
@@ -150,6 +154,15 @@ GET  /v1/runtime/identity
 ```
 
 `/v1/authorize` is the single policy entry point for supported tool actions.
+`/v1/human/observe` records human presence/save/change/delete observations from
+watcher or CLI sources. High-confidence `save`, `change`, and `delete`
+observations become unreconciled human writes unless they occur while an active
+same-file write fence attributes the save to an agent write. `/v1/human/save-check`
+is advisory for human tools: it returns `decision: "clear"` or `decision: "warn"`
+with claim/write-fence conflicts, and clients fail open for human saves when the
+server is unavailable. `/v1/reconcile/ack` records a reconciliation decision and
+clears unreconciled human-write blocks only for `adopt` or `reapply`, only after
+non-empty reread files are covered by the caller's active exact file reservation.
 `/v1/notifications/poll` returns pending coordination notifications for a
 target agent and marks returned notifications as delivered so a later poll does
 not redeliver the same notification. `/v1/notifications/stream` returns an SSE
@@ -167,21 +180,10 @@ SSE response. `/v1/reservation/claim` is the explicit reservation claim path; it
 takes a `wait_id`, uses the stored reservation purpose, and creates active
 reservation scope plus an active claim for the reservation owner. `/v1/authorize`
 may lazy-claim a claimable reservation for hook and sandbox authorization sources
-after the client rereads
-and retries the write boundary; read-only conflict checks must not claim reservations.
-`/v1/claim/acquire` records the target existence and content hash when `root` is
-supplied; hook-originated native file writes compare that observation before
-authorization. `/v1/claim/refresh-observation` refreshes the exact reservation
-claim observation while a claim remains active. Completed native edit and
-`write-targets` hook flows release their authorizing claim instead of carrying
-it forward, so later writes must reread and acquire a fresh claim or claim a
-claimable reservation. `/v1/reservation/request`
-creates or returns an idempotent queued or claimable (`reserved`) request by
-`request_id`; `/v1/reservation/cancel` cancels queued or claimable (`reserved`)
-requests owned by the caller.
-`/v1/runtime/identity` is an authenticated server identity endpoint used by
-`stateful server stop` to verify that the runtime file and process id describe
-the same stateful server.
+after the client rereads and retries the write boundary; read-only conflict
+checks must not claim reservations. `/v1/claim/acquire` records the target
+existence and content hash when `root` is supplied; hook-originated native file
+writes compare that observation before authorization.
 
 Native Stateful tool integrations that expose the full state surface map
 directly onto these endpoints. Native tool handlers do not implement policy
@@ -253,35 +255,49 @@ same-reservation file claim before hooks call `/v1/authorize` with the
 operation-specific action, including `write_file`, `delete_file`, and
 `move_file` with source `path` / `old_path` and destination `new_path`.
 PreToolUse authorization sends current `base_observations` for each affected
-target when the hook can read the workspace file state. PostToolUse observes
-completed native edits and sandbox `write-targets` transactions, records the
-result, and releases the same-reservation claims that authorized the completed
-write boundary. Released claims leave the live context render and do not
-authorize a later write; the agent must reread and reacquire a claim, or
-lazy-claim a claimable reservation, before retrying. Remaining OMP `edit`
-denials are captured as live-agent lazy edit operations when the patch has
-safe repo-relative line targets. Remaining OMP `write` denials are captured as
-live-agent lazy write operations with the original full write content. Denials
-with a wait id reuse that id; other retryable lazy operations receive a generated
-live-agent operation id. For stored wait ids, `lazy_edit_resume` and
-`lazy_write_resume` first claim the queued reservation, then re-authorize the
-original edit or write. Generated no-wait operation ids still require the agent
-to fix scope, receive and claim a claimable reservation, or recover from another
-fallback denial before resume. `lazy_edit_resume` verifies the file content still
-matches the queued base text, then applies only line-based edit patch operations;
-block operations or changed files require regenerating the patch.
-`lazy_write_resume` verifies the target still matches the queued state, then
-writes the captured full content; changed targets require retrying the write.
-`lazy_bash_resume` stores a trusted external `stateful sandbox run ...` command
-when the original OMP Bash call cannot display the scoped grant prompt, asks for
-the same grant during resume, re-authorizes the original Bash tool call, and
-reruns the stored command.
-For Bash, command text alone never authorizes tool use.
-`/v1/authorize` accepts optional `base_observations` for OCC-style freshness
-checks. When supplied, each observation is compared against the current
-workspace file state under `workspace.root`; existence or `content_hash` changes
-for an affected target return `deny` with `reason_code:
-stale_target_observation` and require the caller to reread before retrying.
+file target when the hook can identify the target. File-changing native, hook,
+and sandbox writes fail closed with `reason_code: missing_base_observation`
+whenever a freshness-scoped action omits an observation for an affected file,
+even if `workspace.root` is absent or not readable by the server. If an
+observation is supplied and the server can read the workspace under
+`workspace.root`, `/v1/authorize` compares it against current file state;
+existence or `content_hash` changes for an affected target return `deny` with
+`reason_code: stale_target_observation` and require the caller to reread before
+retrying.
+
+This base-observation requirement is one of the presence-first safety rails that
+let broad reservation blocking be measured separately from freshness. Shipped v1
+also acquires short same-file write fences at authorized write boundaries.
+Enforcement mode still requires active reservation scope plus same-reservation
+claims for supported writes; awareness mode softens only reservation/scope/claim
+coordination denials to warnings. `write_directory` and adapter paths where exact
+file target extraction or readable file state is unsupported keep the shipped
+reservation/claim and sandbox-scope guardrails until per-file observation or
+equivalent independent fence coverage is implemented for that surface.
+
+PostToolUse observes completed native edits and sandbox `write-targets`
+transactions, records the result, and releases the same-reservation claims and
+write fences that authorized the completed write boundary. Released claims and
+fences leave the live context render and do not authorize a later write; the
+agent must reread and reacquire a claim, or lazy-claim a claimable reservation,
+before retrying. Remaining OMP `edit` denials are captured as live-agent lazy edit
+operations when the patch has safe repo-relative line targets. Remaining OMP
+`write` denials are captured as live-agent lazy write operations with the
+original full write content. Denials with a wait id reuse that id; other
+retryable lazy operations receive a generated live-agent operation id. For stored
+wait ids, `lazy_edit_resume` and `lazy_write_resume` first claim the queued
+reservation, then re-authorize the original edit or write. Generated no-wait
+operation ids still require the agent to fix scope, receive and claim a
+claimable reservation, or recover from another fallback denial before resume.
+`lazy_edit_resume` verifies the file content still matches the queued base text,
+then applies only line-based edit patch operations; block operations or changed
+files require regenerating the patch. `lazy_write_resume` verifies the target
+still matches the queued state, then writes the captured full content; changed
+targets require retrying the write. `lazy_bash_resume` stores a trusted external
+`stateful sandbox run ...` command when the original OMP Bash call cannot display
+the scoped grant prompt, asks for the same grant during resume, re-authorizes the
+original Bash tool call, and reruns the stored command. For Bash, command text
+alone never authorizes tool use.
 Hook adapters normalize namespaced runtime tool names to their leaf before
 policy classification: `functions.bash` follows Bash rules,
 `functions.python` / `functions.javascript` / `functions.js` /
@@ -340,13 +356,14 @@ context_items[]
 audit_event
 ```
 
-`deny` means the adapter must block the action. `error` is used for
-state-server, protocol, or sandbox execution failures; write and reconciliation
-paths treat `error` as fail-closed. A `warn` decision and response-level
-`conflicts[]`, `context_items[]`, or `audit_event` fields are target response
-vocabulary. The shipped `/v1/authorize` response returns allow/deny/error plus
-`wait` or `reservation` details when applicable, and it appends
-`AuthorizationDenied` events for deny decisions.
+`deny` means the adapter must block the action. `warn` is shipped for awareness
+mode and means the adapter should surface coordination context but may proceed
+unless another hard safety denial applies. `error` is used for state-server,
+protocol, or sandbox execution failures; write and reconciliation paths treat
+`error` as fail-closed. The shipped `/v1/authorize` response returns
+allow/warn/deny/error plus `wait` or `reservation` details when applicable, and
+it appends `AuthorizationDenied` events for deny decisions and warning audit
+events for awareness-mode warnings.
 
 For scheduling APIs, a hard conflict decision may produce a queued reservation
 request instead of an immediate reservation. V1 queues only hard
@@ -413,6 +430,7 @@ sessions
 activities
 reservations
 claims
+write_fences
 wait_queue
 notifications
 conflicts
@@ -442,12 +460,15 @@ activities(agent_id, workspace_id, expires_at)
 reservations(agent_id, status, expires_at)
 claims(workspace_id, relative_path, status)
 claims(repo_id, relative_path, status, expires_at)
+write_fences(workspace_id, relative_path, released_at, expires_at)
+write_fences(agent_id, workspace_id, released_at, expires_at)
 wait_queue(workspace_id, relative_path, status)
 wait_queue(agent_id, status)
 notifications(target_agent_id, status)
 notifications(target_agent_id, workspace_id, status, sequence)
 conflicts(agent_id, checked_at)
 reconciliations(agent_id, created_at)
+human_observations(workspace_id, relative_path, kind, confidence, reconciled_at)
 outbox(agent_id, sequence, sync_status)
 ```
 
@@ -475,13 +496,15 @@ capped at 60 minutes from `declared_at`.
 
 The shipped state server runs a background expiration loop while serving and
 also triggers expiration lazily from read/write paths. Expiration covers stale
-claims, stale reservations, and stale reservation state, promotes eligible FIFO
-waiters, and must be transactionally equivalent in both paths.
+claims, stale reservations, stale reservation state, stale write fences,
+presence/dirty human observations, and eligible FIFO waiter promotion. The
+background and lazy paths must be transactionally equivalent.
 
 The same maintenance loop prunes old historical evidence after the built-in
 14-day retention window. Pruning deletes old events, reconciliations, conflicts,
 human observations, and expired notifications. It must not delete active
-current-state rows, pending notifications, or outbox sync evidence.
+current-state rows, pending notifications, active write fences, or outbox sync
+evidence.
 
 ## Runtime Files
 
@@ -621,7 +644,7 @@ stateful enable [--repo <path>]
 stateful disable [--repo <path>]
 stateful repos list
 stateful server
-stateful server start [--foreground] [--host <host>] [--port <port>] [--token <token>] [--workspace-id <id>]
+stateful server start [--foreground] [--host <host>] [--port <port>] [--token <token>] [--workspace-id <id>] [--coordination-mode enforcement|awareness]
 stateful server restart
 stateful server stop
 stateful server status
@@ -630,6 +653,9 @@ stateful status
 stateful current
 stateful events
 stateful doctor
+stateful human observe <path> [--kind save|change|delete|presence|dirty] [--confidence high|low] [--summary <text>]
+stateful human save-check <paths...>
+stateful reconcile ack --resource <path> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon --reservation-id <id> [--conflict-with-plan]
 stateful sandbox run --fs read-only|write-targets|build|git|github-pr ...
 stateful sandbox process find <selector>
 stateful reservation declare [--agent-id <id>] [--workspace-id <id>] --purpose <purpose> <paths...>
@@ -666,6 +692,16 @@ OMP `session_start`, `tool_call`, `tool_result`, and `session_shutdown`
 extension events to `stateful hook omp session-start`, `pre-tool-use`,
 `post-tool-use`, and `stop`; OMP does not expose a stateful
 `user-prompt-submit` hook. `stateful enable` opts a repo into enforcement.
+`stateful server start` defaults to `--coordination-mode enforcement`. Passing
+`--coordination-mode awareness` returns warnings for reservation/scope/claim
+coordination denials while keeping hard denials for stale observations,
+unreconciled human writes, same-file write fences, and unsafe commands when
+those checks apply. Detached `stateful server restart` reuses the coordination
+mode recorded in the runtime file. `stateful human observe` posts an enveloped
+watcher-style observation to `/v1/human/observe`; `stateful human save-check`
+calls the advisory `/v1/human/save-check`; `stateful reconcile ack` calls
+`/v1/reconcile/ack` and requires the reservation id that covers the reread files.
+
 `stateful server start`
 without `--foreground` uses the detached lazy lifecycle. Bare legacy
 `stateful server` and `stateful server start --foreground` run in the
@@ -736,21 +772,24 @@ Implemented v1 behavior must have tests for:
   `write_directory` command-shaped writes
 - exact file scope for delete, rename, and move
 - Bash full-deny classification and sandbox-gated hook authorization
+- coordination-mode parsing and awareness-mode warning behavior, including hard
+  denials that must not soften
+- short write-fence acquisition, conflict, release, expiration, and context render
 - nested Codex benchmark sandbox hook authorization only when the
   `codex-benchmark` cargo feature is enabled
 - native edit hook authorization plus Bash sandbox fixtures
 - prompt renderer golden output for shipped store-backed rendering
 - heartbeat refresh of activities, capped active reservation TTL, and active claims
   still covered by active reservation
-- background and lazy expiration of stale claims, active reservations,
-  and claimable reservations, including FIFO waiter promotion after stale reservation expiry
+- background and lazy expiration of stale claims, active reservations, claimable
+  reservations, write fences, and human observations
 - missing purpose and empty `files_planned` rejection
 - SQLite event append plus materialized-view transaction behavior
 - sandbox-run execution with artifact writes limited to an authorized directory
 - state-server unavailable behavior
 - outbox idempotent sync
-- human-write reconciliation blocks and acknowledgements when human-write
-  observation is shipped
+- human observation, advisory save-check conflicts, unreconciled-human-write
+  denial, and reconciliation acknowledgement clearing rules
 
 Pure scope-policy primitives should be testable without starting the HTTP
 server. The shipped store-backed authorization service is currently tested

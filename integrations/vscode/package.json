@@ -1,0 +1,17 @@
+{
+  "name": "stateful-save-gate",
+  "displayName": "Stateful Save Gate",
+  "description": "Advisory Stateful save conflict warnings for enabled workspaces.",
+  "version": "0.0.1",
+  "publisher": "stateful-core",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "scripts": {
+    "test": "node --test test"
+  },
+  "devDependencies": {}
+}
