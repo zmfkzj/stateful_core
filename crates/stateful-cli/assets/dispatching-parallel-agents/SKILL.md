@@ -13,6 +13,15 @@ When you have multiple unrelated failures (different test files, different subsy
 
 **Core principle:** Dispatch one agent per independent problem domain. Let them work concurrently.
 
+## Stateful-safe parallel dispatch checklist
+
+Before dispatching write agents:
+- Use parallel agents only for independent problem domains.
+- Give write agents disjoint files and disjoint scratch directories.
+- Use read-only agents when overlap is unknown.
+- Require first-write smoke proof from write agents when applicable.
+- Have the orchestrator run final verification through the Stateful sandbox build profile, not raw tests.
+
 ## When to Use
 
 ```dot
@@ -81,7 +90,7 @@ Multiple dispatch calls in one response = parallel execution. One per response =
 When agents return:
 - Read each summary
 - Verify fixes don't conflict
-- Run full test suite
+- Run orchestrator verification through the Stateful sandbox build profile
 - Integrate all changes
 
 ## Agent Prompt Structure
@@ -172,7 +181,7 @@ Agent 3 → Fix tool-approval-race-conditions.test.ts
 After agents return:
 1. **Review each summary** - Understand what changed
 2. **Check for conflicts** - Did agents edit same code?
-3. **Run full suite** - Verify all fixes work together
+3. **Run sandboxed verification** - The orchestrator runs the needed checks through the Stateful sandbox build profile
 4. **Spot check** - Agents can make systematic errors
 
 ## Real-World Impact

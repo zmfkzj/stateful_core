@@ -23,6 +23,9 @@ HTTP state server, native Stateful coordination tools, Codex and OMP hook
 adapters, SQLite-backed state store, sandboxed command profiles, outbox sync,
 and benchmark tooling.
 
+These docs describe the shipped local v1 coordination mechanism. There is not
+yet a checked-in empirical paired-agent stateful/no-state result.
+
 It does not ship a filesystem watcher or IDE save gate for automatic human edit
 observation. Human editing signals remain part of the target coordination model,
 not a fully shipped observer path.
@@ -65,6 +68,10 @@ hide information the actors need right now. Typical cases:
 - a human is working live in the canonical checkout alongside agents, and the
   agents need to avoid supported writes that collide with fresh shared-state
   claims
+
+This does not mean automatic filesystem or IDE observation of human edits is
+shipped. Current protection depends on explicit/shared-state signals and
+supported write paths.
 
 When those conditions do not apply, prefer isolation first: separate branches,
 worktrees, containers, or task-level orchestration usually give a simpler failure
@@ -161,6 +168,15 @@ Check local setup health:
 stateful status
 stateful doctor
 ```
+
+For a no-source-change first use, inspect current state:
+
+```bash
+stateful current
+```
+
+Then read the write-flow notes below and use either the active-session native
+tools path or the manual reservation/claim path before making writes.
 
 ## Day-To-Day Coordination
 

@@ -2,6 +2,8 @@
 
 This document defines the coordination model behind `stateful_core`.
 
+Shipped local v1 is a pre-write guardrail for supported actions, not exclusive locking: claims are advisory product semantics, but they block at hook and sandbox boundaries where the system can observe and authorize a supported mutation.
+
 The short version:
 
 ```text

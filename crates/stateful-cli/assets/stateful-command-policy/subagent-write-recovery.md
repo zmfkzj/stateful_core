@@ -23,6 +23,18 @@ When a subagent hits `apply_patch writes require ... same-reservation file claim
 
 If the active tool list exposes runtime-specific native Stateful names, use the exact shown equivalent. If no native Stateful coordination tool is visible, report the missing tool and denial. If the first recovery call returns `unsupported call`, stop and report the exact call name, active tool list if visible, and denial.
 
+## Denial Report Template
+
+When recovery is blocked, report:
+- Missing tool or unsupported call, if any:
+- Active tool list, if visible:
+- Exact denial:
+- Path:
+- `blocking_agent_id`:
+- `wait_id` or `reservation_id`:
+- Target reread? yes/no:
+- Parent next action:
+
 ## Parent-Agent Rules For Large Reconstruction
 
 Before dispatching implementation subagents for large source-tree reconstruction, the parent must prove the write path:

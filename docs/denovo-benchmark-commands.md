@@ -248,6 +248,12 @@ and three independent trials. It is a declared subagent/concurrency behavior
 test, not the official-style `--max-concurrent 1` default from
 `docs/denovo-benchmark-guide.md`.
 
+Report and collection commands in this section summarize that behavior run only.
+They do not convert the 12-instance `--max-concurrent 6` reduced matrix into
+official-style `--max-concurrent 1` quality evidence. Final comparison tables
+must state both `max-concurrent` and matrix type, for example `reduced
+stateful:on/off,subagent:on` versus the full four-axis matrix.
+
 Rebuild the Docker agent image before relaunching after local `stateful` or OMP
 integration changes. The examples below pass `--agent-docker-sandbox off`
 because Docker isolation is the sandbox boundary for the benchmark agent:
@@ -471,8 +477,13 @@ upstream access through `.read.log` URL headers, `read`/`browser` URL or path
 tool-call arguments, forbidden target-upstream commands in shell command tool
 calls, or traffic denied by the Docker OMP source-access proxy.
 
-After all three trials complete, collect each trial separately and report the
-mean:
+After all three behavior-test trials complete, collect each trial separately and
+report the mean:
+
+These collection commands are not an official-style quality comparison unless
+the underlying runs used the official-style `--max-concurrent 1` design. Keep
+`max-concurrent` and matrix type in the final table alongside run IDs and trial
+IDs.
 
 ```bash
 python3 crates/stateful-bench/scripts/denovo_progress_report.py --run-prefix "$RUN_SERIES-t1-shard-" --expected-instances-per-condition 3675

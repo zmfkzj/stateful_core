@@ -173,6 +173,22 @@ subagent spawn count for both Codex and OMP `subagent:on` runs. Treat that
 prompt addition as a declared behavior-test condition axis; do not reuse it as
 normal scored comparison policy or general patch-quality guidance.
 
+## Success Criteria
+
+Define the claim before reading the results:
+
+- Improvement claim: the stateful condition must improve the primary
+  score/success metric under fixed conditions.
+- Non-inferiority or efficiency claim: the stateful condition must keep the
+  primary quality metric comparable while improving an efficiency metric; report
+  quality separately from efficiency.
+
+Minimum evidence for either claim is three independent trials per condition over
+the same instance set, model, prompt version, temperature, context window, max
+turns, evaluator settings, runtime limits, and network/source policy. For small
+samples, report every trial plus mean and variance or standard deviation.
+
+
 ## Docker OMP Stateful Lifecycle
 
 Docker OMP runs execute the agent in a dedicated container instead of using the

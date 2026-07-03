@@ -322,6 +322,8 @@ The v1 authorization API supports:
 
 Task-level reservation authorizes writes only when its file set includes the exact file or directory resource and the write supplies that `reservation_id`. Directory scope authorizes only `write_directory` for the exact directory resource. File writes, deletes, renames, and moves require exact file scopes for the affected paths; directory scope does not authorize them.
 
+Shipped v1 queueing is single-path `write_file` or `write_directory`; multi-resource queueing and `rename_file`/`move_file` queueing are target-model only.
+
 Writes without matching active reservation are denied. A write is allowed only
 when the `reservation_id` has active scope for the target and an active claim
 under the same `reservation_id` covers the target. Conflicting claims outside

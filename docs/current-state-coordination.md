@@ -7,6 +7,22 @@ and [Architecture](architecture.md). When this page says `target`, `future`, or
 `should`, treat it as direction rather than shipped behavior unless the canonical
 docs above say otherwise.
 
+## Shipped v1 vs Target
+
+Use this table as a quick boundary; the linked canonical docs remain authoritative.
+
+| Capability | Status | Safe to rely on today | Canonical detail |
+| --- | --- | --- | --- |
+| Exact file/directory scope rules | Shipped v1 | Exact file scopes authorize exact file writes; directory scopes authorize only exact `write_directory` for the exact directory resource and do not authorize child file/delete/rename/move actions. | [State Model](state-model.md), [Implementation Contract](implementation-contract.md), [Usage Reference](usage-reference.md) |
+| FIFO single-path `write_file`/`write_directory` queueing | Shipped v1 | A wait request stores one path and schedules only `write_file` or `write_directory`. | [Implementation Contract](implementation-contract.md), this page's Wait Queue section |
+| Lazy resume notifications | Shipped v1 | Poll/SSE/`resume next` expose claimable reservations; OMP lazy edit/write resume can replay captured writes after claiming and rereading. | [Implementation Contract](implementation-contract.md), [Usage Reference](usage-reference.md) |
+| Human-write observation and reconciliation blocks | Partial | Shipped hooks compare claim-time file observations for active exact file claims; watcher/IDE human-save blocks are target behavior. | [README](../README.md), [Architecture](architecture.md), [Implementation Contract](implementation-contract.md) |
+| Cross-workspace repo warnings | Target | Local v1 coordinates one workspace boundary; repo-relative warnings across workspaces, worktrees, or branches are future behavior. | [State Model](state-model.md), [Architecture](architecture.md) |
+| Phase-aware authorization | Partial | Shipped writes require active, unexpired reservation scope and active same-reservation claims; finalization or expiration ends authority. Direct phase-as-policy-input behavior is implementation-specific beyond canonical state-model wording. | [State Model](state-model.md), [Implementation Contract](implementation-contract.md) |
+| Continuous claim fencing | Target | Shipped v1 consumes/releases claims at write boundaries; later writes must reread and reacquire or claim a promoted reservation. Continuous claim-id fencing through a native write or long command is target behavior. | [State Model](state-model.md), [Implementation Contract](implementation-contract.md), [Usage Reference](usage-reference.md) |
+| Multi-resource queueing | Target | Shipped scheduling is single-path; atomic all-or-nothing multi-resource queueing is target-model behavior. | [State Model](state-model.md), [Implementation Contract](implementation-contract.md) |
+| Rename/move queueing | Target | `rename_file` and `move_file` are immediate authorization actions requiring exact source and destination scopes/claims; conflicting rename/move queueing waits for the multi-resource scheduler. | [Implementation Contract](implementation-contract.md), [Usage Reference](usage-reference.md) |
+
 ## Problem
 
 Coding agents are usually bounded by their own session. A session can know its

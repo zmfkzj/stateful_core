@@ -68,6 +68,19 @@ runs: the host airlock for host CLI mode, or the separate OMP agent container
 when `--agent-docker-image` is set. The target ProgramBench container stays
 available for bundled `./executable` behavior checks and smoke compile.
 
+
+## Reliability and Reporting
+
+Use at least three independent trials per condition for stateful/control claims.
+Keep the same instance set or filter, model, Docker image, timeout, max turns,
+and network policy across compared conditions.
+
+Reports should include each trial, mean, and standard deviation for the primary
+quality metric. Label smoke, debug, interrupted, or partial runs as
+non-comparable. Separate quality claims from efficiency claims: score/resolved
+count establish quality, while wall time, tokens, and score-per-cost metrics
+describe efficiency.
+
 ## Inference Rules
 
 ProgramBench inference is offline by default. Agents must not search the
