@@ -79,6 +79,8 @@ fn programbench_run_command_parses_defaultable_options() {
         "stateful:on,subagent:off",
         "--model",
         "gpt-5.4-mini",
+        "--thinking",
+        "xhigh",
         "--benchmark-max-turns",
         "500",
         "--timeout-seconds",
@@ -109,6 +111,7 @@ fn programbench_run_command_parses_defaultable_options() {
                 agent: ProgramBenchAgentKind::CodexCli,
                 ref condition,
                 ref model,
+                ref thinking,
                 benchmark_max_turns: 500,
                 timeout_seconds: 7200,
                 ref filter,
@@ -124,6 +127,7 @@ fn programbench_run_command_parses_defaultable_options() {
             && run_id == "pb-dev"
             && condition == &vec!["stateful:on,subagent:off".to_string()]
             && model.as_deref() == Some("gpt-5.4-mini")
+            && thinking.as_deref() == Some("xhigh")
             && filter.as_deref() == Some("ripgrep.*")
             && slice.as_deref() == Some("0:2")
             && programbench_bin == "programbench"
@@ -346,6 +350,7 @@ exit 0
             agent: ProgramBenchAgentKind::CodexCli,
             conditions: vec![ProgramBenchCondition::new(true, false)],
             model: None,
+            thinking: None,
             benchmark_max_turns: 500,
             timeout_seconds: 17,
             filter: None,
@@ -474,6 +479,7 @@ printf '{{"usage":{{"input_tokens":7,"output_tokens":5}}}}\n'
         agent: ProgramBenchAgentKind::CodexCli,
         conditions: vec![ProgramBenchCondition::new(false, false)],
         model: None,
+        thinking: None,
         benchmark_max_turns: 500,
         timeout_seconds: 17,
         filter: Some("stateful_bench__fake_discovery\\.deadbee$".to_string()),
@@ -535,6 +541,7 @@ fn programbench_codex_agent_command_contains_condition_and_paths() {
         omp_bin: "omp".to_string(),
         stateful_binary: "target/debug/stateful".to_string(),
         model: Some("gpt-5.4-mini".to_string()),
+        thinking: None,
         benchmark_max_turns: 500,
         timeout_seconds: 7200,
         subagent_min_count: 3,
@@ -567,6 +574,7 @@ fn programbench_omp_agent_command_marks_subagent_condition() {
         omp_bin: "omp".to_string(),
         stateful_binary: "stateful".to_string(),
         model: None,
+        thinking: Some("xhigh".to_string()),
         benchmark_max_turns: 500,
         timeout_seconds: 7200,
         subagent_min_count: 3,
@@ -577,6 +585,7 @@ fn programbench_omp_agent_command_marks_subagent_condition() {
     })
     .expect("omp agent command should build");
 
+    assert!(has_arg_pair(&command.args, "--thinking", "xhigh"));
     assert!(command.program.ends_with("programbench_omp_agent.py"));
     assert!(has_arg(&command.args, "--subagent"));
     assert!(!has_arg(&command.args, "--stateful"));
@@ -594,7 +603,8 @@ fn programbench_omp_agent_command_passes_agent_docker_options() {
         codex_bin: "codex".to_string(),
         omp_bin: "host-omp".to_string(),
         stateful_binary: "/host/stateful".to_string(),
-        model: None,
+        model: Some("openai-codex/gpt-5.5".to_string()),
+        thinking: Some("xhigh".to_string()),
         benchmark_max_turns: 500,
         timeout_seconds: 7200,
         subagent_min_count: 3,
@@ -626,6 +636,7 @@ fn programbench_omp_agent_command_passes_agent_docker_options() {
         "--agent-docker-home",
         "/home/bench-agent",
     ));
+    assert!(has_arg_pair(&command.args, "--thinking", "xhigh"));
 }
 
 #[test]
@@ -1085,6 +1096,7 @@ args = types.SimpleNamespace(
     omp_bin="omp",
     stateful_binary="/usr/local/bin/stateful",
     model="gpt-5.4-mini",
+    thinking="xhigh",
     benchmark_max_turns=654,
     timeout_seconds=456,
     stateful=True,
@@ -1147,6 +1159,8 @@ print(json.dumps({
             "stateful",
             "--model",
             "gpt-5.4-mini",
+            "--thinking",
+            "xhigh",
             "-p",
             observed["prompt"]
         ])
@@ -1465,7 +1479,7 @@ print(json.dumps(observed))
 }
 
 #[test]
-fn programbench_omp_adapter_does_not_pass_parent_stateful_runtime_to_agent_docker() {
+fn programbench_omp_adapter_passes_parent_stateful_runtime_to_agent_docker() {
     let output = run_python_adapter(
         &programbench_omp_agent_path(),
         r#"import json
@@ -1535,8 +1549,11 @@ print(json.dumps(docker_exec_envs))
             "/home/bench-agent/.omp/profiles/stateful/agent"
         );
         assert_eq!(env["STATEFUL_HOME"], "/home/bench-agent/.stateful");
-        assert_eq!(env["STATEFUL_SERVER_URL"], serde_json::Value::Null);
-        assert_eq!(env["STATEFUL_SERVER_TOKEN"], serde_json::Value::Null);
+        assert_eq!(
+            env["STATEFUL_SERVER_URL"],
+            "http://host.docker.internal:43873"
+        );
+        assert_eq!(env["STATEFUL_SERVER_TOKEN"], "parent-token");
     }
 }
 

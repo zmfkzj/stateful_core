@@ -23,8 +23,8 @@ const DEFAULT_PROGRAMBENCH_AGENT_DOCKER_STATEFUL_BINARY: &str = "/usr/local/bin/
 const DEFAULT_PROGRAMBENCH_AGENT_DOCKER_HOME: &str = "/home/stateful";
 const DEFAULT_BENCHMARK_MAX_TURNS: usize = 500;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 7200;
-// ponytail: fixed cleanup grace; make configurable only if adapter cleanup exceeds it.
-const PROGRAMBENCH_ADAPTER_CLEANUP_GRACE_SECONDS: u64 = 60;
+// ponytail: fixed adapter lifecycle grace; make configurable only if setup exceeds it.
+const PROGRAMBENCH_ADAPTER_LIFECYCLE_GRACE_SECONDS: u64 = 30 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -51,6 +51,8 @@ pub enum ProgramBenchCommand {
         condition: Vec<String>,
         #[arg(long)]
         model: Option<String>,
+        #[arg(long)]
+        thinking: Option<String>,
         #[arg(long, default_value_t = DEFAULT_BENCHMARK_MAX_TURNS)]
         benchmark_max_turns: usize,
         #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECONDS)]
@@ -159,6 +161,7 @@ pub struct ProgramBenchInstanceRunOptions {
     pub omp_bin: String,
     pub stateful_binary: String,
     pub model: Option<String>,
+    pub thinking: Option<String>,
     pub benchmark_max_turns: usize,
     pub timeout_seconds: u64,
     pub subagent_min_count: usize,
@@ -175,6 +178,7 @@ pub struct ProgramBenchRunOptions {
     pub agent: ProgramBenchAgentKind,
     pub conditions: Vec<ProgramBenchCondition>,
     pub model: Option<String>,
+    pub thinking: Option<String>,
     pub benchmark_max_turns: usize,
     pub timeout_seconds: u64,
     pub filter: Option<String>,
@@ -1338,6 +1342,7 @@ fn run_programbench_instance(
         omp_bin: options.omp_bin.clone(),
         stateful_binary: options.stateful_binary.clone(),
         model: options.model.clone(),
+        thinking: options.thinking.clone(),
         benchmark_max_turns: options.benchmark_max_turns,
         timeout_seconds: options.timeout_seconds,
         subagent_min_count: 3,
@@ -1533,6 +1538,10 @@ pub fn build_programbench_agent_command(
         ProgramBenchAgentKind::OmpCli => {
             args.push("--omp-bin".to_string());
             args.push(options.omp_bin);
+            if let Some(thinking) = options.thinking {
+                args.push("--thinking".to_string());
+                args.push(thinking);
+            }
             if let Some(agent_docker_image) = options.agent_docker_image {
                 args.push("--agent-docker-image".to_string());
                 args.push(agent_docker_image);
@@ -1578,6 +1587,7 @@ pub fn run_programbench_cli(command: ProgramBenchCommand) -> Result<()> {
             agent,
             condition,
             model,
+            thinking,
             benchmark_max_turns,
             timeout_seconds,
             filter,
@@ -1600,6 +1610,7 @@ pub fn run_programbench_cli(command: ProgramBenchCommand) -> Result<()> {
                 agent,
                 conditions: planned_programbench_conditions(&condition)?,
                 model,
+                thinking,
                 benchmark_max_turns,
                 timeout_seconds,
                 filter,
@@ -1678,7 +1689,7 @@ fn execute_recipe_command(command: &ProgramBenchRecipeCommand) -> Result<()> {
 
 fn programbench_adapter_execution_timeout(adapter_timeout: Duration) -> Duration {
     adapter_timeout.saturating_add(Duration::from_secs(
-        PROGRAMBENCH_ADAPTER_CLEANUP_GRACE_SECONDS,
+        PROGRAMBENCH_ADAPTER_LIFECYCLE_GRACE_SECONDS,
     ))
 }
 
@@ -1834,12 +1845,13 @@ mod tests {
     }
 
     #[test]
-    fn programbench_adapter_execution_timeout_includes_cleanup_grace() {
-        let adapter_timeout = Duration::from_secs(10);
+    fn programbench_adapter_execution_timeout_includes_lifecycle_grace() {
+        let adapter_timeout = Duration::from_secs(7200);
 
-        assert!(
-            programbench_adapter_execution_timeout(adapter_timeout) > adapter_timeout,
-            "Rust wrapper timeout must exceed the adapter timeout so Python cleanup can run"
+        assert_eq!(
+            programbench_adapter_execution_timeout(adapter_timeout),
+            Duration::from_secs(9000),
+            "Rust wrapper timeout must allow stateful setup plus the full Python adapter timeout"
         );
     }
 

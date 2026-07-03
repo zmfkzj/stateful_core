@@ -24,10 +24,12 @@ inside a separate agent container instead of on the host. The image must include
 `--agent-docker-stateful-binary /usr/local/bin/stateful`,
 `--agent-docker-home /home/stateful`, and `--agent-docker-sandbox off`.
 The Docker container is the sandbox boundary, so the adapter sets
-`STATEFUL_OMP_SANDBOX=off` for the in-container `docker exec` by default. It
-copies the target workspace into `/workspace`, runs Stateful install/enable and
-OMP, copies `/workspace` back to the host airlock, then uses the existing target
-container smoke compile and archive flow. Copy-back failures are reported as
+`STATEFUL_OMP_SANDBOX=off` for the in-container `docker exec` by default. When
+Stateful is enabled, the agent container inherits the parent Stateful runtime
+environment so it uses the same server/token. The adapter copies the target
+workspace into `/workspace`, runs Stateful install/enable and OMP, copies
+`/workspace` back to the host airlock, then uses the existing target container
+smoke compile and archive flow. Copy-back failures are reported as
 `workspace_copy_error`; `smoke_compile_error` is reserved for target-container
 compile failures, and primary OMP exit errors stay primary.
 
@@ -58,8 +60,9 @@ stateful:on,subagent:on
 ```
 
 Use the same instance set, model, image tag, max turns, timeout, and network
-policy across compared conditions. `--timeout-seconds` is passed to the adapter,
-and the Rust wrapper adds cleanup grace before enforcing its outer deadline.
+policy across compared conditions. `--timeout-seconds` is passed to the Python
+adapter, and the Rust wrapper enforces that timeout plus a fixed 30-minute
+adapter lifecycle grace.
 Explicit `subagent:off`
 conditions still parse for diagnostic or backwards-compatible runs.
 
@@ -104,18 +107,22 @@ stateful-bench programbench run \
   --max-instances 2
 ```
 
-Run OMP in a separate Docker agent image while keeping ProgramBench's target
-container as the compile/smoke-test boundary:
+Run OMP with a modern Codex model in a separate Docker agent image while keeping
+ProgramBench's target container as the compile/smoke-test boundary:
 
 ```bash
 stateful-bench programbench run \
   --run-id pb-omp-docker \
   --agent omp-cli \
-  --model deepseek-v4-flash \
+  --model gpt-5.4-mini \
+  --thinking high \
   --filter 'ripgrep.*' \
   --max-instances 2 \
   --agent-docker-image stateful-programbench-omp-agent:local
 ```
+
+For OMP ProgramBench runs, `--thinking <value>` is passed through to the OMP
+agent; omit it to use the model/runtime default.
 
 Pass `--agent-docker-omp-bin`, `--agent-docker-stateful-binary`, or
 `--agent-docker-home` only when the image does not use the defaults listed in

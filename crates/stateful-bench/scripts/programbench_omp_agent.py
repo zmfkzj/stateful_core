@@ -375,6 +375,7 @@ def run_agent_in_docker(args, prompt: str, airlock: str, base_env: dict[str, str
             "yolo",
             *(["--profile", "stateful"] if args.stateful else []),
             *(["--model", args.model] if args.model else []),
+            *(["--thinking", args.thinking] if getattr(args, "thinking", None) else []),
             "-p",
             prompt,
             env=container_env,
@@ -409,10 +410,10 @@ def run_agent(args, prompt):
         copy_workspace_from_container(args, airlock)
     env["PI_CODING_AGENT_DIR"] = str(Path(airlock) / ".omp" / "profiles" / "stateful" / "agent")
     auth_source_agent = omp_auth_source_agent_dir(os.environ)
-    if getattr(args, "agent_docker_image", None):
-        return run_agent_in_docker(args, prompt, airlock, env, auth_source_agent)
     if args.stateful:
         inherit_parent_stateful_runtime(env, os.environ)
+    if getattr(args, "agent_docker_image", None):
+        return run_agent_in_docker(args, prompt, airlock, env, auth_source_agent)
     try:
         if args.stateful:
             install_stateful_for_agent(args, airlock, "omp")
@@ -435,6 +436,8 @@ def run_agent(args, prompt):
             command.extend(["--profile", "stateful"])
         if args.model:
             command.extend(["--model", args.model])
+        if getattr(args, "thinking", None):
+            command.extend(["--thinking", args.thinking])
         command.extend(["-p", prompt])
         try:
             return run_omp_command(
@@ -457,6 +460,7 @@ def run_agent(args, prompt):
 def parse_args(argv: list[str] | None = None):
     parser = build_base_parser()
     parser.add_argument("--omp-bin", required=True)
+    parser.add_argument("--thinking")
     parser.add_argument("--agent-docker-image")
     parser.add_argument("--agent-docker-omp-bin", default="omp")
     parser.add_argument("--agent-docker-stateful-binary", default="/usr/local/bin/stateful")

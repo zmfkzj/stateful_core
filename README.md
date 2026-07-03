@@ -92,7 +92,7 @@ here right now?"
 - Sandboxed profiles for build/test output, command-shaped repo writes, git
   operations, GitHub PR commands, and repo-external shell work.
 - Benchmark tooling for SWE-bench pair runs, reports, comparisons, synthetic
-  coordination experiments, and DeNovoSWE adapters.
+  coordination experiments, and DeNovoSWE/ProgramBench adapters.
 
 `stateful_core` is not a sandbox, access-control system, file lock manager,
 distributed lock service, durable secret store, or long-term memory product. It
