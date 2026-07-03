@@ -463,7 +463,7 @@ def prompt_for_args(args) -> str:
     if max_turns is not None:
         prompt += f"\n\nBenchmark max turns: {max_turns}."
     if args.subagent:
-        prompt += f"\n\nUse at least {args.subagent_min_count} native subagents before implementation."
+        prompt += "\n\norchestrate"
     return prompt
 
 

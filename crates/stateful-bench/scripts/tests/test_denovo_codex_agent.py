@@ -182,11 +182,12 @@ def test_timeout_wrappers(mod):
     assert calls == [{"command": ["omp", "-p", "@/tmp/prompt.txt"], "cwd": "target/workspace", "stdin_is_devnull": True}]
 
 
-def test_prompt_and_command_builders(mod, tmp_path):
-    prompt = mod.native_subagent_prompt_instruction("on", 3)
-    assert "spawn exactly 3 native subagents" in prompt
-    assert "at least 3 native subagents" not in prompt
+def test_native_subagent_prompt_instruction_is_orchestrate_only(mod):
+    assert mod.native_subagent_prompt_instruction("on", 3) == "orchestrate"
+    assert mod.native_subagent_prompt_instruction("off", 3) == ""
 
+
+def test_prompt_and_command_builders(mod, tmp_path):
     kwargs = {
         "workspace": Path("/tmp/workspace"),
         "subagent": "on",
@@ -569,15 +570,16 @@ def test_prompt_requires_native_subagents_and_blocks_upstream_source(mod):
     off = mod.build_codex_prompt("i1", "doc", 500, None, "v1", subagent="off")
     on = mod.build_codex_prompt("i1", "doc", 500, None, "v1", subagent="on", subagent_min_count=3)
     assert "Native Codex/OMP subagent requirements" not in off
-    assert "Native Codex/OMP subagent requirements" in on
-    assert "MUST use native subagents" in on
-    assert "tasks` array containing exactly 3 implementation subagents" in on
-    assert "Use exactly 3 native subagents for repository editing" in on
+    assert "MUST use native subagents" not in off
+    assert "tasks` array containing exactly 3 implementation subagents" not in off
+    assert "\norchestrate\n" in on
+    assert "Native Codex/OMP subagent requirements" not in on
+    assert "MUST use native subagents" not in on
+    assert "tasks` array containing exactly 3 implementation subagents" not in on
     assert "Benchmark isolation requirements" in off and "Benchmark isolation requirements" in on
     assert "Do not fetch, clone, open, or inspect the upstream repository" in on
     assert "ABSOLUTE RULE: DO NOT DOWNLOAD THE TARGET PACKAGE'S SOURCE CODE FROM THE INTERNET" in on
     assert "Do not create or use an `upstream` checkout" in on
-    assert on.index("Native Codex/OMP subagent requirements") < on.index("Repository specification:")
     assert off != on
 
 

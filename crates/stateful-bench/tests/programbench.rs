@@ -891,6 +891,42 @@ print(json.dumps({"prompt": mod.prompt_for_args(args)}))
 }
 
 #[test]
+fn programbench_prompt_uses_orchestrate_only_for_subagent_on() {
+    let output = run_python_adapter(
+        &programbench_codex_agent_path(),
+        r#"import json
+import types
+
+base_args = dict(
+    docker_bin="./docker-shim",
+    container_id="programbench-container",
+    benchmark_max_turns=None,
+    subagent_min_count=3,
+)
+off_args = types.SimpleNamespace(**base_args, subagent=False)
+on_args = types.SimpleNamespace(**base_args, subagent=True)
+print(json.dumps({
+    "off_prompt": mod.prompt_for_args(off_args),
+    "on_prompt": mod.prompt_for_args(on_args),
+}))
+"#,
+    );
+    let observed: serde_json::Value = serde_json::from_str(&output).expect("prompt should be JSON");
+    let off_prompt = observed["off_prompt"]
+        .as_str()
+        .expect("off prompt should be a string");
+    let on_prompt = observed["on_prompt"]
+        .as_str()
+        .expect("on prompt should be a string");
+
+    assert!(!off_prompt.contains("orchestrate"));
+    let custom_prompt = on_prompt
+        .strip_prefix(off_prompt)
+        .expect("subagent-on prompt should extend the subagent-off prompt");
+    assert_eq!(custom_prompt, "\n\norchestrate");
+}
+
+#[test]
 fn programbench_codex_adapter_resolves_relative_codex_binary_before_airlock_chdir() {
     let output = run_python_adapter(
         &programbench_codex_agent_path(),

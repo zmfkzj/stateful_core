@@ -165,19 +165,13 @@ The 12-instance Docker OMP command in
 `--max-concurrent 6`. Treat it as a declared behavior/concurrency run; report it
 separately from full four-axis or official-style stateful/no-state comparisons.
 
-For `subagent:on`, the generated DeNovo prompt explicitly requires native
-Codex/OMP subagents before implementation or broad repository exploration,
-while allowing narrow preflight to read the prompt, inspect tool availability,
-or initialize stateful coordination. It tells OMP to use the current `task` tool
-or older multi-agent tools such as `multi_agent_v1spawn_agent`, requires every
-counted subagent to inspect, edit, and verify a distinct implementation slice,
-and requires explicit blocker reporting if the runtime does not expose subagent
-tools. OMP runs also unpack bundled task agents into the isolated runtime home,
-append the requirement to the system prompt, and enable `features.multi_agent=true`.
-The adapter enforces the minimum native subagent spawn count for both Codex and
-OMP `subagent:on` runs. Treat that injected instruction as a declared
-behavior-test condition axis; do not reuse it as normal scored comparison policy
-or as general patch-quality guidance.
+For `subagent:on`, the generated DeNovo prompt appends only `orchestrate`.
+`subagent:off` does not add a custom subagent prompt. OMP runs also unpack
+bundled task agents into the isolated runtime home and enable
+`features.multi_agent=true`. The adapter still enforces the minimum native
+subagent spawn count for both Codex and OMP `subagent:on` runs. Treat that
+prompt addition as a declared behavior-test condition axis; do not reuse it as
+normal scored comparison policy or general patch-quality guidance.
 
 ## Docker OMP Stateful Lifecycle
 
