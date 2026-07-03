@@ -400,9 +400,7 @@ native names directly; other tools map to dotted protocol names:
 - `state_reservation_cancel` / `state.reservation.cancel`
 - `state_claim_acquire` / `state.claim.acquire`
 - `state_claim_release` / `state.claim.release`
-- `state_activity_observe` / `state.activity.observe`
 - `state_activity_finalize` / `state.activity.finalize`
-- `state_conflicts_check` / `state.conflicts.check`
 - `state_current_read` / `state.current.read`
 - `state_events_read` / `state.events.read`
 - `state_context_render` / `state.context.render`
@@ -411,7 +409,6 @@ native names directly; other tools map to dotted protocol names:
 denial recovery should use reservation, claim, resume, and the denial's direct
 next action instead of rendering ambient context.
 
-- `state_reconcile_ack` / `state.reconcile.ack`
 - `state_notifications_poll` / `state.notifications.poll`
 - `state_resume_next` / `state.resume.next`
 

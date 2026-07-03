@@ -13,7 +13,8 @@ use stateful_core::{
 use std::time::Duration as StdDuration;
 use std::{fs, path::Path};
 use thiserror::Error;
-use time::{Date, Duration, Month, OffsetDateTime, Time};
+use time::format_description::well_known::Rfc3339;
+use time::{Duration, OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 
 pub const CRATE_NAME: &str = "stateful-store";
@@ -1106,31 +1107,6 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    pub fn append_reconciliation_ack(&self, agent_id: impl AsRef<str>) -> StoreResult<()> {
-        self.conn.execute(
-            "INSERT INTO reconciliations (
-                reconciliation_id,
-                agent_id,
-                created_at
-            ) VALUES (?1, ?2, ?3)",
-            params![
-                Uuid::new_v4().to_string(),
-                agent_id.as_ref(),
-                now_timestamp(),
-            ],
-        )?;
-
-        Ok(())
-    }
-
-    pub fn reconciliation_count(&self) -> StoreResult<u64> {
-        self.conn
-            .query_row("SELECT COUNT(*) FROM reconciliations", [], |row| {
-                row.get::<_, u64>(0)
-            })
-            .map_err(StoreError::from)
-    }
-
     pub fn has_table(&self, table_name: &str) -> StoreResult<bool> {
         self.schema_object_exists("table", table_name)
     }
@@ -1491,16 +1467,6 @@ impl Store {
         self.conn
             .execute("DELETE FROM events WHERE created_at < ?1", [cutoff])?;
         self.conn.execute(
-            "DELETE FROM reconciliations WHERE created_at < ?1",
-            [cutoff],
-        )?;
-        self.conn
-            .execute("DELETE FROM conflicts WHERE checked_at < ?1", [cutoff])?;
-        self.conn.execute(
-            "DELETE FROM human_observations WHERE created_at < ?1",
-            [cutoff],
-        )?;
-        self.conn.execute(
             "DELETE FROM notifications
              WHERE status IN ('expired', 'delivered') AND created_at < ?1",
             [cutoff],
@@ -1521,6 +1487,7 @@ impl Store {
             ",
         )?;
         self.migrate_agent_identity_schema()?;
+        self.drop_dead_coordination_tables()?;
         self.conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS events (
@@ -1651,36 +1618,6 @@ impl Store {
                 ON notifications(target_agent_id, status);
 
 
-            CREATE TABLE IF NOT EXISTS conflicts (
-                conflict_id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
-                checked_at TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_conflicts_agent_checked_at
-                ON conflicts(agent_id, checked_at);
-
-            CREATE TABLE IF NOT EXISTS overrides (
-                override_id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
-                status TEXT NOT NULL,
-                expires_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS reconciliations (
-                reconciliation_id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_reconciliations_agent_created_at
-                ON reconciliations(agent_id, created_at);
-
-            CREATE TABLE IF NOT EXISTS human_observations (
-                observation_id TEXT PRIMARY KEY,
-                workspace_id TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
 
             CREATE TABLE IF NOT EXISTS outbox (
                 outbox_id TEXT PRIMARY KEY,
@@ -1870,9 +1807,6 @@ impl Store {
             ("wait_queue", "session_id", "agent_id"),
             ("wait_queue", "blocking_session_id", "blocking_agent_id"),
             ("notifications", "target_session_id", "target_agent_id"),
-            ("conflicts", "session_id", "agent_id"),
-            ("overrides", "session_id", "agent_id"),
-            ("reconciliations", "session_id", "agent_id"),
             ("outbox", "session_id", "agent_id"),
         ] {
             self.rename_legacy_identity_column(table, old_column, new_column)?;
@@ -1941,9 +1875,6 @@ impl Store {
                 | ("wait_queue", "session_id", "agent_id")
                 | ("wait_queue", "blocking_session_id", "blocking_agent_id")
                 | ("notifications", "target_session_id", "target_agent_id")
-                | ("conflicts", "session_id", "agent_id")
-                | ("overrides", "session_id", "agent_id")
-                | ("reconciliations", "session_id", "agent_id")
                 | ("outbox", "session_id", "agent_id")
         );
         if !supported || !self.has_table(table)? {
@@ -2019,6 +1950,18 @@ impl Store {
 
     fn quote_sql_identifier(identifier: &str) -> String {
         format!("\"{}\"", identifier.replace('"', "\"\""))
+    }
+
+    fn drop_dead_coordination_tables(&self) -> StoreResult<()> {
+        self.conn.execute_batch(
+            "
+            DROP TABLE IF EXISTS conflicts;
+            DROP TABLE IF EXISTS overrides;
+            DROP TABLE IF EXISTS reconciliations;
+            DROP TABLE IF EXISTS human_observations;
+            ",
+        )?;
+        Ok(())
     }
 
     fn remove_legacy_rows_without_required_purpose(&self) -> StoreResult<()> {
@@ -2761,41 +2704,18 @@ fn timestamp_after(timestamp: &str, seconds: i64) -> StoreResult<String> {
 }
 
 fn parse_timestamp(timestamp: &str) -> Option<OffsetDateTime> {
-    let timestamp = timestamp.strip_suffix('Z')?;
-    let (date, time) = timestamp.split_once('T')?;
-    let mut date_parts = date.split('-');
-    let year = date_parts.next()?.parse::<i32>().ok()?;
-    let month = date_parts.next()?.parse::<u8>().ok()?;
-    let day = date_parts.next()?.parse::<u8>().ok()?;
-    if date_parts.next().is_some() {
-        return None;
-    }
-
-    let mut time_parts = time.split(':');
-    let hour = time_parts.next()?.parse::<u8>().ok()?;
-    let minute = time_parts.next()?.parse::<u8>().ok()?;
-    let second_text = time_parts.next()?.split('.').next()?;
-    let second = second_text.parse::<u8>().ok()?;
-    if time_parts.next().is_some() {
-        return None;
-    }
-
-    let month = Month::try_from(month).ok()?;
-    let date = Date::from_calendar_date(year, month, day).ok()?;
-    let time = Time::from_hms(hour, minute, second).ok()?;
-    Some(date.with_time(time).assume_utc())
+    OffsetDateTime::parse(timestamp, &Rfc3339)
+        .ok()
+        .map(|parsed| parsed.to_offset(UtcOffset::UTC))
 }
 
 fn format_timestamp(timestamp: OffsetDateTime) -> String {
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        timestamp.year(),
-        u8::from(timestamp.month()),
-        timestamp.day(),
-        timestamp.hour(),
-        timestamp.minute(),
-        timestamp.second()
-    )
+    timestamp
+        .to_offset(UtcOffset::UTC)
+        .replace_nanosecond(0)
+        .expect("zero nanosecond is always valid")
+        .format(&Rfc3339)
+        .expect("UTC timestamp should format as RFC 3339")
 }
 
 fn wait_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WaitRecord> {
@@ -3427,6 +3347,7 @@ pub struct OutboxRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use time::{Date, Month, Time};
 
     #[test]
     fn creates_expiry_predicate_indexes_for_stale_cleanup() {
@@ -3456,6 +3377,72 @@ mod tests {
             missing.is_empty(),
             "missing expiry indexes for stale cleanup: {}",
             missing.join("; ")
+        );
+    }
+
+    fn utc_instant(
+        year: i32,
+        month: Month,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        nanosecond: u32,
+    ) -> OffsetDateTime {
+        Date::from_calendar_date(year, month, day)
+            .expect("test date should be valid")
+            .with_time(
+                Time::from_hms_nano(hour, minute, second, nanosecond)
+                    .expect("test time should be valid"),
+            )
+            .assume_utc()
+    }
+
+    #[test]
+    fn format_timestamp_emits_utc_whole_second_z() {
+        // Pins the stored on-disk shape: UTC, trailing `Z`, no fractional
+        // seconds even when the instant carries nanoseconds.
+        let instant = utc_instant(2026, Month::March, 5, 7, 8, 9, 123_456_789);
+        assert_eq!(format_timestamp(instant), "2026-03-05T07:08:09Z");
+    }
+
+    #[test]
+    fn parse_timestamp_accepts_rfc3339_numeric_offsets() {
+        let cases = [
+            // Canonical stored form must keep parsing across any migration.
+            (
+                "2026-01-01T00:00:00Z",
+                utc_instant(2026, Month::January, 1, 0, 0, 0, 0),
+            ),
+            // Explicit +00:00 offset denotes the same instant as `Z`.
+            (
+                "2026-01-01T00:00:00+00:00",
+                utc_instant(2026, Month::January, 1, 0, 0, 0, 0),
+            ),
+            // Non-zero offset must be applied, not ignored.
+            (
+                "2026-01-01T02:00:00+02:00",
+                utc_instant(2026, Month::January, 1, 0, 0, 0, 0),
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                parse_timestamp(input).map(|parsed| parsed.unix_timestamp_nanos()),
+                Some(expected.unix_timestamp_nanos()),
+                "parsing {input} should yield {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_timestamp_keeps_fractional_seconds_instant() {
+        // `2026-01-01T00:00:00.123Z` is 123ms past midnight; the parser must
+        // not silently truncate the fraction to a different instant.
+        let expected = utc_instant(2026, Month::January, 1, 0, 0, 0, 123_000_000);
+        assert_eq!(
+            parse_timestamp("2026-01-01T00:00:00.123Z").map(|parsed| parsed.unix_timestamp_nanos()),
+            Some(expected.unix_timestamp_nanos()),
+            "fractional-second RFC3339 input should parse to the exact instant"
         );
     }
 

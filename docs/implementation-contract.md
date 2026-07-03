@@ -69,9 +69,9 @@ one implementation and avoids policy drift.
 
 The `stateful.v1` envelope is the target request shape for side-effecting
 protocol calls. The current implementation enforces it for `/v1/authorize` and
-the reservation declare/request/claim/cancel endpoints. Session, claim, activity,
-conflicts/check, context, reconciliation, notification, resume, outbox, and read
-endpoints still use their current flat request bodies.
+the reservation declare/request/claim/cancel endpoints. Session, claim, activity
+finalize, context, notification, resume, outbox, and read endpoints still use
+their current flat request bodies.
 
 Envelope-shaped requests include:
 
@@ -139,12 +139,9 @@ POST /v1/reservation/cancel
 POST /v1/claim/acquire
 POST /v1/claim/refresh-observation
 POST /v1/claim/release
-POST /v1/activity/observe
 POST /v1/activity/finalize
 POST /v1/authorize
-POST /v1/conflicts/check
 POST /v1/context/render
-POST /v1/reconcile/ack
 POST /v1/notifications/poll
 GET  /v1/notifications/stream
 POST /v1/resume/next
@@ -153,8 +150,6 @@ GET  /v1/runtime/identity
 ```
 
 `/v1/authorize` is the single policy entry point for supported tool actions.
-`/v1/conflicts/check` is a read-only dry-run wrapper around the same policy
-engine and must not create claims or write-authorizing state.
 `/v1/notifications/poll` returns pending coordination notifications for a
 target agent and marks returned notifications as delivered so a later poll does
 not redeliver the same notification. `/v1/notifications/stream` returns an SSE

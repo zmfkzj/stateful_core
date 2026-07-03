@@ -617,11 +617,6 @@ fn retention_pruning_removes_old_history_but_preserves_live_notification_state()
     let conn = Connection::open(&db_path).expect("db should reopen");
     conn.execute_batch(
         "
-        INSERT INTO reconciliations (reconciliation_id, agent_id, created_at)
-        VALUES
-            ('old-reconciliation', 's1', '2026-05-01T00:00:00Z'),
-            ('recent-reconciliation', 's1', '2026-05-20T00:00:00Z');
-
         INSERT INTO notifications (
             notification_id,
             target_agent_id,
@@ -646,9 +641,6 @@ fn retention_pruning_removes_old_history_but_preserves_live_notification_state()
     let events = store.recent_events(10).expect("events should load");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_id, "recent-event");
-
-    let reconciliation_ids = query_ids(&conn, "SELECT reconciliation_id FROM reconciliations");
-    assert_eq!(reconciliation_ids, vec!["recent-reconciliation"]);
 
     let notification_ids = query_ids(&conn, "SELECT notification_id FROM notifications");
     assert_eq!(
@@ -1054,6 +1046,95 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
     assert_eq!(intent_count, 0);
     assert_eq!(waiter_count, 0);
     assert_eq!(active_claim_count, 0);
+
+    fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[test]
+fn fresh_schema_omits_dead_coordination_tables() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    for table in [
+        "conflicts",
+        "overrides",
+        "reconciliations",
+        "human_observations",
+    ] {
+        assert!(
+            !store.has_table(table).expect("table check should run"),
+            "dead table {table} should not exist in a fresh schema"
+        );
+    }
+}
+
+#[test]
+fn migration_drops_dead_coordination_tables_from_legacy_db() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-store-dead-tables-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root).expect("temp root should be creatable");
+    let db_path = temp_root.join("state.db");
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("old db should open");
+        conn.execute_batch(
+            "
+            CREATE TABLE conflicts (
+                conflict_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                checked_at TEXT NOT NULL
+            );
+
+            CREATE INDEX idx_conflicts_agent_checked_at
+                ON conflicts(agent_id, checked_at);
+
+            INSERT INTO conflicts (conflict_id, agent_id, checked_at)
+            VALUES ('legacy-conflict-1', 'legacy-agent', '2026-05-31T00:00:00Z');
+
+            CREATE TABLE overrides (
+                override_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                expires_at TEXT
+            );
+
+            CREATE TABLE reconciliations (
+                reconciliation_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX idx_reconciliations_agent_created_at
+                ON reconciliations(agent_id, created_at);
+
+            CREATE TABLE human_observations (
+                observation_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            ",
+        )
+        .expect("legacy dead tables should be created");
+    }
+
+    let store = Store::open(&db_path).expect("store should migrate old db");
+    store
+        .append(Event::agent_registered("s1", "w1"))
+        .expect("event should append after dead-table migration");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&db_path).expect("migrated db should reopen");
+    let dead_tables = query_ids(
+        &conn,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN
+            ('conflicts', 'overrides', 'reconciliations', 'human_observations')",
+    );
+    assert_eq!(dead_tables, Vec::<String>::new());
 
     fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
@@ -3959,8 +4040,6 @@ fn migrations_create_contract_tables_and_indexes() {
         "idx_reservations_agent_status_expires_at",
         "idx_claims_workspace_absolute_status_expires_at",
         "idx_claims_repo_relative_status_expires_at",
-        "idx_conflicts_agent_checked_at",
-        "idx_reconciliations_agent_created_at",
         "idx_outbox_agent_sequence_sync_status",
     ] {
         assert!(

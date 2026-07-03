@@ -15,7 +15,7 @@ serde.workspace = true
 serde_json.workspace = true
 stateful-core = { path = "../stateful-core" }
 thiserror.workspace = true
-time.workspace = true
+time = { workspace = true, features = ["formatting", "parsing"] }
 uuid.workspace = true
 
 [lints]

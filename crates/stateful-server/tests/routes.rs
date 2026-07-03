@@ -785,7 +785,7 @@ async fn session_events_preserve_repo_identity_when_provided() {
 }
 
 #[tokio::test]
-async fn lease_activity_and_conflict_routes_are_available() {
+async fn lease_finalize_route_is_available() {
     let temp_root = std::env::temp_dir().join(format!(
         "stateful-coordination-store-{}",
         std::process::id()
@@ -812,19 +812,6 @@ async fn lease_activity_and_conflict_routes_are_available() {
         .expect("claim acquire should complete");
     assert_eq!(claim.status(), StatusCode::OK);
 
-    let activity = app
-        .clone()
-        .oneshot(json_request(
-            "/v1/activity/observe",
-            serde_json::json!({
-                "agent_id": "s1",
-                "workspace_id": "w1"
-            }),
-        ))
-        .await
-        .expect("activity observe should complete");
-    assert_eq!(activity.status(), StatusCode::OK);
-
     let finalized = app
         .clone()
         .oneshot(json_request(
@@ -837,26 +824,6 @@ async fn lease_activity_and_conflict_routes_are_available() {
         .await
         .expect("activity finalize should complete");
     assert_eq!(finalized.status(), StatusCode::OK);
-
-    let conflict = app
-        .clone()
-        .oneshot(json_request(
-            "/v1/conflicts/check",
-            serde_json::json!({
-                "agent_id": "s1",
-                "action": "write_file",
-                "path": "src/auth.ts"
-            }),
-        ))
-        .await
-        .expect("conflict check should complete");
-    assert_eq!(conflict.status(), StatusCode::OK);
-    let body = to_bytes(conflict.into_body(), 1024)
-        .await
-        .expect("body should read");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-    assert_eq!(json["decision"], "deny");
-    assert_eq!(json["reason_code"], "missing_reservation");
 
     let release = app
         .oneshot(json_request(
@@ -880,7 +847,7 @@ async fn lease_activity_and_conflict_routes_are_available() {
         reopened
             .activity_count()
             .expect("activity count should load"),
-        2
+        1
     );
 
     std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
@@ -888,7 +855,14 @@ async fn lease_activity_and_conflict_routes_are_available() {
 
 #[tokio::test]
 async fn blocked_activity_phase_denies_authorized_write() {
-    let app = build_router(ServerConfig::new("secret-token"));
+    let temp_root =
+        std::env::temp_dir().join(format!("stateful-blocked-activity-{}", std::process::id()));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
     ensure_test_reservation_via_http(&app, "s1", "w1", "src/auth.ts").await;
     let claim = app
         .clone()
@@ -903,20 +877,10 @@ async fn blocked_activity_phase_denies_authorized_write() {
         .await
         .expect("claim acquire should complete");
     assert_eq!(claim.status(), StatusCode::OK);
-
-    let activity = app
-        .clone()
-        .oneshot(json_request(
-            "/v1/activity/observe",
-            serde_json::json!({
-                "agent_id": "s1",
-                "workspace_id": "w1",
-                "phase": "blocked"
-            }),
-        ))
-        .await
-        .expect("activity observe should complete");
-    assert_eq!(activity.status(), StatusCode::OK);
+    let blocker = Store::open(&db_path).expect("file store should reopen");
+    blocker
+        .append_activity_with_phase("s1", "w1", stateful_core::ActivityPhase::Blocked)
+        .expect("blocked activity should append");
 
     let blocked = app
         .oneshot(protocol_request(
@@ -934,6 +898,8 @@ async fn blocked_activity_phase_denies_authorized_write() {
     let json = response_json(blocked, 2048).await;
     assert_eq!(json["decision"], "deny");
     assert_eq!(json["reason_code"], "inactive_session_phase");
+
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
 }
 
 #[tokio::test]
@@ -3430,7 +3396,7 @@ async fn lease_acquire_rejects_directory_observation_for_file_path() {
     assert_eq!(acquire.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let json = response_json(acquire, 2048).await;
     assert!(
-        json["error"]
+        json["message"]
             .as_str()
             .expect("error message should be present")
             .contains("Is a directory"),
@@ -4358,7 +4324,7 @@ async fn activity_finalize_rolls_back_activity_and_lease_release_when_intent_com
     assert_eq!(finalize.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let json = response_json(finalize, 2048).await;
     assert!(
-        json["error"]
+        json["message"]
             .as_str()
             .expect("error should be string")
             .contains("simulated reservation completion failure")
@@ -5679,7 +5645,7 @@ async fn lease_acquire_rolls_back_lease_when_audit_event_append_fails() {
     assert_eq!(acquire.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let json = response_json(acquire, 2048).await;
     assert!(
-        json["error"]
+        json["message"]
             .as_str()
             .expect("error should be string")
             .contains("simulated claim audit event append failure")
@@ -7026,70 +6992,6 @@ async fn reservation_request_retry_backfills_identity_for_filtered_context_rende
 }
 
 #[tokio::test]
-async fn reconcile_ack_records_acknowledgement() {
-    let app = build_router(ServerConfig::new("secret-token"));
-
-    let response = app
-        .oneshot(json_request(
-            "/v1/reconcile/ack",
-            serde_json::json!({
-                "agent_id": "s1",
-                "workspace_id": "w1",
-                "decision": "adopt",
-                "files_reread": ["src/auth.ts"],
-                "human_change_summary": "User adjusted auth guard."
-            }),
-        ))
-        .await
-        .expect("reconcile ack should complete");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = to_bytes(response.into_body(), 1024)
-        .await
-        .expect("body should read");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
-    assert_eq!(json["status"], "ok");
-    assert_eq!(json["clears_human_write_block"], true);
-}
-
-#[tokio::test]
-async fn reconcile_ack_persists_acknowledgement() {
-    let temp_root =
-        std::env::temp_dir().join(format!("stateful-reconcile-store-{}", std::process::id()));
-    if temp_root.exists() {
-        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
-    }
-    let db_path = temp_root.join(".stateful_core").join("state.db");
-    let store = Store::open(&db_path).expect("file store should open");
-    let app = build_router(ServerConfig::with_store("secret-token", store));
-
-    let response = app
-        .oneshot(json_request(
-            "/v1/reconcile/ack",
-            serde_json::json!({
-                "agent_id": "s1",
-                "workspace_id": "w1",
-                "decision": "reapply",
-                "files_reread": ["src/auth.ts"],
-                "human_change_summary": "User edited guard."
-            }),
-        ))
-        .await
-        .expect("reconcile ack should complete");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let reopened = Store::open(&db_path).expect("file store should reopen");
-    assert_eq!(
-        reopened
-            .reconciliation_count()
-            .expect("reconciliation count should load"),
-        1
-    );
-
-    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
-}
-
-#[tokio::test]
 async fn outbox_sync_accepts_idempotent_events() {
     let app = build_router(ServerConfig::new("secret-token"));
 
@@ -7155,6 +7057,262 @@ async fn outbox_sync_persists_full_event_payload() {
     );
 
     std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[tokio::test]
+async fn claim_refresh_observation_error_uses_status_error_envelope() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/claim/refresh-observation",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("claim refresh should complete");
+
+    let status = response.status();
+    assert!(
+        status.is_client_error() || status.is_server_error(),
+        "missing root should map to an error status, got {status}"
+    );
+    let json = response_json(response, 2048).await;
+    assert_eq!(
+        json["status"], "error",
+        "unified envelope should mark errors with status=error: {json}"
+    );
+    assert!(
+        json["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "unified envelope should carry a non-empty message: {json}"
+    );
+    assert!(
+        json.get("error").is_none(),
+        "legacy bare top-level error field should be gone: {json}"
+    );
+}
+
+#[tokio::test]
+async fn activity_finalize_store_failure_uses_status_error_envelope() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-finalize-envelope-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    ensure_test_reservation_via_http(&app, "s1", "w1", "src/auth.ts").await;
+    let claim = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/claim/acquire",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "path": "src/auth.ts"
+            }),
+        ))
+        .await
+        .expect("claim acquire should complete");
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    let trigger_conn =
+        rusqlite::Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_finalize_envelope
+             BEFORE UPDATE OF status ON reservations
+             WHEN NEW.status = 'completed'
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated finalize failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let finalize = app
+        .oneshot(json_request(
+            "/v1/activity/finalize",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("finalize should complete");
+
+    let status = finalize.status();
+    assert!(
+        status.is_client_error() || status.is_server_error(),
+        "store failure should map to an error status, got {status}"
+    );
+    let json = response_json(finalize, 2048).await;
+    assert_eq!(
+        json["status"], "error",
+        "unified envelope should mark errors with status=error: {json}"
+    );
+    assert!(
+        json["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("simulated finalize failure")),
+        "unified envelope message should surface the failure reason: {json}"
+    );
+    assert!(
+        json.get("error").is_none(),
+        "legacy bare top-level error field should be gone: {json}"
+    );
+
+    drop(trigger_conn);
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[tokio::test]
+async fn outbox_sync_store_failure_uses_status_error_envelope() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!(
+        "stateful-outbox-envelope-{}-{unique}",
+        std::process::id()
+    ));
+    if temp_root.exists() {
+        std::fs::remove_dir_all(&temp_root).expect("old temp root should be removable");
+    }
+    let db_path = temp_root.join(".stateful_core").join("state.db");
+    let store = Store::open(&db_path).expect("file store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let trigger_conn =
+        rusqlite::Connection::open(&db_path).expect("trigger connection should open");
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_outbox_envelope
+             BEFORE INSERT ON outbox
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated outbox failure');
+             END;",
+        )
+        .expect("failure trigger should install");
+
+    let response = app
+        .oneshot(json_request(
+            "/v1/outbox/sync",
+            serde_json::json!({
+                "outbox_id": "outbox-envelope-1",
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "sequence": 1,
+                "event_type": "HeartbeatObserved",
+                "payload": {"ok": true}
+            }),
+        ))
+        .await
+        .expect("outbox sync should complete");
+
+    let status = response.status();
+    assert!(
+        status.is_client_error() || status.is_server_error(),
+        "store failure should map to an error status, got {status}"
+    );
+    let json = response_json(response, 2048).await;
+    assert_eq!(
+        json["status"], "error",
+        "unified envelope should mark errors with status=error: {json}"
+    );
+    assert!(
+        json["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("simulated outbox failure")),
+        "unified envelope message should surface the failure reason: {json}"
+    );
+    assert!(
+        json.get("error").is_none(),
+        "legacy bare top-level error field should be gone: {json}"
+    );
+
+    drop(trigger_conn);
+    std::fs::remove_dir_all(&temp_root).expect("temp root should be removable");
+}
+
+#[tokio::test]
+async fn removed_compat_endpoints_return_not_found() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    for (path, body) in [
+        (
+            "/v1/activity/observe",
+            serde_json::json!({"agent_id": "s1", "workspace_id": "w1"}),
+        ),
+        (
+            "/v1/conflicts/check",
+            serde_json::json!({
+                "agent_id": "s1",
+                "action": "write_file",
+                "path": "src/auth.ts"
+            }),
+        ),
+        (
+            "/v1/reconcile/ack",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1",
+                "decision": "adopt",
+                "files_reread": ["src/auth.ts"],
+                "human_change_summary": "User adjusted auth guard."
+            }),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(json_request(path, body))
+            .await
+            .expect("request should complete");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{path} should be removed and answer 404"
+        );
+    }
+}
+
+#[tokio::test]
+async fn protected_route_rejects_wrong_bearer_token() {
+    let app = build_router(ServerConfig::new("secret-token"));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/authorize")
+                .header("authorization", "Bearer wrong-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "agent_id": "s1",
+                        "action": "write_file",
+                        "path": "src/auth.ts"
+                    })
+                    .to_string(),
+                ))
+                .expect("authorize request should build"),
+        )
+        .await
+        .expect("authorize response should complete");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 fn json_request(path: &str, body: serde_json::Value) -> Request<Body> {
