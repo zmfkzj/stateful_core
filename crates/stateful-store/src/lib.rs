@@ -1,14 +1,20 @@
 mod activity;
 mod claims;
+mod human;
 mod notifications;
 mod reservations;
+mod write_fences;
+pub use human::{
+    HumanObservationConfidence, HumanObservationInput, HumanObservationKind,
+    HumanObservationRecord, ReconciliationAckInput,
+};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use stateful_core::{
     AGENT_CONTEXT_SCOPE_SOURCE_REF, ActivityPhase, CurrentEvidenceKind, CurrentFreshness,
-    CurrentItem, CurrentItemKind, CurrentSeverity, PolicyState, ReservationScope,
-    normalize_relative_path,
+    CurrentItem, CurrentItemKind, CurrentSeverity, PolicyState, ReconciliationDecision,
+    ReservationScope, normalize_relative_path,
 };
 use std::time::Duration as StdDuration;
 use std::{fs, path::Path};
@@ -24,6 +30,9 @@ const ACTIVE_RESERVATION_MAX_SECONDS: i64 = 3600;
 const CLAIM_TTL_SECONDS: i64 = 300;
 const CLAIMABLE_RESERVATION_TTL_SECONDS: i64 = 120;
 const ACTIVITY_TTL_SECONDS: i64 = 900;
+// ponytail: fence TTL matches claim freshness ceiling; release-on-completion is the normal path.
+const WRITE_FENCE_TTL_SECONDS: i64 = 300;
+const WRITE_FENCE_RELEASE_GRACE_SECONDS: i64 = 5;
 const EVENT_RETENTION_DAYS: i64 = 14;
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 
@@ -51,6 +60,11 @@ pub enum StoreError {
     ClaimOwnerMismatch,
     #[error("matching active reservation is required")]
     MissingReservation,
+    #[error("write fence conflict on `{path}` held by `{owner_agent_id}`")]
+    WriteFenceConflict {
+        path: String,
+        owner_agent_id: String,
+    },
     #[error(
         "invalid claim path `{0}`: direct tmp claims are not allowed; claim a file or subdirectory under tmp instead"
     )]
@@ -437,6 +451,16 @@ impl Store {
             resource_filter.as_deref(),
         )?);
         items.extend(self.live_claim_items(
+            workspace_filter,
+            identity_filter,
+            resource_filter.as_deref(),
+        )?);
+        items.extend(self.live_write_fence_items(
+            workspace_filter,
+            identity_filter,
+            resource_filter.as_deref(),
+        )?);
+        items.extend(self.live_human_observation_items(
             workspace_filter,
             identity_filter,
             resource_filter.as_deref(),
@@ -1454,6 +1478,14 @@ impl Store {
         }
 
         self.conn.execute(
+            "UPDATE write_fences
+             SET released_at = expires_at
+             WHERE released_at IS NULL AND expires_at <= ?1",
+            [now],
+        )?;
+        self.expire_stale_human_observations_inner(now)?;
+
+        self.conn.execute(
             "UPDATE notifications
              SET status = 'expired'
              WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?1",
@@ -1576,6 +1608,43 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_claims_repo_relative_status_expires_at
                 ON claims(repo_id, relative_path, status, expires_at);
 
+
+            CREATE TABLE IF NOT EXISTS write_fences (
+                fence_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                action TEXT NOT NULL,
+                acquired_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                released_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_write_fences_workspace_path_active
+                ON write_fences(workspace_id, relative_path, released_at, expires_at);
+
+            CREATE INDEX IF NOT EXISTS idx_write_fences_agent_workspace_active
+                ON write_fences(agent_id, workspace_id, released_at, expires_at);
+
+            CREATE TABLE IF NOT EXISTS human_observations (
+                observation_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                source TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                observed_exists INTEGER NOT NULL DEFAULT 1,
+                observed_content_hash TEXT,
+                observed_at TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                expires_at TEXT,
+                reconciled_at TEXT,
+                reconcile_decision TEXT,
+                reconciled_by_agent_id TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_human_obs_unreconciled
+                ON human_observations(workspace_id, relative_path, kind, confidence, reconciled_at);
 
             CREATE TABLE IF NOT EXISTS wait_queue (
                 wait_id TEXT PRIMARY KEY,
@@ -1958,9 +2027,18 @@ impl Store {
             DROP TABLE IF EXISTS conflicts;
             DROP TABLE IF EXISTS overrides;
             DROP TABLE IF EXISTS reconciliations;
-            DROP TABLE IF EXISTS human_observations;
             ",
         )?;
+        if self.has_table("human_observations")? {
+            let columns = self.table_columns("human_observations")?;
+            let has_current_shape = ["relative_path", "kind", "observed_at", "reconciled_at"]
+                .iter()
+                .all(|required| columns.iter().any(|column| column == required));
+            if !has_current_shape {
+                self.conn
+                    .execute_batch("DROP TABLE IF EXISTS human_observations;")?;
+            }
+        }
         Ok(())
     }
 
@@ -2216,7 +2294,10 @@ impl Store {
             | EventType::ReservationClaimed
             | EventType::ReservationCanceled
             | EventType::ActivityFinalized
-            | EventType::AuthorizationDenied => {}
+            | EventType::AuthorizationDenied
+            | EventType::AuthorizationWarned
+            | EventType::HumanWriteObserved
+            | EventType::ReconciliationAcknowledged => {}
         }
 
         Ok(())
@@ -3152,6 +3233,117 @@ impl Event {
             created_at: now_timestamp(),
         }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorization_warned(
+        agent_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        action: impl Into<String>,
+        path: impl Into<String>,
+        old_path: Option<String>,
+        new_path: Option<String>,
+        reason_code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        let agent_id = agent_id.into();
+        let workspace_id = workspace_id.into();
+        let action = action.into();
+        let path = path.into();
+        let reason_code = reason_code.into();
+        let message = message.into();
+
+        Self {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: EventType::AuthorizationWarned,
+            payload: serde_json::json!({
+                "agent_id": agent_id,
+                "workspace_id": workspace_id,
+                "action": action,
+                "path": path,
+                "old_path": old_path,
+                "new_path": new_path,
+                "reason_code": reason_code,
+                "message": message,
+            }),
+            agent_id,
+            workspace_id,
+            repo_id: None,
+            worktree_id: None,
+            root: None,
+            branch: None,
+            created_at: now_timestamp(),
+        }
+    }
+
+    pub fn human_write_observed(
+        workspace_id: impl Into<String>,
+        relative_path: impl Into<String>,
+        kind: impl Into<String>,
+        source: impl Into<String>,
+        summary: impl Into<String>,
+    ) -> Self {
+        let workspace_id = workspace_id.into();
+        let relative_path = relative_path.into();
+        let kind = kind.into();
+        let source = source.into();
+        let summary = summary.into();
+
+        Self {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: EventType::HumanWriteObserved,
+            payload: serde_json::json!({
+                "workspace_id": workspace_id,
+                "relative_path": relative_path,
+                "kind": kind,
+                "source": source,
+                "summary": summary,
+            }),
+            agent_id: "human".to_string(),
+            workspace_id,
+            repo_id: None,
+            worktree_id: None,
+            root: None,
+            branch: None,
+            created_at: now_timestamp(),
+        }
+    }
+
+    pub fn reconciliation_acknowledged(
+        agent_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        decision: ReconciliationDecision,
+        files_reread: Vec<String>,
+        human_change_summary: impl Into<String>,
+    ) -> Self {
+        let agent_id = agent_id.into();
+        let workspace_id = workspace_id.into();
+        let decision = match decision {
+            ReconciliationDecision::Adopt => "adopt",
+            ReconciliationDecision::Reapply => "reapply",
+            ReconciliationDecision::AskUser => "ask_user",
+            ReconciliationDecision::Abandon => "abandon",
+        };
+        let human_change_summary = human_change_summary.into();
+
+        Self {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: EventType::ReconciliationAcknowledged,
+            payload: serde_json::json!({
+                "agent_id": agent_id,
+                "workspace_id": workspace_id,
+                "decision": decision,
+                "files_reread": files_reread,
+                "human_change_summary": human_change_summary,
+            }),
+            agent_id,
+            workspace_id,
+            repo_id: None,
+            worktree_id: None,
+            root: None,
+            branch: None,
+            created_at: now_timestamp(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3166,6 +3358,9 @@ pub enum EventType {
     ReservationCanceled,
     ActivityFinalized,
     AuthorizationDenied,
+    AuthorizationWarned,
+    HumanWriteObserved,
+    ReconciliationAcknowledged,
 }
 
 impl EventType {
@@ -3181,6 +3376,9 @@ impl EventType {
             Self::ReservationCanceled => "ReservationCanceled",
             Self::ActivityFinalized => "ActivityFinalized",
             Self::AuthorizationDenied => "AuthorizationDenied",
+            Self::AuthorizationWarned => "AuthorizationWarned",
+            Self::HumanWriteObserved => "HumanWriteObserved",
+            Self::ReconciliationAcknowledged => "ReconciliationAcknowledged",
         }
     }
 }

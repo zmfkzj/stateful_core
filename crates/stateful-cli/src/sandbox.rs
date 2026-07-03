@@ -138,6 +138,7 @@ pub struct SandboxRunOutput {
     pub stderr: String,
     pub allowed_write_targets: Vec<String>,
     pub denied_write_targets: Vec<serde_json::Value>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -325,6 +326,7 @@ pub fn run_sandbox_in_repo(
 
     let mut allowed_write_targets = Vec::new();
     let mut denied_write_targets = Vec::new();
+    let mut authorization_warnings = Vec::new();
     let mut release_after_run: Option<SandboxLeaseReleaseContext> = None;
     let writable_paths = match request.fs {
         SandboxFsProfile::ReadOnly => Vec::new(),
@@ -374,6 +376,10 @@ pub fn run_sandbox_in_repo(
                     let response = authorize_sandbox_write(&authorize_context, "write_file", path)?;
                     match classify_sandbox_authorize_response(path, response)? {
                         SandboxAuthorizeDecision::Allow => allowed_write_targets.push(path.clone()),
+                        SandboxAuthorizeDecision::Warn(message) => {
+                            authorization_warnings.push(message);
+                            allowed_write_targets.push(path.clone());
+                        }
                         SandboxAuthorizeDecision::Deny(body) => {
                             denied_write_targets.push(serde_json::json!({
                                 "path": path,
@@ -391,6 +397,10 @@ pub fn run_sandbox_in_repo(
                     )?;
                     match classify_sandbox_authorize_response(path, response)? {
                         SandboxAuthorizeDecision::Allow => {
+                            allowed_write_targets.push(sandbox_write_dir_display_path(path));
+                        }
+                        SandboxAuthorizeDecision::Warn(message) => {
+                            authorization_warnings.push(message);
                             allowed_write_targets.push(sandbox_write_dir_display_path(path));
                         }
                         SandboxAuthorizeDecision::Deny(body) => {
@@ -468,6 +478,10 @@ pub fn run_sandbox_in_repo(
                 let response = authorize_sandbox_write(&authorize_context, "write_file", path)?;
                 match classify_sandbox_authorize_response(path, response)? {
                     SandboxAuthorizeDecision::Allow => allowed_write_targets.push(path.clone()),
+                    SandboxAuthorizeDecision::Warn(message) => {
+                        authorization_warnings.push(message);
+                        allowed_write_targets.push(path.clone());
+                    }
                     SandboxAuthorizeDecision::Deny(body) => {
                         denied_write_targets.push(serde_json::json!({
                             "path": path,
@@ -485,6 +499,10 @@ pub fn run_sandbox_in_repo(
                 )?;
                 match classify_sandbox_authorize_response(path, response)? {
                     SandboxAuthorizeDecision::Allow => {
+                        allowed_write_targets.push(sandbox_write_dir_display_path(path));
+                    }
+                    SandboxAuthorizeDecision::Warn(message) => {
+                        authorization_warnings.push(message);
                         allowed_write_targets.push(sandbox_write_dir_display_path(path));
                     }
                     SandboxAuthorizeDecision::Deny(body) => {
@@ -614,13 +632,34 @@ pub fn run_sandbox_in_repo(
     }
     let result = result?;
 
+    let stderr = if authorization_warnings.is_empty() {
+        result.stderr
+    } else if result.stderr.is_empty() {
+        authorization_warnings
+            .iter()
+            .map(|warning| format!("stateful warning: {warning}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        format!(
+            "{}\n{}",
+            authorization_warnings
+                .iter()
+                .map(|warning| format!("stateful warning: {warning}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            result.stderr
+        )
+    };
+
     Ok(SandboxRunOutput {
         status: result.status,
         exit_code: result.exit_code,
         stdout: result.stdout,
-        stderr: result.stderr,
+        stderr,
         allowed_write_targets,
         denied_write_targets: Vec::new(),
+        warnings: authorization_warnings,
     })
 }
 
@@ -2867,6 +2906,7 @@ fn sandbox_authorize_purpose(action: &str, path: &str) -> String {
 
 pub(crate) enum SandboxAuthorizeDecision {
     Allow,
+    Warn(String),
     Deny(Value),
 }
 
@@ -2890,6 +2930,12 @@ pub(crate) fn classify_sandbox_authorize_response(
 
     match body.get("decision").and_then(Value::as_str) {
         Some("allow") => Ok(SandboxAuthorizeDecision::Allow),
+        Some("warn") => Ok(SandboxAuthorizeDecision::Warn(
+            body.get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("authorization warning")
+                .to_string(),
+        )),
         Some("deny") => Ok(SandboxAuthorizeDecision::Deny(body)),
         Some(decision) => {
             anyhow::bail!(
@@ -4212,6 +4258,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn classify_sandbox_authorize_response_accepts_warn() {
+        let decision = classify_sandbox_authorize_response(
+            "src/auth.ts",
+            HttpResponse {
+                status_code: 200,
+                body: serde_json::json!({
+                    "decision": "warn",
+                    "message": "Review context first."
+                })
+                .to_string(),
+            },
+        )
+        .expect("warn response should parse");
+
+        assert!(matches!(
+            decision,
+            SandboxAuthorizeDecision::Warn(message) if message == "Review context first."
+        ));
+    }
+
     fn sandbox_output(status: &'static str, exit_code: Option<i32>) -> SandboxRunOutput {
         SandboxRunOutput {
             status,
@@ -4220,6 +4287,7 @@ mod tests {
             stderr: String::new(),
             allowed_write_targets: Vec::new(),
             denied_write_targets: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 

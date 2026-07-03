@@ -51,6 +51,9 @@ fn report_loads_pair_artifacts_and_renders_deterministic_summaries() {
         &[
             serde_json::json!({"event_type":"uncoordinated_same_file_write_collision","path":"src/a.py"}),
             serde_json::json!({"event_type":"denied_write","reason":"scope_mismatch"}),
+            serde_json::json!({"event_type":"authorization_warning","path":"src/a.py"}),
+            serde_json::json!({"event_type":"warning_ignored_write","path":"src/a.py"}),
+            serde_json::json!({"event_type":"wait_event","path":"src/a.py"}),
         ],
     )
     .expect("observer events should write");
@@ -63,6 +66,9 @@ fn report_loads_pair_artifacts_and_renders_deterministic_summaries() {
     assert_eq!(report.summary.task_passed, 1);
     assert_eq!(report.summary.task_failed, 1);
     assert_eq!(report.summary.uncoordinated_same_file_collisions, 1);
+    assert_eq!(report.summary.authorization_warnings, 1);
+    assert_eq!(report.summary.warned_writes_applied, 1);
+    assert_eq!(report.summary.wait_events, 1);
 
     let json = report
         .render(ReportFormat::Json)

@@ -156,6 +156,8 @@ pub enum Command {
         #[arg(long, required = true)]
         no_state_run_dir: Vec<PathBuf>,
         #[arg(long)]
+        awareness_run_dir: Vec<PathBuf>,
+        #[arg(long)]
         manifest: PathBuf,
         #[arg(long)]
         max_pairs: Option<usize>,
@@ -304,6 +306,7 @@ pub fn run_cli() -> Result<()> {
         Command::Compare {
             stateful_run_dir,
             no_state_run_dir,
+            awareness_run_dir,
             manifest,
             max_pairs,
             format,
@@ -312,6 +315,7 @@ pub fn run_cli() -> Result<()> {
             let report = compare_runs(CompareOptions {
                 stateful_run_dir,
                 no_state_run_dir,
+                awareness_run_dir,
                 manifest,
                 max_pairs,
             })?;
@@ -360,6 +364,7 @@ fn default_synthetic_run_id() -> String {
 #[value(rename_all = "kebab-case")]
 pub enum RunMode {
     Stateful,
+    Awareness,
     NoState,
 }
 
@@ -367,6 +372,7 @@ impl RunMode {
     fn as_str(self) -> &'static str {
         match self {
             Self::Stateful => "stateful",
+            Self::Awareness => "awareness",
             Self::NoState => "no-state",
         }
     }
@@ -1034,6 +1040,12 @@ pub struct CollisionMetrics {
     pub stale_intents: u64,
     pub timeouts: u64,
     pub long_idle_periods: u64,
+    #[serde(default)]
+    pub authorization_warnings: u64,
+    #[serde(default)]
+    pub warned_writes_applied: u64,
+    #[serde(default)]
+    pub wait_events: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1436,7 +1448,7 @@ fn run_pair_inner(
     let pair_dir = run_dir.join(sanitize_id(&pair.pair_id));
     let workspace = pair_dir.join("workspace");
     let stateful_home = pair_dir.join("stateful-home");
-    let stateful_env: Vec<(&str, &Path)> = if options.mode == RunMode::Stateful {
+    let stateful_env: Vec<(&str, &Path)> = if options.mode != RunMode::NoState {
         vec![("STATEFUL_HOME", stateful_home.as_path())]
     } else {
         Vec::new()
@@ -1474,13 +1486,14 @@ fn run_pair_inner(
     let mut stateful_server = None;
 
     let result = (|| -> Result<()> {
-        if options.mode == RunMode::Stateful {
+        if options.mode != RunMode::NoState {
             stateful_server = Some(start_stateful_workspace(
                 &workspace,
                 &pair_dir,
                 &options.stateful_binary,
                 &stateful_workspace_id,
                 &stateful_home,
+                options.mode,
             )?);
         }
 
@@ -1530,6 +1543,9 @@ fn run_pair_inner(
             return Err(error.into());
         }
         let wall_time_ms = elapsed_ms(started.elapsed());
+        if options.mode != RunMode::NoState {
+            export_coordination_events(&stateful_home, &pair_dir)?;
+        }
 
         observer_events.extend(agent_records.iter().map(|agent| {
             serde_json::json!({"event_type":"agent_finished","agent_id":agent.agent_id,"outcome":agent.outcome})
@@ -2184,6 +2200,7 @@ fn start_stateful_workspace(
     stateful_binary: &str,
     workspace_id: &str,
     stateful_home: &Path,
+    mode: RunMode,
 ) -> Result<Child> {
     run_shell_command(
         &format!("{stateful_binary} enable"),
@@ -2202,15 +2219,7 @@ fn start_stateful_workspace(
     let stderr = File::create(pair_dir.join("stateful-server.stderr.log"))?;
     let mut process = ProcessCommand::new(stateful_binary);
     process
-        .args([
-            "server",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &port.to_string(),
-            "--workspace-id",
-            workspace_id,
-        ])
+        .args(stateful_server_args(mode, port, workspace_id))
         .current_dir(workspace)
         .env("STATEFUL_HOME", stateful_home)
         .stdout(Stdio::from(stdout))
@@ -2229,6 +2238,48 @@ fn start_stateful_workspace(
         },
     )?;
     Ok(child)
+}
+
+fn stateful_server_args(mode: RunMode, port: u16, workspace_id: &str) -> Vec<String> {
+    let mut args = vec![
+        "server".to_string(),
+        "--host".to_string(),
+        "127.0.0.1".to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--workspace-id".to_string(),
+        workspace_id.to_string(),
+    ];
+    if mode == RunMode::Awareness {
+        args.extend(["--coordination-mode".to_string(), "awareness".to_string()]);
+    }
+    args
+}
+
+fn export_coordination_events(stateful_home: &Path, pair_dir: &Path) -> Result<()> {
+    let runtime: Value = read_json_file(stateful_home.join("runtime/server.json"))?;
+    let base_url = runtime
+        .get("base_url")
+        .and_then(Value::as_str)
+        .context("stateful runtime missing base_url")?;
+    let token = runtime
+        .get("token")
+        .and_then(Value::as_str)
+        .context("stateful runtime missing token")?;
+    let url = format!("{}/v1/events", base_url.trim_end_matches('/'));
+    let body = ureq::get(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+        .context("failed to export stateful coordination events")?
+        .into_string()
+        .context("failed to read stateful coordination events")?;
+    let value: Value = serde_json::from_str(&body).context("failed to parse stateful events")?;
+    let events = value
+        .get("events")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    write_jsonl(pair_dir.join("coordination-events.jsonl"), &events)
 }
 
 fn wait_for_stateful_ready(
@@ -2479,6 +2530,7 @@ impl RunReport {
 pub struct CompareOptions {
     pub stateful_run_dir: Vec<PathBuf>,
     pub no_state_run_dir: Vec<PathBuf>,
+    pub awareness_run_dir: Vec<PathBuf>,
     pub manifest: PathBuf,
     pub max_pairs: Option<usize>,
 }
@@ -2495,7 +2547,13 @@ pub struct ComparisonReport {
     pub paired: PairedComparisonSummary,
     pub stateful: ModeComparisonSummary,
     pub no_state: ModeComparisonSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awareness: Option<ModeComparisonSummary>,
     pub coordination_effects: CoordinationEffectSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_vs_awareness: Option<CoordinationEffectSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awareness_vs_enforcement: Option<CoordinationEffectSummary>,
     pub pairs: Vec<PairComparison>,
     pub excluded_pairs: Vec<ExcludedComparisonPair>,
 }
@@ -2561,6 +2619,12 @@ pub struct ModeComparisonSummary {
     pub stale_intents: u64,
     pub timeouts: u64,
     pub long_idle_periods: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub authorization_warnings: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub warned_writes_applied: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub wait_events: u64,
     pub wall_time_ms: u64,
     pub token_count: Option<u64>,
     pub tool_call_count: Option<u64>,
@@ -2579,6 +2643,10 @@ pub struct PairComparison {
     pub no_state_status: PairComparisonStatus,
     pub stateful_functional_pair_score: Option<f64>,
     pub no_state_functional_pair_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awareness_status: Option<PairComparisonStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awareness_functional_pair_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2609,21 +2677,33 @@ pub fn compare_runs(options: CompareOptions) -> Result<ComparisonReport> {
         .collect::<Vec<_>>();
     let stateful_reports = build_reports(&options.stateful_run_dir)?;
     let no_state_reports = build_reports(&options.no_state_run_dir)?;
+    let awareness_reports = if options.awareness_run_dir.is_empty() {
+        Vec::new()
+    } else {
+        build_reports(&options.awareness_run_dir)?
+    };
     let stateful_run_id = joined_run_ids(&stateful_reports);
     let no_state_run_id = joined_run_ids(&no_state_reports);
+    let awareness_run_id =
+        (!awareness_reports.is_empty()).then(|| joined_run_ids(&awareness_reports));
     let evidence_kind = comparison_evidence_kind(
         stateful_reports
             .iter()
             .chain(no_state_reports.iter())
+            .chain(awareness_reports.iter())
             .map(|report| report.evidence_kind),
     );
     let stateful_by_pair = pair_report_map(&stateful_reports);
     let no_state_by_pair = pair_report_map(&no_state_reports);
+    let awareness_by_pair = pair_report_map(&awareness_reports);
 
     let stateful =
         summarize_mode_for_manifest(stateful_run_id.clone(), &pair_ids, &stateful_by_pair);
     let no_state =
         summarize_mode_for_manifest(no_state_run_id.clone(), &pair_ids, &no_state_by_pair);
+    let awareness = awareness_run_id
+        .clone()
+        .map(|run_id| summarize_mode_for_manifest(run_id, &pair_ids, &awareness_by_pair));
 
     let mut pairs = Vec::new();
     let mut excluded_pairs = Vec::new();
@@ -2634,10 +2714,15 @@ pub fn compare_runs(options: CompareOptions) -> Result<ComparisonReport> {
     for pair_id in &pair_ids {
         let stateful_pair = stateful_by_pair.get(pair_id);
         let no_state_pair = no_state_by_pair.get(pair_id);
+        let awareness_pair = awareness
+            .as_ref()
+            .and_then(|_| awareness_by_pair.get(pair_id));
         let stateful_status = comparison_status(stateful_pair);
         let no_state_status = comparison_status(no_state_pair);
+        let awareness_status = awareness_pair.map(|pair| comparison_status(Some(pair)));
         let stateful_score = functional_pair_score(stateful_pair);
         let no_state_score = functional_pair_score(no_state_pair);
+        let awareness_score = functional_pair_score(awareness_pair);
 
         if stateful_status == PairComparisonStatus::Scored
             && no_state_status == PairComparisonStatus::Scored
@@ -2660,6 +2745,8 @@ pub fn compare_runs(options: CompareOptions) -> Result<ComparisonReport> {
             no_state_status,
             stateful_functional_pair_score: stateful_score,
             no_state_functional_pair_score: no_state_score,
+            awareness_status,
+            awareness_functional_pair_score: awareness_score,
         });
     }
 
@@ -2673,6 +2760,12 @@ pub fn compare_runs(options: CompareOptions) -> Result<ComparisonReport> {
         stateful.raw_manifest_score - no_state.raw_manifest_score,
     ));
     let coordination_effects = summarize_coordination_effects(&stateful, &no_state);
+    let off_vs_awareness = awareness
+        .as_ref()
+        .map(|awareness| summarize_coordination_effects(awareness, &no_state));
+    let awareness_vs_enforcement = awareness
+        .as_ref()
+        .map(|awareness| summarize_coordination_effects(&stateful, awareness));
 
     Ok(ComparisonReport {
         stateful_run_id,
@@ -2691,7 +2784,10 @@ pub fn compare_runs(options: CompareOptions) -> Result<ComparisonReport> {
         },
         stateful,
         no_state,
+        awareness,
         coordination_effects,
+        off_vs_awareness,
+        awareness_vs_enforcement,
         pairs,
         excluded_pairs,
     })
@@ -2751,6 +2847,10 @@ fn coordination_friction_events(summary: &ModeComparisonSummary) -> u64 {
         .saturating_add(summary.long_idle_periods)
         .saturating_add(summary.false_block_count)
         .saturating_add(summary.manual_intervention_count)
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 fn signed_delta(left: u64, right: u64) -> i64 {
@@ -2842,6 +2942,7 @@ pub fn run_synthetic_benchmark(options: SyntheticOptions) -> Result<SyntheticBen
     let comparison = compare_runs(CompareOptions {
         stateful_run_dir: vec![stateful_run_dir.clone()],
         no_state_run_dir: vec![no_state_run_dir.clone()],
+        awareness_run_dir: Vec::new(),
         manifest: manifest_path.clone(),
         max_pairs: None,
     })?;
@@ -3162,7 +3263,7 @@ fn write_synthetic_pair_run(
     scenario: &SyntheticScenario,
 ) -> Result<()> {
     let outcome = match mode {
-        RunMode::Stateful => &scenario.stateful,
+        RunMode::Stateful | RunMode::Awareness => &scenario.stateful,
         RunMode::NoState => &scenario.no_state,
     };
     let pair_dir = run_dir.join(sanitize_id(&scenario.pair.pair_id));
@@ -3304,6 +3405,9 @@ fn summarize_mode_for_manifest(
         stale_intents: 0,
         timeouts: 0,
         long_idle_periods: 0,
+        authorization_warnings: 0,
+        warned_writes_applied: 0,
+        wait_events: 0,
         wall_time_ms: 0,
         token_count: None,
         tool_call_count: None,
@@ -3339,6 +3443,9 @@ fn summarize_mode_for_manifest(
         summary.stale_intents += pair.collisions.stale_intents;
         summary.timeouts += pair.collisions.timeouts;
         summary.long_idle_periods += pair.collisions.long_idle_periods;
+        summary.authorization_warnings += pair.collisions.authorization_warnings;
+        summary.warned_writes_applied += pair.collisions.warned_writes_applied;
+        summary.wait_events += pair.collisions.wait_events;
         summary.preserved_edit_count += pair.preserved_edit_count;
         summary.missing_expected_line_count += pair.missing_expected_line_count;
         summary.false_block_count += pair.false_block_count;
@@ -3554,83 +3661,207 @@ fn render_comparison_markdown(report: &ComparisonReport) -> String {
     ));
 
     output.push_str("## Mode Metrics\n\n");
-    output.push_str("| Metric | Stateful | No-state |\n");
-    output.push_str("| --- | ---: | ---: |\n");
-    output.push_str(&format!(
-        "| Artifact pairs | {} | {} |\n",
-        report.stateful.artifact_pairs, report.no_state.artifact_pairs
-    ));
-    output.push_str(&format!(
-        "| Scored pairs | {} | {} |\n",
-        report.stateful.scored_pairs, report.no_state.scored_pairs
-    ));
-    output.push_str(&format!(
-        "| Available valid functional score | {} | {} |\n",
-        format_optional_score(report.stateful.available_valid_score),
-        format_optional_score(report.no_state.available_valid_score)
-    ));
-    output.push_str(&format!(
-        "| Raw manifest functional score | {:.3} | {:.3} |\n",
-        report.stateful.raw_manifest_score, report.no_state.raw_manifest_score
-    ));
-    output.push_str(&format!(
-        "| Missing artifacts | {} | {} |\n",
-        report.stateful.missing_artifacts, report.no_state.missing_artifacts
-    ));
-    output.push_str(&format!(
-        "| Setup error pairs | {} | {} |\n",
-        report.stateful.setup_error_pairs, report.no_state.setup_error_pairs
-    ));
-    output.push_str(&format!(
-        "| Unknown pairs | {} | {} |\n",
-        report.stateful.unknown_pairs, report.no_state.unknown_pairs
-    ));
-    output.push_str(&format!(
-        "| Infra loss rate | {:.3} | {:.3} |\n",
-        report.stateful.infra_loss_rate, report.no_state.infra_loss_rate
-    ));
-    output.push_str(&format!(
-        "| Uncoordinated same-file collisions | {} | {} |\n",
-        report.stateful.uncoordinated_same_file_collisions,
-        report.no_state.uncoordinated_same_file_collisions
-    ));
-    output.push_str(&format!(
-        "| Lost edit events | {} | {} |\n",
-        report.stateful.lost_edit_events, report.no_state.lost_edit_events
-    ));
-    output.push_str(&format!(
-        "| Coordinated blocks | {} | {} |\n",
-        report.stateful.coordinated_blocks, report.no_state.coordinated_blocks
-    ));
-    output.push_str(&format!(
-        "| Denied writes | {} | {} |\n",
-        report.stateful.denied_writes, report.no_state.denied_writes
-    ));
-    output.push_str(&format!(
-        "| Preserved edit count | {} | {} |\n",
-        report.stateful.preserved_edit_count, report.no_state.preserved_edit_count
-    ));
-    output.push_str(&format!(
-        "| Missing expected line count | {} | {} |\n",
-        report.stateful.missing_expected_line_count, report.no_state.missing_expected_line_count
-    ));
-    output.push_str(&format!(
-        "| False block count | {} | {} |\n",
-        report.stateful.false_block_count, report.no_state.false_block_count
-    ));
-    output.push_str(&format!(
-        "| Missed conflict count | {} | {} |\n",
-        report.stateful.missed_conflict_count, report.no_state.missed_conflict_count
-    ));
-    output.push_str(&format!(
-        "| Manual intervention count | {} | {} |\n",
-        report.stateful.manual_intervention_count, report.no_state.manual_intervention_count
-    ));
-    output.push_str(&format!(
-        "| Time to converge ms | {} | {} |\n\n",
-        format_optional_count(report.stateful.time_to_converge_ms),
-        format_optional_count(report.no_state.time_to_converge_ms)
-    ));
+    if let Some(awareness) = &report.awareness {
+        output.push_str("| Metric | Stateful | Awareness | No-state |\n");
+        output.push_str("| --- | ---: | ---: | ---: |\n");
+        output.push_str(&format!(
+            "| Artifact pairs | {} | {} | {} |\n",
+            report.stateful.artifact_pairs,
+            awareness.artifact_pairs,
+            report.no_state.artifact_pairs
+        ));
+        output.push_str(&format!(
+            "| Scored pairs | {} | {} | {} |\n",
+            report.stateful.scored_pairs, awareness.scored_pairs, report.no_state.scored_pairs
+        ));
+        output.push_str(&format!(
+            "| Available valid functional score | {} | {} | {} |\n",
+            format_optional_score(report.stateful.available_valid_score),
+            format_optional_score(awareness.available_valid_score),
+            format_optional_score(report.no_state.available_valid_score)
+        ));
+        output.push_str(&format!(
+            "| Raw manifest functional score | {:.3} | {:.3} | {:.3} |\n",
+            report.stateful.raw_manifest_score,
+            awareness.raw_manifest_score,
+            report.no_state.raw_manifest_score
+        ));
+        output.push_str(&format!(
+            "| Missing artifacts | {} | {} | {} |\n",
+            report.stateful.missing_artifacts,
+            awareness.missing_artifacts,
+            report.no_state.missing_artifacts
+        ));
+        output.push_str(&format!(
+            "| Setup error pairs | {} | {} | {} |\n",
+            report.stateful.setup_error_pairs,
+            awareness.setup_error_pairs,
+            report.no_state.setup_error_pairs
+        ));
+        output.push_str(&format!(
+            "| Unknown pairs | {} | {} | {} |\n",
+            report.stateful.unknown_pairs, awareness.unknown_pairs, report.no_state.unknown_pairs
+        ));
+        output.push_str(&format!(
+            "| Infra loss rate | {:.3} | {:.3} | {:.3} |\n",
+            report.stateful.infra_loss_rate,
+            awareness.infra_loss_rate,
+            report.no_state.infra_loss_rate
+        ));
+        output.push_str(&format!(
+            "| Uncoordinated same-file collisions | {} | {} | {} |\n",
+            report.stateful.uncoordinated_same_file_collisions,
+            awareness.uncoordinated_same_file_collisions,
+            report.no_state.uncoordinated_same_file_collisions
+        ));
+        output.push_str(&format!(
+            "| Lost edit events | {} | {} | {} |\n",
+            report.stateful.lost_edit_events,
+            awareness.lost_edit_events,
+            report.no_state.lost_edit_events
+        ));
+        output.push_str(&format!(
+            "| Coordinated blocks | {} | {} | {} |\n",
+            report.stateful.coordinated_blocks,
+            awareness.coordinated_blocks,
+            report.no_state.coordinated_blocks
+        ));
+        output.push_str(&format!(
+            "| Denied writes | {} | {} | {} |\n",
+            report.stateful.denied_writes, awareness.denied_writes, report.no_state.denied_writes
+        ));
+        output.push_str(&format!(
+            "| Authorization warnings | {} | {} | {} |\n",
+            report.stateful.authorization_warnings,
+            awareness.authorization_warnings,
+            report.no_state.authorization_warnings
+        ));
+        output.push_str(&format!(
+            "| Warned writes applied | {} | {} | {} |\n",
+            report.stateful.warned_writes_applied,
+            awareness.warned_writes_applied,
+            report.no_state.warned_writes_applied
+        ));
+        output.push_str(&format!(
+            "| Wait events | {} | {} | {} |\n",
+            report.stateful.wait_events, awareness.wait_events, report.no_state.wait_events
+        ));
+        output.push_str(&format!(
+            "| Preserved edit count | {} | {} | {} |\n",
+            report.stateful.preserved_edit_count,
+            awareness.preserved_edit_count,
+            report.no_state.preserved_edit_count
+        ));
+        output.push_str(&format!(
+            "| Missing expected line count | {} | {} | {} |\n",
+            report.stateful.missing_expected_line_count,
+            awareness.missing_expected_line_count,
+            report.no_state.missing_expected_line_count
+        ));
+        output.push_str(&format!(
+            "| False block count | {} | {} | {} |\n",
+            report.stateful.false_block_count,
+            awareness.false_block_count,
+            report.no_state.false_block_count
+        ));
+        output.push_str(&format!(
+            "| Missed conflict count | {} | {} | {} |\n",
+            report.stateful.missed_conflict_count,
+            awareness.missed_conflict_count,
+            report.no_state.missed_conflict_count
+        ));
+        output.push_str(&format!(
+            "| Manual intervention count | {} | {} | {} |\n",
+            report.stateful.manual_intervention_count,
+            awareness.manual_intervention_count,
+            report.no_state.manual_intervention_count
+        ));
+        output.push_str(&format!(
+            "| Time to converge ms | {} | {} | {} |\n\n",
+            format_optional_count(report.stateful.time_to_converge_ms),
+            format_optional_count(awareness.time_to_converge_ms),
+            format_optional_count(report.no_state.time_to_converge_ms)
+        ));
+    } else {
+        output.push_str("| Metric | Stateful | No-state |\n");
+        output.push_str("| --- | ---: | ---: |\n");
+        output.push_str(&format!(
+            "| Artifact pairs | {} | {} |\n",
+            report.stateful.artifact_pairs, report.no_state.artifact_pairs
+        ));
+        output.push_str(&format!(
+            "| Scored pairs | {} | {} |\n",
+            report.stateful.scored_pairs, report.no_state.scored_pairs
+        ));
+        output.push_str(&format!(
+            "| Available valid functional score | {} | {} |\n",
+            format_optional_score(report.stateful.available_valid_score),
+            format_optional_score(report.no_state.available_valid_score)
+        ));
+        output.push_str(&format!(
+            "| Raw manifest functional score | {:.3} | {:.3} |\n",
+            report.stateful.raw_manifest_score, report.no_state.raw_manifest_score
+        ));
+        output.push_str(&format!(
+            "| Missing artifacts | {} | {} |\n",
+            report.stateful.missing_artifacts, report.no_state.missing_artifacts
+        ));
+        output.push_str(&format!(
+            "| Setup error pairs | {} | {} |\n",
+            report.stateful.setup_error_pairs, report.no_state.setup_error_pairs
+        ));
+        output.push_str(&format!(
+            "| Unknown pairs | {} | {} |\n",
+            report.stateful.unknown_pairs, report.no_state.unknown_pairs
+        ));
+        output.push_str(&format!(
+            "| Infra loss rate | {:.3} | {:.3} |\n",
+            report.stateful.infra_loss_rate, report.no_state.infra_loss_rate
+        ));
+        output.push_str(&format!(
+            "| Uncoordinated same-file collisions | {} | {} |\n",
+            report.stateful.uncoordinated_same_file_collisions,
+            report.no_state.uncoordinated_same_file_collisions
+        ));
+        output.push_str(&format!(
+            "| Lost edit events | {} | {} |\n",
+            report.stateful.lost_edit_events, report.no_state.lost_edit_events
+        ));
+        output.push_str(&format!(
+            "| Coordinated blocks | {} | {} |\n",
+            report.stateful.coordinated_blocks, report.no_state.coordinated_blocks
+        ));
+        output.push_str(&format!(
+            "| Denied writes | {} | {} |\n",
+            report.stateful.denied_writes, report.no_state.denied_writes
+        ));
+        output.push_str(&format!(
+            "| Preserved edit count | {} | {} |\n",
+            report.stateful.preserved_edit_count, report.no_state.preserved_edit_count
+        ));
+        output.push_str(&format!(
+            "| Missing expected line count | {} | {} |\n",
+            report.stateful.missing_expected_line_count,
+            report.no_state.missing_expected_line_count
+        ));
+        output.push_str(&format!(
+            "| False block count | {} | {} |\n",
+            report.stateful.false_block_count, report.no_state.false_block_count
+        ));
+        output.push_str(&format!(
+            "| Missed conflict count | {} | {} |\n",
+            report.stateful.missed_conflict_count, report.no_state.missed_conflict_count
+        ));
+        output.push_str(&format!(
+            "| Manual intervention count | {} | {} |\n",
+            report.stateful.manual_intervention_count, report.no_state.manual_intervention_count
+        ));
+        output.push_str(&format!(
+            "| Time to converge ms | {} | {} |\n\n",
+            format_optional_count(report.stateful.time_to_converge_ms),
+            format_optional_count(report.no_state.time_to_converge_ms)
+        ));
+    }
 
     if !report.excluded_pairs.is_empty() {
         output.push_str("## Excluded Pairs\n\n");
@@ -3679,6 +3910,9 @@ pub struct ReportSummary {
     pub stale_intents: u64,
     pub timeouts: u64,
     pub long_idle_periods: u64,
+    pub authorization_warnings: u64,
+    pub warned_writes_applied: u64,
+    pub wait_events: u64,
     pub wall_time_ms: u64,
     pub token_count: Option<u64>,
     pub tool_call_count: Option<u64>,
@@ -3759,6 +3993,9 @@ pub fn build_report(run_dir: impl AsRef<Path>) -> Result<RunReport> {
         summary.stale_intents += collisions.stale_intents;
         summary.timeouts += collisions.timeouts;
         summary.long_idle_periods += collisions.long_idle_periods;
+        summary.authorization_warnings += collisions.authorization_warnings;
+        summary.warned_writes_applied += collisions.warned_writes_applied;
+        summary.wait_events += collisions.wait_events;
         summary.preserved_edit_count += harness.metrics.preserved_edit_count;
         summary.missing_expected_line_count += harness.metrics.missing_expected_line_count;
         summary.false_block_count += harness.metrics.false_block_count;
@@ -4048,6 +4285,9 @@ fn read_collision_metrics(path: impl AsRef<Path>) -> Result<CollisionMetrics> {
             "stale_intent" | "intent_expired" => metrics.stale_intents += 1,
             "timeout" => metrics.timeouts += 1,
             "long_idle" | "long_idle_period" => metrics.long_idle_periods += 1,
+            "authorization_warning" => metrics.authorization_warnings += 1,
+            "warning_ignored_write" => metrics.warned_writes_applied += 1,
+            "wait_event" => metrics.wait_events += 1,
             _ => {}
         }
     }
@@ -4132,4 +4372,40 @@ fn write_text_file(path: impl AsRef<Path>, text: &str) -> Result<()> {
     }
     fs::write(path, text)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn awareness_mode_uses_awareness_server_flag() {
+        assert_eq!(RunMode::Awareness.as_str(), "awareness");
+        assert_eq!(
+            stateful_server_args(RunMode::Awareness, 3456, "workspace-1"),
+            vec![
+                "server".to_string(),
+                "--host".to_string(),
+                "127.0.0.1".to_string(),
+                "--port".to_string(),
+                "3456".to_string(),
+                "--workspace-id".to_string(),
+                "workspace-1".to_string(),
+                "--coordination-mode".to_string(),
+                "awareness".to_string(),
+            ]
+        );
+        assert_eq!(
+            stateful_server_args(RunMode::Stateful, 3456, "workspace-1"),
+            vec![
+                "server".to_string(),
+                "--host".to_string(),
+                "127.0.0.1".to_string(),
+                "--port".to_string(),
+                "3456".to_string(),
+                "--workspace-id".to_string(),
+                "workspace-1".to_string(),
+            ]
+        );
+    }
 }

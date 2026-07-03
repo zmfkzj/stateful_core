@@ -174,46 +174,63 @@ subagent spawn count for both Codex and OMP `subagent:on` runs. Treat that
 prompt addition as a declared behavior-test condition axis; do not reuse it as
 normal scored comparison policy or general patch-quality guidance.
 
-### Coordination-Mode Arms (Target Design)
+### Coordination-Mode Arms
 
-[ADR 0002](adr/0002-presence-first-not-lock-first.md) records a presence-first
-product direction. How much claim machinery the product keeps is an empirical
-question, so coordination-focused comparisons should use three arms once a
-warn-only mode ships:
+[ADR 0002](adr/0002-presence-first-not-lock-first.md) records the
+presence-first product direction. Coordination-focused comparisons now have three
+implemented arms:
 
 ```text
-A: off          no presence, no freshness injection, no denial
-B: awareness    render + freshness warnings, no queue/denial
-C: enforcement  shipped reservation/claim/queue/blocking behavior
+A: no-state     no Stateful server/extension rails
+B: awareness    presence/context warnings, hard safety denials when checked, no queue/claim blocking
+C: stateful     default enforcement with reservation/claim/queue blocking
 ```
 
-The first useful comparison is a synthetic forced-overlap scenario: create a
-small task where two or more actors are steered toward the same file or adjacent
-files, run with `--max-concurrent >= 2`, and compare A/B/C on the same shard and
-instance order. Do not wait for DeNovoSWE to produce emergent same-file
-collisions; ordinary small-N DeNovo runs may have too few overlaps to measure
-coordination behavior, and null results there can be underpowered rather than
-dispositive.
+Use the checked-in forced-overlap harness for coordination-mode behavior, not
+incidental DeNovo same-file collisions:
+
+```text
+crates/stateful-bench/scripts/overlap_manifest_generator.py
+crates/stateful-bench/scripts/overlap_omp_agent.py
+crates/stateful-bench/scripts/overlap_harness.py
+stateful-bench run --mode no-state|awareness|stateful
+stateful-bench compare --awareness-run-dir <dir>
+```
+
+Generate one manifest with a fixed seed, then run all arms with the same
+manifest, model, image/runtime, `--jobs`, timeout, and instance order. The
+checked-in manifest generator creates `exact_file_overlap` pairs over `doc.txt`
+so every arm sees the same forced same-file pressure. Do not wait for DeNovoSWE
+to produce emergent same-file collisions; ordinary small-N DeNovo runs may have
+too few overlaps to measure coordination behavior, and null results there can be
+underpowered rather than dispositive.
+
+The checked-in harness and comparison report directly measure only artifacts
+they can observe: uncoordinated same-file collisions, lost edit events, denied
+writes, coordinated blocks, authorization warnings, warned writes that were
+applied, wait events, preserved/missing expected edits, false blocks, missed
+conflicts, wall time, and token/tool overhead when the agent logs expose usage.
+`manual_intervention_count` is read only if a harness result supplies it; the
+checked-in overlap harness writes `0` and does not observe real human/manual
+interventions. Duplicated-investigation time is not observable in this harness;
+mark it omitted/N.A. rather than inventing a proxy.
+
+Comparison reports label evidence kind. `synthetic_fixture` validates report
+plumbing only. Product efficacy claims require `paired_agent_run` evidence from
+the forced-overlap harness, enough paired-valid samples, and overhead reporting.
+The checked-in [2026-07-03 forced-overlap result](benchmarks/2026-07-03-forced-overlap-three-arm.md)
+is a three-arm plumbing/smoke result with no differentiated safety outcome, not
+final efficacy evidence.
 
 Fable5's review cautions against overgeneralizing Cursor's large-N convoy
 evidence to small-N shared-checkout tests. Use Cursor as a warning against broad
 waits and task-scale locks, not as proof that every enforcement claim is bad or
 that every small-N null result validates the pivot.
 
-Arm B requires a warn-only configuration that is not shipped yet. Until it
-ships, label any approximation as a behavior test, not a scored comparison.
-
-Beyond the primary score, coordination arms should report: same-file overwrite
-count, stale edit attempts versus stale edits actually applied, duplicated
-investigation time, wall time, wait time, token overhead from injected
-context, warning-ignored rate, human/manual intervention count, final merge
-conflict count, and successful handoff count.
-
 The registered hypothesis is that arm B keeps arm C's safety metrics while
-spending less waiting and complexity. If that holds, claim machinery shrinks
-to thin safety fences only after mandatory base observations and independent
-write fences are implemented and verified; if arm C is meaningfully safer, the
-fences stay and the result documents why.
+spending less waiting and complexity. If that holds, claim machinery shrinks to
+thin safety fences; if arm C is meaningfully safer, the fences stay and the
+result documents why.
 
 ## Success Criteria
 

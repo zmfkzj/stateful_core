@@ -24,6 +24,7 @@ pub struct ServerStartOptions {
     pub port: u16,
     pub token: Option<String>,
     pub workspace_id: String,
+    pub coordination_mode: String,
 }
 
 impl Default for ServerStartOptions {
@@ -33,6 +34,7 @@ impl Default for ServerStartOptions {
             port: 43873,
             token: None,
             workspace_id: "local".to_string(),
+            coordination_mode: "enforcement".to_string(),
         }
     }
 }
@@ -228,6 +230,7 @@ pub fn server_start_options_from_runtime(
         port,
         token: Some(runtime.token.clone()),
         workspace_id: runtime.workspace_id.clone(),
+        coordination_mode: "enforcement".to_string(),
     })
 }
 
@@ -401,6 +404,10 @@ pub fn detached_server_args(options: &ServerStartOptions) -> Vec<String> {
     }
 
     args.extend(["--workspace-id".to_string(), options.workspace_id.clone()]);
+    args.extend([
+        "--coordination-mode".to_string(),
+        options.coordination_mode.clone(),
+    ]);
     args
 }
 

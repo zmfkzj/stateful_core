@@ -3,9 +3,13 @@ use stateful_core::{
     normalized_relative_path_is_empty,
 };
 use stateful_store::{
-    ClaimObservation, Event, ReservationRequestInput, Store, WaitRecord, WorkspaceIdentity,
+    ClaimObservation, Event, ReservationRequestInput, Store, StoreError, WaitRecord,
+    WorkspaceIdentity,
 };
-use std::path::{Component, Path, PathBuf};
+use std::{
+    path::{Component, Path, PathBuf},
+    str::FromStr,
+};
 
 #[derive(Debug, Clone)]
 pub struct AuthorizationOutcome {
@@ -112,8 +116,37 @@ fn workspace_identity<'a>(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CoordinationMode {
+    #[default]
+    Enforcement,
+    Awareness,
+}
+
+impl CoordinationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforcement => "enforcement",
+            Self::Awareness => "awareness",
+        }
+    }
+}
+
+impl FromStr for CoordinationMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "enforcement" => Ok(Self::Enforcement),
+            "awareness" => Ok(Self::Awareness),
+            _ => Err("coordination mode must be 'enforcement' or 'awareness'".to_string()),
+        }
+    }
+}
+
 pub struct PolicyService<'a> {
     store: &'a Store,
+    coordination_mode: CoordinationMode,
 }
 
 fn is_multi_path_action(action: &str) -> bool {
@@ -139,6 +172,19 @@ fn can_queue_after_policy_denial(decision: &Decision) -> bool {
     )
 }
 
+fn is_awareness_softenable(reason_code: &str) -> bool {
+    matches!(
+        reason_code,
+        "missing_reservation"
+            | "scope_mismatch"
+            | "reservation_claim_required"
+            | "missing_claim"
+            | "reservation_conflict"
+            | "active_claim_conflict"
+            | "inactive_session_phase"
+    )
+}
+
 fn active_claim_conflict_decision() -> Decision {
     Decision::deny(
         "active_claim_conflict",
@@ -148,11 +194,25 @@ fn active_claim_conflict_decision() -> Decision {
 }
 
 impl<'a> PolicyService<'a> {
-    pub fn new(store: &'a Store) -> Self {
-        Self { store }
+    pub fn new(store: &'a Store, coordination_mode: CoordinationMode) -> Self {
+        Self {
+            store,
+            coordination_mode,
+        }
     }
 
     pub fn authorize_write(
+        &self,
+        input: AuthorizeWriteInput,
+        allow_queue_side_effects: bool,
+    ) -> Result<AuthorizationOutcome, String> {
+        let allow_queue_side_effects =
+            allow_queue_side_effects && self.coordination_mode == CoordinationMode::Enforcement;
+        let outcome = self.authorize_write_inner(input, allow_queue_side_effects)?;
+        Ok(self.soften_for_awareness(outcome))
+    }
+
+    fn authorize_write_inner(
         &self,
         input: AuthorizeWriteInput,
         allow_queue_side_effects: bool,
@@ -188,7 +248,10 @@ impl<'a> PolicyService<'a> {
         };
 
         let mut lazy_claimed_reservation = None;
-        if let Some(workspace_id) = &input.workspace_id {
+        let mut awareness_warning = None;
+        if let (CoordinationMode::Enforcement, Some(workspace_id)) =
+            (self.coordination_mode, &input.workspace_id)
+        {
             let current_agent_reservation =
                 if let Some(reservation_id) = input.reservation_id.as_deref() {
                     self.supplied_agent_reservation(&input, workspace_id, reservation_id)?
@@ -253,12 +316,25 @@ impl<'a> PolicyService<'a> {
                     return Ok(outcome);
                 }
             }
-            self.release_lazy_claimed_lease_if_needed(&input, lazy_claimed_reservation.as_ref())?;
-            return Ok(AuthorizationOutcome {
-                decision,
-                wait: None,
-                reservation: None,
-            });
+            if self.coordination_mode == CoordinationMode::Awareness
+                && is_awareness_softenable(decision.reason_code.as_str())
+            {
+                awareness_warning.get_or_insert(AuthorizationOutcome {
+                    decision: decision.clone(),
+                    wait: None,
+                    reservation: None,
+                });
+            } else {
+                self.release_lazy_claimed_lease_if_needed(
+                    &input,
+                    lazy_claimed_reservation.as_ref(),
+                )?;
+                return Ok(AuthorizationOutcome {
+                    decision,
+                    wait: None,
+                    reservation: None,
+                });
+            }
         }
 
         let Some(workspace_id) = &input.workspace_id else {
@@ -275,16 +351,31 @@ impl<'a> PolicyService<'a> {
 
         let reservation_conflict = self.reservation_conflict(&input, workspace_id)?;
         if let Some(reservation) = reservation_conflict {
-            self.release_lazy_claimed_lease_if_needed(&input, lazy_claimed_reservation.as_ref())?;
-            return Ok(AuthorizationOutcome {
-                decision: Decision::deny(
-                    "reservation_conflict",
-                    "Write target is reserved for the next waiting agent.",
-                    "Wait for the active reservation to be claimed or expire. Do not redeclare reservation or change agent_id; that does not release another agent's reservation.",
-                ),
-                wait: None,
-                reservation: Some(reservation),
-            });
+            if self.coordination_mode == CoordinationMode::Awareness {
+                awareness_warning.get_or_insert(AuthorizationOutcome {
+                    decision: Decision::deny(
+                        "reservation_conflict",
+                        "Write target is reserved for the next waiting agent.",
+                        "Wait for the active reservation to be claimed or expire. Do not redeclare reservation or change agent_id; that does not release another agent's reservation.",
+                    ),
+                    wait: None,
+                    reservation: Some(reservation),
+                });
+            } else {
+                self.release_lazy_claimed_lease_if_needed(
+                    &input,
+                    lazy_claimed_reservation.as_ref(),
+                )?;
+                return Ok(AuthorizationOutcome {
+                    decision: Decision::deny(
+                        "reservation_conflict",
+                        "Write target is reserved for the next waiting agent.",
+                        "Wait for the active reservation to be claimed or expire. Do not redeclare reservation or change agent_id; that does not release another agent's reservation.",
+                    ),
+                    wait: None,
+                    reservation: Some(reservation),
+                });
+            }
         }
 
         if self.requires_exact_hook_file_scope(&input)
@@ -301,8 +392,7 @@ impl<'a> PolicyService<'a> {
                 )?;
                 return Ok(outcome);
             }
-            self.release_lazy_claimed_lease_if_needed(&input, lazy_claimed_reservation.as_ref())?;
-            return Ok(AuthorizationOutcome {
+            let outcome = AuthorizationOutcome {
                 decision: Decision::deny(
                     "scope_mismatch",
                     "Hook file targets require active task reservation exact file scope for every affected path.",
@@ -310,7 +400,16 @@ impl<'a> PolicyService<'a> {
                 ),
                 wait: None,
                 reservation: None,
-            });
+            };
+            if self.coordination_mode == CoordinationMode::Awareness {
+                awareness_warning.get_or_insert(outcome);
+            } else {
+                self.release_lazy_claimed_lease_if_needed(
+                    &input,
+                    lazy_claimed_reservation.as_ref(),
+                )?;
+                return Ok(outcome);
+            }
         }
 
         let claim_owner = self.claim_conflict_owner(&input, workspace_id)?;
@@ -322,12 +421,20 @@ impl<'a> PolicyService<'a> {
                 allow_queue_side_effects,
             )?;
 
-            self.release_lazy_claimed_lease_if_needed(&input, lazy_claimed_reservation.as_ref())?;
-            return Ok(AuthorizationOutcome {
+            let outcome = AuthorizationOutcome {
                 decision: active_claim_conflict_decision(),
                 wait,
                 reservation: None,
-            });
+            };
+            if self.coordination_mode == CoordinationMode::Awareness {
+                awareness_warning.get_or_insert(outcome);
+            } else {
+                self.release_lazy_claimed_lease_if_needed(
+                    &input,
+                    lazy_claimed_reservation.as_ref(),
+                )?;
+                return Ok(outcome);
+            }
         }
 
         let requires_exact_hook_file_scope = self.requires_exact_hook_file_scope(&input);
@@ -350,9 +457,42 @@ impl<'a> PolicyService<'a> {
                     "Acquire exact same-reservation file claims for file actions, or exact same-reservation directory claims for write-directory actions. Do not change reservation_id; that does not create same-reservation claim ownership.",
                 )
             };
+            let outcome = AuthorizationOutcome {
+                decision,
+                wait: None,
+                reservation: None,
+            };
+            if self.coordination_mode == CoordinationMode::Awareness {
+                awareness_warning.get_or_insert(outcome);
+            } else {
+                self.release_lazy_claimed_lease_if_needed(
+                    &input,
+                    lazy_claimed_reservation.as_ref(),
+                )?;
+                return Ok(outcome);
+            }
+        }
+
+        let human_write_paths: Vec<String> = self
+            .affected_paths(&input)
+            .into_iter()
+            .map(normalize_relative_path)
+            .filter(|path| !path.is_empty())
+            .collect();
+        let unreconciled = self
+            .store
+            .unreconciled_human_write_paths(workspace_id, &human_write_paths)
+            .map_err(|error| error.to_string())?;
+        if let Some(path) = unreconciled.first() {
             self.release_lazy_claimed_lease_if_needed(&input, lazy_claimed_reservation.as_ref())?;
             return Ok(AuthorizationOutcome {
-                decision,
+                decision: Decision::deny(
+                    "unreconciled_human_write",
+                    format!("{path} has an unreconciled human write."),
+                    format!(
+                        "Reread {path}, summarize the human change, then call state.reconcile.ack with adopt or reapply before retrying."
+                    ),
+                ),
                 wait: None,
                 reservation: None,
             });
@@ -376,11 +516,71 @@ impl<'a> PolicyService<'a> {
             });
         }
 
+        let fence_paths: Vec<String> = self
+            .affected_paths(&input)
+            .into_iter()
+            .map(normalize_relative_path)
+            .filter(|path| !path.is_empty())
+            .collect();
+        match self.store.acquire_write_fences(
+            &input.agent_id,
+            workspace_id,
+            &fence_paths,
+            &input.action,
+        ) {
+            Ok(()) => {}
+            Err(StoreError::WriteFenceConflict {
+                path,
+                owner_agent_id,
+            }) => {
+                self.release_lazy_claimed_lease_if_needed(
+                    &input,
+                    lazy_claimed_reservation.as_ref(),
+                )?;
+                return Ok(AuthorizationOutcome {
+                    decision: Decision::deny(
+                        "write_fence_conflict",
+                        format!(
+                            "Write target already has an active write in flight by {owner_agent_id}."
+                        ),
+                        format!(
+                            "Wait for {owner_agent_id} to finish writing {path}, then reread before retrying."
+                        ),
+                    ),
+                    wait: None,
+                    reservation: None,
+                });
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+
+        if let Some(outcome) = awareness_warning {
+            return Ok(outcome);
+        }
         Ok(AuthorizationOutcome {
             decision,
             wait: None,
             reservation: lazy_claimed_reservation,
         })
+    }
+
+    fn soften_for_awareness(&self, mut outcome: AuthorizationOutcome) -> AuthorizationOutcome {
+        if self.coordination_mode != CoordinationMode::Awareness
+            || outcome.decision.decision != DecisionKind::Deny
+        {
+            return outcome;
+        }
+
+        if !is_awareness_softenable(outcome.decision.reason_code.as_str()) {
+            return outcome;
+        }
+
+        outcome.decision.decision = DecisionKind::Warn;
+        outcome.decision.required_next_action = Some(
+            "Warned in awareness mode: review rendered coordination context; reread the target before writing."
+                .to_string(),
+        );
+        outcome
     }
 
     fn release_lazy_claimed_lease_if_needed(
@@ -725,7 +925,27 @@ impl<'a> PolicyService<'a> {
             return Ok(None);
         }
 
+        let affected_paths = self
+            .affected_paths(input)
+            .into_iter()
+            .map(normalize_relative_path)
+            .collect::<Vec<_>>();
+
+        if require_observations
+            && affected_paths.iter().any(|path| {
+                !input
+                    .base_observations
+                    .iter()
+                    .any(|observation| normalize_relative_path(&observation.path) == *path)
+            })
+        {
+            return Ok(Some(missing_base_observation_decision()));
+        }
+
         let Some(root) = input.root.as_deref().filter(|root| !root.is_empty()) else {
+            if require_observations {
+                return Ok(None);
+            }
             if input.base_observations.is_empty() {
                 return Ok(None);
             }
@@ -734,16 +954,9 @@ impl<'a> PolicyService<'a> {
             )));
         };
 
-        if require_observations && !Path::new(root).is_dir() && input.base_observations.is_empty() {
+        if require_observations && !Path::new(root).is_dir() {
             return Ok(None);
         }
-
-        let affected_paths = self
-            .affected_paths(input)
-            .into_iter()
-            .map(normalize_relative_path)
-            .collect::<Vec<_>>();
-
         for path in affected_paths {
             let observation = input
                 .base_observations

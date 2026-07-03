@@ -39,7 +39,7 @@ fn run_command_parses_mode_and_agent_template() {
         "--pairs",
         ".stateful_bench/pairs/dev-50.jsonl",
         "--mode",
-        "no-state",
+        "awareness",
         "--run-id",
         "dev-no-state",
         "--agent-cmd-template",
@@ -60,7 +60,7 @@ fn run_command_parses_mode_and_agent_template() {
     assert!(matches!(
         cli.command,
         Command::Run {
-            mode: RunMode::NoState,
+            mode: RunMode::Awareness,
             ref run_id,
             ref agent_cmd_template,
             ref auth_check_cmd_template,
@@ -1113,6 +1113,8 @@ fn compare_command_parses_run_dirs_manifest_and_format() {
         ".stateful_bench/runs/dev-stateful-remainder",
         "--no-state-run-dir",
         ".stateful_bench/runs/dev-no-state",
+        "--awareness-run-dir",
+        ".stateful_bench/runs/dev-awareness",
         "--manifest",
         ".stateful_bench/pairs/dev-30.jsonl",
         "--max-pairs",
@@ -1129,6 +1131,7 @@ fn compare_command_parses_run_dirs_manifest_and_format() {
         Command::Compare {
             ref stateful_run_dir,
             ref no_state_run_dir,
+            ref awareness_run_dir,
             ref manifest,
             max_pairs: Some(30),
             format: ReportFormat::Markdown,
@@ -1138,6 +1141,8 @@ fn compare_command_parses_run_dirs_manifest_and_format() {
             && stateful_run_dir[1].to_string_lossy() == ".stateful_bench/runs/dev-stateful-remainder"
             && no_state_run_dir.len() == 1
             && no_state_run_dir[0].to_string_lossy() == ".stateful_bench/runs/dev-no-state"
+            && awareness_run_dir.len() == 1
+            && awareness_run_dir[0].to_string_lossy() == ".stateful_bench/runs/dev-awareness"
             && manifest.to_string_lossy() == ".stateful_bench/pairs/dev-30.jsonl"
             && output.as_ref().is_some_and(|path| path.to_string_lossy() == ".stateful_bench/runs/dev-compare.md")
     ));

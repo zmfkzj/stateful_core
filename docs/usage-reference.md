@@ -131,16 +131,17 @@ report that the repo is not enabled.
 ## Server Lifecycle
 
 ```bash
-stateful server start
+stateful server start [--coordination-mode enforcement|awareness]
 stateful server status
 stateful server restart
 stateful server stop
 ```
 
 `stateful server start` starts the HTTP state server detached by default and
-prints join commands. Use `stateful server start --foreground` for a foreground
-compatibility form. Bare `stateful server` remains a foreground compatibility
-form.
+prints join commands. Coordination mode defaults to `enforcement`; `awareness`
+is the warn-only middle arm for overlap experiments. Use
+`stateful server start --foreground` for a foreground compatibility form. Bare
+`stateful server` remains a foreground compatibility form.
 
 ## LAN Runtime Sharing
 
@@ -244,6 +245,23 @@ later pending notifications. `stateful resume next` remains the
 durable recovery path for still-active claimable reservations. Reservation
 notifications and resume payloads include the stored request purpose.
 
+Human coordination commands:
+
+```bash
+stateful human observe <path> [--kind save] [--confidence high] [--source watcher:save] [--summary <text>]
+stateful human save-check <paths...>
+stateful reconcile ack --reservation-id <reservation_id> --resource <path> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon
+```
+
+`human observe` records an explicit human activity signal. `human save-check`
+returns advisory conflict warnings for the requested paths; the VS Code save
+gate uses the same check and warns instead of blocking the save. After a denial
+for unreconciled human writes, reread the file and use the active
+`state_reconcile_ack` / `state.reconcile.ack` tool with `reservation_id`, or an
+exposed runtime alias such as `stateful_reconcile_ack`, when available; otherwise
+use `stateful reconcile ack --reservation-id <reservation_id>` from the CLI
+before retrying an adopt/reapply write.
+
 ## CLI Overview
 
 Common commands:
@@ -256,6 +274,8 @@ Common commands:
 - `stateful server start|restart|status|stop|join`
 - `stateful status`, `stateful doctor`, `stateful current`, `stateful events`
 - `stateful reservation declare|request|claim|cancel`
+- `stateful human observe|save-check`
+- `stateful reconcile ack`
 - `stateful notifications poll`
 - `stateful resume next`
 - `stateful sandbox run ...`
@@ -419,10 +439,11 @@ never exposed.
 ## HTTP And Native Tool Surface
 
 The HTTP server exposes `/health`, `/v1/current`, `/v1/events`,
-`/v1/runtime/identity`, and POST endpoints for agent registration,
-heartbeats, reservation declaration, reservation request, reservation claim, reservation cancel,
-claims, activity observation/finalization, authorization, conflict checks,
-context rendering, reconciliation ack, notifications, resume, and outbox sync.
+`/v1/runtime/identity`, `/v1/human/observe`, `/v1/human/save-check`, and POST
+endpoints for agent registration, heartbeats, reservation declaration,
+reservation request, reservation claim, reservation cancel, claims, activity
+observation/finalization, authorization, conflict checks, context rendering,
+reconciliation ack, notifications, resume, and outbox sync.
 
 Integrations that expose native Stateful tools use agent-friendly tool names.
 Agent identity tools use native names directly; other tools map to dotted
@@ -440,6 +461,8 @@ protocol names:
 - `state_current_read` / `state.current.read`
 - `state_events_read` / `state.events.read`
 - `state_context_render` / `state.context.render`
+- `state_reconcile_ack` / `state.reconcile.ack` / exposed runtime aliases such
+  as `stateful_reconcile_ack`
 
 `state_context_render` is for planning/manual inspection. Routine write and
 denial recovery should use reservation, claim, resume, and the denial's direct
@@ -520,9 +543,15 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
 - `prepare-pairs` and `generate-fallback-preflight`: build eligible pair
   manifests.
 - `sample`: create deterministic stratified samples.
-- `run`: execute no-state or stateful paired-agent runs.
-- `report` and `compare`: summarize one run or compare stateful/no-state runs.
+- `run --mode no-state|awareness|stateful`: execute paired-agent runs; awareness
+  is the warn-only middle arm between no-state and enforcement.
+- `report`: summarize one run.
+- `compare`: compare stateful/no-state runs; pass `--awareness-run-dir` to add
+  awareness runs to the comparison.
 - `synthetic`: run the built-in synthetic coordination benchmark.
+- Forced-overlap scripts:
+  `crates/stateful-bench/scripts/overlap_manifest_generator.py`,
+  `overlap_omp_agent.py`, and `overlap_harness.py`.
 - `denovo`: wrap AweAgent DeNovoSWE extract/evaluation workflows and run the
   official AweAgent agent recipe, a host Codex CLI adapter, or an OMP CLI adapter
   while recording `stateful`, `subagent`, and `running_time_ms` comparison axes.
@@ -540,9 +569,16 @@ the CLI's default remains compatible with historical behavior. See
 and [DeNovoSWE Benchmark Commands](denovo-benchmark-commands.md) for reusable
 command lines.
 
-For ProgramBench, scored runs require Linux `amd64` Docker support and official
-`programbench eval`; see [ProgramBench Benchmark Guide](programbench-benchmark-guide.md).
+For ProgramBench, scored runs require Linux `amd64` Docker support, Python
+>=3.10, and official `programbench eval`; see
+[ProgramBench Benchmark Guide](programbench-benchmark-guide.md). If PyPI does
+not provide a usable `programbench` package for your interpreter, install the
+upstream `facebookresearch/ProgramBench` source.
 
+Checked-in summaries live under `docs/benchmarks/`. The 2026-07-03
+forced-overlap result verifies three-arm plumbing without a differentiated
+safety outcome; the 2026-07-03 ProgramBench note records completed inference
+runs and the macOS arm64 official-eval blocker, not a quality comparison.
 Benchmark artifacts live under `.stateful_bench/` and are intentionally ignored.
 
 ## Versioning And Reclaims

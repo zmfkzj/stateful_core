@@ -114,6 +114,7 @@ pub fn run_nested_codex_benchmark_sandbox_in_repo(
     let mut denied_write_targets = Vec::new();
     match classify_sandbox_authorize_response(&nested_paths.write_dir_relative, response)? {
         SandboxAuthorizeDecision::Allow => allowed_write_targets.push(authorization_path),
+        SandboxAuthorizeDecision::Warn(_) => allowed_write_targets.push(authorization_path),
         SandboxAuthorizeDecision::Deny(body) => {
             denied_write_targets.push(serde_json::json!({
                 "path": sandbox_write_dir_display_path(&nested_paths.write_dir_relative),
@@ -152,6 +153,7 @@ pub fn run_nested_codex_benchmark_sandbox_in_repo(
         stderr: result.stderr,
         allowed_write_targets,
         denied_write_targets: Vec::new(),
+        warnings: Vec::new(),
     })
 }
 

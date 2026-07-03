@@ -1,7 +1,12 @@
 use rusqlite::Connection;
 use serde_json::json;
-use stateful_core::{AuthorizationInput, CurrentEvidenceKind, CurrentItemKind, DecisionKind};
-use stateful_store::{Event, OutboxEntry, ReservationRequestInput, Store, StoreError};
+use stateful_core::{
+    AuthorizationInput, CurrentEvidenceKind, CurrentItemKind, DecisionKind, ReconciliationDecision,
+};
+use stateful_store::{
+    Event, HumanObservationConfidence, HumanObservationInput, HumanObservationKind, OutboxEntry,
+    ReconciliationAckInput, ReservationRequestInput, Store, StoreError,
+};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration as StdDuration;
@@ -454,6 +459,278 @@ fn intent_declarations_allow_edit_and_artifact_scopes_to_coexist() {
             .iter()
             .any(|item| item.resource == "tmp/test-suite/"
                 && item.purpose == "Run the workspace test suite.")
+    );
+}
+
+#[test]
+fn write_fences_conflict_release_and_render_live_context() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    let paths = vec!["src/auth.ts".to_string()];
+
+    store
+        .acquire_write_fences("s1", "w1", &paths, "write_file")
+        .expect("first fence should acquire");
+    store
+        .acquire_write_fences("s1", "w1", &paths, "write_file")
+        .expect("same owner should refresh fence");
+
+    let conflict = store
+        .acquire_write_fences("s2", "w1", &paths, "write_file")
+        .expect_err("different owner should conflict");
+    assert!(matches!(
+        conflict,
+        StoreError::WriteFenceConflict { path, owner_agent_id }
+            if path == "src/auth.ts" && owner_agent_id == "s1"
+    ));
+    assert_eq!(
+        store
+            .active_write_fence_owner("w1", "src/auth.ts")
+            .expect("owner should load"),
+        Some("s1".to_string())
+    );
+    let windows = store
+        .fence_windows_for_path("w1", "src/auth.ts", "1970-01-01T00:00:00Z")
+        .expect("fence windows should load");
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].0, "s1");
+    assert!(windows[0].2.is_none());
+
+    let live = store
+        .live_current_state(Some("src/auth.ts"))
+        .expect("live current state should load");
+    assert!(live.items.iter().any(|item| {
+        item.kind == CurrentItemKind::Claim
+            && item.severity == stateful_core::CurrentSeverity::Warn
+            && item.resource == "src/auth.ts"
+            && item.summary.contains("write in flight")
+    }));
+
+    assert_eq!(
+        store
+            .release_write_fences("s1", "w1", "src/auth.ts")
+            .expect("fence should release"),
+        1
+    );
+    let windows = store
+        .fence_windows_for_path("w1", "src/auth.ts", "1970-01-01T00:00:00Z")
+        .expect("fence windows should load");
+    assert_eq!(windows.len(), 1);
+    assert!(windows[0].2.is_some());
+
+    store
+        .acquire_write_fences("s2", "w1", &paths, "write_file")
+        .expect("second owner should acquire after release");
+}
+
+fn high_confidence_human_save(path: &str) -> HumanObservationInput {
+    HumanObservationInput {
+        workspace_id: "w1".to_string(),
+        relative_path: path.to_string(),
+        kind: HumanObservationKind::Save,
+        confidence: HumanObservationConfidence::High,
+        source: "watcher:save".to_string(),
+        observed_at: "2026-05-31T00:00:00Z".to_string(),
+        summary: "Human saved the file outside Stateful.".to_string(),
+    }
+}
+
+#[test]
+fn human_save_observation_is_listed_as_unreconciled_outside_fence_windows() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+
+    let observation_id = store
+        .record_human_observation(high_confidence_human_save("src/auth.ts"))
+        .expect("human observation should record");
+
+    let observations = store
+        .unreconciled_human_observations("w1", &["src/auth.ts".to_string()])
+        .expect("unreconciled human observations should load");
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].observation_id, observation_id);
+    assert_eq!(observations[0].relative_path, "src/auth.ts");
+    assert_eq!(observations[0].kind, HumanObservationKind::Save);
+    assert_eq!(observations[0].confidence, HumanObservationConfidence::High);
+}
+
+#[test]
+fn human_observation_inside_agent_fence_window_does_not_block_reconciliation() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    store
+        .acquire_write_fences("s1", "w1", &["src/generated.ts".to_string()], "write_file")
+        .expect("agent write fence should acquire");
+
+    let mut observation = high_confidence_human_save("src/generated.ts");
+    observation.observed_at = test_timestamp(OffsetDateTime::now_utc());
+    store
+        .record_human_observation(observation)
+        .expect("fenced human observation should record");
+
+    let unreconciled_paths = store
+        .unreconciled_human_write_paths("w1", &["src/generated.ts".to_string()])
+        .expect("unreconciled paths should load");
+    assert_eq!(
+        unreconciled_paths,
+        Vec::<String>::new(),
+        "human saves during an agent fence window are attributed to that agent write"
+    );
+}
+
+#[test]
+fn human_observation_immediately_after_released_fence_is_agent_attributed() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    store
+        .acquire_write_fences("s1", "w1", &["src/generated.ts".to_string()], "write_file")
+        .expect("agent write fence should acquire");
+    store
+        .release_write_fences("s1", "w1", "src/generated.ts")
+        .expect("agent write fence should release");
+
+    let mut observation = high_confidence_human_save("src/generated.ts");
+    observation.observed_at = test_timestamp(OffsetDateTime::now_utc());
+    store
+        .record_human_observation(observation)
+        .expect("fenced human observation should record");
+
+    let unreconciled_paths = store
+        .unreconciled_human_write_paths("w1", &["src/generated.ts".to_string()])
+        .expect("unreconciled paths should load");
+    assert_eq!(
+        unreconciled_paths,
+        Vec::<String>::new(),
+        "save notifications can arrive just after the agent releases its write fence"
+    );
+}
+
+#[test]
+fn reconciliation_ack_clears_adopt_and_reapply_but_not_ask_user() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    store
+        .append(
+            Event::reservation_declared(
+                "s1",
+                "w1",
+                "Review human edits before continuing.",
+                ["src/adopt.ts", "src/reapply.ts", "src/question.ts"],
+            )
+            .with_event_id("reservation-human-1"),
+        )
+        .expect("reservation should append");
+    for path in ["src/adopt.ts", "src/reapply.ts", "src/question.ts"] {
+        store
+            .record_human_observation(high_confidence_human_save(path))
+            .expect("human observation should record");
+    }
+
+    assert_eq!(
+        store
+            .acknowledge_human_reconciliation(ReconciliationAckInput {
+                agent_id: "s1".to_string(),
+                workspace_id: "w1".to_string(),
+                reservation_id: Some("reservation-human-1".to_string()),
+                decision: ReconciliationDecision::Adopt,
+                files_reread: vec!["src/adopt.ts".to_string()],
+                human_change_summary: "Adopted the human auth edit.".to_string(),
+            })
+            .expect("adopt ack should succeed"),
+        1
+    );
+    assert_eq!(
+        store
+            .acknowledge_human_reconciliation(ReconciliationAckInput {
+                agent_id: "s1".to_string(),
+                workspace_id: "w1".to_string(),
+                reservation_id: Some("reservation-human-1".to_string()),
+                decision: ReconciliationDecision::Reapply,
+                files_reread: vec!["src/reapply.ts".to_string()],
+                human_change_summary: "Reapplied the intended change.".to_string(),
+            })
+            .expect("reapply ack should succeed"),
+        1
+    );
+    assert_eq!(
+        store
+            .acknowledge_human_reconciliation(ReconciliationAckInput {
+                agent_id: "s1".to_string(),
+                workspace_id: "w1".to_string(),
+                reservation_id: Some("reservation-human-1".to_string()),
+                decision: ReconciliationDecision::AskUser,
+                files_reread: vec!["src/question.ts".to_string()],
+                human_change_summary: "Need a user choice before continuing.".to_string(),
+            })
+            .expect("ask_user ack should succeed"),
+        0
+    );
+
+    let remaining_paths = store
+        .unreconciled_human_write_paths(
+            "w1",
+            &[
+                "src/adopt.ts".to_string(),
+                "src/reapply.ts".to_string(),
+                "src/question.ts".to_string(),
+            ],
+        )
+        .expect("remaining unreconciled paths should load");
+    assert_eq!(remaining_paths, vec!["src/question.ts".to_string()]);
+}
+
+#[test]
+fn write_fences_are_acquired_all_or_nothing() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    store
+        .acquire_write_fences("s1", "w1", &["src/a.ts".to_string()], "write_file")
+        .expect("existing fence should acquire");
+
+    let result = store.acquire_write_fences(
+        "s2",
+        "w1",
+        &["src/b.ts".to_string(), "src/a.ts".to_string()],
+        "write_file",
+    );
+    assert!(matches!(
+        result,
+        Err(StoreError::WriteFenceConflict { path, .. }) if path == "src/a.ts"
+    ));
+    assert_eq!(
+        store
+            .active_write_fence_owner("w1", "src/b.ts")
+            .expect("owner should load"),
+        None
+    );
+}
+
+#[test]
+fn write_fences_release_by_session_and_expire() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    let paths = vec!["src/a.ts".to_string(), "src/b.ts".to_string()];
+    store
+        .acquire_write_fences("s1", "w1", &paths, "write_file")
+        .expect("fences should acquire");
+
+    assert_eq!(
+        store
+            .release_session_write_fences("s1", "w1")
+            .expect("session fences should release"),
+        2
+    );
+    assert_eq!(
+        store
+            .active_write_fence_owner("w1", "src/a.ts")
+            .expect("owner should load"),
+        None
+    );
+
+    store
+        .acquire_write_fences("s1", "w1", &paths, "write_file")
+        .expect("fences should acquire again");
+    store
+        .expire_stale_at("9999-01-01T00:00:00Z")
+        .expect("future expiry should release stale fences");
+    assert_eq!(
+        store
+            .active_write_fence_owner("w1", "src/a.ts")
+            .expect("owner should load"),
+        None
     );
 }
 
@@ -968,17 +1245,18 @@ fn migration_removes_legacy_coordination_rows_without_required_purpose() {
 fn fresh_schema_omits_dead_coordination_tables() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
-    for table in [
-        "conflicts",
-        "overrides",
-        "reconciliations",
-        "human_observations",
-    ] {
+    for table in ["conflicts", "overrides", "reconciliations"] {
         assert!(
             !store.has_table(table).expect("table check should run"),
             "dead table {table} should not exist in a fresh schema"
         );
     }
+    assert!(
+        store
+            .has_table("human_observations")
+            .expect("table check should run"),
+        "human_observations is the shipped human-write reconciliation table"
+    );
 }
 
 #[test]
@@ -1038,9 +1316,11 @@ fn migration_drops_dead_coordination_tables_from_legacy_db() {
     let dead_tables = query_ids(
         &conn,
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN
-            ('conflicts', 'overrides', 'reconciliations', 'human_observations')",
+            ('conflicts', 'overrides', 'reconciliations')",
     );
     assert_eq!(dead_tables, Vec::<String>::new());
+    let columns = query_columns(&conn, "human_observations");
+    assert!(columns.iter().any(|column| column == "relative_path"));
 }
 
 #[test]

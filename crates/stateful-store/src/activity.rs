@@ -92,6 +92,7 @@ impl Store {
     ) -> StoreResult<(u64, u64)> {
         self.cancel_session_waiters_inner(agent_id, workspace_id)?;
         let released = self.release_session_claims_inner(agent_id, workspace_id)?;
+        self.release_session_write_fences_inner(agent_id, workspace_id)?;
         let completed = self.complete_session_reservations_inner(agent_id, workspace_id)?;
         self.append_inner(&Event::activity_finalized(
             agent_id.to_string(),

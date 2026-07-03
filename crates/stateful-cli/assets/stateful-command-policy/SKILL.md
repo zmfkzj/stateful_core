@@ -13,6 +13,12 @@ This is the procedural manual for Stateful hooks. Rules decide when the skill ap
 - This skill owns procedure: exact native-tool flow, sandbox profile selection, denial recovery, and edge cases.
 - Hooks own enforcement: hook allow means proceed; hook deny or unavailable means stop and choose the documented alternative.
 
+## Coordination Modes
+
+- Run or start the server in enforcement mode by default: `stateful server --coordination-mode enforcement` or `stateful server start --coordination-mode enforcement`.
+- `--coordination-mode awareness` changes reservation/claim/conflict denials into warnings for coordination practice, not permission to ignore coordination. Review rendered context and reread the target before writing.
+- `unreconciled_human_write` still requires human-change reconciliation before overwrite in either mode.
+
 ## Default Write Flow
 
 1. For planning, inspect context once only when active coordination may affect the plan. When target paths are known, `state_context_render(mode="brief", resource="<target>")` is optional planning/manual inspection; use broad `state_current_read` only before targets are known or when assigning parallel work.
@@ -21,7 +27,7 @@ This is the procedural manual for Stateful hooks. Rules decide when the skill ap
 4. Keep paths narrow. Directory claims authorize only `write_directory`; exact file writes still need exact file reservation scope and a same-reservation claim.
 5. Re-read files immediately before native edits so hooks can send fresh `base_observations`. Native edits and write-target sandbox writes release authorized claims after the transaction; reacquire before another explicit write under the active reservation. If authorization returns `missing_base_observation`, `stale_target_observation`, or `stale_claim_observation`, reread/reconcile and retry with a fresh write.
 6. For hook denials, follow the denial's next action or `denial-recovery.md`; do not call `state_context_render` unless you need to revise the plan.
-7. Use active Stateful native tool names only when they appear in the tool list: `state_context_render`, `state_current_read`, `state_session_register`, `state_reservation_declare`, `state_claim_acquire`, `state_reservation_request`, `state_notifications_poll`, `state_resume_next`, and `state_reservation_claim`. If the active tool list exposes runtime-specific names, call the exact shown equivalent; if it does not expose a tool, choose the documented OMP lazy-resume/write-boundary path instead.
+7. Use active Stateful native tool names only when they appear in the tool list. Canonical allowlisted names include `state_session_register`, `state_session_heartbeat`, `state_reservation_declare`, `state_reservation_request`, `state_reservation_claim`, `state_reservation_cancel`, `state_claim_acquire`, `state_claim_release`, `state_activity_finalize`, `state_current_read`, `state_events_read`, `state_context_render`, `state_reconcile_ack` / `state.reconcile.ack`, `state_notifications_poll`, and `state_resume_next`. Runtime-specific names may be MCP-prefixed or shown as `state.reconcile_ack` / `stateful_reconcile_ack`; copy the exact active name. If a tool is absent, choose the documented OMP lazy-resume/write-boundary path instead.
 
 ## Support Files
 

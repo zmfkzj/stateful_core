@@ -84,25 +84,30 @@ Concretely:
   allocation belongs to the orchestrator or human, and integration belongs to
   Git. Cursor's flat self-coordination failure is the recorded warning for that
   misuse, not a reason to turn this system into a planner.
-- Human observation sensors are high-value target work: the most expensive
-  collision is an agent overwriting a human's uncommitted edit. They are not
-  shipped watcher or IDE save gates. Target sensor confidence remains tiered -
-  editor-open is low-confidence presence, a dirty buffer warns, a save/hash
-  observation updates freshness, an external write raises a stale warning - and
-  low-confidence signals warn rather than deny.
+- Human observation sensors are shipped as advisory CLI/HTTP and IDE-facing
+  safety input. `human save-check` warns before a human save overlaps active
+  claims or write fences, but the human remains in control. High-confidence
+  `human observe` writes (`save`, `change`, `delete`) raise
+  `HumanWriteObserved`; later agent writes stop until reconciliation records
+  `adopt` or `reapply`. Low-confidence presence/dirty signals warn rather than
+  deny.
 
-Shipped v1 still requires an active reservation scope plus a same-reservation
-claim before supported writes, as the [README](../../README.md) and
-[Implementation Contract](../implementation-contract.md) describe. This ADR
-records a narrative pivot; it does not demote shipped enforcement by itself.
-Reservation/blocking demotion is gated on implemented and verified safety rails:
-mandatory base observations across supported write paths and independent
-write-scale fences that protect simultaneous mutation boundaries. The machinery
-question is tested through the three-arm comparison in the
-[DeNovoSWE guide](../denovo-benchmark-guide.md): off versus awareness (render
-plus freshness warnings, no queue/denial) versus enforcement. If awareness holds
-enforcement's safety at lower waiting and complexity cost, machinery shrinks to
-thin fences; if enforcement is meaningfully safer, the fences stay with evidence.
+Shipped v1 now has two coordination modes. `enforcement` remains the default and
+requires active reservation scope plus same-reservation claim before supported
+writes, as the [README](../../README.md) and [Implementation Contract](../implementation-contract.md)
+describe. `awareness` is the presence-first comparison arm: broad reservation,
+scope, claim, phase, and active-claim conflicts warn instead of blocking, while
+thin data-safety edges still deny. Those edges include stale base or claim-time
+observations, unreconciled human writes, unsupported actions, and simultaneous
+same-file write fences. The machinery question is tested through the three-arm
+comparison in the [DeNovoSWE guide](../denovo-benchmark-guide.md): off versus
+awareness versus enforcement. If awareness holds enforcement's safety at lower
+waiting and complexity cost, default machinery can shrink to thin fences; if
+enforcement is meaningfully safer, the broader guardrail stays with evidence.
+
+Current evidence pointer: [2026-07-03 forced-overlap three-arm](../benchmarks/2026-07-03-forced-overlap-three-arm.md)
+exercises the no-state/awareness/enforcement plumbing, but produced no
+differentiated safety outcome. Status therefore stays Proposed.
 
 ## Consequences
 
@@ -120,14 +125,13 @@ Positive:
 Negative:
 
 - Advisory intent depends on agents reading and honoring rendered context;
-  overlap that information does not deter is absorbed by freshness stops and
-  merge-time work.
+  overlap that information does not deter is absorbed by freshness stops,
+  human-write reconciliation stops, write fences, and merge-time work.
 - Two concepts (intent records, write fences) replace one overloaded claim
-  concept, and docs and tests must keep shipped-versus-target boundaries
-  explicit during the transition.
-- Warn-only mode, mandatory base-observation coverage across all supported write
-  paths, independent write-scale fences, and sensor confidence tiers are new work
-  that must land and be verified before reservation/blocking demotion can ship.
+  concept, and docs and tests must keep mode-specific behavior explicit.
+- Awareness mode, base-observation coverage, write-scale fences, human
+  observation, and sensor confidence tiers are shipped surfaces now, but the
+  default-mode decision remains evidence-gated by benchmark and product data.
 
 ## Boundary Rule
 

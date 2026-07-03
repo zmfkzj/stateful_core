@@ -1357,6 +1357,19 @@ function state_reservation_claim(operation, ctx) {
         return { block: true, reason: decision.reason || "Blocked by user" };
       }
     }
+    if (decision.decision === "warn") {
+      if (typeof pi?.sendMessage === "function") {
+        pi.sendMessage(
+          {
+            customType: "stateful_coordination_warning",
+            content: decision.message,
+            display: true,
+          },
+          { deliverAs: "nextTurn" }
+        );
+      }
+      return;
+    }
     if (decision.decision === "block") {
       const editOperationId = rememberLazyEditOperation(event, ctx, decision);
       const writeOperationId = rememberLazyWriteOperation(event, ctx, decision);
