@@ -55,6 +55,7 @@ use process_find::{
 pub(crate) const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
 pub(crate) const STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV: &str = "STATEFUL_ALLOW_NESTED_SANDBOX_RUN";
 const SANDBOX_TMP_ROOT: &str = "/tmp/stateful";
+const DEFAULT_SANDBOX_RUN_TIMEOUT_SECONDS: u64 = 3600;
 #[cfg(unix)]
 const SIGKILL: i32 = 9;
 
@@ -262,6 +263,14 @@ pub(crate) fn sandbox_run_cli_exit_code(output: &SandboxRunOutput) -> Option<i32
         ("exited", None) => Some(1),
         _ => Some(1),
     }
+}
+
+fn sandbox_run_timeout_duration(timeout_seconds: Option<u64>) -> Duration {
+    Duration::from_secs(
+        timeout_seconds
+            .unwrap_or(DEFAULT_SANDBOX_RUN_TIMEOUT_SECONDS)
+            .max(1),
+    )
 }
 
 pub fn run_sandbox_in_repo(
@@ -554,7 +563,7 @@ pub fn run_sandbox_in_repo(
     };
 
     let cwd = resolve_sandbox_cwd(&repo_root)?;
-    let timeout = Duration::from_secs(request.timeout_seconds.unwrap_or(300).max(1));
+    let timeout = sandbox_run_timeout_duration(request.timeout_seconds);
     let result = (|| -> anyhow::Result<_> {
         match direct_command.as_ref() {
             Some(ValidatedSandboxDirectCommand::Git(words)) => {
@@ -4139,6 +4148,19 @@ mod tests {
 
         validate_sandbox_run_request_shape(&request)
             .expect("literal ps argument should not be treated as process inspection");
+    }
+
+    #[test]
+    fn sandbox_run_timeout_resolution_defaults_overrides_and_clamps_zero() {
+        assert_eq!(
+            sandbox_run_timeout_duration(None),
+            Duration::from_secs(3600)
+        );
+        assert_eq!(
+            sandbox_run_timeout_duration(Some(17)),
+            Duration::from_secs(17)
+        );
+        assert_eq!(sandbox_run_timeout_duration(Some(0)), Duration::from_secs(1));
     }
 
     fn sandbox_output(status: &'static str, exit_code: Option<i32>) -> SandboxRunOutput {
