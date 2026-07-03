@@ -19,6 +19,9 @@ pub(crate) fn reject_outer_shell_syntax(
                 '$' if chars.peek().is_some_and(|next| *next == '(') => {
                     return Err("Bash wrapper must not use command substitution".to_string());
                 }
+                '\\' if chars.peek().is_some_and(|next| *next == '\'') => {
+                    chars.next();
+                }
                 '\\' => {
                     return Err("Bash wrapper must not use shell escapes".to_string());
                 }
@@ -61,7 +64,8 @@ pub(crate) fn split_simple_command_words(command: &str) -> Result<Vec<String>, S
     let mut state = QuoteState::None;
     let mut in_word = false;
 
-    for ch in command.chars() {
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
         match state {
             QuoteState::None => match ch {
                 '\'' => {
@@ -70,6 +74,11 @@ pub(crate) fn split_simple_command_words(command: &str) -> Result<Vec<String>, S
                 }
                 '"' => {
                     state = QuoteState::Double;
+                    in_word = true;
+                }
+                '\\' if chars.peek().is_some_and(|next| *next == '\'') => {
+                    chars.next();
+                    current.push('\'');
                     in_word = true;
                 }
                 ch if ch.is_whitespace() => {

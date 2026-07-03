@@ -563,6 +563,25 @@ fn pre_tool_use_allows_canonical_sandbox_run_read_only() {
 }
 
 #[test]
+fn pre_tool_use_allows_shell_escaped_nested_command_quotes() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "agent_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs git --network disabled --command 'git commit -m '\\''docs: clarify methodology validation boundaries'\\'''")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
 fn pre_tool_use_allows_structured_process_find() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({

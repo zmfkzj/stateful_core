@@ -2297,11 +2297,46 @@ pub(crate) fn parse_git_profile_command(command: &str) -> Result<Vec<String>, St
         .map_err(|reason| format!("git profile requires a single git command: {reason}"))?;
     let words = split_simple_command_words(command)
         .map_err(|reason| format!("git profile requires a single git command: {reason}"))?;
+    let words = coalesce_git_commit_message_flag(words);
     if words.first().is_none_or(|word| word != "git") {
         return Err("git profile requires a single git command".to_string());
     }
     validate_git_profile_words(&words)?;
     Ok(words)
+}
+
+fn coalesce_git_commit_message_flag(words: Vec<String>) -> Vec<String> {
+    if words.get(1).map(String::as_str) != Some("commit") {
+        return words;
+    }
+
+    // ponytail: unquoted `-m msg path` is ambiguous; use `--` before pathspecs.
+    let mut coalesced = Vec::with_capacity(words.len());
+    let mut index = 0;
+    while index < words.len() {
+        let word = &words[index];
+        coalesced.push(word.clone());
+        if matches!(word.as_str(), "-m" | "--message")
+            && words.get(index + 1).is_some()
+            && words
+                .get(index + 2)
+                .is_some_and(|next| !next.starts_with('-'))
+        {
+            index += 1;
+            let mut message = words[index].clone();
+            while words
+                .get(index + 1)
+                .is_some_and(|next| !next.starts_with('-'))
+            {
+                index += 1;
+                message.push(' ');
+                message.push_str(&words[index]);
+            }
+            coalesced.push(message);
+        }
+        index += 1;
+    }
+    coalesced
 }
 
 fn validate_github_pr_profile_words(words: &[String]) -> Result<(), String> {
@@ -4012,6 +4047,24 @@ mod tests {
         assert_eq!(invocation.request.fs, SandboxFsProfile::ReadOnly);
         assert_eq!(invocation.request.network, SandboxNetworkPolicy::Disabled);
         assert_eq!(invocation.request.command, "printf ok");
+    }
+
+    #[test]
+    fn git_profile_commit_message_flag_consumes_unquoted_remainder() {
+        let words = parse_git_profile_command(
+            "git commit -m docs: clarify methodology validation boundaries",
+        )
+        .expect("git profile should parse commit message");
+
+        assert_eq!(
+            words,
+            vec![
+                "git",
+                "commit",
+                "-m",
+                "docs: clarify methodology validation boundaries",
+            ]
+        );
     }
 
     #[test]
