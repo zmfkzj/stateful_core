@@ -52,9 +52,9 @@ fn runtime_file_round_trips_server_discovery() {
     let temp_root = temp.path();
 
     let runtime = ServerRuntime::new("http://127.0.0.1:43873", "secret-token", "w1", 42);
-    write_runtime_file(&temp_root, &runtime).expect("runtime file should write");
+    write_runtime_file(temp_root, &runtime).expect("runtime file should write");
 
-    let discovered = discover_runtime(&temp_root).expect("runtime should be discoverable");
+    let discovered = discover_runtime(temp_root).expect("runtime should be discoverable");
 
     assert_eq!(discovered.base_url, "http://127.0.0.1:43873");
     assert_eq!(discovered.token, "secret-token");
@@ -114,11 +114,11 @@ fn cli_current_uses_local_runtime_when_global_paths_are_unavailable() {
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    write_runtime_file(&temp_root, &runtime).expect("runtime file should write");
+    write_runtime_file(temp_root, &runtime).expect("runtime file should write");
 
     let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
         .arg("current")
-        .current_dir(&temp_root)
+        .current_dir(temp_root)
         .env_clear()
         .output()
         .expect("stateful current should run");
@@ -139,7 +139,7 @@ fn runtime_files_are_owner_read_write_only() {
     let paths = GlobalPaths::new(temp_root.join("home"));
     let runtime = ServerRuntime::new("http://127.0.0.1:43875", "secret-token", "w1", 44);
 
-    write_runtime_file(&temp_root, &runtime).expect("repo runtime file should write");
+    write_runtime_file(temp_root, &runtime).expect("repo runtime file should write");
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let repo_mode = fs::metadata(temp_root.join(".stateful_core/runtime/server.json"))
@@ -235,7 +235,7 @@ fn cli_current_rejects_env_runtime_without_required_capabilities() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
         .arg("current")
-        .current_dir(&temp_root)
+        .current_dir(temp_root)
         .env_clear()
         .env("STATEFUL_SERVER_URL", format!("http://{addr}"))
         .env("STATEFUL_SERVER_TOKEN", "secret-token")
@@ -280,7 +280,7 @@ fn cli_current_accepts_env_runtime_with_required_capabilities() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
         .arg("current")
-        .current_dir(&temp_root)
+        .current_dir(temp_root)
         .env_clear()
         .env("STATEFUL_SERVER_URL", format!("http://{addr}"))
         .env("STATEFUL_SERVER_TOKEN", "secret-token")

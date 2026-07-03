@@ -22,7 +22,7 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
     let temp = tempfile::tempdir().expect("temp dir should create");
     let temp_root = temp.path();
     fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -70,7 +70,7 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
 fn sync_outbox_refuses_symlinked_outbox_directory() {
     let temp = temp_root("stateful-outbox-symlink-test");
     let temp_root = temp.path();
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     let victim_outbox = temp_root.join("victim-outbox");
     fs::create_dir_all(paths.home.clone()).expect("stateful dir should be creatable");
     fs::create_dir_all(&victim_outbox).expect("victim outbox should be creatable");
@@ -115,7 +115,7 @@ fn sync_outbox_refuses_symlinked_outbox_directory() {
 fn sync_outbox_refuses_symlinked_outbox_file() {
     let temp = temp_root("stateful-outbox-file-symlink-test");
     let temp_root = temp.path();
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     let victim_dir = temp_root.join("victim");
     fs::create_dir_all(paths.outbox_dir.clone()).expect("outbox dir should be creatable");
     fs::create_dir_all(&victim_dir).expect("victim dir should be creatable");
@@ -153,7 +153,7 @@ fn sync_outbox_refuses_symlinked_outbox_file() {
 fn sync_outbox_refuses_hard_linked_outbox_file() {
     let temp = temp_root("stateful-outbox-file-hardlink-test");
     let temp_root = temp.path();
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     let victim_dir = temp_root.join("victim");
     fs::create_dir_all(paths.outbox_dir.clone()).expect("outbox dir should be creatable");
     fs::create_dir_all(&victim_dir).expect("victim dir should be creatable");
@@ -186,7 +186,7 @@ fn sync_outbox_refuses_hard_linked_outbox_file() {
 fn sync_outbox_skips_malformed_lines_and_posts_valid_pending_records() {
     let temp = temp_root("stateful-outbox-malformed-line-test");
     let temp_root = temp.path();
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -223,7 +223,7 @@ fn sync_outbox_skips_malformed_lines_and_posts_valid_pending_records() {
 fn sync_outbox_recovers_stale_lock_before_wait_timeout() {
     let temp = temp_root("stateful-outbox-stale-lock-test");
     let temp_root = temp.path();
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     fs::create_dir_all(paths.outbox_dir.join(".lock")).expect("stale lock dir should be creatable");
     let heartbeat = paths.outbox_dir.join(".lock/heartbeat");
     fs::write(&heartbeat, "stale\n").expect("stale heartbeat should write");
@@ -259,7 +259,7 @@ fn sync_outbox_command_discovers_global_runtime_file() {
     let temp = tempfile::tempdir().expect("temp dir should create");
     let temp_root = temp.path();
     fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -284,7 +284,7 @@ fn sync_outbox_command_discovers_global_runtime_file() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
         .arg("sync-outbox")
-        .current_dir(&temp_root)
+        .current_dir(temp_root)
         .env_clear()
         .env("STATEFUL_HOME", &paths.home)
         .output()
@@ -310,7 +310,7 @@ fn sync_outbox_command_discovers_global_runtime_file() {
 fn sync_outbox_preserves_records_queued_while_file_is_in_flight() {
     let temp = temp_root("stateful-outbox-race-test");
     let temp_root = temp.path();
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -348,7 +348,7 @@ fn sync_outbox_preserves_records_queued_while_file_is_in_flight() {
 fn sync_outbox_requeues_only_unsent_records_after_failure() {
     let temp = temp_root("stateful-outbox-partial-failure-test");
     let temp_root = temp.path();
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -394,7 +394,7 @@ fn sync_outbox_requeues_only_unsent_records_after_failure() {
 fn sync_outbox_recovers_stranded_claimed_files() {
     let temp = temp_root("stateful-outbox-stranded-claim-test");
     let temp_root = temp.path();
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -445,7 +445,7 @@ fn sync_outbox_recovers_stranded_claimed_files() {
 fn sync_outbox_does_not_trust_symlinked_active_claim_marker() {
     let temp = temp_root("stateful-outbox-symlink-active-claim-test");
     let temp_root = temp.path();
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -498,7 +498,7 @@ fn sync_outbox_does_not_trust_symlinked_active_claim_marker() {
 fn sync_outbox_does_not_let_fake_active_claim_block_base_file() {
     let temp = temp_root("stateful-outbox-fake-active-claim-test");
     let temp_root = temp.path();
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -539,7 +539,7 @@ fn sync_outbox_does_not_let_fake_active_claim_block_base_file() {
 fn sync_outbox_does_not_trust_symlinked_lock_heartbeat() {
     let temp = temp_root("stateful-outbox-symlink-lock-heartbeat-test");
     let temp_root = temp.path();
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     fs::create_dir_all(paths.outbox_dir.join(".lock")).expect("lock dir should be creatable");
     let fresh_target = temp_root.join("fresh-heartbeat");
     fs::write(&fresh_target, "fresh\n").expect("fresh heartbeat target should write");
@@ -580,7 +580,7 @@ fn sync_outbox_does_not_trust_symlinked_lock_heartbeat() {
 fn sync_outbox_does_not_trust_symlinked_lock_directory() {
     let temp = temp_root("stateful-outbox-symlink-lock-dir-test");
     let temp_root = temp.path();
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     fs::create_dir_all(paths.outbox_dir.join("fake-lock"))
         .expect("fake lock dir should be creatable");
     fs::write(paths.outbox_dir.join("fake-lock/heartbeat"), "fresh\n")
@@ -621,7 +621,7 @@ fn sync_outbox_does_not_trust_symlinked_lock_directory() {
 fn sync_outbox_deduplicates_claimed_records_already_merged_into_base() {
     let temp = temp_root("stateful-outbox-duplicate-merge-test");
     let temp_root = temp.path();
-    let paths = paths_for_temp_root(&temp_root);
+    let paths = paths_for_temp_root(temp_root);
     fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");

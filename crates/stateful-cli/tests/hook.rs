@@ -1675,7 +1675,7 @@ fn pre_tool_use_in_disabled_repo_noops_without_runtime() {
     }"#;
 
     let outcome =
-        handle_pre_tool_use_in_repo(input, &temp_root).expect("disabled repo should no-op");
+        handle_pre_tool_use_in_repo(input, temp_root).expect("disabled repo should no-op");
 
     assert_eq!(outcome, HookOutcome::Allow);
     assert!(
@@ -3868,7 +3868,7 @@ fn pre_tool_use_edit_relative_path_is_resolved_from_payload_cwd() {
     .to_string();
 
     let output = run_hook_subprocess_from(
-        &temp_root,
+        temp_root,
         &paths,
         &["hook", "codex", "pre-tool-use"],
         &input,
@@ -5111,7 +5111,7 @@ fn post_tool_use_in_disabled_repo_noops_without_outbox() {
       "tool_input": {"command": "rg auth src"}
     }"#;
 
-    handle_post_tool_use_in_repo(input, &temp_root).expect("disabled repo should no-op");
+    handle_post_tool_use_in_repo(input, temp_root).expect("disabled repo should no-op");
 
     assert!(!temp_root.join(".stateful_core/outbox/s1.jsonl").exists());
 }
