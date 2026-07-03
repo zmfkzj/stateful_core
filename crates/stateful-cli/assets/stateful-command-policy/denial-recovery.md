@@ -43,7 +43,7 @@ Do not wrap `stateful sandbox run` in arbitrary Bash/eval in OMP; only the built
 Use external only when the command is outside the repo or needs external OS capabilities.
 
 - Codex: `sandbox run --fs external --purpose ... --command ...`.
-- OMP: built-in Bash with strict trusted `stateful sandbox run --fs external ...`; write/create/write-dir/socket/signal scope and repo-external native `edit`/`write` file targets prompt unless OMP auto-approval is enabled.
+- OMP: built-in Bash with strict trusted `stateful sandbox run --fs external ...`; write/create/write-dir/socket/signal scope and repo-external native `edit`/`write` file targets auto-approve by default through `stateful.autoApprove: true` and prompt only when `stateful.autoApprove: false` is configured.
 - Add absolute external targets, directories, sockets, or signal permission only when needed.
 - Repo-relative external write scopes require matching Stateful reservation and same-reservation claims.
 

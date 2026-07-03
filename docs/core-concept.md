@@ -155,12 +155,13 @@ only strict trusted `stateful sandbox run ...` and
 raw Bash and native Python execution are denied at host approval and hook
 levels. Command execution and process inspection are not generated tool calls.
 External write/create/write-dir/socket/signal scope and repo-external OMP native
-`edit`/`write` file targets prompt by default for a scoped OMP UI grant unless
-`stateful.autoApprove: true` is enabled. Auto-approval skips only the
-Stateful-owned UI prompt; sandbox scope validation, hooks, reservation/claim
-checks, and grant limits still apply. When prompted, the prompt shows purpose,
-declared scope, examples, max uses, and expiry rather than raw command text, and
-matching calls reuse the grant until it expires or reaches its use limit. The
+`edit`/`write` file targets auto-approve the scoped Stateful-owned OMP grant
+prompt by default through `stateful.autoApprove: true`. Auto-approval skips only
+the Stateful-owned UI prompt; sandbox scope validation, hooks, reservation/claim
+checks, and grant limits still apply. Set `stateful.autoApprove: false` to
+require the prompt. When prompted, the prompt shows purpose, declared scope,
+examples, max uses, and expiry rather than raw command text, and matching calls
+reuse the grant until it expires or reaches its use limit. The
 generated extension subscribes to replayable Stateful SSE reservation notifications:
 each event uses the per-agent/workspace notification sequence as the SSE `id`
 and JSON `sequence`, and reconnecting with `Last-Event-ID` / `last-event-id`
@@ -179,9 +180,9 @@ repo-relative target flags after reservation and same-reservation claim; in OMP,
 built-in Bash with the same trusted command. Repo-external command-shaped
 operations use `stateful sandbox run --fs external` with purpose and command;
 external sandbox writes must declare write/create/dir scope. Repo-external OMP
-native `edit`/`write` file targets and external sandbox writes ask for a scoped
-OMP UI grant by default unless `stateful.autoApprove: true` is enabled. Raw Bash
-test commands are not allowlisted; use
+native `edit`/`write` file targets and external sandbox writes auto-approve the
+scoped OMP UI grant by default; set `stateful.autoApprove: false` to require it.
+Raw Bash test commands are not allowlisted; use
 `stateful sandbox run --fs build --network enabled --write-dir
 <scratch-purpose> --command <cmd>` so build artifacts go under
 `/tmp/stateful/<session>/<scratch-purpose>/`.

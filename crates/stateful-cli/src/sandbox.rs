@@ -3955,17 +3955,10 @@ mod tests {
 
     #[test]
     fn sandbox_run_sequence_quotes_single_quotes_inside_steps() {
-        let command = resolve_sandbox_run_command(
-            None,
-            vec!["printf 'ok'".to_string()],
-            None,
-        )
-        .expect("sequence should resolve");
+        let command = resolve_sandbox_run_command(None, vec!["printf 'ok'".to_string()], None)
+            .expect("sequence should resolve");
 
-        assert_eq!(
-            command,
-            "'/bin/sh' -c 'set -e\nprintf '\\''ok'\\''\n'"
-        );
+        assert_eq!(command, "'/bin/sh' -c 'set -e\nprintf '\\''ok'\\''\n'");
     }
 
     #[test]
@@ -4160,7 +4153,10 @@ mod tests {
             sandbox_run_timeout_duration(Some(17)),
             Duration::from_secs(17)
         );
-        assert_eq!(sandbox_run_timeout_duration(Some(0)), Duration::from_secs(1));
+        assert_eq!(
+            sandbox_run_timeout_duration(Some(0)),
+            Duration::from_secs(1)
+        );
     }
 
     fn sandbox_output(status: &'static str, exit_code: Option<i32>) -> SandboxRunOutput {

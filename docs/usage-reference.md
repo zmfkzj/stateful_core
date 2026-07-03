@@ -63,7 +63,7 @@ The target OMP profile keys are:
 
 ```yaml
 tools.approvalMode: yolo
-stateful.autoApprove: false
+stateful.autoApprove: true
 bash.enabled: true
 eval.py: false
 eval.js: false
@@ -90,13 +90,13 @@ Installed OMP support:
 - Built-in Bash for strict trusted `stateful sandbox process find ...` process
   inspection commands.
 - External write/create/write-dir/socket/signal scope and repo-external OMP
-  native `edit`/`write` file targets ask for a scoped OMP UI grant by default;
-  `stateful.autoApprove: true` skips only that Stateful-owned prompt while
+  native `edit`/`write` file targets auto-approve the scoped Stateful-owned
+  OMP grant prompt by default through `stateful.autoApprove: true`, while
   sandbox scope validation, hooks, reservation/claim checks, and grant limits
-  still apply. The approval prompt omits raw command text and grants matching
-  calls keyed by purpose plus write/create/write-dir/socket/signal/network scope
-  until expiry or max uses; defaults are 5 uses and 600 seconds. When
-  auto-approval is enabled, no prompt is shown.
+  still apply. Set `stateful.autoApprove: false` to require the prompt. The
+  approval prompt omits raw command text and grants matching calls keyed by
+  purpose plus write/create/write-dir/socket/signal/network scope until expiry
+  or max uses; defaults are 5 uses and 600 seconds.
 - `lazy_bash_resume` for a blocked external Bash command that could not prompt
   for its scoped grant on the original tool call. The live extension stores the
   trusted `stateful sandbox run --fs external ...` command, asks for the same

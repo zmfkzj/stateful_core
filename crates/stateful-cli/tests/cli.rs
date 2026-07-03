@@ -607,7 +607,9 @@ fn parses_sandbox_run_external_profile() {
             assert!(!stream_events);
             assert_eq!(
                 command,
-                Some("install -m 755 target/release/stateful /opt/stateful/bin/stateful".to_string())
+                Some(
+                    "install -m 755 target/release/stateful /opt/stateful/bin/stateful".to_string()
+                )
             );
             assert!(sequences.is_empty());
             assert_eq!(sequence_shell, None);

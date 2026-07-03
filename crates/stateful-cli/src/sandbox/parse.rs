@@ -252,7 +252,11 @@ pub(crate) fn resolve_sandbox_run_command(
         script.push('\n');
     }
 
-    Ok(format!("{} -c {}", shell_quote(&shell), shell_quote(&script)))
+    Ok(format!(
+        "{} -c {}",
+        shell_quote(&shell),
+        shell_quote(&script)
+    ))
 }
 
 pub(crate) fn parse_sandbox_process_find_bash_invocation(

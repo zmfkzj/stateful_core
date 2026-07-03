@@ -303,8 +303,8 @@ Initial policy should prefer advisory claims:
   `stateful sandbox process find ...` commands after Stateful preflight;
   arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution is
   denied at host approval and hook levels. Scoped external writes and repo-external
-  native `edit`/`write` file targets still ask for the Stateful OMP UI grant
-  unless auto-approved.
+  native `edit`/`write` file targets auto-approve the Stateful OMP UI grant by
+  default and ask only when `stateful.autoApprove: false` is configured.
 - directory reservation and directory claim authorize only `write_directory` for the
   exact directory resource; they do not authorize `write_file`, delete, rename,
   or move actions on child paths
@@ -587,8 +587,8 @@ Codex raw Bash -> deny; OMP built-in Bash -> allow only strict trusted
   `stateful sandbox run ...` and `stateful sandbox process find ...` commands
   after Stateful preflight; arbitrary raw OMP Bash and Python/JavaScript/JS/Ruby/Julia
   eval tools -> deny. Scoped external writes and repo-external native
-  `edit`/`write` file targets still ask for the Stateful OMP UI grant unless
-  auto-approved.
+  `edit`/`write` file targets auto-approve the Stateful OMP UI grant by default
+  and ask only when `stateful.autoApprove: false` is configured.
 delete action + non-exact file scope -> deny
 rename/move action + non-exact source or destination scope -> deny
 active write claim in hard conflict domain -> deny

@@ -1272,7 +1272,7 @@ fn ensure_omp_required_config(contents: String, update_existing: bool) -> anyhow
         &mut lines,
         "stateful",
         "autoApprove",
-        "false",
+        "true",
         update_existing,
     )?;
     ensure_omp_child_scalar(&mut lines, "eval", "py", "false", update_existing)?;
@@ -1644,7 +1644,6 @@ mod tests {
 
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
     }
-
 
     #[test]
     fn omp_extension_allows_sandbox_run_sequence_preflight() {

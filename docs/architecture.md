@@ -120,7 +120,7 @@ The prototype supports user-level installation with repo allowlist gating.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
 (`~/.omp/profiles/stateful/agent`) and ensures the target keys
-`tools.approvalMode: yolo`, `stateful.autoApprove: false`,
+`tools.approvalMode: yolo`, `stateful.autoApprove: true`,
 `bash.enabled: true`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
 and `eval.jl: false`. The installer removes `tools.approval` from the stateful
 profile because yolo mode delegates safety to
@@ -139,13 +139,13 @@ tools. Built-in Bash may run only strict trusted `stateful sandbox run ...` and
 `stateful sandbox process find ...` commands after Stateful preflight; command
 execution and process inspection are not generated tool calls. External
 write/create/write-dir/socket/signal scope and repo-external OMP native
-`edit`/`write` file targets ask for a scoped OMP UI grant by default;
-`stateful.autoApprove: true` skips only that Stateful-owned prompt while sandbox
-scope validation, hooks, reservation/claim checks, and grant limits still apply.
-The grant prompt shows purpose, declared scope, network mode, examples, max
-uses, and expiry instead of raw command text, and matching calls can reuse it
-until the limit is reached. When auto-approval is enabled, no prompt is shown. Raw Bash and
-Python/JavaScript/JS/Ruby/Julia
+`edit`/`write` file targets auto-approve the scoped Stateful-owned OMP grant
+prompt by default through `stateful.autoApprove: true`, while sandbox scope
+validation, hooks, reservation/claim checks, and grant limits still apply. Set
+`stateful.autoApprove: false` to require the prompt. The grant prompt shows
+purpose, declared scope, network mode, examples, max uses, and expiry instead
+of raw command text, and matching calls can reuse it until the limit is reached.
+Raw Bash and Python/JavaScript/JS/Ruby/Julia
 eval-tool calls
 are blocked even if their command text
 invokes `stateful sandbox run`. The OMP
@@ -204,13 +204,13 @@ For OMP, built-in Bash owns sandbox command execution and process inspection
 only when the command is a single trusted `stateful sandbox run ...` or
 `stateful sandbox process find ...` invocation that passes Stateful preflight.
 External write/create/write-dir/socket/signal scope and repo-external OMP native
-`edit`/`write` file targets ask for a scoped OMP UI grant by default;
-`stateful.autoApprove: true` skips only that Stateful-owned prompt while sandbox
-scope validation, hooks, reservation/claim checks, and grant limits still apply.
-The grant prompt shows purpose, declared scope, examples, max uses, and expiry
-rather than raw command text, and matching calls reuse the grant until it
-expires or reaches its use limit. When auto-approval is enabled, no prompt is
-shown.
+`edit`/`write` file targets auto-approve the scoped Stateful-owned OMP grant
+prompt by default through `stateful.autoApprove: true`, while sandbox scope
+validation, hooks, reservation/claim checks, and grant limits still apply. Set
+`stateful.autoApprove: false` to require the prompt. The grant prompt shows
+purpose, declared scope, examples, max uses, and expiry rather than raw command
+text, and matching calls reuse the grant until it expires or reaches its use
+limit. When auto-approval is enabled, no prompt is shown.
 Other stateful allows translate to OMP allow. Stateful deny or unavailable server
 translates to a hard block, even when OMP yolo metadata is present.
 
@@ -275,10 +275,10 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   find ...` commands after Stateful preflight; arbitrary raw Bash and the
   Python/JavaScript/JS/Ruby/Julia eval tools remain denied at host approval and
   hook levels. Scoped external writes and repo-external OMP native `edit`/`write`
-  file targets still ask for a Stateful OMP UI grant by default;
-  `stateful.autoApprove: true` skips only that Stateful-owned prompt while
-  sandbox scope validation, hooks, reservation/claim checks, and grant limits
-  still apply.
+  file targets auto-approve the scoped Stateful-owned OMP grant prompt by default
+  through `stateful.autoApprove: true`, while sandbox scope validation, hooks,
+  reservation/claim checks, and grant limits still apply. Set
+  `stateful.autoApprove: false` to require the prompt.
   Hook-mediated command execution outside OMP built-in Bash must be a single
   strict invocation of the trusted absolute `stateful` binary. Read-only
   command-shaped inspection uses `--fs read-only --network disabled`; Codex
@@ -377,8 +377,8 @@ classification, so `functions.bash` is Bash,
   arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution
   are denied at host approval and hook levels. External write/create/write-dir,
   socket, or signal scope and repo-external OMP native `edit`/`write` file
-  targets ask for a scoped OMP UI grant by default; `stateful.autoApprove: true`
-  skips only that Stateful-owned prompt while sandbox scope validation, hooks,
+  targets auto-approve the scoped Stateful-owned OMP grant prompt by default
+  through `stateful.autoApprove: true`, while sandbox scope validation, hooks,
   reservation/claim checks, and grant limits still apply.
   Ordinary read work should use native read/search/diff tools when available.
   Read-only command-shaped inspection that genuinely needs a shell uses
