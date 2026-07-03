@@ -541,6 +541,7 @@ def run_main(
 
     archive_error = getattr(args, "archive_error", None)
     smoke_compile_error = getattr(args, "smoke_compile_error", None)
+    workspace_copy_error = getattr(args, "workspace_copy_error", None)
     submission_path = instance_dir / "submission.tar.gz"
     try:
         submission_path = archive_workspace(args, instance_dir)
@@ -548,6 +549,9 @@ def run_main(
         archive_error = str(exc)
         if error is None:
             error = f"archive failed: {exc}"
+    if workspace_copy_error is not None and error is None:
+        exit_code = 1
+        error = f"workspace copy failed: {workspace_copy_error}"
     if smoke_compile_error is not None and error is None:
         exit_code = 1
         error = f"smoke compile failed: {smoke_compile_error}"
@@ -566,6 +570,8 @@ def run_main(
     }
     if archive_error is not None:
         metadata["archive_error"] = archive_error
+    if workspace_copy_error is not None:
+        metadata["workspace_copy_error"] = workspace_copy_error
     if smoke_compile_error is not None:
         metadata["smoke_compile_error"] = smoke_compile_error
     if cleanup_error is not None:

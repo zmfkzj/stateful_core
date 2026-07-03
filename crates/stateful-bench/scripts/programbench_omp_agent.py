@@ -188,6 +188,8 @@ def agent_docker_env(args, base_env: dict[str, str]) -> dict[str, str]:
         "XDG_CACHE_HOME": f"{home}/.cache",
         "XDG_CONFIG_HOME": f"{home}/.config",
     }
+    if getattr(args, "agent_docker_sandbox", "off") == "off":
+        env["STATEFUL_OMP_SANDBOX"] = "off"
     for key, value in base_env.items():
         if key in AGENT_DOCKER_ENV_ALLOWLIST or key.startswith(AGENT_DOCKER_ENV_PREFIXES):
             env[key] = docker_host_url(value) if key == "STATEFUL_SERVER_URL" else value
@@ -387,10 +389,14 @@ def run_agent_in_docker(args, prompt: str, airlock: str, base_env: dict[str, str
         finally:
             try:
                 copy_agent_workspace_to_airlock(args, airlock, agent_container_id)
+            except Exception as exc:  # noqa: BLE001 - preserve primary agent failure separately.
+                args.workspace_copy_error = str(exc)
+            else:
                 if hasattr(args, "condition_dir"):
-                    smoke_compile_airlock(airlock, args)
-            except Exception as exc:  # noqa: BLE001 - preserve submission for failed compile diagnostics.
-                args.smoke_compile_error = str(exc)
+                    try:
+                        smoke_compile_airlock(airlock, args)
+                    except Exception as exc:  # noqa: BLE001 - preserve submission for failed compile diagnostics.
+                        args.smoke_compile_error = str(exc)
     finally:
         remove_agent_docker_container(args, agent_container_id)
 
@@ -455,6 +461,7 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--agent-docker-omp-bin", default="omp")
     parser.add_argument("--agent-docker-stateful-binary", default="/usr/local/bin/stateful")
     parser.add_argument("--agent-docker-home", default="/home/stateful")
+    parser.add_argument("--agent-docker-sandbox", choices=["on", "off"], default="off")
     return parser.parse_args(argv)
 
 

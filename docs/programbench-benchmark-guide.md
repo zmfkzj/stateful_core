@@ -21,11 +21,15 @@ airlock's `.stateful` directory.
 With `programbench run --agent omp-cli --agent-docker-image <image>`, OMP runs
 inside a separate agent container instead of on the host. The image must include
 `omp` and `stateful`; defaults are `--agent-docker-omp-bin omp`,
-`--agent-docker-stateful-binary /usr/local/bin/stateful`, and
-`--agent-docker-home /home/stateful`. The adapter copies the target workspace
-into `/workspace`, runs Stateful install/enable and OMP through `docker exec`,
-copies `/workspace` back to the host airlock, then uses the existing target
-container smoke compile and archive flow.
+`--agent-docker-stateful-binary /usr/local/bin/stateful`,
+`--agent-docker-home /home/stateful`, and `--agent-docker-sandbox off`.
+The Docker container is the sandbox boundary, so the adapter sets
+`STATEFUL_OMP_SANDBOX=off` for the in-container `docker exec` by default. It
+copies the target workspace into `/workspace`, runs Stateful install/enable and
+OMP, copies `/workspace` back to the host airlock, then uses the existing target
+container smoke compile and archive flow. Copy-back failures are reported as
+`workspace_copy_error`; `smoke_compile_error` is reserved for target-container
+compile failures, and primary OMP exit errors stay primary.
 
 For OMP runs, the adapter mirrors DeNovoSWE auth seeding: it copies only the
 `openai-codex` OAuth provider credential from `OMP_AUTH_SOURCE_AGENT_DIR`,

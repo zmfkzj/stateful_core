@@ -53,6 +53,7 @@ fn programbench_metadata_schema_uses_required_instance_fields() {
         exit_code: None,
         error: None,
         archive_error: Some("archive failed".to_string()),
+        workspace_copy_error: None,
         subagent_used: None,
         token_usage: Some(token_usage),
     };
@@ -1279,6 +1280,152 @@ print(json.dumps({
     assert_eq!(observed["returncode"], 0);
     assert_eq!(observed["usage"]["input_tokens"], 11);
     assert_eq!(observed["usage"]["output_tokens"], 7);
+}
+
+#[test]
+fn programbench_omp_adapter_disables_nested_omp_sandbox_in_agent_docker() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import subprocess
+import types
+
+docker_calls = []
+
+def fake_run(command, **kwargs):
+    if command and command[0] == "docker":
+        docker_calls.append(command)
+        if command[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(command, 0, stdout="agent-container-id\n", stderr="")
+        if command[:2] == ["docker", "exec"] and "/opt/omp/bin/omp" in command:
+            return subprocess.CompletedProcess(command, 0, stdout='{"usage":{"input_tokens":1}}\n', stderr="")
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+mod.subprocess.run = fake_run
+mod.omp_auth_source_agent_dir = lambda env: None
+args = types.SimpleNamespace(
+    docker_bin="docker",
+    container_id="programbench-container",
+    omp_bin="host-omp",
+    stateful_binary="/host/stateful",
+    model="gpt-5.4-mini",
+    benchmark_max_turns=123,
+    timeout_seconds=456,
+    stateful=True,
+    subagent=False,
+    subagent_min_count=3,
+    airlock="/tmp/programbench-airlock",
+    agent_docker_image="stateful/omp-agent:test",
+    agent_docker_omp_bin="/opt/omp/bin/omp",
+    agent_docker_stateful_binary="/opt/stateful/bin/stateful",
+    agent_docker_home="/home/bench-agent",
+)
+mod.run_agent(args, mod.prompt_for_args(args))
+print(json.dumps(docker_calls))
+"#,
+    );
+    let docker_calls: Vec<serde_json::Value> =
+        serde_json::from_str(&output).expect("docker calls should be JSON");
+
+    assert!(docker_calls.iter().any(|call| docker_call_execs(
+        call,
+        "agent-container-id",
+        &[
+            "/opt/stateful/bin/stateful",
+            "install",
+            "--agent",
+            "omp",
+            "--yes"
+        ],
+    )));
+    assert!(docker_calls.iter().any(|call| docker_call_execs(
+        call,
+        "agent-container-id",
+        &[
+            "/opt/stateful/bin/stateful",
+            "enable",
+            "--repo",
+            "/workspace"
+        ],
+    )));
+    assert!(docker_calls.iter().any(|call| {
+        docker_call_execs(
+            call,
+            "agent-container-id",
+            &["/opt/omp/bin/omp", "--cwd", "/workspace"],
+        ) && docker_call_contains_env(call, "STATEFUL_OMP_SANDBOX=off")
+    }));
+}
+
+#[test]
+fn programbench_omp_adapter_records_agent_docker_copy_back_error_separately() {
+    let output = run_python_adapter(
+        &programbench_omp_agent_path(),
+        r#"import json
+import subprocess
+import tempfile
+import types
+from pathlib import Path
+
+def fake_run(command, **kwargs):
+    if command and command[0] == "docker":
+        if command[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(command, 0, stdout="agent-container-id\n", stderr="")
+        if command[:2] == ["docker", "cp"] and command[2] == "agent-container-id:/workspace/.":
+            raise RuntimeError("copy denied from agent")
+        if command[:2] == ["docker", "exec"] and "/opt/omp/bin/omp" in command:
+            return subprocess.CompletedProcess(command, 137, stdout="", stderr="killed\n")
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+mod.subprocess.run = fake_run
+mod.omp_auth_source_agent_dir = lambda env: None
+
+with tempfile.TemporaryDirectory() as condition_dir:
+    args = types.SimpleNamespace(
+        condition_dir=condition_dir,
+        instance_id="owner__repo.abc123",
+        condition_id="stateful-on_subagent-off",
+        container_id="programbench-container",
+        docker_bin="docker",
+        omp_bin="host-omp",
+        stateful_binary="/host/stateful",
+        model="gpt-5.4-mini",
+        benchmark_max_turns=123,
+        timeout_seconds=456,
+        stateful=True,
+        subagent=False,
+        subagent_min_count=3,
+        agent_docker_image="stateful/omp-agent:test",
+        agent_docker_omp_bin="/opt/omp/bin/omp",
+        agent_docker_stateful_binary="/opt/stateful/bin/stateful",
+        agent_docker_home="/home/bench-agent",
+    )
+    exit_code = mod.run_main(
+        args,
+        agent_name="omp-cli",
+        exited_error_prefix="omp",
+        token_usage_from_output=mod.omp_token_usage_from_output,
+        run_agent_func=mod.run_agent,
+    )
+    metadata = json.loads((Path(condition_dir) / "owner__repo.abc123" / "instance.json").read_text())
+    observed = {
+        "exit_code": exit_code,
+        "metadata_exit_code": metadata.get("exit_code"),
+        "error": metadata.get("error"),
+        "workspace_copy_error": metadata.get("workspace_copy_error"),
+        "smoke_compile_error": metadata.get("smoke_compile_error"),
+    }
+print(json.dumps(observed))
+"#,
+    );
+    let observed: serde_json::Value =
+        serde_json::from_str(&output).expect("adapter observation should be JSON");
+
+    assert_eq!(observed["exit_code"], 137);
+    assert_eq!(observed["metadata_exit_code"], 137);
+    assert_eq!(observed["error"], "omp exited 137");
+    assert_eq!(observed["workspace_copy_error"], "copy denied from agent");
+    assert_eq!(observed["smoke_compile_error"], serde_json::Value::Null);
 }
 
 #[test]
@@ -2695,6 +2842,7 @@ fn instance_metadata(
         exit_code: Some(if error.is_some() { 1 } else { 0 }),
         error: error.map(str::to_string),
         archive_error: None,
+        workspace_copy_error: None,
         subagent_used,
         token_usage: Some(token_usage),
     }

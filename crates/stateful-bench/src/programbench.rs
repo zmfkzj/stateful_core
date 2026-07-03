@@ -238,6 +238,8 @@ pub struct ProgramBenchInstanceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_copy_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_used: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<ProgramBenchTokenUsage>,
