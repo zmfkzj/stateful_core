@@ -2720,28 +2720,6 @@ async def run_one_instance_async(
             )
 
 
-        if args.subagent == "on" and not subagent_usage["subagent_requirement_met"]:
-            patch_path.write_text("", encoding="utf-8")
-            orchestration_trace = capture_trace()
-            finish_command_record(orchestration_trace)
-            cleanup_stateful_repo_enable(workspace, stateful_repo_cleanup)
-            stateful_repo_cleanup = None
-            spawn_count = subagent_usage["native_subagent"]["subagent_spawn_count"]
-            return InstanceResult(
-                inst.id,
-                False,
-                None,
-                "subagent-requirement-failed",
-                (
-                    f"subagent:on requires at least {args.subagent_min_count} native "
-                    f"{args.cli_runtime.upper()} subagent spawns; observed {spawn_count}"
-                ),
-                None,
-                subagent_used=subagent_usage["subagent_used"],
-                subagent_usage=subagent_usage,
-                token_usage=token_usage,
-                orchestration_trace=orchestration_trace,
-            )
 
         patch = git_diff(workspace)
         patch_path.write_text(patch, encoding="utf-8")
