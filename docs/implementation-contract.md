@@ -288,10 +288,8 @@ policy classification: `functions.bash` follows Bash rules,
 `functions.ruby` / `functions.julia` follow eval-tool rules, and
 `functions.read` / `functions.search` follow native read/search rules.
 Codex raw Bash is denied by stateful hooks with sandbox guidance. Bash hook
-calls for repo-internal shell work are allowed only when the outer command is a
-single strict invocation of the trusted absolute `stateful` binary running
-`<absolute-stateful-binary> sandbox run ... --command <cmd>`. Ordinary read work
-should use agent-native read/search/diff tools when available. Read-only
+calls for repo-internal shell work use a single strict invocation of the trusted `stateful` binary running `stateful sandbox run ...` with either `--command <cmd>` or repeated `--sequence <cmd>` flags. `--sequence` is compiled into one sandbox-internal script; outer Bash wrappers with multiple commands, redirects, pipelines, substitutions, or environment assignments remain denied.
+Ordinary read work should use agent-native read/search/diff tools when available. Read-only
 command-shaped inspection uses `<absolute-stateful-binary> sandbox run --fs
 read-only --network disabled --command <cmd>`; the read-only profile rejects
 `--network enabled`. Command-shaped repo writes use `--fs write-targets` with
@@ -322,7 +320,7 @@ Local git operations use `<absolute-stateful-binary> sandbox run --fs git
 --network disabled --command 'git <args>'`; use `--network enabled` only for
 remote git operations. GitHub pull request list/view/status/create commands use
 `<absolute-stateful-binary> sandbox run --fs github-pr --network enabled --command
-'gh pr <list|view|status|create> ...'`; in OMP, use built-in Bash with the same trusted command. Use the
+'gh pr <list|view|status|create> ...'`; in OMP, use built-in Bash with the same trusted command. Both profiles reject `--sequence` because they intentionally validate one direct `git` or `gh pr` command. Use the
 GitHub connector instead when that connector is explicitly allowlisted for the repo.
 
 ## Decision Output

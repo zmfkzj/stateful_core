@@ -406,8 +406,8 @@ for Codex command-shaped shell execution, OMP built-in Bash for strict trusted
 and build-profile sandbox wrappers for tests.
 
 Native Stateful tools do not perform local command-shaped file writes.
-Hook-mediated shell execution uses `<absolute-stateful-binary> sandbox run ... --command <cmd>`;
-plain CLI-context usage outside hooks can use `stateful sandbox run`. The MVP
+Hook-mediated shell execution uses a single strict invocation of the trusted `stateful` binary running `stateful sandbox run ...` with either `--command <cmd>` or repeated `--sequence <cmd>` flags. `--sequence` is compiled into one sandbox-internal script; outer Bash wrappers with multiple commands, redirects, pipelines, substitutions, or environment assignments remain denied.
+Plain CLI-context usage outside hooks can use `stateful sandbox run`. The MVP
 ships `read-only`, `write-targets`, `build`, `git`, `external`, and `github-pr`
 profiles; `workspace` profiles are deferred and fail closed. `/dev/null` is
 writable in every sandbox profile so common shell and Git behavior works.

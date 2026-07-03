@@ -248,6 +248,8 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 | GitHub PR list/view/status/create | `stateful sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` |
 | Repo-external shell operation | `stateful sandbox run --fs external --purpose <purpose> --command <cmd>` for reads; add exact `--write-target`, `--create-target`, or `--write-dir` scopes for writes |
 
+Use repeated `--sequence <cmd>` instead of outer Bash `&&`/`;` when a sandboxed operation needs multiple setup steps. Stateful compiles the sequence into one sandbox-internal script, so the outer Bash call remains a single trusted `stateful sandbox run ...` command. Add `--sequence-shell /bin/zsh` only when the script needs a shell other than `/bin/sh`. The `git` and `github-pr` profiles reject `--sequence` because they validate one direct `git` or `gh pr` command.
+
 By default, `stateful sandbox run` passes the wrapped command's `stdout`,
 `stderr`, and exit code through unchanged. Add `--json` when automation needs the
 structured result envelope with `status`, `exit_code`, captured streams, and

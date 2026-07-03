@@ -5,7 +5,7 @@
 - If Stateful native tools are missing from the active OMP tool list, use `search_tool_bm25` once with a query such as `stateful state current read`, then call the activated runtime-specific tool names.
 - Never fall back to Bash for Stateful coordination.
 - OMP built-in Bash may run strict trusted `stateful sandbox run ...` and `stateful sandbox process find ...` commands: bare `stateful` is trusted only after session-start or per-tool preflight hash-verifies the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted. Arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied.
-- Use built-in Bash for sandboxed command execution via a single trusted `stateful sandbox run ...` command with the narrowest valid sandbox profile and any required Stateful reservation/claim preflight.
+- Use built-in Bash for sandboxed command execution via a single trusted `stateful sandbox run ...` command with either `--command <cmd>` or repeated `--sequence <cmd>` flags, the narrowest valid sandbox profile, and any required Stateful reservation/claim preflight.
 - Use built-in Bash for process inspection via a single trusted `stateful sandbox process find ...` command.
 - External sandbox write/create/write-dir, socket, or signal scope and repo-external native `edit`/`write` file targets prompt for a scoped OMP UI grant unless the profile sets `stateful.autoApprove: true`.
 
