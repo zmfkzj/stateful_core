@@ -222,7 +222,11 @@ pub enum SandboxCommand {
         #[arg(long)]
         json: bool,
         #[arg(long)]
-        command: String,
+        command: Option<String>,
+        #[arg(long = "sequence")]
+        sequences: Vec<String>,
+        #[arg(long = "sequence-shell")]
+        sequence_shell: Option<String>,
         #[arg(long)]
         timeout_seconds: Option<u64>,
         #[arg(long, hide = true)]
@@ -596,9 +600,13 @@ pub fn run() -> anyhow::Result<()> {
             allow_signal,
             json,
             command,
+            sequences,
+            sequence_shell,
             timeout_seconds,
             stream_events,
         }) => {
+            let command = sandbox::resolve_sandbox_run_command(command, sequences, sequence_shell)
+                .map_err(anyhow::Error::msg)?;
             let paths = GlobalPaths::from_env()?;
             let repo_root = current_repo_root_or_current_dir()?;
             let output = match sandbox::run_sandbox_in_repo(

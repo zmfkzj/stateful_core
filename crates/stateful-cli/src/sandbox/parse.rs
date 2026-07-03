@@ -37,6 +37,8 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
     let mut connect_sockets = Vec::new();
     let mut allow_signal = false;
     let mut inner_command = None;
+    let mut sequences = Vec::new();
+    let mut sequence_shell = None;
     let mut timeout_seconds = None;
     let mut stream_events = false;
     let mut index = 3;
@@ -134,6 +136,23 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
                 index += 1;
                 inner_command = Some(parse_sandbox_run_arg_value(&words, index, "--command")?);
             }
+            "--sequence" => {
+                index += 1;
+                sequences.push(parse_sandbox_run_arg_value(&words, index, "--sequence")?);
+            }
+            "--sequence-shell" => {
+                if sequence_shell.is_some() {
+                    return Err(
+                        "stateful sandbox run accepts at most one --sequence-shell".to_string()
+                    );
+                }
+                index += 1;
+                sequence_shell = Some(parse_sandbox_run_arg_value(
+                    &words,
+                    index,
+                    "--sequence-shell",
+                )?);
+            }
             "--timeout-seconds" => {
                 index += 1;
                 let timeout = parse_sandbox_run_arg_value(&words, index, "--timeout-seconds")?;
@@ -152,10 +171,7 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
         index += 1;
     }
 
-    let command = match inner_command {
-        Some(command) => resolve_sandbox_run_command(Some(command), Vec::new(), None)?,
-        None => return Err("stateful sandbox run requires exactly one --command".to_string()),
-    };
+    let command = resolve_sandbox_run_command(inner_command, sequences, sequence_shell)?;
 
     Ok(SandboxRunBashInvocation {
         executable: words[0].clone(),

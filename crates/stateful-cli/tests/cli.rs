@@ -28,6 +28,8 @@ fn parses_sandbox_run_read_only_defaults() {
             allow_signal,
             json,
             command,
+            sequences,
+            sequence_shell,
             timeout_seconds,
             stream_events,
         }) => {
@@ -44,8 +46,47 @@ fn parses_sandbox_run_read_only_defaults() {
             assert!(!allow_signal);
             assert!(!json);
             assert!(!stream_events);
-            assert_eq!(command, "rg auth src");
+            assert_eq!(command, Some("rg auth src".to_string()));
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
             assert_eq!(timeout_seconds, None);
+        }
+        other => panic!("expected sandbox run command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_sandbox_run_sequence() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "run",
+        "--fs",
+        "external",
+        "--purpose",
+        "launch benchmark",
+        "--sequence-shell",
+        "/bin/zsh",
+        "--sequence",
+        "set -euo pipefail",
+        "--sequence",
+        "printf ok",
+    ])
+    .expect("sandbox run sequence should parse");
+
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Run {
+            command,
+            sequences,
+            sequence_shell,
+            ..
+        }) => {
+            assert_eq!(command, None);
+            assert_eq!(sequence_shell, Some("/bin/zsh".to_string()));
+            assert_eq!(
+                sequences,
+                vec!["set -euo pipefail".to_string(), "printf ok".to_string()]
+            );
         }
         other => panic!("expected sandbox run command, got {other:?}"),
     }
@@ -66,7 +107,7 @@ fn parses_sandbox_run_json_flag() {
     match cli.command {
         Command::Sandbox(SandboxCommand::Run { json, command, .. }) => {
             assert!(json);
-            assert_eq!(command, "printf ok");
+            assert_eq!(command, Some("printf ok".to_string()));
         }
         other => panic!("expected sandbox run command, got {other:?}"),
     }
@@ -160,6 +201,8 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             allow_signal,
             json,
             command,
+            sequences,
+            sequence_shell,
             timeout_seconds,
             stream_events,
         }) => {
@@ -176,7 +219,9 @@ fn parses_sandbox_run_write_targets_network_enabled() {
             assert!(!allow_signal);
             assert!(!json);
             assert!(!stream_events);
-            assert_eq!(command, "printf x > README.md");
+            assert_eq!(command, Some("printf x > README.md".to_string()));
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
             assert_eq!(timeout_seconds, Some(12));
         }
         other => panic!("expected sandbox run command, got {other:?}"),
@@ -215,6 +260,8 @@ fn parses_sandbox_run_git_profile() {
             allow_signal,
             json,
             command,
+            sequences,
+            sequence_shell,
             timeout_seconds,
             stream_events,
         }) => {
@@ -231,7 +278,9 @@ fn parses_sandbox_run_git_profile() {
             assert!(!allow_signal);
             assert!(!json);
             assert!(!stream_events);
-            assert_eq!(command, "git fetch --all");
+            assert_eq!(command, Some("git fetch --all".to_string()));
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
             assert_eq!(timeout_seconds, Some(30));
         }
         other => panic!("expected sandbox run command, got {other:?}"),
@@ -270,6 +319,8 @@ fn parses_sandbox_run_github_pr_profile() {
             allow_signal,
             json,
             command,
+            sequences,
+            sequence_shell,
             timeout_seconds,
             stream_events,
         }) => {
@@ -286,7 +337,9 @@ fn parses_sandbox_run_github_pr_profile() {
             assert!(!allow_signal);
             assert!(!json);
             assert!(!stream_events);
-            assert_eq!(command, "gh pr status");
+            assert_eq!(command, Some("gh pr status".to_string()));
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
             assert_eq!(timeout_seconds, Some(30));
         }
         other => panic!("expected sandbox run command, got {other:?}"),
@@ -325,6 +378,8 @@ fn parses_sandbox_run_build_profile() {
             allow_signal,
             json,
             command,
+            sequences,
+            sequence_shell,
             timeout_seconds,
             stream_events,
         }) => {
@@ -341,7 +396,9 @@ fn parses_sandbox_run_build_profile() {
             assert!(!allow_signal);
             assert!(!json);
             assert!(!stream_events);
-            assert_eq!(command, "npm test");
+            assert_eq!(command, Some("npm test".to_string()));
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
             assert_eq!(timeout_seconds, Some(60));
         }
         other => panic!("expected sandbox run command, got {other:?}"),
@@ -349,11 +406,23 @@ fn parses_sandbox_run_build_profile() {
 }
 
 #[test]
-fn sandbox_run_rejects_missing_command() {
-    let error = Cli::try_parse_from(["stateful", "sandbox", "run"])
-        .expect_err("sandbox run requires --command");
+fn parses_sandbox_run_without_command_for_runtime_validation() {
+    let cli = Cli::try_parse_from(["stateful", "sandbox", "run"])
+        .expect("sandbox run command resolution validates missing command");
 
-    assert!(error.to_string().contains("--command"));
+    match cli.command {
+        Command::Sandbox(SandboxCommand::Run {
+            command,
+            sequences,
+            sequence_shell,
+            ..
+        }) => {
+            assert_eq!(command, None);
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
+        }
+        other => panic!("expected sandbox run command, got {other:?}"),
+    }
 }
 
 #[test]
@@ -518,6 +587,8 @@ fn parses_sandbox_run_external_profile() {
             json,
             timeout_seconds,
             command,
+            sequences,
+            sequence_shell,
             stream_events,
         }) => {
             assert_eq!(fs, SandboxFsProfile::External);
@@ -536,8 +607,10 @@ fn parses_sandbox_run_external_profile() {
             assert!(!stream_events);
             assert_eq!(
                 command,
-                "install -m 755 target/release/stateful /opt/stateful/bin/stateful"
+                Some("install -m 755 target/release/stateful /opt/stateful/bin/stateful".to_string())
             );
+            assert!(sequences.is_empty());
+            assert_eq!(sequence_shell, None);
         }
         other => panic!("expected sandbox external run command, got {other:?}"),
     }

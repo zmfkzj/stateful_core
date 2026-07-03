@@ -384,6 +384,66 @@ fn pre_tool_use_allows_sandbox_external_without_write_scope() {
 }
 
 #[test]
+fn pre_tool_use_allows_sandbox_external_sequence() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "agent_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs external --purpose 'launch benchmark' --write-dir /tmp/stateful-bench --sequence-shell /bin/zsh --sequence 'set -euo pipefail' --sequence 'printf ok > /tmp/stateful-bench/out'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_eq!(outcome, HookOutcome::Allow);
+}
+
+#[test]
+fn pre_tool_use_denies_sandbox_sequence_with_command() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "agent_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --command 'printf ok' --sequence 'printf later'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(
+        outcome,
+        "stateful sandbox run accepts either --command or --sequence, not both",
+    );
+}
+
+#[test]
+fn pre_tool_use_denies_git_profile_sequence() {
+    let stateful = trusted_stateful_path();
+    let input = serde_json::json!({
+        "agent_id": "s1",
+        "cwd": "/repo",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("{stateful} sandbox run --fs git --network disabled --sequence 'git status'")
+        }
+    })
+    .to_string();
+
+    let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
+
+    assert_bash_denial_mentions(outcome, "git profile requires a single git command");
+}
+
+#[test]
 fn pre_tool_use_allows_sandbox_external_with_supported_scopes() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
