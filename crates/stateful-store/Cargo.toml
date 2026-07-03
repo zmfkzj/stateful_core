@@ -1,6 +1,6 @@
 [package]
 name = "stateful-store"
-version = "0.1.1"
+version = "1.0.0"
 description = "SQLite-backed event store and current-state persistence for stateful_core."
 edition.workspace = true
 license.workspace = true
