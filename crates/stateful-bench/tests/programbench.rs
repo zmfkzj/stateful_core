@@ -2182,7 +2182,7 @@ mod.subprocess.run = fake_run
 with tempfile.TemporaryDirectory() as root:
     airlock = Path(root)
     (airlock / "executable").write_text("seed binary", encoding="utf-8")
-    (airlock / "compile.sh").write_text("#!/bin/sh\nprintf replacement > executable\n", encoding="utf-8")
+    (airlock / "compile.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\nprintf replacement > executable\n", encoding="utf-8")
     (airlock / ".omp").mkdir()
     (airlock / ".omp" / "agent.db").write_text("secret", encoding="utf-8")
     (airlock / ".stateful").mkdir()
@@ -2225,8 +2225,9 @@ print(json.dumps(observed))
             "-w",
             "/workspace",
             "programbench-container",
-            "sh",
-            "./compile.sh"
+            "bash",
+            "-lc",
+            "chmod +x ./compile.sh && ./compile.sh"
         ])
     );
     assert_eq!(observed["calls"][1]["cwd"], "None");

@@ -292,7 +292,7 @@ def smoke_compile_airlock(airlock: str, args) -> None:
         finally:
             staged.cleanup()
         subprocess.run(
-            docker_exec(args, "sh", "./compile.sh"),
+            docker_exec(args, "bash", "-lc", "chmod +x ./compile.sh && ./compile.sh"),
             check=True,
             capture_output=True,
             text=True,
