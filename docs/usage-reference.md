@@ -290,9 +290,11 @@ Run `stateful <command> --help` for command-specific options.
 ## Tool Allowlist
 
 `stateful tools list`, `stateful tools allow <tool>`, and
-`stateful tools deny <tool>` manage repo-scoped exceptions for unclassified
-tools. The default allowlist is assembled from Codex-specific and OMP-specific
-entries; both hooks record unknown tool names into this list.
+`stateful tools deny <tool>` manage repo-scoped tool exceptions. Effective
+allowed tools are the Codex and OMP defaults plus repo-scoped user allows, minus
+repo-scoped explicit denies. Denies survive `stateful enable`; use
+`stateful tools allow <tool>` to remove a deny and restore that tool when it is
+allowed by defaults or user config.
 
 This allowlist does not bypass hard-denied write or execution classifications.
 Write/execute paths still require the normal stateful authorization flow.

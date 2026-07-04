@@ -223,6 +223,29 @@ fn tool_allowlist_is_repo_scoped_deduplicated_and_preserved() {
 }
 
 #[test]
+fn re_enable_preserves_user_tool_exceptions_separate_from_defaults() {
+    let fixture = TestFixture::new("tool-allowlist-re-enable");
+    let repo = fixture.create_repo("repo");
+    enable_repo(&fixture.paths, &repo).expect("repo should enable");
+
+    deny_tool_for_repo(&fixture.paths, &repo, "glob").expect("default tool should be denied");
+    allow_tool_for_repo(&fixture.paths, &repo, "FutureWriteTool")
+        .expect("custom tool should be allowed");
+
+    enable_repo(&fixture.paths, &repo).expect("repo should re-enable");
+
+    assert!(
+        !tool_allowed_for_enabled_repo(&fixture.paths, &repo, "glob")
+            .expect("deny lookup should survive re-enable")
+    );
+    let mut expected_allowed_tools = default_allowed_tools();
+    expected_allowed_tools.retain(|tool| tool != "glob");
+    expected_allowed_tools.push("FutureWriteTool".to_string());
+    let list = tool_list_for_repo(&fixture.paths, &repo).expect("tool list should reload");
+    assert_eq!(list.allowed_tools, expected_allowed_tools);
+}
+
+#[test]
 fn tool_list_includes_recorded_unclassified_tools() {
     let fixture = TestFixture::new("tool-list-unclassified");
     let repo = fixture.create_repo("repo");

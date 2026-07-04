@@ -121,6 +121,8 @@ pub struct RepoEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unclassified_tools: Vec<String>,
 }
 
@@ -212,18 +214,20 @@ pub fn enable_repo(paths: &GlobalPaths, repo: impl AsRef<Path>) -> anyhow::Resul
     ensure_repo_configs(&root)?;
     let repo_id = repo_id_for_root(&root);
     let mut registry = RepoRegistry::load(paths)?;
-    let allowed_tools = default_allowed_tools_with_existing(
-        registry
-            .repos
-            .iter()
-            .find(|existing| existing.repo_id == repo_id || existing.root == root)
+    let existing = registry
+        .repos
+        .iter()
+        .find(|existing| existing.repo_id == repo_id || existing.root == root);
+    let denied_tools = existing
+        .map(|existing| existing.denied_tools.clone())
+        .unwrap_or_default();
+    let mut allowed_tools = default_allowed_tools_with_existing(
+        existing
             .map(|existing| existing.allowed_tools.clone())
             .unwrap_or_default(),
     );
-    let unclassified_tools = registry
-        .repos
-        .iter()
-        .find(|existing| existing.repo_id == repo_id || existing.root == root)
+    allowed_tools.retain(|tool| !denied_tools.iter().any(|denied| denied == tool));
+    let unclassified_tools = existing
         .map(|existing| existing.unclassified_tools.clone())
         .unwrap_or_default();
 
@@ -234,6 +238,7 @@ pub fn enable_repo(paths: &GlobalPaths, repo: impl AsRef<Path>) -> anyhow::Resul
         enabled_at: current_unix_timestamp()?,
         policy_config_path: root.join(".stateful/config.yml"),
         allowed_tools,
+        denied_tools,
         unclassified_tools,
     };
 
@@ -304,20 +309,22 @@ pub fn tool_list_for_repo(
         .find(|entry| entry.root == root)
         .ok_or_else(|| anyhow::anyhow!("repo is not registered: {}", root.display()))?;
 
+    let allowed_tools = effective_allowed_tools(entry);
     let unclassified_tools = entry
         .unclassified_tools
         .iter()
         .filter(|tool| {
-            !entry
-                .allowed_tools
-                .iter()
-                .any(|allowed_tool| allowed_tool == *tool)
+            !allowed_tools.iter().any(|allowed_tool| allowed_tool == *tool)
+                && !entry
+                    .denied_tools
+                    .iter()
+                    .any(|denied_tool| denied_tool == *tool)
         })
         .cloned()
         .collect();
 
     Ok(RepoToolList {
-        allowed_tools: entry.allowed_tools.clone(),
+        allowed_tools,
         unclassified_tools,
     })
 }
@@ -332,8 +339,7 @@ pub fn tool_allowed_for_enabled_repo(
     let Some(entry) = registry.enabled_entry(&root) else {
         return Ok(false);
     };
-    Ok(entry
-        .allowed_tools
+    Ok(effective_allowed_tools(entry)
         .iter()
         .any(|allowed| allowed == tool_name))
 }
@@ -352,10 +358,13 @@ pub fn record_unclassified_tool_for_repo(
         .find(|entry| entry.root == root)
         .ok_or_else(|| anyhow::anyhow!("repo is not registered: {}", root.display()))?;
 
-    if !entry
-        .allowed_tools
+    if !effective_allowed_tools(entry)
         .iter()
         .any(|allowed| allowed == &tool_name)
+        && !entry
+            .denied_tools
+            .iter()
+            .any(|denied| denied == &tool_name)
         && !entry
             .unclassified_tools
             .iter()
@@ -418,6 +427,7 @@ fn update_tool_allowlist(
 
     match update {
         ToolAllowlistUpdate::Allow => {
+            entry.denied_tools.retain(|denied| denied != &tool_name);
             if !entry
                 .allowed_tools
                 .iter()
@@ -431,6 +441,12 @@ fn update_tool_allowlist(
         }
         ToolAllowlistUpdate::Deny => {
             entry.allowed_tools.retain(|allowed| allowed != &tool_name);
+            if !entry.denied_tools.iter().any(|denied| denied == &tool_name) {
+                entry.denied_tools.push(tool_name.clone());
+            }
+            entry
+                .unclassified_tools
+                .retain(|unclassified| unclassified != &tool_name);
         }
     }
 
@@ -452,6 +468,12 @@ fn default_allowed_tools_with_existing(existing_tools: Vec<String>) -> Vec<Strin
             allowed_tools.push(tool);
         }
     }
+    allowed_tools
+}
+
+fn effective_allowed_tools(entry: &RepoEntry) -> Vec<String> {
+    let mut allowed_tools = default_allowed_tools_with_existing(entry.allowed_tools.clone());
+    allowed_tools.retain(|tool| !entry.denied_tools.iter().any(|denied| denied == tool));
     allowed_tools
 }
 
