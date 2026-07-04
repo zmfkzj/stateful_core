@@ -1403,11 +1403,11 @@ pub fn run_denovo_extract(options: DeNovoExtractOptions) -> Result<DeNovoExtract
 
 pub fn render_denovo_report_markdown(reports: &[DeNovoConditionReport]) -> String {
     let mut output = String::from(
-        "# DeNovoSWE Report\n\n| Condition | Stateful | Subagent | Instances | Success rate | Average score | Running time ms | Input+output tokens | Uncached input+output tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n",
+        "# DeNovoSWE Report\n\n| Condition | Stateful | Subagent | Instances | Success rate | Average score | Running time ms | Input+output tokens | Uncached input+output tokens | Score per million tokens | Score per million uncached tokens | Score per hour |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n",
     );
     for report in reports {
         output.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             report.condition_id,
             axis_label(report.condition.stateful),
             axis_label(report.condition.subagent),
@@ -1416,7 +1416,10 @@ pub fn render_denovo_report_markdown(reports: &[DeNovoConditionReport]) -> Strin
             optional_float(report.average_score),
             report.running_time_ms,
             report.token_input_plus_output_tokens,
-            report.token_uncached_input_plus_output_tokens
+            report.token_uncached_input_plus_output_tokens,
+            optional_float(report.score_per_million_input_plus_output_tokens),
+            optional_float(report.score_per_million_uncached_input_plus_output_tokens),
+            optional_float(report.score_per_hour)
         ));
     }
     output
@@ -1843,6 +1846,9 @@ impl DeNovoTokenUsage {
             || self.cached_input_tokens > 0
             || self.output_tokens > 0
             || self.reasoning_output_tokens > 0
+            || self.input_plus_output_tokens > 0
+            || self.uncached_input_tokens > 0
+            || self.uncached_input_plus_output_tokens > 0
     }
 
     fn input_plus_output_tokens(&self) -> u64 {
@@ -1962,6 +1968,12 @@ pub struct DeNovoConditionReport {
     pub average_input_plus_output_tokens: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub average_uncached_input_plus_output_tokens: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_per_million_input_plus_output_tokens: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_per_million_uncached_input_plus_output_tokens: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_per_hour: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aweagent_commit: Option<String>,
 }
@@ -2155,6 +2167,7 @@ pub fn build_denovo_condition_report(
         .sum::<u64>();
     let orchestration_trace = orchestration_trace_summary(&results);
     let condition_id = condition.id();
+    let average_score = average(&scores);
 
     DeNovoConditionReport {
         run_id: run_id.into(),
@@ -2167,7 +2180,7 @@ pub fn build_denovo_condition_report(
         success_count,
         error_count,
         success_rate: ratio(success_count, total_instances),
-        average_score: average(&scores),
+        average_score,
         average_pass_rate: average(&pass_rates),
         correct_rate: ratio(correct_count, total_instances),
         almost_correct_rate: ratio(almost_correct_count, total_instances),
@@ -2210,6 +2223,15 @@ pub fn build_denovo_condition_report(
             token_uncached_input_plus_output_tokens,
             token_observed_instances,
         ),
+        score_per_million_input_plus_output_tokens: score_per_million(
+            average_score,
+            token_input_plus_output_tokens,
+        ),
+        score_per_million_uncached_input_plus_output_tokens: score_per_million(
+            average_score,
+            token_uncached_input_plus_output_tokens,
+        ),
+        score_per_hour: score_per_hour(average_score, running_time_ms),
         aweagent_commit,
     }
 }
@@ -2291,6 +2313,22 @@ fn score_for(
         return None;
     }
     report.average_score
+}
+
+fn score_per_million(score: Option<f64>, tokens: u64) -> Option<f64> {
+    if tokens == 0 {
+        None
+    } else {
+        Some(round_three(score? * 1_000_000.0 / tokens as f64))
+    }
+}
+
+fn score_per_hour(score: Option<f64>, running_time_ms: u64) -> Option<f64> {
+    if running_time_ms == 0 {
+        None
+    } else {
+        Some(round_three(score? * 3_600_000.0 / running_time_ms as f64))
+    }
 }
 
 fn delta(value: Option<f64>, baseline: Option<f64>) -> Option<f64> {

@@ -132,6 +132,10 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
             r#"{"instance_id":"c","success":false,"error":"agent failed"}"#,
         )
         .expect("result c"),
+        serde_json::from_str::<DeNovoOfficialResult>(
+            r#"{"instance_id":"d","success":false,"score":0.875,"token_usage":{"input_plus_output_tokens":35,"uncached_input_tokens":20,"uncached_input_plus_output_tokens":25}}"#,
+        )
+        .expect("result d"),
     ];
 
     let report = build_denovo_condition_report(
@@ -143,33 +147,45 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
     );
 
     assert_eq!(report.condition_id, "stateful-on_subagent-off");
-    assert_eq!(report.total_instances, 3);
-    assert_eq!(report.completed_instances, 2);
-    assert_eq!(report.scored_instances, 2);
+    assert_eq!(report.total_instances, 4);
+    assert_eq!(report.completed_instances, 3);
+    assert_eq!(report.scored_instances, 3);
     assert_eq!(report.pass_rate_instances, 2);
     assert_eq!(report.success_count, 1);
     assert_eq!(report.error_count, 1);
-    assert_eq!(report.success_rate, Some(0.333));
+    assert_eq!(report.success_rate, Some(0.25));
     assert_eq!(report.average_score, Some(0.875));
     assert_eq!(report.average_pass_rate, Some(0.75));
-    assert_eq!(report.correct_rate, Some(0.333));
-    assert_eq!(report.almost_correct_rate, Some(0.333));
+    assert_eq!(report.correct_rate, Some(0.25));
+    assert_eq!(report.almost_correct_rate, Some(0.5));
     assert_eq!(report.running_time_ms, 9000);
-    assert_eq!(report.average_running_time_ms, Some(3000.0));
+    assert_eq!(report.average_running_time_ms, Some(2250.0));
     assert_eq!(report.subagent_observed_instances, 2);
     assert_eq!(report.subagent_used_count, 1);
     assert_eq!(report.subagent_used_rate, Some(0.5));
-    assert_eq!(report.token_observed_instances, 2);
+    assert_eq!(report.token_observed_instances, 3);
     assert_eq!(report.token_usage_turns, 3);
     assert_eq!(report.token_input_tokens, 150);
     assert_eq!(report.token_cached_input_tokens, 60);
     assert_eq!(report.token_output_tokens, 15);
     assert_eq!(report.token_reasoning_output_tokens, 5);
-    assert_eq!(report.token_input_plus_output_tokens, 165);
-    assert_eq!(report.token_uncached_input_tokens, 90);
-    assert_eq!(report.token_uncached_input_plus_output_tokens, 105);
-    assert_eq!(report.average_input_plus_output_tokens, Some(82.5));
-    assert_eq!(report.average_uncached_input_plus_output_tokens, Some(52.5));
+    assert_eq!(report.token_input_plus_output_tokens, 200);
+    assert_eq!(report.token_uncached_input_tokens, 110);
+    assert_eq!(report.token_uncached_input_plus_output_tokens, 130);
+    assert_eq!(report.average_input_plus_output_tokens, Some(66.667));
+    assert_eq!(
+        report.average_uncached_input_plus_output_tokens,
+        Some(43.333)
+    );
+    assert_eq!(
+        report.score_per_million_input_plus_output_tokens,
+        Some(4375.000)
+    );
+    assert_eq!(
+        report.score_per_million_uncached_input_plus_output_tokens,
+        Some(6730.769)
+    );
+    assert_eq!(report.score_per_hour, Some(350.000));
     assert_eq!(report.orchestration_trace_observed, 1);
     assert_eq!(report.orchestration_trace_captured, 1);
     assert_eq!(report.orchestration_reservation_events, 2);
@@ -186,6 +202,31 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
         report.orchestration_denial_messages["Target existence changed since the supplied base observation."],
         1
     );
+
+    let zero_denominator_report = build_denovo_condition_report(
+        "denovo-dev",
+        DeNovoCondition {
+            stateful: true,
+            subagent: false,
+            config_path: Some("configs/tasks/denovoswe-stateful.yaml".into()),
+            env: BTreeMap::new(),
+        },
+        vec![serde_json::from_str::<DeNovoOfficialResult>(
+            r#"{"instance_id":"no-usage","success":false,"score":0.5}"#,
+        )
+        .expect("zero denominator result")],
+        0,
+        None,
+    );
+    assert_eq!(
+        zero_denominator_report.score_per_million_input_plus_output_tokens,
+        None
+    );
+    assert_eq!(
+        zero_denominator_report.score_per_million_uncached_input_plus_output_tokens,
+        None
+    );
+    assert_eq!(zero_denominator_report.score_per_hour, None);
 }
 
 #[test]

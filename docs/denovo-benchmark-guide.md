@@ -254,6 +254,12 @@ the same instance set, model, prompt version, temperature, context window, max
 turns, evaluator settings, runtime limits, and network/source policy. For small
 samples, report every trial plus mean and variance or standard deviation.
 
+## Efficiency Metrics
+
+DeNovoSWE reports include wall time, token totals, uncached token totals, subagent
+usage, score per million tokens, score per million uncached tokens, and score
+per hour. Treat quality and efficiency separately: `average_score` establishes
+quality, while wall time, tokens, and score-per-cost metrics describe efficiency.
 
 ## Docker OMP Stateful Lifecycle
 
